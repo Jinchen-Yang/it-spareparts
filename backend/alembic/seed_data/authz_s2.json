@@ -1,0 +1,6065 @@
+{
+  "schema_version": 1,
+  "legacy_inputs": {
+    "all_keys": [
+      "data_supplier",
+      "data_customer",
+      "data_purchase_cost",
+      "data_profit",
+      "data_pool_price_governance",
+      "data_reconciliation",
+      "page_parts",
+      "page_purchases",
+      "page_profit",
+      "page_inventory",
+      "page_chat",
+      "page_import",
+      "page_governance",
+      "page_master_data",
+      "page_maintenance",
+      "page_boss_board",
+      "page_pool_analysis",
+      "page_maintenance_boss",
+      "page_maintenance_beta",
+      "page_replenishment_beta",
+      "page_accounts",
+      "page_sales_analysis",
+      "page_purchase_analytics",
+      "action_pool_manage",
+      "action_pool_set_policy",
+      "action_account_manage",
+      "action_data_quality_review",
+      "action_maintenance_roundtrip_apply",
+      "action_maintenance_manager_workbook_apply",
+      "action_maintenance_project_manage",
+      "action_maintenance_demand_delete",
+      "action_maintenance_demand_manage",
+      "action_maintenance_site_issue_manage",
+      "action_maintenance_bad_return_manage",
+      "action_maintenance_acceptance_submit",
+      "action_maintenance_acceptance_review",
+      "action_maintenance_acceptance_checklist_import",
+      "action_maintenance_warehouse_manage",
+      "action_maintenance_migration_review",
+      "action_maintenance_ledger_import",
+      "action_maintenance_doc_import",
+      "action_maintenance_wbdd_import",
+      "action_maintenance_expense_collection_upload",
+      "action_maintenance_collection_follow_up",
+      "action_maintenance_collection_plan_import",
+      "action_replenishment_create",
+      "action_replenishment_review",
+      "own_customers_only",
+      "own_maintenance_projects_only"
+    ],
+    "role_templates": {
+      "admin": {
+        "data_supplier": true,
+        "data_customer": true,
+        "data_purchase_cost": true,
+        "data_profit": true,
+        "data_pool_price_governance": true,
+        "data_reconciliation": true,
+        "page_parts": true,
+        "page_purchases": true,
+        "page_profit": true,
+        "page_inventory": true,
+        "page_chat": true,
+        "page_import": true,
+        "page_governance": true,
+        "page_master_data": true,
+        "page_maintenance": true,
+        "page_boss_board": true,
+        "page_pool_analysis": true,
+        "page_maintenance_boss": true,
+        "page_maintenance_beta": true,
+        "page_replenishment_beta": true,
+        "page_accounts": true,
+        "page_sales_analysis": true,
+        "page_purchase_analytics": true,
+        "action_pool_manage": true,
+        "action_pool_set_policy": true,
+        "action_account_manage": true,
+        "action_data_quality_review": true,
+        "action_maintenance_roundtrip_apply": true,
+        "action_maintenance_manager_workbook_apply": true,
+        "action_maintenance_project_manage": true,
+        "action_maintenance_demand_delete": true,
+        "action_maintenance_demand_manage": true,
+        "action_maintenance_site_issue_manage": true,
+        "action_maintenance_bad_return_manage": true,
+        "action_maintenance_acceptance_submit": true,
+        "action_maintenance_acceptance_review": true,
+        "action_maintenance_acceptance_checklist_import": true,
+        "action_maintenance_warehouse_manage": true,
+        "action_maintenance_migration_review": true,
+        "action_maintenance_ledger_import": true,
+        "action_maintenance_doc_import": true,
+        "action_maintenance_wbdd_import": true,
+        "action_maintenance_expense_collection_upload": true,
+        "action_maintenance_collection_follow_up": false,
+        "action_maintenance_collection_plan_import": false,
+        "action_replenishment_create": true,
+        "action_replenishment_review": true,
+        "own_customers_only": false,
+        "own_maintenance_projects_only": false
+      },
+      "boss": {
+        "data_supplier": true,
+        "data_customer": true,
+        "data_purchase_cost": true,
+        "data_profit": true,
+        "data_pool_price_governance": true,
+        "data_reconciliation": true,
+        "page_parts": true,
+        "page_purchases": true,
+        "page_profit": true,
+        "page_inventory": true,
+        "page_chat": true,
+        "page_import": true,
+        "page_governance": true,
+        "page_master_data": true,
+        "page_maintenance": true,
+        "page_boss_board": true,
+        "page_pool_analysis": true,
+        "page_maintenance_boss": false,
+        "page_maintenance_beta": false,
+        "page_replenishment_beta": false,
+        "page_accounts": false,
+        "page_sales_analysis": true,
+        "page_purchase_analytics": true,
+        "action_pool_manage": true,
+        "action_pool_set_policy": true,
+        "action_account_manage": false,
+        "action_data_quality_review": false,
+        "action_maintenance_roundtrip_apply": true,
+        "action_maintenance_manager_workbook_apply": false,
+        "action_maintenance_project_manage": false,
+        "action_maintenance_demand_delete": false,
+        "action_maintenance_demand_manage": false,
+        "action_maintenance_site_issue_manage": false,
+        "action_maintenance_bad_return_manage": false,
+        "action_maintenance_acceptance_submit": false,
+        "action_maintenance_acceptance_review": false,
+        "action_maintenance_acceptance_checklist_import": false,
+        "action_maintenance_warehouse_manage": false,
+        "action_maintenance_migration_review": false,
+        "action_maintenance_ledger_import": false,
+        "action_maintenance_doc_import": false,
+        "action_maintenance_wbdd_import": false,
+        "action_maintenance_expense_collection_upload": false,
+        "action_maintenance_collection_follow_up": false,
+        "action_maintenance_collection_plan_import": false,
+        "action_replenishment_create": false,
+        "action_replenishment_review": false,
+        "own_customers_only": false,
+        "own_maintenance_projects_only": false
+      },
+      "readonly": {
+        "data_supplier": true,
+        "data_customer": true,
+        "data_purchase_cost": true,
+        "data_profit": true,
+        "data_pool_price_governance": true,
+        "data_reconciliation": false,
+        "page_parts": true,
+        "page_purchases": true,
+        "page_profit": true,
+        "page_inventory": true,
+        "page_chat": true,
+        "page_import": false,
+        "page_governance": false,
+        "page_master_data": false,
+        "page_maintenance": false,
+        "page_boss_board": false,
+        "page_pool_analysis": true,
+        "page_maintenance_boss": false,
+        "page_maintenance_beta": false,
+        "page_replenishment_beta": false,
+        "page_accounts": false,
+        "page_sales_analysis": false,
+        "page_purchase_analytics": false,
+        "action_pool_manage": false,
+        "action_pool_set_policy": false,
+        "action_account_manage": false,
+        "action_data_quality_review": false,
+        "action_maintenance_roundtrip_apply": false,
+        "action_maintenance_manager_workbook_apply": false,
+        "action_maintenance_project_manage": false,
+        "action_maintenance_demand_delete": false,
+        "action_maintenance_demand_manage": false,
+        "action_maintenance_site_issue_manage": false,
+        "action_maintenance_bad_return_manage": false,
+        "action_maintenance_acceptance_submit": false,
+        "action_maintenance_acceptance_review": false,
+        "action_maintenance_acceptance_checklist_import": false,
+        "action_maintenance_warehouse_manage": false,
+        "action_maintenance_migration_review": false,
+        "action_maintenance_ledger_import": false,
+        "action_maintenance_doc_import": false,
+        "action_maintenance_wbdd_import": false,
+        "action_maintenance_expense_collection_upload": false,
+        "action_maintenance_collection_follow_up": false,
+        "action_maintenance_collection_plan_import": false,
+        "action_replenishment_create": false,
+        "action_replenishment_review": false,
+        "own_customers_only": false,
+        "own_maintenance_projects_only": false
+      },
+      "sales": {
+        "data_supplier": false,
+        "data_customer": true,
+        "data_purchase_cost": true,
+        "data_profit": true,
+        "page_parts": true,
+        "page_purchases": true,
+        "page_profit": false,
+        "page_inventory": true,
+        "page_chat": true,
+        "page_maintenance": false,
+        "page_maintenance_beta": false,
+        "page_boss_board": false,
+        "page_pool_analysis": true,
+        "data_pool_price_governance": true,
+        "action_pool_manage": false,
+        "action_pool_set_policy": false,
+        "action_data_quality_review": false,
+        "action_maintenance_roundtrip_apply": false,
+        "action_maintenance_manager_workbook_apply": false,
+        "action_maintenance_project_manage": false,
+        "action_maintenance_demand_delete": false,
+        "action_maintenance_demand_manage": false,
+        "action_maintenance_site_issue_manage": false,
+        "action_maintenance_bad_return_manage": false,
+        "action_maintenance_acceptance_submit": false,
+        "action_maintenance_acceptance_review": false,
+        "action_maintenance_acceptance_checklist_import": false,
+        "action_maintenance_warehouse_manage": false,
+        "action_maintenance_migration_review": false,
+        "action_maintenance_ledger_import": false,
+        "action_maintenance_doc_import": false,
+        "page_maintenance_boss": false,
+        "action_maintenance_wbdd_import": false,
+        "action_maintenance_expense_collection_upload": false,
+        "action_maintenance_collection_follow_up": false,
+        "action_maintenance_collection_plan_import": false,
+        "page_replenishment_beta": false,
+        "action_replenishment_create": false,
+        "action_replenishment_review": false,
+        "page_purchase_analytics": false,
+        "own_customers_only": true,
+        "own_maintenance_projects_only": false
+      },
+      "purchaser": {
+        "data_supplier": true,
+        "data_customer": false,
+        "data_purchase_cost": true,
+        "data_profit": false,
+        "page_parts": true,
+        "page_purchases": true,
+        "page_profit": false,
+        "page_inventory": true,
+        "page_chat": true,
+        "page_import": false,
+        "page_governance": false,
+        "page_master_data": true,
+        "page_maintenance": true,
+        "page_maintenance_beta": false,
+        "page_boss_board": false,
+        "page_pool_analysis": true,
+        "data_pool_price_governance": true,
+        "action_pool_manage": false,
+        "action_pool_set_policy": false,
+        "action_data_quality_review": false,
+        "action_maintenance_roundtrip_apply": false,
+        "action_maintenance_manager_workbook_apply": false,
+        "action_maintenance_project_manage": false,
+        "action_maintenance_demand_delete": false,
+        "action_maintenance_demand_manage": false,
+        "action_maintenance_site_issue_manage": false,
+        "action_maintenance_bad_return_manage": false,
+        "action_maintenance_acceptance_submit": false,
+        "action_maintenance_acceptance_review": false,
+        "action_maintenance_acceptance_checklist_import": false,
+        "action_maintenance_warehouse_manage": false,
+        "action_maintenance_migration_review": false,
+        "action_maintenance_ledger_import": false,
+        "action_maintenance_doc_import": false,
+        "page_maintenance_boss": false,
+        "action_maintenance_wbdd_import": false,
+        "action_maintenance_expense_collection_upload": false,
+        "action_maintenance_collection_follow_up": false,
+        "action_maintenance_collection_plan_import": false,
+        "page_replenishment_beta": false,
+        "action_replenishment_create": false,
+        "action_replenishment_review": false,
+        "page_purchase_analytics": false,
+        "own_maintenance_projects_only": false,
+        "own_customers_only": false
+      },
+      "maintenance_manager": {
+        "data_supplier": false,
+        "data_customer": false,
+        "data_purchase_cost": false,
+        "data_profit": false,
+        "data_pool_price_governance": false,
+        "data_reconciliation": false,
+        "page_parts": false,
+        "page_purchases": false,
+        "page_profit": false,
+        "page_inventory": false,
+        "page_chat": false,
+        "page_import": false,
+        "page_governance": false,
+        "page_master_data": false,
+        "page_maintenance": true,
+        "page_boss_board": false,
+        "page_pool_analysis": false,
+        "page_maintenance_boss": false,
+        "page_maintenance_beta": false,
+        "page_replenishment_beta": false,
+        "page_accounts": false,
+        "page_sales_analysis": false,
+        "page_purchase_analytics": false,
+        "action_pool_manage": false,
+        "action_pool_set_policy": false,
+        "action_account_manage": false,
+        "action_data_quality_review": false,
+        "action_maintenance_roundtrip_apply": false,
+        "action_maintenance_manager_workbook_apply": false,
+        "action_maintenance_project_manage": false,
+        "action_maintenance_demand_delete": false,
+        "action_maintenance_demand_manage": false,
+        "action_maintenance_site_issue_manage": false,
+        "action_maintenance_bad_return_manage": false,
+        "action_maintenance_acceptance_submit": true,
+        "action_maintenance_acceptance_review": false,
+        "action_maintenance_acceptance_checklist_import": false,
+        "action_maintenance_warehouse_manage": false,
+        "action_maintenance_migration_review": false,
+        "action_maintenance_ledger_import": false,
+        "action_maintenance_doc_import": false,
+        "action_maintenance_wbdd_import": false,
+        "action_maintenance_expense_collection_upload": false,
+        "action_maintenance_collection_follow_up": false,
+        "action_maintenance_collection_plan_import": false,
+        "action_replenishment_create": false,
+        "action_replenishment_review": false,
+        "own_customers_only": false,
+        "own_maintenance_projects_only": true
+      }
+    },
+    "unknown_role_default": {
+      "data_supplier": true,
+      "data_customer": true,
+      "data_purchase_cost": true,
+      "data_profit": true,
+      "data_pool_price_governance": true,
+      "data_reconciliation": false,
+      "page_parts": true,
+      "page_purchases": true,
+      "page_profit": true,
+      "page_inventory": true,
+      "page_chat": true,
+      "page_import": false,
+      "page_governance": false,
+      "page_master_data": false,
+      "page_maintenance": false,
+      "page_boss_board": false,
+      "page_pool_analysis": true,
+      "page_maintenance_boss": false,
+      "page_maintenance_beta": false,
+      "page_replenishment_beta": false,
+      "page_accounts": false,
+      "page_sales_analysis": false,
+      "page_purchase_analytics": false,
+      "action_pool_manage": false,
+      "action_pool_set_policy": false,
+      "action_account_manage": false,
+      "action_data_quality_review": false,
+      "action_maintenance_roundtrip_apply": false,
+      "action_maintenance_manager_workbook_apply": false,
+      "action_maintenance_project_manage": false,
+      "action_maintenance_demand_delete": false,
+      "action_maintenance_demand_manage": false,
+      "action_maintenance_site_issue_manage": false,
+      "action_maintenance_bad_return_manage": false,
+      "action_maintenance_acceptance_submit": false,
+      "action_maintenance_acceptance_review": false,
+      "action_maintenance_acceptance_checklist_import": false,
+      "action_maintenance_warehouse_manage": false,
+      "action_maintenance_migration_review": false,
+      "action_maintenance_ledger_import": false,
+      "action_maintenance_doc_import": false,
+      "action_maintenance_wbdd_import": false,
+      "action_maintenance_expense_collection_upload": false,
+      "action_maintenance_collection_follow_up": false,
+      "action_maintenance_collection_plan_import": false,
+      "action_replenishment_create": false,
+      "action_replenishment_review": false,
+      "own_customers_only": false,
+      "own_maintenance_projects_only": false
+    },
+    "admin_permissions": {
+      "data_supplier": true,
+      "data_customer": true,
+      "data_purchase_cost": true,
+      "data_profit": true,
+      "data_pool_price_governance": true,
+      "data_reconciliation": true,
+      "page_parts": true,
+      "page_purchases": true,
+      "page_profit": true,
+      "page_inventory": true,
+      "page_chat": true,
+      "page_import": true,
+      "page_governance": true,
+      "page_master_data": true,
+      "page_maintenance": true,
+      "page_boss_board": true,
+      "page_pool_analysis": true,
+      "page_maintenance_boss": true,
+      "page_maintenance_beta": true,
+      "page_replenishment_beta": true,
+      "page_accounts": true,
+      "page_sales_analysis": true,
+      "page_purchase_analytics": true,
+      "action_pool_manage": true,
+      "action_pool_set_policy": true,
+      "action_account_manage": true,
+      "action_data_quality_review": true,
+      "action_maintenance_roundtrip_apply": true,
+      "action_maintenance_manager_workbook_apply": true,
+      "action_maintenance_project_manage": true,
+      "action_maintenance_demand_delete": true,
+      "action_maintenance_demand_manage": true,
+      "action_maintenance_site_issue_manage": true,
+      "action_maintenance_bad_return_manage": true,
+      "action_maintenance_acceptance_submit": true,
+      "action_maintenance_acceptance_review": true,
+      "action_maintenance_acceptance_checklist_import": true,
+      "action_maintenance_warehouse_manage": true,
+      "action_maintenance_migration_review": true,
+      "action_maintenance_ledger_import": true,
+      "action_maintenance_doc_import": true,
+      "action_maintenance_wbdd_import": true,
+      "action_maintenance_expense_collection_upload": true,
+      "action_maintenance_collection_follow_up": false,
+      "action_maintenance_collection_plan_import": false,
+      "action_replenishment_create": true,
+      "action_replenishment_review": true,
+      "own_customers_only": false,
+      "own_maintenance_projects_only": false
+    },
+    "data_dependencies": {
+      "data_profit": "data_purchase_cost"
+    },
+    "page_dependencies": {
+      "page_maintenance_beta": "page_maintenance"
+    },
+    "account_scoped_page_keys": [
+      "page_maintenance_beta",
+      "page_replenishment_beta"
+    ],
+    "account_scoped_action_keys": [
+      "action_maintenance_collection_follow_up",
+      "action_maintenance_collection_plan_import"
+    ]
+  },
+  "resources": {
+    "company_summary": {
+      "actions": {
+        "read": {
+          "permission": "page_boss_board"
+        }
+      },
+      "fields": {
+        "data_purchase_cost": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_purchase_cost"
+            }
+          ]
+        },
+        "data_profit": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_profit"
+            }
+          ]
+        }
+      }
+    },
+    "company_sales_orders": {
+      "actions": {
+        "read": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "not": {
+                "permission": "own_customers_only"
+              }
+            }
+          ]
+        }
+      },
+      "fields": {
+        "data_customer": {
+          "all": [
+            {
+              "all": [
+                {
+                  "permission": "page_boss_board"
+                },
+                {
+                  "not": {
+                    "permission": "own_customers_only"
+                  }
+                }
+              ]
+            },
+            {
+              "permission": "data_customer"
+            }
+          ]
+        },
+        "data_purchase_cost": {
+          "all": [
+            {
+              "all": [
+                {
+                  "permission": "page_boss_board"
+                },
+                {
+                  "not": {
+                    "permission": "own_customers_only"
+                  }
+                }
+              ]
+            },
+            {
+              "permission": "data_purchase_cost"
+            }
+          ]
+        },
+        "data_profit": {
+          "all": [
+            {
+              "all": [
+                {
+                  "permission": "page_boss_board"
+                },
+                {
+                  "not": {
+                    "permission": "own_customers_only"
+                  }
+                }
+              ]
+            },
+            {
+              "permission": "data_profit"
+            }
+          ]
+        },
+        "data_reconciliation": {
+          "all": [
+            {
+              "all": [
+                {
+                  "permission": "page_boss_board"
+                },
+                {
+                  "not": {
+                    "permission": "own_customers_only"
+                  }
+                }
+              ]
+            },
+            {
+              "permission": "data_reconciliation"
+            }
+          ]
+        }
+      }
+    },
+    "company_purchase_orders": {
+      "actions": {
+        "read": {
+          "permission": "page_boss_board"
+        }
+      },
+      "fields": {
+        "data_supplier": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_supplier"
+            }
+          ]
+        },
+        "data_purchase_cost": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_purchase_cost"
+            }
+          ]
+        },
+        "data_pool_price_governance": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_pool_price_governance"
+            }
+          ]
+        }
+      }
+    },
+    "company_pool_analysis": {
+      "actions": {
+        "read_summary": {
+          "permission": "page_boss_board"
+        },
+        "read_sales_transactions": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "not": {
+                "permission": "own_customers_only"
+              }
+            }
+          ]
+        },
+        "read_customer_cross_brand": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "not": {
+                "permission": "own_customers_only"
+              }
+            },
+            {
+              "permission": "data_customer"
+            }
+          ]
+        }
+      },
+      "fields": {
+        "data_pool_price_governance": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_pool_price_governance"
+            }
+          ]
+        },
+        "data_purchase_cost": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_purchase_cost"
+            }
+          ]
+        },
+        "data_profit": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_profit"
+            }
+          ]
+        },
+        "data_customer": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_customer"
+            }
+          ]
+        },
+        "data_supplier": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_supplier"
+            }
+          ]
+        }
+      }
+    },
+    "price_discipline": {
+      "actions": {
+        "read": {
+          "permission": "page_boss_board"
+        }
+      },
+      "fields": {
+        "data_pool_price_governance": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_pool_price_governance"
+            }
+          ]
+        }
+      }
+    },
+    "company_pool_order_facts": {
+      "actions": {
+        "read": {
+          "permission": "page_boss_board"
+        }
+      },
+      "fields": {
+        "data_pool_price_governance": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_pool_price_governance"
+            }
+          ]
+        },
+        "data_supplier": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_supplier"
+            }
+          ]
+        },
+        "data_customer": {
+          "all": [
+            {
+              "permission": "page_boss_board"
+            },
+            {
+              "permission": "data_customer"
+            }
+          ]
+        }
+      }
+    },
+    "pool_price_analysis": {
+      "actions": {
+        "read": {
+          "permission": "page_pool_analysis"
+        }
+      },
+      "fields": {
+        "data_pool_price_governance": {
+          "all": [
+            {
+              "permission": "page_pool_analysis"
+            },
+            {
+              "permission": "data_pool_price_governance"
+            }
+          ]
+        },
+        "data_supplier": {
+          "all": [
+            {
+              "permission": "page_pool_analysis"
+            },
+            {
+              "permission": "data_supplier"
+            }
+          ]
+        },
+        "data_customer": {
+          "all": [
+            {
+              "permission": "page_pool_analysis"
+            },
+            {
+              "permission": "data_customer"
+            }
+          ]
+        }
+      }
+    },
+    "pool_order_facts": {
+      "actions": {
+        "read": {
+          "permission": "page_pool_analysis"
+        }
+      },
+      "fields": {
+        "data_pool_price_governance": {
+          "all": [
+            {
+              "permission": "page_pool_analysis"
+            },
+            {
+              "permission": "data_pool_price_governance"
+            }
+          ]
+        },
+        "data_supplier": {
+          "all": [
+            {
+              "permission": "page_pool_analysis"
+            },
+            {
+              "permission": "data_supplier"
+            }
+          ]
+        },
+        "data_customer": {
+          "all": [
+            {
+              "permission": "page_pool_analysis"
+            },
+            {
+              "permission": "data_customer"
+            }
+          ]
+        }
+      }
+    },
+    "pool_catalog": {
+      "actions": {
+        "read": {
+          "constant": true
+        },
+        "create": {
+          "permission": "action_pool_manage"
+        },
+        "edit": {
+          "permission": "action_pool_manage"
+        },
+        "edit_members": {
+          "permission": "action_pool_manage"
+        },
+        "archive": {
+          "permission": "action_pool_manage"
+        },
+        "restore": {
+          "permission": "action_pool_manage"
+        }
+      },
+      "fields": {}
+    },
+    "pool_price_policy": {
+      "actions": {
+        "read": {
+          "constant": true
+        },
+        "set": {
+          "all": [
+            {
+              "permission": "action_pool_set_policy"
+            },
+            {
+              "permission": "data_pool_price_governance"
+            }
+          ]
+        }
+      },
+      "fields": {
+        "data_pool_price_governance": {
+          "all": [
+            {
+              "constant": true
+            },
+            {
+              "permission": "data_pool_price_governance"
+            }
+          ]
+        }
+      }
+    },
+    "part_lookup": {
+      "actions": {
+        "read": {
+          "constant": true
+        },
+        "purchase_records_read": {
+          "constant": true
+        },
+        "inventory_read": {
+          "constant": true
+        },
+        "financial_summary_read": {
+          "constant": true
+        },
+        "market_prices_read": {
+          "constant": true
+        },
+        "sales_records_read": {
+          "not": {
+            "permission": "own_customers_only"
+          }
+        }
+      },
+      "fields": {
+        "data_supplier": {
+          "all": [
+            {
+              "constant": true
+            },
+            {
+              "permission": "data_supplier"
+            }
+          ]
+        },
+        "data_customer": {
+          "all": [
+            {
+              "constant": true
+            },
+            {
+              "permission": "data_customer"
+            }
+          ]
+        },
+        "data_purchase_cost": {
+          "all": [
+            {
+              "constant": true
+            },
+            {
+              "permission": "data_purchase_cost"
+            }
+          ]
+        },
+        "data_profit": {
+          "all": [
+            {
+              "constant": true
+            },
+            {
+              "permission": "data_profit"
+            }
+          ]
+        },
+        "data_pool_price_governance": {
+          "all": [
+            {
+              "constant": true
+            },
+            {
+              "permission": "data_pool_price_governance"
+            }
+          ]
+        }
+      }
+    },
+    "part_master": {
+      "actions": {
+        "read": {
+          "permission": "page_master_data"
+        },
+        "create": {
+          "permission": "page_master_data"
+        },
+        "edit": {
+          "permission": "page_master_data"
+        },
+        "normalize_preview": {
+          "permission": "page_master_data"
+        },
+        "normalize_apply": {
+          "permission": "page_master_data"
+        }
+      },
+      "fields": {
+        "data_purchase_cost": {
+          "all": [
+            {
+              "permission": "page_master_data"
+            },
+            {
+              "permission": "data_purchase_cost"
+            }
+          ]
+        },
+        "data_profit": {
+          "all": [
+            {
+              "permission": "page_master_data"
+            },
+            {
+              "permission": "data_profit"
+            }
+          ]
+        }
+      }
+    },
+    "part_substitute": {
+      "actions": {
+        "read": {
+          "constant": true
+        },
+        "manage": {
+          "role_in": [
+            "admin",
+            "purchaser"
+          ]
+        }
+      },
+      "fields": {}
+    },
+    "governance": {
+      "actions": {
+        "read": {
+          "permission": "page_governance"
+        },
+        "refresh": {
+          "permission": "page_governance"
+        },
+        "classify": {
+          "permission": "page_governance"
+        },
+        "exclude": {
+          "permission": "page_governance"
+        },
+        "review": {
+          "permission": "page_governance"
+        }
+      },
+      "fields": {
+        "data_supplier": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "data_supplier"
+            }
+          ]
+        },
+        "data_customer": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "data_customer"
+            }
+          ]
+        },
+        "data_purchase_cost": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "data_purchase_cost"
+            }
+          ]
+        },
+        "data_profit": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "data_profit"
+            }
+          ]
+        }
+      }
+    },
+    "part_identity": {
+      "actions": {
+        "read": {
+          "permission": "page_governance"
+        },
+        "confirm": {
+          "permission": "page_governance"
+        },
+        "merge": {
+          "permission": "page_governance"
+        },
+        "rename": {
+          "permission": "page_governance"
+        },
+        "review_alias": {
+          "permission": "page_governance"
+        },
+        "unmerge": {
+          "permission": "page_governance"
+        }
+      },
+      "fields": {
+        "data_supplier": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "data_supplier"
+            }
+          ]
+        },
+        "data_customer": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "data_customer"
+            }
+          ]
+        },
+        "data_purchase_cost": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "data_purchase_cost"
+            }
+          ]
+        },
+        "data_profit": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "data_profit"
+            }
+          ]
+        }
+      }
+    },
+    "data_quality": {
+      "actions": {
+        "read_purchase_issues": {
+          "permission": "page_governance"
+        },
+        "read_sales_issues": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "not": {
+                "permission": "own_customers_only"
+              }
+            }
+          ]
+        },
+        "review": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "action_data_quality_review"
+            },
+            {
+              "permission": "data_purchase_cost"
+            }
+          ]
+        }
+      },
+      "fields": {
+        "data_supplier": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "data_supplier"
+            }
+          ]
+        },
+        "data_customer": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "data_customer"
+            }
+          ]
+        },
+        "data_purchase_cost": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "data_purchase_cost"
+            }
+          ]
+        },
+        "data_profit": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "data_profit"
+            }
+          ]
+        }
+      }
+    },
+    "data_quality_calibration": {
+      "actions": {
+        "preview": {
+          "all": [
+            {
+              "permission": "page_governance"
+            },
+            {
+              "permission": "data_purchase_cost"
+            }
+          ]
+        }
+      },
+      "fields": {
+        "data_supplier": {
+          "all": [
+            {
+              "all": [
+                {
+                  "permission": "page_governance"
+                },
+                {
+                  "permission": "data_purchase_cost"
+                }
+              ]
+            },
+            {
+              "permission": "data_supplier"
+            }
+          ]
+        },
+        "data_customer": {
+          "all": [
+            {
+              "all": [
+                {
+                  "permission": "page_governance"
+                },
+                {
+                  "permission": "data_purchase_cost"
+                }
+              ]
+            },
+            {
+              "permission": "data_customer"
+            }
+          ]
+        },
+        "data_purchase_cost": {
+          "all": [
+            {
+              "all": [
+                {
+                  "permission": "page_governance"
+                },
+                {
+                  "permission": "data_purchase_cost"
+                }
+              ]
+            },
+            {
+              "permission": "data_purchase_cost"
+            }
+          ]
+        },
+        "data_profit": {
+          "all": [
+            {
+              "all": [
+                {
+                  "permission": "page_governance"
+                },
+                {
+                  "permission": "data_purchase_cost"
+                }
+              ]
+            },
+            {
+              "permission": "data_profit"
+            }
+          ]
+        }
+      }
+    },
+    "profit_analysis": {
+      "actions": {
+        "read_part_analysis": {
+          "any": [
+            {
+              "role_in": [
+                "admin"
+              ]
+            },
+            {
+              "permission": "page_profit"
+            }
+          ]
+        },
+        "read_salesperson_analysis": {
+          "all": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_profit"
+                }
+              ]
+            },
+            {
+              "not": {
+                "permission": "own_customers_only"
+              }
+            }
+          ]
+        },
+        "read_customer_analysis": {
+          "all": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_profit"
+                }
+              ]
+            },
+            {
+              "not": {
+                "permission": "own_customers_only"
+              }
+            },
+            {
+              "permission": "data_customer"
+            }
+          ]
+        },
+        "export": {
+          "any": [
+            {
+              "role_in": [
+                "admin"
+              ]
+            },
+            {
+              "permission": "page_profit"
+            }
+          ]
+        },
+        "recompute": {
+          "role_in": [
+            "admin"
+          ]
+        }
+      },
+      "fields": {
+        "data_purchase_cost": {
+          "permission": "data_purchase_cost"
+        },
+        "data_profit": {
+          "permission": "data_profit"
+        },
+        "data_customer": {
+          "permission": "data_customer"
+        }
+      }
+    },
+    "purchase_analysis": {
+      "actions": {
+        "read": {
+          "all": [
+            {
+              "role_in": [
+                "admin",
+                "boss"
+              ]
+            },
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_purchase_analytics"
+                }
+              ]
+            },
+            {
+              "not": {
+                "permission": "own_customers_only"
+              }
+            }
+          ]
+        }
+      },
+      "fields": {
+        "data_customer": {
+          "permission": "data_customer"
+        },
+        "data_purchase_cost": {
+          "permission": "data_purchase_cost"
+        }
+      }
+    },
+    "purchase_records": {
+      "actions": {
+        "read": {
+          "any": [
+            {
+              "role_in": [
+                "admin"
+              ]
+            },
+            {
+              "permission": "page_purchases"
+            }
+          ]
+        }
+      },
+      "fields": {
+        "data_supplier": {
+          "permission": "data_supplier"
+        },
+        "data_purchase_cost": {
+          "permission": "data_purchase_cost"
+        }
+      }
+    },
+    "inventory": {
+      "actions": {
+        "read": {
+          "any": [
+            {
+              "role_in": [
+                "admin"
+              ]
+            },
+            {
+              "permission": "page_inventory"
+            }
+          ]
+        },
+        "adjust": {
+          "role_in": [
+            "admin"
+          ]
+        }
+      },
+      "fields": {
+        "data_purchase_cost": {
+          "permission": "data_purchase_cost"
+        }
+      }
+    },
+    "display_policy": {
+      "actions": {
+        "read": {
+          "constant": true
+        },
+        "read_audit_identity": {
+          "role_in": [
+            "admin"
+          ]
+        },
+        "update": {
+          "role_in": [
+            "admin"
+          ]
+        }
+      },
+      "fields": {}
+    }
+  },
+  "definitions": [
+    {
+      "resource_id": "company_summary",
+      "label_zh": "公司经营汇总",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_dependencies": [
+        {
+          "field": "data_profit",
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_kpi_sales",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_kpi_purchase",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_kpi_profit",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_kpi_coverage",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_order_health",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_profit_ranking",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "company_sales_orders",
+      "label_zh": "经营看板销售逐单",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_customer",
+        "data_purchase_cost",
+        "data_profit",
+        "data_reconciliation"
+      ],
+      "field_dependencies": [
+        {
+          "field": "data_profit",
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_recent_orders",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "company_purchase_orders",
+      "label_zh": "经营看板采购逐单",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_supplier",
+        "data_purchase_cost",
+        "data_pool_price_governance"
+      ],
+      "field_dependencies": [],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_recent_orders",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "company_pool_analysis",
+      "label_zh": "经营看板池经营",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_pool_price_governance",
+        "data_purchase_cost",
+        "data_profit",
+        "data_customer",
+        "data_supplier"
+      ],
+      "field_dependencies": [
+        {
+          "field": "data_profit",
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "id": "read_summary",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read_sales_transactions",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read_customer_cross_brand",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer"
+          ]
+        },
+        {
+          "id": "show_pools",
+          "kind": "display",
+          "requires_actions": [
+            "read_summary"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "price_discipline",
+      "label_zh": "价格纪律事实摘要",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_pool_price_governance"
+      ],
+      "field_dependencies": [],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_summary",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "sales_analysis",
+      "label_zh": "销售分析",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all",
+        "assigned_customers"
+      ],
+      "field_permissions": [
+        "data_supplier",
+        "data_customer",
+        "data_purchase_cost",
+        "data_profit",
+        "data_pool_price_governance",
+        "data_reconciliation"
+      ],
+      "field_dependencies": [
+        {
+          "field": "data_profit",
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        },
+        {
+          "field": "data_reconciliation",
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "id": "read_options",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read_summary",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read_groups",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read_trend",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read_orders",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read_order_detail",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read_amount_histogram",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        },
+        {
+          "id": "export",
+          "kind": "data",
+          "requires_actions": [
+            "read_orders"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_overview",
+          "kind": "display",
+          "requires_actions": [],
+          "requires_any_actions": [
+            "read_groups",
+            "read_trend"
+          ],
+          "requires_fields": []
+        },
+        {
+          "id": "show_compact",
+          "kind": "display",
+          "requires_actions": [
+            "read_groups"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_groups",
+          "kind": "display",
+          "requires_actions": [
+            "read_groups"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_trend",
+          "kind": "display",
+          "requires_actions": [
+            "read_trend"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_orders",
+          "kind": "display",
+          "requires_actions": [
+            "read_orders"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_summary_counts",
+          "kind": "display",
+          "requires_actions": [
+            "read_summary"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_summary_amounts",
+          "kind": "display",
+          "requires_actions": [
+            "read_summary"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_summary_profit",
+          "kind": "display",
+          "requires_actions": [
+            "read_summary"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "show_amount_histogram",
+          "kind": "display",
+          "requires_actions": [
+            "read_amount_histogram"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        },
+        {
+          "id": "show_order_detail",
+          "kind": "display",
+          "requires_actions": [
+            "read_order_detail"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_reconciliation",
+          "kind": "display",
+          "requires_actions": [
+            "read_order_detail"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_purchase_cost",
+            "data_reconciliation"
+          ]
+        },
+        {
+          "id": "show_export",
+          "kind": "display",
+          "requires_actions": [
+            "read_orders",
+            "export"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "part_lookup",
+      "label_zh": "型号查询与交易历史",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_supplier",
+        "data_customer",
+        "data_purchase_cost",
+        "data_profit",
+        "data_pool_price_governance"
+      ],
+      "field_dependencies": [
+        {
+          "field": "data_profit",
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "purchase_records_read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "sales_records_read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "inventory_read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "financial_summary_read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "market_prices_read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_search",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_purchase_history",
+          "kind": "display",
+          "requires_actions": [
+            "purchase_records_read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_sales_history",
+          "kind": "display",
+          "requires_actions": [
+            "sales_records_read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_inventory",
+          "kind": "display",
+          "requires_actions": [
+            "inventory_read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_quick_pricing",
+          "kind": "display",
+          "requires_actions": [],
+          "requires_any_actions": [
+            "financial_summary_read",
+            "market_prices_read"
+          ],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "profit_analysis",
+      "label_zh": "利润分析",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_purchase_cost",
+        "data_profit",
+        "data_customer"
+      ],
+      "field_dependencies": [
+        {
+          "field": "data_profit",
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "id": "read_part_analysis",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read_salesperson_analysis",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read_customer_analysis",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer"
+          ]
+        },
+        {
+          "id": "export",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [
+            "read_part_analysis",
+            "read_salesperson_analysis",
+            "read_customer_analysis"
+          ],
+          "requires_fields": []
+        },
+        {
+          "id": "recompute",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_summary",
+          "kind": "display",
+          "requires_actions": [],
+          "requires_any_actions": [
+            "read_part_analysis",
+            "read_salesperson_analysis",
+            "read_customer_analysis"
+          ],
+          "requires_fields": []
+        },
+        {
+          "id": "show_export",
+          "kind": "display",
+          "requires_actions": [
+            "export"
+          ],
+          "requires_any_actions": [
+            "read_part_analysis",
+            "read_salesperson_analysis",
+            "read_customer_analysis"
+          ],
+          "requires_fields": []
+        },
+        {
+          "id": "show_recompute",
+          "kind": "display",
+          "requires_actions": [
+            "recompute"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "purchase_analysis",
+      "label_zh": "采购日期分析",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_customer",
+        "data_purchase_cost"
+      ],
+      "field_dependencies": [],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_summary",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_trend",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_groups",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_orders",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_order_detail",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "purchase_records",
+      "label_zh": "采购记录与型号分析",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_supplier",
+        "data_purchase_cost"
+      ],
+      "field_dependencies": [],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_model_analysis",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_price_trend_advice",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_exceptions",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_records",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "inventory",
+      "label_zh": "库存查询与人工修正",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_purchase_cost"
+      ],
+      "field_dependencies": [],
+      "actions": [
+        {
+          "id": "adjust",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_list",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_adjust",
+          "kind": "display",
+          "requires_actions": [
+            "adjust"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "pool_catalog",
+      "label_zh": "人工互通池目录",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [],
+      "field_dependencies": [],
+      "actions": [
+        {
+          "id": "archive",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "create",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "edit",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "edit_members",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "restore",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_list",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_identity_edit",
+          "kind": "display",
+          "requires_actions": [],
+          "requires_any_actions": [
+            "create",
+            "edit"
+          ],
+          "requires_fields": []
+        },
+        {
+          "id": "show_members_edit",
+          "kind": "display",
+          "requires_actions": [
+            "edit_members"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_lifecycle",
+          "kind": "display",
+          "requires_actions": [],
+          "requires_any_actions": [
+            "archive",
+            "restore"
+          ],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "pool_price_policy",
+      "label_zh": "互通池价格政策",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_pool_price_governance"
+      ],
+      "field_dependencies": [],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "set",
+          "kind": "mutation",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_pool_price_governance"
+          ]
+        },
+        {
+          "id": "show_read",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_set",
+          "kind": "display",
+          "requires_actions": [
+            "read",
+            "set"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_pool_price_governance"
+          ]
+        }
+      ]
+    },
+    {
+      "resource_id": "pool_price_analysis",
+      "label_zh": "互通池价格分析",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_pool_price_governance",
+        "data_supplier",
+        "data_customer"
+      ],
+      "field_dependencies": [],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_part_reference",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_list",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_members",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_price_map",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "pool_order_facts",
+      "label_zh": "池价格订单事实",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_pool_price_governance",
+        "data_supplier",
+        "data_customer"
+      ],
+      "field_dependencies": [],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_purchase_facts",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_sales_facts",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_order_detail",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "part_master",
+      "label_zh": "备件主数据",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_dependencies": [
+        {
+          "field": "data_profit",
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "id": "create",
+          "kind": "mutation",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "edit",
+          "kind": "mutation",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "normalize_apply",
+          "kind": "mutation",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "normalize_preview",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_inline_edit",
+          "kind": "display",
+          "requires_actions": [
+            "read",
+            "edit"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_list",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_create",
+          "kind": "display",
+          "requires_actions": [
+            "read",
+            "create"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_edit",
+          "kind": "display",
+          "requires_actions": [
+            "read",
+            "edit"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_normalize",
+          "kind": "display",
+          "requires_actions": [
+            "read",
+            "normalize_preview"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "part_substitute",
+      "label_zh": "替代料关系",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [],
+      "field_dependencies": [],
+      "actions": [
+        {
+          "id": "manage",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_relations",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_manage",
+          "kind": "display",
+          "requires_actions": [
+            "manage"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "part_identity",
+      "label_zh": "型号身份治理",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_supplier",
+        "data_customer",
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_dependencies": [
+        {
+          "field": "data_profit",
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "review_alias",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "confirm",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "merge",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "rename",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "unmerge",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_candidates",
+          "kind": "display",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "cross_resource_dependency": "surface.mount_rule; do not invent same-resource read"
+        },
+        {
+          "id": "show_merges",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_aliases",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "governance",
+      "label_zh": "数据治理",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_supplier",
+        "data_customer",
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_dependencies": [
+        {
+          "field": "data_profit",
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "review",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "classify",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "exclude",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "refresh",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_parts",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_issues",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_metrics",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "data_quality",
+      "label_zh": "数据疑点审查",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_supplier",
+        "data_customer",
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_dependencies": [
+        {
+          "field": "data_profit",
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "id": "read_purchase_issues",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read_sales_issues",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "review",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [
+            "read_purchase_issues",
+            "read_sales_issues"
+          ],
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        },
+        {
+          "id": "show_issues",
+          "kind": "display",
+          "requires_actions": [],
+          "requires_any_actions": [
+            "read_purchase_issues",
+            "read_sales_issues"
+          ],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "data_quality_calibration",
+      "label_zh": "规则校准预览",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_supplier",
+        "data_customer",
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_dependencies": [
+        {
+          "field": "data_profit",
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "id": "preview",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        },
+        {
+          "id": "show_preview",
+          "kind": "display",
+          "requires_actions": [
+            "preview"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ]
+    },
+    {
+      "resource_id": "display_policy",
+      "label_zh": "全局展示与业务默认值",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [],
+      "field_dependencies": [],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read_audit_identity",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "update",
+          "kind": "mutation",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_read",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_update",
+          "kind": "display",
+          "requires_actions": [
+            "read",
+            "update"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    },
+    {
+      "resource_id": "company_pool_order_facts",
+      "label_zh": "经营看板池价格订单事实",
+      "status": "S2_proposed_not_executable_evidence",
+      "scopes": [
+        "all"
+      ],
+      "field_permissions": [
+        "data_pool_price_governance",
+        "data_supplier",
+        "data_customer"
+      ],
+      "field_dependencies": [],
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_order_detail",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ]
+    }
+  ],
+  "surfaces": [
+    {
+      "resource_id": "company_summary",
+      "display_action": "show_kpi_sales",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_boss_board"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "company_summary",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "company_summary",
+      "display_action": "show_kpi_purchase",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_boss_board"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "company_summary",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "company_summary",
+      "display_action": "show_kpi_profit",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_boss_board"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "company_summary",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "company_summary",
+      "display_action": "show_kpi_coverage",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_boss_board"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "company_summary",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "company_summary",
+      "display_action": "show_order_health",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_boss_board"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "company_summary",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "company_sales_orders",
+      "display_action": "show_recent_orders",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_boss_board"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "company_sales_orders",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "company_purchase_orders",
+      "display_action": "show_recent_orders",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_boss_board"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "company_purchase_orders",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "company_summary",
+      "display_action": "show_profit_ranking",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_boss_board"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "company_summary",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "company_pool_analysis",
+      "display_action": "show_pools",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_boss_board"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "company_pool_analysis",
+                "actions": [
+                  "read_summary"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "price_discipline",
+      "display_action": "show_summary",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_boss_board"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "price_discipline",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "company_pool_order_facts",
+      "display_action": "show_order_detail",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_boss_board"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "company_pool_order_facts",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_lookup",
+      "display_action": "show_search",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_parts"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_lookup",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_lookup",
+      "display_action": "show_purchase_history",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_parts"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_lookup",
+                "actions": [
+                  "purchase_records_read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_lookup",
+      "display_action": "show_sales_history",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_parts"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_lookup",
+                "actions": [
+                  "sales_records_read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_lookup",
+      "display_action": "show_inventory",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_parts"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_lookup",
+                "actions": [
+                  "inventory_read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_lookup",
+      "display_action": "show_quick_pricing",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_parts"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_lookup",
+                "actions": [
+                  "financial_summary_read"
+                ],
+                "field_permissions": []
+              }
+            ],
+            [
+              {
+                "resource_id": "part_lookup",
+                "actions": [
+                  "market_prices_read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_master",
+      "display_action": "show_inline_edit",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_parts"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_master",
+                "actions": [
+                  "read",
+                  "edit"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "pool_price_analysis",
+      "display_action": "show_part_reference",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_parts"
+                }
+              ]
+            },
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_purchases"
+                }
+              ]
+            },
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_purchases"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "pool_price_analysis",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "profit_analysis",
+      "display_action": "show_summary",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_profit"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "profit_analysis",
+                "actions": [
+                  "read_part_analysis"
+                ],
+                "field_permissions": []
+              }
+            ],
+            [
+              {
+                "resource_id": "profit_analysis",
+                "actions": [
+                  "read_salesperson_analysis"
+                ],
+                "field_permissions": []
+              }
+            ],
+            [
+              {
+                "resource_id": "profit_analysis",
+                "actions": [
+                  "read_customer_analysis"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "profit_analysis",
+      "display_action": "show_export",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_profit"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "profit_analysis",
+                "actions": [
+                  "read_part_analysis",
+                  "export"
+                ],
+                "field_permissions": []
+              }
+            ],
+            [
+              {
+                "resource_id": "profit_analysis",
+                "actions": [
+                  "read_salesperson_analysis",
+                  "export"
+                ],
+                "field_permissions": []
+              }
+            ],
+            [
+              {
+                "resource_id": "profit_analysis",
+                "actions": [
+                  "read_customer_analysis",
+                  "export"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "profit_analysis",
+      "display_action": "show_recompute",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_profit"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "profit_analysis",
+                "actions": [
+                  "recompute"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "purchase_analysis",
+      "display_action": "show_summary",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "all": [
+                    {
+                      "role_in": [
+                        "admin",
+                        "boss"
+                      ]
+                    },
+                    {
+                      "permission": "page_purchase_analytics"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "purchase_analysis",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "purchase_analysis",
+      "display_action": "show_trend",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "all": [
+                    {
+                      "role_in": [
+                        "admin",
+                        "boss"
+                      ]
+                    },
+                    {
+                      "permission": "page_purchase_analytics"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "purchase_analysis",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "purchase_analysis",
+      "display_action": "show_groups",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "all": [
+                    {
+                      "role_in": [
+                        "admin",
+                        "boss"
+                      ]
+                    },
+                    {
+                      "permission": "page_purchase_analytics"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "purchase_analysis",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "purchase_analysis",
+      "display_action": "show_orders",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "all": [
+                    {
+                      "role_in": [
+                        "admin",
+                        "boss"
+                      ]
+                    },
+                    {
+                      "permission": "page_purchase_analytics"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "purchase_analysis",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "purchase_analysis",
+      "display_action": "show_order_detail",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "all": [
+                    {
+                      "role_in": [
+                        "admin",
+                        "boss"
+                      ]
+                    },
+                    {
+                      "permission": "page_purchase_analytics"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "purchase_analysis",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "purchase_records",
+      "display_action": "show_model_analysis",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_purchases"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "purchase_records",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "purchase_records",
+      "display_action": "show_price_trend_advice",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_purchases"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "purchase_records",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "purchase_records",
+      "display_action": "show_exceptions",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_purchases"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "purchase_records",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "purchase_records",
+      "display_action": "show_records",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_purchases"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "purchase_records",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "inventory",
+      "display_action": "show_list",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_inventory"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "inventory",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "inventory",
+      "display_action": "show_adjust",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_inventory"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "inventory",
+                "actions": [
+                  "adjust"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "pool_price_analysis",
+      "display_action": "show_list",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_pool_analysis"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "pool_price_analysis",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "pool_price_analysis",
+      "display_action": "show_members",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_pool_analysis"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "pool_price_analysis",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "pool_price_analysis",
+      "display_action": "show_price_map",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_pool_analysis"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "pool_price_analysis",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "pool_order_facts",
+      "display_action": "show_purchase_facts",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_pool_analysis"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "pool_order_facts",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "pool_order_facts",
+      "display_action": "show_sales_facts",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_pool_analysis"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "pool_order_facts",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "pool_order_facts",
+      "display_action": "show_order_detail",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_pool_analysis"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "pool_order_facts",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "pool_catalog",
+      "display_action": "show_list",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "action_pool_manage"
+                },
+                {
+                  "permission": "action_pool_set_policy"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "pool_catalog",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "pool_catalog",
+      "display_action": "show_identity_edit",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "action_pool_manage"
+                },
+                {
+                  "permission": "action_pool_set_policy"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "pool_catalog",
+                "actions": [
+                  "create"
+                ],
+                "field_permissions": []
+              }
+            ],
+            [
+              {
+                "resource_id": "pool_catalog",
+                "actions": [
+                  "edit"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "pool_catalog",
+      "display_action": "show_members_edit",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "action_pool_manage"
+                },
+                {
+                  "permission": "action_pool_set_policy"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "pool_catalog",
+                "actions": [
+                  "edit_members"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "pool_catalog",
+      "display_action": "show_lifecycle",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "action_pool_manage"
+                },
+                {
+                  "permission": "action_pool_set_policy"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "pool_catalog",
+                "actions": [
+                  "archive"
+                ],
+                "field_permissions": []
+              }
+            ],
+            [
+              {
+                "resource_id": "pool_catalog",
+                "actions": [
+                  "restore"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "pool_price_policy",
+      "display_action": "show_read",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "action_pool_manage"
+                },
+                {
+                  "permission": "action_pool_set_policy"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "pool_price_policy",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "pool_price_policy",
+      "display_action": "show_set",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "action_pool_manage"
+                },
+                {
+                  "permission": "action_pool_set_policy"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "pool_price_policy",
+                "actions": [
+                  "read",
+                  "set"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [
+          "data_pool_price_governance"
+        ],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_master",
+      "display_action": "show_list",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_master_data"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_master",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_master",
+      "display_action": "show_create",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_master_data"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_master",
+                "actions": [
+                  "read",
+                  "create"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_master",
+      "display_action": "show_edit",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_master_data"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_master",
+                "actions": [
+                  "read",
+                  "edit"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_master",
+      "display_action": "show_normalize",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_master_data"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_master",
+                "actions": [
+                  "read",
+                  "normalize_preview"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_substitute",
+      "display_action": "show_relations",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_parts"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_substitute",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_substitute",
+      "display_action": "show_manage",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_parts"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_substitute",
+                "actions": [
+                  "manage"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "governance",
+      "display_action": "show_parts",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_governance"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "governance",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_identity",
+      "display_action": "show_candidates",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_governance"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "governance",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_identity",
+      "display_action": "show_merges",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_governance"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_identity",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "governance",
+      "display_action": "show_issues",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_governance"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "governance",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "part_identity",
+      "display_action": "show_aliases",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_governance"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "part_identity",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "governance",
+      "display_action": "show_metrics",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_governance"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "governance",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "data_quality",
+      "display_action": "show_issues",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_governance"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "data_quality",
+                "actions": [
+                  "read_purchase_issues"
+                ],
+                "field_permissions": []
+              }
+            ],
+            [
+              {
+                "resource_id": "data_quality",
+                "actions": [
+                  "read_sales_issues"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "data_quality_calibration",
+      "display_action": "show_preview",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "any": [
+                {
+                  "role_in": [
+                    "admin"
+                  ]
+                },
+                {
+                  "permission": "page_governance"
+                }
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "data_quality_calibration",
+                "actions": [
+                  "preview"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [
+          "data_purchase_cost"
+        ],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "display_policy",
+      "display_action": "show_read",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "role_in": [
+                "admin"
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "display_policy",
+                "actions": [
+                  "read"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    },
+    {
+      "resource_id": "display_policy",
+      "display_action": "show_update",
+      "legacy_display_seed": {
+        "route_predicate": {
+          "any": [
+            {
+              "role_in": [
+                "admin"
+              ]
+            }
+          ]
+        },
+        "data_predicate": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "display_policy",
+                "actions": [
+                  "read",
+                  "update"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "fields_all": [],
+        "evaluation": "after eligible legacy data/field interpretation, grant display iff old route predicate AND data_rule AND whole-surface fields; source eligibility and protected presence checked first; do not use live /me runtime allow to seed inactive saved entitlements",
+        "transient_state": "tab/drawer open, data presence, collapsed state, loading/error are not durable seed predicates"
+      }
+    }
+  ],
+  "sales_upgrade": {
+    "old_read_maps_to": [
+      "read_options",
+      "read_summary",
+      "read_groups",
+      "read_trend",
+      "read_orders",
+      "read_order_detail"
+    ],
+    "old_read_and_cost_maps_to": [
+      "read_amount_histogram"
+    ],
+    "old_export_maps_to": [
+      "export"
+    ],
+    "existing_read_compatibility": "If retained, read is never accepted by any S2 data endpoint or show fallback",
+    "source_objects": [
+      "template canonical bundle",
+      "account saved template snapshot",
+      "present complete override including equal override and deny",
+      "materialized Grant"
+    ],
+    "invariants": [
+      "preserve scopes, fields, customer assignments and override presence",
+      "do not sync latest template implicitly",
+      "empty action tombstone remains empty",
+      "bump source versions/epoch/catalog transactionally once; repeat migration no-op; no regrant after revocation",
+      "canonical-origin empty account/template is not eligible for legacy expansion"
+    ],
+    "display_rows": [
+      {
+        "surface_id": "sales_analysis.overview",
+        "new_display_action": "show_overview",
+        "source": "pre-upgrade canonical sales Grant/source, not current role/template bool",
+        "old_actions_all": [
+          "read"
+        ],
+        "old_fields_all": [],
+        "old_component_location": "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:450",
+        "persistent_seed": "all old_actions_all AND all old_fields_all; false/missing/explicit empty => no new display action",
+        "request_rule": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "sales_analysis",
+                "actions": [
+                  "read_groups"
+                ],
+                "field_permissions": []
+              }
+            ],
+            [
+              {
+                "resource_id": "sales_analysis",
+                "actions": [
+                  "read_trend"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "old_component_predicate": "valid owner/read; tab label present; content active when !sessionDead && state.tab == overview",
+        "do_not_persist_transient_conditions": [
+          "active tab",
+          "orderId present",
+          "row count",
+          "API response empty/nonempty",
+          "loading/error",
+          "sessionDead",
+          "collapsed state",
+          "amount selections"
+        ]
+      },
+      {
+        "surface_id": "sales_analysis.compact",
+        "new_display_action": "show_compact",
+        "source": "pre-upgrade canonical sales Grant/source, not current role/template bool",
+        "old_actions_all": [
+          "read"
+        ],
+        "old_fields_all": [],
+        "old_component_location": "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:458",
+        "persistent_seed": "all old_actions_all AND all old_fields_all; false/missing/explicit empty => no new display action",
+        "request_rule": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "sales_analysis",
+                "actions": [
+                  "read_groups"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "old_component_predicate": "valid owner/read; tab label present; content active when !sessionDead && state.tab == compact",
+        "do_not_persist_transient_conditions": [
+          "active tab",
+          "orderId present",
+          "row count",
+          "API response empty/nonempty",
+          "loading/error",
+          "sessionDead",
+          "collapsed state",
+          "amount selections"
+        ]
+      },
+      {
+        "surface_id": "sales_analysis.groups",
+        "new_display_action": "show_groups",
+        "source": "pre-upgrade canonical sales Grant/source, not current role/template bool",
+        "old_actions_all": [
+          "read"
+        ],
+        "old_fields_all": [],
+        "old_component_location": "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:467",
+        "persistent_seed": "all old_actions_all AND all old_fields_all; false/missing/explicit empty => no new display action",
+        "request_rule": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "sales_analysis",
+                "actions": [
+                  "read_groups"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "old_component_predicate": "valid owner/read; tab label present; content active when !sessionDead && state.tab == groups",
+        "do_not_persist_transient_conditions": [
+          "active tab",
+          "orderId present",
+          "row count",
+          "API response empty/nonempty",
+          "loading/error",
+          "sessionDead",
+          "collapsed state",
+          "amount selections"
+        ]
+      },
+      {
+        "surface_id": "sales_analysis.trend",
+        "new_display_action": "show_trend",
+        "source": "pre-upgrade canonical sales Grant/source, not current role/template bool",
+        "old_actions_all": [
+          "read"
+        ],
+        "old_fields_all": [],
+        "old_component_location": "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:476",
+        "persistent_seed": "all old_actions_all AND all old_fields_all; false/missing/explicit empty => no new display action",
+        "request_rule": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "sales_analysis",
+                "actions": [
+                  "read_trend"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "old_component_predicate": "valid owner/read; tab label present; content active when !sessionDead && state.tab == trend",
+        "do_not_persist_transient_conditions": [
+          "active tab",
+          "orderId present",
+          "row count",
+          "API response empty/nonempty",
+          "loading/error",
+          "sessionDead",
+          "collapsed state",
+          "amount selections"
+        ]
+      },
+      {
+        "surface_id": "sales_analysis.orders",
+        "new_display_action": "show_orders",
+        "source": "pre-upgrade canonical sales Grant/source, not current role/template bool",
+        "old_actions_all": [
+          "read"
+        ],
+        "old_fields_all": [],
+        "old_component_location": "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:482",
+        "persistent_seed": "all old_actions_all AND all old_fields_all; false/missing/explicit empty => no new display action",
+        "request_rule": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "sales_analysis",
+                "actions": [
+                  "read_orders"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "old_component_predicate": "valid owner/read; tab label present; content active when !sessionDead && state.tab == orders",
+        "do_not_persist_transient_conditions": [
+          "active tab",
+          "orderId present",
+          "row count",
+          "API response empty/nonempty",
+          "loading/error",
+          "sessionDead",
+          "collapsed state",
+          "amount selections"
+        ]
+      },
+      {
+        "surface_id": "sales_analysis.summary_counts",
+        "new_display_action": "show_summary_counts",
+        "source": "pre-upgrade canonical sales Grant/source, not current role/template bool",
+        "old_actions_all": [
+          "read"
+        ],
+        "old_fields_all": [],
+        "old_component_location": "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:419",
+        "persistent_seed": "all old_actions_all AND all old_fields_all; false/missing/explicit empty => no new display action",
+        "request_rule": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "sales_analysis",
+                "actions": [
+                  "read_summary"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "old_component_predicate": "read && !sessionDead && !summaryError; SummaryView inner cards depend on amount selections or response field presence, not new authorization",
+        "do_not_persist_transient_conditions": [
+          "active tab",
+          "orderId present",
+          "row count",
+          "API response empty/nonempty",
+          "loading/error",
+          "sessionDead",
+          "collapsed state",
+          "amount selections"
+        ]
+      },
+      {
+        "surface_id": "sales_analysis.summary_amounts",
+        "new_display_action": "show_summary_amounts",
+        "source": "pre-upgrade canonical sales Grant/source, not current role/template bool",
+        "old_actions_all": [
+          "read"
+        ],
+        "old_fields_all": [],
+        "old_component_location": "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:419",
+        "persistent_seed": "all old_actions_all AND all old_fields_all; false/missing/explicit empty => no new display action",
+        "request_rule": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "sales_analysis",
+                "actions": [
+                  "read_summary"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "old_component_predicate": "read && !sessionDead && !summaryError; SummaryView inner cards depend on amount selections or response field presence, not new authorization",
+        "do_not_persist_transient_conditions": [
+          "active tab",
+          "orderId present",
+          "row count",
+          "API response empty/nonempty",
+          "loading/error",
+          "sessionDead",
+          "collapsed state",
+          "amount selections"
+        ]
+      },
+      {
+        "surface_id": "sales_analysis.summary_profit",
+        "new_display_action": "show_summary_profit",
+        "source": "pre-upgrade canonical sales Grant/source, not current role/template bool",
+        "old_actions_all": [
+          "read"
+        ],
+        "old_fields_all": [
+          "data_purchase_cost",
+          "data_profit"
+        ],
+        "old_component_location": "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:419",
+        "persistent_seed": "all old_actions_all AND all old_fields_all; false/missing/explicit empty => no new display action",
+        "request_rule": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "sales_analysis",
+                "actions": [
+                  "read_summary"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "old_component_predicate": "SummaryView.tsx:125 !profitRestricted && kpi?.gross_profit !== undefined; canonical data_profit requires data_purchase_cost",
+        "do_not_persist_transient_conditions": [
+          "active tab",
+          "orderId present",
+          "row count",
+          "API response empty/nonempty",
+          "loading/error",
+          "sessionDead",
+          "collapsed state",
+          "amount selections"
+        ]
+      },
+      {
+        "surface_id": "sales_analysis.amount_histogram",
+        "new_display_action": "show_amount_histogram",
+        "source": "pre-upgrade canonical sales Grant/source, not current role/template bool",
+        "old_actions_all": [
+          "read"
+        ],
+        "old_fields_all": [
+          "data_purchase_cost"
+        ],
+        "old_component_location": "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:394",
+        "persistent_seed": "all old_actions_all AND all old_fields_all; false/missing/explicit empty => no new display action",
+        "request_rule": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "sales_analysis",
+                "actions": [
+                  "read_amount_histogram"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "old_component_predicate": "SalesAnalyticsPage.tsx:394 !amountRangeHidden && !sessionDead; amountRangeHidden=costRestricted",
+        "do_not_persist_transient_conditions": [
+          "active tab",
+          "orderId present",
+          "row count",
+          "API response empty/nonempty",
+          "loading/error",
+          "sessionDead",
+          "collapsed state",
+          "amount selections"
+        ]
+      },
+      {
+        "surface_id": "sales_analysis.order_detail",
+        "new_display_action": "show_order_detail",
+        "source": "pre-upgrade canonical sales Grant/source, not current role/template bool",
+        "old_actions_all": [
+          "read"
+        ],
+        "old_fields_all": [],
+        "old_component_location": "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:489",
+        "persistent_seed": "all old_actions_all AND all old_fields_all; false/missing/explicit empty => no new display action",
+        "request_rule": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "sales_analysis",
+                "actions": [
+                  "read_order_detail"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "old_component_predicate": "DetailDrawer.tsx:79/101 opens/requests when orderId != null and owner is current; parent already requires read; scope object validation remains server-owned",
+        "do_not_persist_transient_conditions": [
+          "active tab",
+          "orderId present",
+          "row count",
+          "API response empty/nonempty",
+          "loading/error",
+          "sessionDead",
+          "collapsed state",
+          "amount selections"
+        ]
+      },
+      {
+        "surface_id": "sales_analysis.reconciliation",
+        "new_display_action": "show_reconciliation",
+        "source": "pre-upgrade canonical sales Grant/source, not current role/template bool",
+        "old_actions_all": [
+          "read"
+        ],
+        "old_fields_all": [
+          "data_purchase_cost",
+          "data_reconciliation"
+        ],
+        "old_component_location": "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:489",
+        "persistent_seed": "all old_actions_all AND all old_fields_all; false/missing/explicit empty => no new display action",
+        "request_rule": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "sales_analysis",
+                "actions": [
+                  "read_order_detail"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "old_component_predicate": "DetailDrawer.tsx:240/274: !reconRestricted enables sensitive latest/history; restricted only renders denial; canonical reconciliation requires cost",
+        "do_not_persist_transient_conditions": [
+          "active tab",
+          "orderId present",
+          "row count",
+          "API response empty/nonempty",
+          "loading/error",
+          "sessionDead",
+          "collapsed state",
+          "amount selections"
+        ]
+      },
+      {
+        "surface_id": "sales_analysis.export",
+        "new_display_action": "show_export",
+        "source": "pre-upgrade canonical sales Grant/source, not current role/template bool",
+        "old_actions_all": [
+          "read",
+          "export"
+        ],
+        "old_fields_all": [],
+        "old_component_location": "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:438",
+        "persistent_seed": "all old_actions_all AND all old_fields_all; false/missing/explicit empty => no new display action",
+        "request_rule": {
+          "anyOf": [
+            [
+              {
+                "resource_id": "sales_analysis",
+                "actions": [
+                  "read_orders",
+                  "export"
+                ],
+                "field_permissions": []
+              }
+            ]
+          ]
+        },
+        "old_component_predicate": "SalesAnalyticsPage.tsx:438 state.tab==orders && canExport; canExport=canonical export; onExport:289 rechecks; old export depends read",
+        "do_not_persist_transient_conditions": [
+          "active tab",
+          "orderId present",
+          "row count",
+          "API response empty/nonempty",
+          "loading/error",
+          "sessionDead",
+          "collapsed state",
+          "amount selections"
+        ]
+      }
+    ],
+    "overview_evidence": {
+      "conclusion": "show_overview needs read_groups OR read_trend; read_summary is not a dependency",
+      "sources": [
+        "frontend/src/pages/sales/analytics/OverviewTab.tsx:40 fetchSalesAnalyticsGroups",
+        "frontend/src/pages/sales/analytics/OverviewTab.tsx:107 fetchSalesAnalyticsTrend",
+        "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:215 parent fetchSalesAnalyticsSummary",
+        "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx:419 separate SummaryView"
+      ],
+      "parent_summary_active_rule": "read_summary AND any actually mounted/authorized summary_counts, summary_amounts, summary_profit consumer; not overview/tab presence",
+      "scenarios": [
+        "show_overview+read_groups only => TopLists, zero trend/summary HTTP",
+        "show_overview+read_trend only => trend, zero groups/summary HTTP",
+        "show_groups false but show_overview+read_groups true => overview TopLists still query",
+        "read_groups false => every group consumer refuses query regardless show",
+        "summary cards hidden but overview visible => no summary query; summary-only grant can display cards without any tabs"
+      ],
+      "safe_navigation": "Overview More/detailed trend/drill links must check target surface show+data before exposing link; lacking target does not suppress source content"
+    }
+  }
+}

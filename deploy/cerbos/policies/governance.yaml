@@ -1,0 +1,169 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "governance",
+    "rules": [
+      {
+        "name": "explicit-classify",
+        "actions": [
+          "classify"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"classify\" in P.attr.grants.governance.actions && P.attr.grants.governance.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"governance\", \"scope\": P.attr.grants.governance.scope, \"version\": P.attr.grants.governance.version, \"field_permissions\": P.attr.grants.governance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-exclude",
+        "actions": [
+          "exclude"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"exclude\" in P.attr.grants.governance.actions && P.attr.grants.governance.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"governance\", \"scope\": P.attr.grants.governance.scope, \"version\": P.attr.grants.governance.version, \"field_permissions\": P.attr.grants.governance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.governance.actions && P.attr.grants.governance.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"governance\", \"scope\": P.attr.grants.governance.scope, \"version\": P.attr.grants.governance.version, \"field_permissions\": P.attr.grants.governance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-refresh",
+        "actions": [
+          "refresh"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"refresh\" in P.attr.grants.governance.actions && P.attr.grants.governance.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"governance\", \"scope\": P.attr.grants.governance.scope, \"version\": P.attr.grants.governance.version, \"field_permissions\": P.attr.grants.governance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-review",
+        "actions": [
+          "review"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"review\" in P.attr.grants.governance.actions && P.attr.grants.governance.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"governance\", \"scope\": P.attr.grants.governance.scope, \"version\": P.attr.grants.governance.version, \"field_permissions\": P.attr.grants.governance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-issues",
+        "actions": [
+          "show_issues"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_issues\" in P.attr.grants.governance.actions && \"read\" in P.attr.grants.governance.actions && P.attr.grants.governance.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"governance\", \"scope\": P.attr.grants.governance.scope, \"version\": P.attr.grants.governance.version, \"field_permissions\": P.attr.grants.governance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-metrics",
+        "actions": [
+          "show_metrics"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_metrics\" in P.attr.grants.governance.actions && \"read\" in P.attr.grants.governance.actions && P.attr.grants.governance.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"governance\", \"scope\": P.attr.grants.governance.scope, \"version\": P.attr.grants.governance.version, \"field_permissions\": P.attr.grants.governance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-parts",
+        "actions": [
+          "show_parts"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_parts\" in P.attr.grants.governance.actions && \"read\" in P.attr.grants.governance.actions && P.attr.grants.governance.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"governance\", \"scope\": P.attr.grants.governance.scope, \"version\": P.attr.grants.governance.version, \"field_permissions\": P.attr.grants.governance.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -36,7 +36,7 @@ def account(db, enabled_module):
     user = SysUser(username="authz-test-account", password_hash="synthetic-not-used", role="maintenance_manager", token_version=3)
     db.add(user)
     db.flush()
-    grant = SysAuthorizationGrant(user_id=user.id, resource="sales_analysis", actions=["read"],
+    grant = SysAuthorizationGrant(user_id=user.id, resource="sales_analysis", actions=["read_orders"],
                                   scope="assigned_customers", field_permissions=["data_customer"], version=1)
     db.add(grant)
     db.commit()
@@ -57,7 +57,7 @@ def test_invalid_principal_never_contacts_pdp(db, account, monkeypatch, changes,
     _, _, identity, _ = account
     monkeypatch.setattr(engine, "plan_access", lambda *a: pytest.fail("invalid identity reached PDP"))
     with pytest.raises(HTTPException) as exc:
-        service.resource_access(db, replace(identity, **changes), "sales_analysis", "read")
+        service.resource_access(db, replace(identity, **changes), "sales_analysis", "read_orders")
     assert exc.value.status_code == status
 
 
@@ -70,7 +70,7 @@ def test_account_changes_are_reloaded_over_session_identity_map(db, account, mon
     db.execute(text(f"UPDATE sys_user SET {column}=:value WHERE id=:id"), {"value": value, "id": user.id})
     monkeypatch.setattr(engine, "plan_access", lambda *a: pytest.fail("revoked account reached PDP"))
     with pytest.raises(HTTPException) as exc:
-        service.resource_access(db, identity, "sales_analysis", "read")
+        service.resource_access(db, identity, "sales_analysis", "read_orders")
     assert exc.value.status_code == 401
 
 
@@ -96,9 +96,9 @@ def test_context_uses_only_one_live_grant_and_explicit_customer_ids(db, account,
     assert access.context.permissions["own_customers_only"] is False
     assert access.context.explicit_field_policy is True
     assert access.customer_count == 1
-    assert access.access.require_binding("sales_analysis", "read") is access.access
+    assert access.access.require_binding("sales_analysis", "read_orders") is access.access
     with pytest.raises(HTTPException):
-        access.access.require_binding("inventory", "read")
+        access.access.require_binding("inventory", "read_orders")
     monkeypatch.setattr(config, "ENABLE_RBAC", False)
     assert is_field_hidden(access.context, "amount_ex_tax")
     assert not is_field_hidden(access.context, "customer")
@@ -125,10 +125,10 @@ def test_corrupt_grant_does_not_fall_back_to_legacy_permissions(db, account, mon
     db.flush()
     monkeypatch.setattr(engine, "plan_access", lambda *a: pytest.fail("invalid grant reached PDP"))
     with pytest.raises(HTTPException) as exc:
-        service.resource_access(db, identity, "sales_analysis", "read")
+        service.resource_access(db, identity, "sales_analysis", "read_orders")
     assert exc.value.status_code == 403
     snapshot = service.my_snapshot(db, identity)
-    assert snapshot["resources"]["sales_analysis"]["decisions"]["read"]["effect"] == "deny"
+    assert snapshot["resources"]["sales_analysis"]["decisions"]["read_orders"]["effect"] == "deny"
     assert snapshot["sales_analysis"]["field_permissions"] == []
 
 
@@ -141,7 +141,7 @@ def test_missing_grant_and_unregistered_action_are_denied(db, account, monkeypat
     db.delete(grant)
     db.flush()
     with pytest.raises(HTTPException) as exc:
-        service.resource_access(db, identity, "sales_analysis", "read")
+        service.resource_access(db, identity, "sales_analysis", "read_orders")
     assert exc.value.status_code == 403
 
 
@@ -151,7 +151,7 @@ def test_engine_unavailable_is_503_without_legacy_fallback(db, account, monkeypa
         raise engine.AuthorizationUnavailable("synthetic outage")
     monkeypatch.setattr(engine, "plan_access", unavailable)
     monkeypatch.setattr(engine, "check_resources", unavailable)
-    for call in (lambda: service.resource_access(db, identity, "sales_analysis", "read"),
+    for call in (lambda: service.resource_access(db, identity, "sales_analysis", "read_orders"),
                  lambda: service.my_snapshot(db, identity)):
         with pytest.raises(HTTPException) as exc:
             call()
@@ -167,7 +167,7 @@ def test_disabled_module_reads_marker_but_does_not_contact_pdp(db, monkeypatch):
     assert snapshot["sales_analysis"]["field_permissions"] == []
     assert db.scalar(select(func.count()).select_from(SysAuthorizationCutover)) == 0
     with pytest.raises(HTTPException) as exc:
-        service.resource_access(db, identity, "sales_analysis", "read")
+        service.resource_access(db, identity, "sales_analysis", "read_orders")
     assert exc.value.status_code == 503
 
 
@@ -184,7 +184,7 @@ def test_suspension_keeps_new_chain_authoritative(db, account, monkeypatch, mode
     assert snapshot["read"] is False
     assert "暂停" in snapshot["reason"]
     with pytest.raises(HTTPException) as exc:
-        service.resource_access(db, identity, "sales_analysis", "read")
+        service.resource_access(db, identity, "sales_analysis", "read_orders")
     assert exc.value.status_code == 503
 
 
@@ -197,7 +197,7 @@ def test_read_lock_keeps_grant_and_assignments_coherent_until_request_finishes(d
     customer_ids = [customer.id for customer in customers]
     db.add(SysCustomerAssignment(user_id=user_id, customer_id=customer_ids[0]))
     db.commit()
-    access = service.resource_access(db, identity, "sales_analysis", "read")
+    access = service.resource_access(db, identity, "sales_analysis", "read_orders")
     assert access.field_permissions == {"data_customer"}
     pid_queue = Queue()
     failures = []
@@ -240,8 +240,8 @@ def test_read_lock_keeps_grant_and_assignments_coherent_until_request_finishes(d
     assert not writer.is_alive()
     assert not failures
     with pytest.raises(HTTPException) as exc:
-        service.resource_access(db, identity, "sales_analysis", "read")
+        service.resource_access(db, identity, "sales_analysis", "read_orders")
     assert exc.value.status_code == 401
-    refreshed = service.resource_access(db, replace(identity, token_version=4), "sales_analysis", "read")
+    refreshed = service.resource_access(db, replace(identity, token_version=4), "sales_analysis", "read_orders")
     assert refreshed.field_permissions == {"data_purchase_cost"}
     assert refreshed.grant_version == 2

@@ -55,7 +55,7 @@ def _headers(user,**kwargs):
 def _body(**kwargs):return {'schema_version':1,'catalog_version':catalog.CATALOG_VERSION,**kwargs}
 
 
-def _config(**kwargs):return {'actions':['read'],'scope':'assigned_customers','field_permissions':[],**kwargs}
+def _config(**kwargs):return {'actions':['read_orders'],'scope':'assigned_customers','field_permissions':[],**kwargs}
 
 
 def _result(response,status=200):
@@ -100,9 +100,9 @@ def test_module_replacement_tombstone_audit_and_legacy_untouched(db,client):
     assert len(logs)==2 and logs[1].before_json==first and logs[1].after_json==second
 
 
-@pytest.mark.parametrize('change',[{'actions':['export']},{'actions':['read','read']},{'scope':'mine'},
+@pytest.mark.parametrize('change',[{'actions':['export']},{'actions':['read_orders','read_orders']},{'scope':'mine'},
     {'field_permissions':['data_profit']},{'field_permissions':['data_reconciliation']},{'field_permissions':['unknown']},
-    {'actions':'read'},{'scope':None},{'field_permissions':None}])
+    {'actions':'read_orders'},{'scope':None},{'field_permissions':None}])
 def test_invalid_resource_is_atomic(db,client,change):
     admin=_user(db,'operator','admin');user=_user(db,'target')
     _result(_write(client,admin,user,config=_config(**change)),422)
@@ -201,7 +201,7 @@ def test_template_resource_removal_revokes_but_saved_user_unchanged_until_sync(d
     admin=_user(db,'operator','admin');user=_user(db,'target');_tpl(client,admin)
     _,res=_bulk(client,admin,[user],{'kind':'apply_template','template_code':'test_team','expected_template_version':1,'override_policy':'preserve'});_result(res)
     _result(client.put('/api/role-templates/test_team',headers=_headers(admin),json=_body(expected_version=1,updates=[{'resource_id':'sales_analysis','operation':'remove_resource'}])))
-    assert _read(client,admin,user)['resources']['sales_analysis']['configuration']['actions']==['read']
+    assert _read(client,admin,user)['resources']['sales_analysis']['configuration']['actions']==['read_orders']
     db.refresh(user)
     preview=_result(client.post('/api/authz/templates/test_team/sync',headers=_headers(admin),json=_body(dry_run=True,targets=[{'user_id':user.id,'username':user.username,'expected_epoch':1}],operation={'kind':'sync_template','template_code':'test_team','expected_template_version':2,'override_policy':'preserve'})))
     assert preview['preview'][0]['resources'][0]['change']=='revoke'
@@ -314,7 +314,7 @@ def test_real_postgres_s0_seed_and_s1_source_backfill_are_distinct(db):
         assert rows[0].scope=='all' and rows[1].scope=='assigned_customers'
         assert all(r.token_version==0 for r in rows)
         db.execute(text("UPDATE sys_authorization_grant SET actions='[]'::jsonb WHERE user_id=(SELECT id FROM sys_user WHERE username='old-sales')"))
-        db.commit();command.upgrade(config,'head')
+        db.commit();command.upgrade(config,'a7c2e9f4b6d1')
         users={u.username:u for u in db.scalars(select(SysUser).where(SysUser.username.like('old-%')))}
         assert users['old-sales'].authorization_profile['resource_overrides']['sales_analysis']['actions']==[]
         assert users['old-sales'].authorization_profile['template_snapshot'] is None
@@ -401,7 +401,7 @@ def test_archive_and_sync_serialize_on_template_before_user_locks(db,client,monk
 def test_corrupt_persisted_sources_are_diagnostic_not_500(db,client,damage):
     admin=_user(db,'operator','admin');user=_user(db,'target');_result(_write(client,admin,user))
     db.refresh(user);grant=db.scalar(select(SysAuthorizationGrant).where(SysAuthorizationGrant.user_id==user.id))
-    if damage=='mixed_actions':grant.actions=['read',3]
+    if damage=='mixed_actions':grant.actions=['read_orders',3]
     elif damage=='mixed_fields':grant.field_permissions=['data_customer',{}]
     elif damage=='profile_shape':user.authorization_profile=[]
     elif damage=='profile_value':user.authorization_profile={**management.empty_profile(),'resource_overrides':{'sales_analysis':{'actions':[3],'scope':'all','field_permissions':[]}}}
@@ -416,10 +416,12 @@ def test_corrupt_persisted_sources_are_diagnostic_not_500(db,client,damage):
 def test_cutover_marker_prevents_schema_downgrade(db,client):
     backend=Path(__file__).parents[1];config=Config(str(backend/'alembic.ini'))
     config.set_main_option('script_location',str(backend/'alembic'));db.rollback()
+    starting_revision = db.scalar(text('SELECT version_num FROM alembic_version'))
+    db.rollback()
     with pytest.raises(RuntimeError,match='Cannot downgrade after authorization cutover'):
         command.downgrade(config,'f1a3c5e7b9d2')
     assert db.scalar(select(func.count()).select_from(SysAuthorizationCutover))==1
-    assert db.execute(text('SELECT version_num FROM alembic_version')).scalar_one()=='a7c2e9f4b6d1'
+    assert db.execute(text('SELECT version_num FROM alembic_version')).scalar_one()==starting_revision
     assert db.execute(text("SELECT count(*) FROM information_schema.columns WHERE table_name='sys_user' AND column_name='authorization_profile' AND table_schema=current_schema()" )).scalar_one()==1
     assert db.execute(text("SELECT count(*) FROM information_schema.columns WHERE table_name IN ('sys_user','sys_role_template') AND column_name='authorization_legacy_seed_eligible' AND table_schema=current_schema()")).scalar_one()==2
     db.rollback()

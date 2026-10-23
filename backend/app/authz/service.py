@@ -5,8 +5,12 @@ validated, live Grant passed through the PDP. Domain adapters own relationships
 and ORM bindings; this module owns identity, coherence and failure semantics.
 """
 from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
+from types import MappingProxyType
 
 from sqlalchemy import func, select, true
 from sqlalchemy.orm import Session
@@ -19,6 +23,7 @@ from app.models.authorization import SysAuthorizationGrant, SysCustomerAssignmen
 from app.models.sales import FSalesOrder
 from app.models.system import SysUser
 from app.security import UserContext
+from app import permissions
 
 
 @dataclass(frozen=True)
@@ -39,6 +44,122 @@ class ResourceAccess:
         if self.resource != resource or self.action != action:
             raise authz_error(403, "AUTHZ_FORBIDDEN", "授权上下文与业务操作不匹配")
         return self
+
+
+_recorder: ContextVar[Callable[[ResourceAccess], None] | None] = ContextVar('authorization_access_recorder', default=None)
+
+
+@contextmanager
+def access_recorder(callback: Callable[[ResourceAccess], None]):
+    """Install inside the worker that executes reads; always restore its context."""
+    token = _recorder.set(callback)
+    try:
+        yield
+    finally:
+        _recorder.reset(token)
+
+
+def _record(access: ResourceAccess) -> ResourceAccess:
+    callback = _recorder.get()
+    if callback is not None:
+        callback(access)
+    return access
+
+
+def lock_actor(db: Session, identity: VerifiedIdentity) -> SysUser:
+    """After domain locks, take SHARE without a later lock-strength upgrade."""
+    if type(identity) is not VerifiedIdentity:
+        raise authz_error(401, 'AUTHN_SESSION_INVALID', '需要已验证的类型化身份')
+    if identity.fallback:
+        raise authz_error(403, 'AUTHZ_FORBIDDEN', '此操作需要有效实名账号')
+    user = db.scalar(select(SysUser).where(SysUser.username == identity.username)
+                     .with_for_update(read=True).execution_options(populate_existing=True))
+    if user is None:
+        raise authz_error(401, 'AUTHN_SESSION_INVALID', '实名账号或登录状态已失效')
+    load_principal(db, identity, locked_user=user)
+    return user
+
+
+def field_context(access: ResourceAccess, legacy_context: UserContext) -> UserContext:
+    """A field adapter, never a role shim or a second permission authority."""
+    field_policy = {key: key in access.field_permissions for key in permissions.DATA_GROUPS}
+    field_policy['own_customers_only'] = False
+    return replace(legacy_context, user_id=access.principal.username, role=access.principal.role,
+                   salesperson_name=access.principal.salesperson_name, permissions=field_policy,
+                   is_authenticated=True, authn='sys_user', is_fallback=False,
+                   token_version=access.authorization_epoch, explicit_field_policy=True)
+
+
+@dataclass(frozen=True)
+class ResourceReadSet:
+    requested: frozenset[tuple[str, str]]
+    accesses: Mapping[tuple[str, str], ResourceAccess]
+
+    def __post_init__(self):
+        object.__setattr__(self, 'accesses', MappingProxyType(dict(self.accesses)))
+
+    def get(self, resource: str, action: str) -> ResourceAccess | None:
+        if (resource, action) not in self.requested:
+            raise ValueError('查询未登记在本次授权批次')
+        return self.accesses.get((resource, action))
+
+    def require(self, resource: str, action: str) -> ResourceAccess:
+        access = self.get(resource, action)
+        if access is None:
+            raise authz_error(403, 'AUTHZ_FORBIDDEN', '未获得此资源动作授权')
+        return access
+
+    def decision(self, resource: str, action: str) -> dict:
+        allowed = self.get(resource, action) is not None
+        return {'effect': 'allow' if allowed else 'deny', 'reason': None if allowed else {
+            'code': 'NOT_GRANTED', 'message': '未获得此资源动作授权'}}
+
+
+def read_accesses(db: Session, identity: VerifiedIdentity, requirements: Mapping[str, Sequence[str]], *,
+                  locked_user: SysUser | None = None) -> ResourceReadSet:
+    """One live actor/Grant read and one PDP batch for independent all-scope blocks.
+
+    Only ordinary missing Grants/actions are partial denials. Invalid metadata,
+    configuration, runtime, identity, database and PDP results abort the request.
+    Scoped/object resources require their domain-bound resource_access instead.
+    """
+    if not isinstance(requirements, Mapping) or not requirements:
+        raise ValueError('批量授权必须具有明确的资源动作')
+    requested = {}
+    for resource, actions in requirements.items():
+        definition = get_resource_definition(resource)
+        if (definition.query_attributes or definition.context_scopes
+                or not isinstance(actions, (list, tuple)) or not actions
+                or any(type(a) is not str for a in actions)
+                or len(set(actions)) != len(actions) or not set(actions) <= definition.actions):
+            raise ValueError('批量授权只接受已登记、无需对象上下文的动作')
+        requested[resource] = tuple(actions)
+    states = runtime.runtime_states(db)
+    if any(states[resource].runtime_state != 'enabled' for resource in requested):
+        raise authz_error(503, 'AUTHZ_RESOURCE_UNAVAILABLE', '授权模块未启用或已暂停')
+    principal = _read_principal(db, identity, locked_user=locked_user)
+    if principal is None:
+        raise authz_error(403, 'AUTHZ_FORBIDDEN', '此操作需要有效实名账号')
+    rows = db.scalars(select(SysAuthorizationGrant).where(
+        SysAuthorizationGrant.user_id == principal.id, SysAuthorizationGrant.resource.in_(requested))
+        .execution_options(populate_existing=True))
+    try:
+        grants = {row.resource: _grant(row) for row in rows}
+    except (ValueError, TypeError):
+        raise authz_error(403, 'AUTHZ_INVALID_CONFIGURATION', '资源授权配置无效') from None
+    try:
+        decisions = engine.check_resources(principal.id, grants, {r: {} for r in grants},
+                                           {r: requested[r] for r in grants}) if grants else {}
+    except (engine.AuthorizationDenied, engine.AuthorizationUnavailable):
+        raise authz_error(503, 'AUTHZ_ENGINE_UNAVAILABLE', '授权服务暂不可用，请稍后重试') from None
+    accesses = {}
+    for resource, decision in decisions.items():
+        grant = grants[resource]
+        for action in decision.allowed_actions:
+            access = ResourceAccess(resource, action, principal, principal.authorization_epoch, grant.version,
+                                    CATALOG_VERSION, grant.scope, decision.field_permissions, true())
+            accesses[(resource, action)] = _record(access)
+    return ResourceReadSet(frozenset((r, a) for r, actions in requested.items() for a in actions), accesses)
 
 
 @dataclass(frozen=True)
@@ -143,19 +264,14 @@ def resource_access(db: Session, identity: VerifiedIdentity, resource: str, acti
         raise authz_error(403, "AUTHZ_FORBIDDEN", str(exc)) from None
     except engine.AuthorizationUnavailable:
         raise authz_error(503, "AUTHZ_ENGINE_UNAVAILABLE", "授权服务暂不可用，请稍后重试") from None
-    return ResourceAccess(resource, action, principal, principal.authorization_epoch, grant.version,
-                          CATALOG_VERSION, grant.scope, fields, predicate, object_id, authorization_revision)
+    return _record(ResourceAccess(resource, action, principal, principal.authorization_epoch, grant.version,
+                          CATALOG_VERSION, grant.scope, fields, predicate, object_id, authorization_revision))
 
 
 def sales_access(db: Session, identity: VerifiedIdentity, legacy_context: UserContext,
-                 action: str = "read") -> SalesAccess:
+                 action: str = 'read_orders') -> SalesAccess:
     access = resource_access(db, identity, SALES_RESOURCE, action)
-    field_policy = {key: key in access.field_permissions for key in SALES_FIELD_PERMISSIONS}
-    field_policy.update(own_customers_only=False, page_sales_analysis=True)
-    context = replace(legacy_context, user_id=access.principal.username, role=access.principal.role,
-                      salesperson_name=access.principal.salesperson_name, permissions=field_policy,
-                      is_authenticated=True, authn="sys_user", is_fallback=False,
-                      token_version=access.authorization_epoch, explicit_field_policy=True)
+    context = field_context(access, legacy_context)
     count = db.scalar(select(func.count()).select_from(SysCustomerAssignment).where(
         SysCustomerAssignment.user_id == access.principal.id))
     return SalesAccess(access.predicate, context, access.scope, count, access)
@@ -232,8 +348,11 @@ def my_snapshot(db: Session, identity: VerifiedIdentity) -> dict:
             "field_permissions": sorted(decision.field_permissions) if has_allow else [],
         }
     sales = resources[SALES_RESOURCE]
-    read = sales["decisions"]["read"]["effect"] == "allow"
-    sales_reason = sales["decisions"]["read"]["reason"]
+    read = any(sales['decisions'][action]['effect'] == 'allow' for action in (
+        'read_summary', 'read_groups', 'read_trend', 'read_orders', 'read_order_detail'))
+    sales_reason = (next((d['reason'] for d in sales['decisions'].values()
+                          if d['effect'] == 'allow' and d['reason']), None)
+                    if read else sales['decisions']['read_orders']['reason'])
     version = hashlib.sha256(json.dumps({
         "catalog": CATALOG_VERSION, "mode": runtime.authorization_mode(),
         "user": principal.id if principal else None, "epoch": principal.authorization_epoch if principal else None,

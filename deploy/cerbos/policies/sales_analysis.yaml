@@ -1,37 +1,409 @@
-apiVersion: api.cerbos.dev/v1
-resourcePolicy:
-  version: default
-  resource: sales_analysis
-  rules:
-    - name: explicit-sales-read
-      actions: [read]
-      effect: EFFECT_ALLOW
-      roles: [registered_account]
-      condition:
-        match:
-          expr: >-
-            "read" in P.attr.grants.sales_analysis.actions &&
-            (R.attr.module_probe || P.attr.grants.sales_analysis.scope == "all" ||
-             (P.attr.grants.sales_analysis.scope == "assigned_customers" &&
-              R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))
-      output:
-        when:
-          ruleActivated: >-
-            {"resource": "sales_analysis", "scope": P.attr.grants.sales_analysis.scope, "version": P.attr.grants.sales_analysis.version,
-             "field_permissions": P.attr.grants.sales_analysis.field_permissions}
-    - name: explicit-sales-export
-      actions: [export]
-      effect: EFFECT_ALLOW
-      roles: [registered_account]
-      condition:
-        match:
-          expr: >-
-            "read" in P.attr.grants.sales_analysis.actions && "export" in P.attr.grants.sales_analysis.actions &&
-            (R.attr.module_probe || P.attr.grants.sales_analysis.scope == "all" ||
-             (P.attr.grants.sales_analysis.scope == "assigned_customers" &&
-              R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))
-      output:
-        when:
-          ruleActivated: >-
-            {"resource": "sales_analysis", "scope": P.attr.grants.sales_analysis.scope, "version": P.attr.grants.sales_analysis.version,
-             "field_permissions": P.attr.grants.sales_analysis.field_permissions}
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "sales_analysis",
+    "rules": [
+      {
+        "name": "explicit-export",
+        "actions": [
+          "export"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"export\" in P.attr.grants.sales_analysis.actions && \"read_orders\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-amount-histogram",
+        "actions": [
+          "read_amount_histogram"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_amount_histogram\" in P.attr.grants.sales_analysis.actions && \"data_purchase_cost\" in P.attr.grants.sales_analysis.field_permissions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-groups",
+        "actions": [
+          "read_groups"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_groups\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-options",
+        "actions": [
+          "read_options"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_options\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-order-detail",
+        "actions": [
+          "read_order_detail"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_order_detail\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-orders",
+        "actions": [
+          "read_orders"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_orders\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-summary",
+        "actions": [
+          "read_summary"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_summary\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-trend",
+        "actions": [
+          "read_trend"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_trend\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-amount-histogram",
+        "actions": [
+          "show_amount_histogram"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_amount_histogram\" in P.attr.grants.sales_analysis.actions && \"read_amount_histogram\" in P.attr.grants.sales_analysis.actions && \"data_purchase_cost\" in P.attr.grants.sales_analysis.field_permissions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-compact",
+        "actions": [
+          "show_compact"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_compact\" in P.attr.grants.sales_analysis.actions && \"read_groups\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-export",
+        "actions": [
+          "show_export"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_export\" in P.attr.grants.sales_analysis.actions && \"read_orders\" in P.attr.grants.sales_analysis.actions && \"export\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-groups",
+        "actions": [
+          "show_groups"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_groups\" in P.attr.grants.sales_analysis.actions && \"read_groups\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-order-detail",
+        "actions": [
+          "show_order_detail"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_order_detail\" in P.attr.grants.sales_analysis.actions && \"read_order_detail\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-orders",
+        "actions": [
+          "show_orders"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_orders\" in P.attr.grants.sales_analysis.actions && \"read_orders\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-overview",
+        "actions": [
+          "show_overview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_overview\" in P.attr.grants.sales_analysis.actions && (\"read_groups\" in P.attr.grants.sales_analysis.actions || \"read_trend\" in P.attr.grants.sales_analysis.actions) && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-reconciliation",
+        "actions": [
+          "show_reconciliation"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_reconciliation\" in P.attr.grants.sales_analysis.actions && \"read_order_detail\" in P.attr.grants.sales_analysis.actions && \"data_purchase_cost\" in P.attr.grants.sales_analysis.field_permissions && \"data_reconciliation\" in P.attr.grants.sales_analysis.field_permissions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-summary-amounts",
+        "actions": [
+          "show_summary_amounts"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_summary_amounts\" in P.attr.grants.sales_analysis.actions && \"read_summary\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-summary-counts",
+        "actions": [
+          "show_summary_counts"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_summary_counts\" in P.attr.grants.sales_analysis.actions && \"read_summary\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-summary-profit",
+        "actions": [
+          "show_summary_profit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_summary_profit\" in P.attr.grants.sales_analysis.actions && \"read_summary\" in P.attr.grants.sales_analysis.actions && \"data_purchase_cost\" in P.attr.grants.sales_analysis.field_permissions && \"data_profit\" in P.attr.grants.sales_analysis.field_permissions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-trend",
+        "actions": [
+          "show_trend"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_trend\" in P.attr.grants.sales_analysis.actions && \"read_trend\" in P.attr.grants.sales_analysis.actions && (R.attr.module_probe || P.attr.grants.sales_analysis.scope == \"all\" || (P.attr.grants.sales_analysis.scope == \"assigned_customers\" && R.attr.customer_id in P.attr.contexts.sales_analysis.customer_ids))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"sales_analysis\", \"scope\": P.attr.grants.sales_analysis.scope, \"version\": P.attr.grants.sales_analysis.version, \"field_permissions\": P.attr.grants.sales_analysis.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,109 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "display_policy",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.display_policy.actions && P.attr.grants.display_policy.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"display_policy\", \"scope\": P.attr.grants.display_policy.scope, \"version\": P.attr.grants.display_policy.version, \"field_permissions\": P.attr.grants.display_policy.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-audit-identity",
+        "actions": [
+          "read_audit_identity"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_audit_identity\" in P.attr.grants.display_policy.actions && P.attr.grants.display_policy.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"display_policy\", \"scope\": P.attr.grants.display_policy.scope, \"version\": P.attr.grants.display_policy.version, \"field_permissions\": P.attr.grants.display_policy.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-read",
+        "actions": [
+          "show_read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_read\" in P.attr.grants.display_policy.actions && \"read\" in P.attr.grants.display_policy.actions && P.attr.grants.display_policy.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"display_policy\", \"scope\": P.attr.grants.display_policy.scope, \"version\": P.attr.grants.display_policy.version, \"field_permissions\": P.attr.grants.display_policy.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-update",
+        "actions": [
+          "show_update"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_update\" in P.attr.grants.display_policy.actions && \"read\" in P.attr.grants.display_policy.actions && \"update\" in P.attr.grants.display_policy.actions && P.attr.grants.display_policy.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"display_policy\", \"scope\": P.attr.grants.display_policy.scope, \"version\": P.attr.grants.display_policy.version, \"field_permissions\": P.attr.grants.display_policy.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-update",
+        "actions": [
+          "update"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"update\" in P.attr.grants.display_policy.actions && \"read\" in P.attr.grants.display_policy.actions && P.attr.grants.display_policy.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"display_policy\", \"scope\": P.attr.grants.display_policy.scope, \"version\": P.attr.grants.display_policy.version, \"field_permissions\": P.attr.grants.display_policy.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,169 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "profit_analysis",
+    "rules": [
+      {
+        "name": "explicit-export",
+        "actions": [
+          "export"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"export\" in P.attr.grants.profit_analysis.actions && (\"read_part_analysis\" in P.attr.grants.profit_analysis.actions || \"read_salesperson_analysis\" in P.attr.grants.profit_analysis.actions || \"read_customer_analysis\" in P.attr.grants.profit_analysis.actions) && P.attr.grants.profit_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"profit_analysis\", \"scope\": P.attr.grants.profit_analysis.scope, \"version\": P.attr.grants.profit_analysis.version, \"field_permissions\": P.attr.grants.profit_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-customer-analysis",
+        "actions": [
+          "read_customer_analysis"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_customer_analysis\" in P.attr.grants.profit_analysis.actions && \"data_customer\" in P.attr.grants.profit_analysis.field_permissions && P.attr.grants.profit_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"profit_analysis\", \"scope\": P.attr.grants.profit_analysis.scope, \"version\": P.attr.grants.profit_analysis.version, \"field_permissions\": P.attr.grants.profit_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-part-analysis",
+        "actions": [
+          "read_part_analysis"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_part_analysis\" in P.attr.grants.profit_analysis.actions && P.attr.grants.profit_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"profit_analysis\", \"scope\": P.attr.grants.profit_analysis.scope, \"version\": P.attr.grants.profit_analysis.version, \"field_permissions\": P.attr.grants.profit_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-salesperson-analysis",
+        "actions": [
+          "read_salesperson_analysis"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_salesperson_analysis\" in P.attr.grants.profit_analysis.actions && P.attr.grants.profit_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"profit_analysis\", \"scope\": P.attr.grants.profit_analysis.scope, \"version\": P.attr.grants.profit_analysis.version, \"field_permissions\": P.attr.grants.profit_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-recompute",
+        "actions": [
+          "recompute"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"recompute\" in P.attr.grants.profit_analysis.actions && P.attr.grants.profit_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"profit_analysis\", \"scope\": P.attr.grants.profit_analysis.scope, \"version\": P.attr.grants.profit_analysis.version, \"field_permissions\": P.attr.grants.profit_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-export",
+        "actions": [
+          "show_export"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_export\" in P.attr.grants.profit_analysis.actions && \"export\" in P.attr.grants.profit_analysis.actions && (\"read_part_analysis\" in P.attr.grants.profit_analysis.actions || \"read_salesperson_analysis\" in P.attr.grants.profit_analysis.actions || \"read_customer_analysis\" in P.attr.grants.profit_analysis.actions) && P.attr.grants.profit_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"profit_analysis\", \"scope\": P.attr.grants.profit_analysis.scope, \"version\": P.attr.grants.profit_analysis.version, \"field_permissions\": P.attr.grants.profit_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-recompute",
+        "actions": [
+          "show_recompute"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_recompute\" in P.attr.grants.profit_analysis.actions && \"recompute\" in P.attr.grants.profit_analysis.actions && P.attr.grants.profit_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"profit_analysis\", \"scope\": P.attr.grants.profit_analysis.scope, \"version\": P.attr.grants.profit_analysis.version, \"field_permissions\": P.attr.grants.profit_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-summary",
+        "actions": [
+          "show_summary"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_summary\" in P.attr.grants.profit_analysis.actions && (\"read_part_analysis\" in P.attr.grants.profit_analysis.actions || \"read_salesperson_analysis\" in P.attr.grants.profit_analysis.actions || \"read_customer_analysis\" in P.attr.grants.profit_analysis.actions) && P.attr.grants.profit_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"profit_analysis\", \"scope\": P.attr.grants.profit_analysis.scope, \"version\": P.attr.grants.profit_analysis.version, \"field_permissions\": P.attr.grants.profit_analysis.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

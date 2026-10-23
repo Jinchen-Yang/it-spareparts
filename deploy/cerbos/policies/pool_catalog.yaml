@@ -1,0 +1,209 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "pool_catalog",
+    "rules": [
+      {
+        "name": "explicit-archive",
+        "actions": [
+          "archive"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"archive\" in P.attr.grants.pool_catalog.actions && P.attr.grants.pool_catalog.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_catalog\", \"scope\": P.attr.grants.pool_catalog.scope, \"version\": P.attr.grants.pool_catalog.version, \"field_permissions\": P.attr.grants.pool_catalog.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-create",
+        "actions": [
+          "create"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"create\" in P.attr.grants.pool_catalog.actions && P.attr.grants.pool_catalog.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_catalog\", \"scope\": P.attr.grants.pool_catalog.scope, \"version\": P.attr.grants.pool_catalog.version, \"field_permissions\": P.attr.grants.pool_catalog.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-edit",
+        "actions": [
+          "edit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"edit\" in P.attr.grants.pool_catalog.actions && P.attr.grants.pool_catalog.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_catalog\", \"scope\": P.attr.grants.pool_catalog.scope, \"version\": P.attr.grants.pool_catalog.version, \"field_permissions\": P.attr.grants.pool_catalog.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-edit-members",
+        "actions": [
+          "edit_members"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"edit_members\" in P.attr.grants.pool_catalog.actions && P.attr.grants.pool_catalog.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_catalog\", \"scope\": P.attr.grants.pool_catalog.scope, \"version\": P.attr.grants.pool_catalog.version, \"field_permissions\": P.attr.grants.pool_catalog.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.pool_catalog.actions && P.attr.grants.pool_catalog.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_catalog\", \"scope\": P.attr.grants.pool_catalog.scope, \"version\": P.attr.grants.pool_catalog.version, \"field_permissions\": P.attr.grants.pool_catalog.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-restore",
+        "actions": [
+          "restore"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"restore\" in P.attr.grants.pool_catalog.actions && P.attr.grants.pool_catalog.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_catalog\", \"scope\": P.attr.grants.pool_catalog.scope, \"version\": P.attr.grants.pool_catalog.version, \"field_permissions\": P.attr.grants.pool_catalog.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-identity-edit",
+        "actions": [
+          "show_identity_edit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_identity_edit\" in P.attr.grants.pool_catalog.actions && (\"create\" in P.attr.grants.pool_catalog.actions || \"edit\" in P.attr.grants.pool_catalog.actions) && P.attr.grants.pool_catalog.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_catalog\", \"scope\": P.attr.grants.pool_catalog.scope, \"version\": P.attr.grants.pool_catalog.version, \"field_permissions\": P.attr.grants.pool_catalog.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-lifecycle",
+        "actions": [
+          "show_lifecycle"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_lifecycle\" in P.attr.grants.pool_catalog.actions && (\"archive\" in P.attr.grants.pool_catalog.actions || \"restore\" in P.attr.grants.pool_catalog.actions) && P.attr.grants.pool_catalog.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_catalog\", \"scope\": P.attr.grants.pool_catalog.scope, \"version\": P.attr.grants.pool_catalog.version, \"field_permissions\": P.attr.grants.pool_catalog.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-list",
+        "actions": [
+          "show_list"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_list\" in P.attr.grants.pool_catalog.actions && \"read\" in P.attr.grants.pool_catalog.actions && P.attr.grants.pool_catalog.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_catalog\", \"scope\": P.attr.grants.pool_catalog.scope, \"version\": P.attr.grants.pool_catalog.version, \"field_permissions\": P.attr.grants.pool_catalog.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-members-edit",
+        "actions": [
+          "show_members_edit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_members_edit\" in P.attr.grants.pool_catalog.actions && \"edit_members\" in P.attr.grants.pool_catalog.actions && P.attr.grants.pool_catalog.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_catalog\", \"scope\": P.attr.grants.pool_catalog.scope, \"version\": P.attr.grants.pool_catalog.version, \"field_permissions\": P.attr.grants.pool_catalog.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

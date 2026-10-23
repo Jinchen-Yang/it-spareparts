@@ -9,6 +9,18 @@ from app.db import Base
 from app.models._types import TZDateTime
 
 
+class SysAuthorizationMigrationReceipt(Base):
+    """Migration before/after evidence and monotonic artifact-format marker."""
+
+    __tablename__ = 'sys_authorization_migration_receipt'
+    migration_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    entity_kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    entity_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    before_state: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    after_state: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+
+
 class SysAuthorizationCutover(Base):
     """Persistent resource authority; only trusted startup initialization activates it."""
 

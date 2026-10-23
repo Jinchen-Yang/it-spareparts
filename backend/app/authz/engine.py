@@ -282,7 +282,7 @@ def sales_bindings(table, customer_column) -> QueryBindings:
 
 
 def check_sales(user_id: int, grant: SalesGrant, customer_ids: Sequence[int],
-                actions: Sequence[str] = ("read", "export")) -> Decision:
+                actions: Sequence[str] = ("read_orders", "export")) -> Decision:
     return check_access(user_id, grant, _sales_attributes(customer_ids), actions)
 
 

@@ -1,0 +1,49 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "price_discipline",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.price_discipline.actions && P.attr.grants.price_discipline.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"price_discipline\", \"scope\": P.attr.grants.price_discipline.scope, \"version\": P.attr.grants.price_discipline.version, \"field_permissions\": P.attr.grants.price_discipline.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-summary",
+        "actions": [
+          "show_summary"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_summary\" in P.attr.grants.price_discipline.actions && \"read\" in P.attr.grants.price_discipline.actions && P.attr.grants.price_discipline.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"price_discipline\", \"scope\": P.attr.grants.price_discipline.scope, \"version\": P.attr.grants.price_discipline.version, \"field_permissions\": P.attr.grants.price_discipline.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

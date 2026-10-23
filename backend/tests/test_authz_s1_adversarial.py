@@ -80,7 +80,7 @@ def _read(client, actor, target):
 
 
 def _configuration(*, actions=None, fields=None):
-    return {"actions": ["read"] if actions is None else sorted(actions),
+    return {"actions": ["read_orders"] if actions is None else sorted(actions),
             "scope": "assigned_customers",
             "field_permissions": [] if fields is None else sorted(fields)}
 
@@ -190,7 +190,7 @@ def test_equal_override_and_clear_advance_cas_without_resurrecting_legacy(db, s1
     assert db.scalar(select(SysAuthorizationGrant.version).where(
         SysAuthorizationGrant.user_id == target.id)) == resource["version"]
     snapshot = _json(s1_client.get("/api/authz/me", headers=_headers(target)))
-    assert snapshot["resources"]["sales_analysis"]["decisions"]["read"]["effect"] == "deny"
+    assert snapshot["resources"]["sales_analysis"]["decisions"]["read_orders"]["effect"] == "deny"
 
 
 def test_customer_omitted_empty_and_invalid_are_distinct_atomic_commands(db, s1_client):
@@ -216,7 +216,7 @@ def test_customer_omitted_empty_and_invalid_are_distinct_atomic_commands(db, s1_
     assert third["authorization_epoch"] == second["authorization_epoch"] + 1
     db.refresh(target)
     snapshot = _json(s1_client.get("/api/authz/me", headers=_headers(target)))
-    assert snapshot["resources"]["sales_analysis"]["decisions"]["read"]["effect"] == "allow"
+    assert snapshot["resources"]["sales_analysis"]["decisions"]["read_orders"]["effect"] == "allow"
     assert snapshot["sales_analysis"]["customer_count"] == 0
 
 
@@ -255,7 +255,7 @@ def test_cutover_survives_mode_and_enable_reversal(db, s1_client, monkeypatch):
     assert snapshot["resources"]["sales_analysis"]["runtime_state"] == "suspended"
     assert snapshot["sales_analysis"]["read"] is False
     assert s1_client.get("/api/sales/analytics/options", headers=headers).status_code == 503
-    legacy = {"expected_version": 1, "actions": ["read"], "scope": "all",
+    legacy = {"expected_version": 1, "actions": ["read_orders"], "scope": "all",
               "field_permissions": [], "customer_ids": []}
     _json(s1_client.put(f"/api/authz/users/{target.username}",
                         headers=_headers(actor), json=legacy), 409)
@@ -313,7 +313,7 @@ def test_two_real_http_writers_share_one_cas_winner(db, s1_client):
     target = _user(db, "independent-target")
     initial = _read(s1_client, actor, target)
     commands = [_command(initial), _command(initial, configuration=_configuration(
-        actions=["read", "export"], fields=["data_customer"]))]
+        actions=["read_orders", "export"], fields=["data_customer"]))]
     headers = _headers(actor)
     path = f"/api/authz/users/{target.username}/modules"
     barrier = Barrier(2, timeout=10)
@@ -344,6 +344,7 @@ def _synthetic_descriptor(definition):
         "migration_state": "implemented",
         "actions": [{"id": action, "label": action, "kind": "data",
                      "requires_actions": [required for source, required in definition.action_dependencies if source == action],
+                     "requires_any_actions": [list(required) for source, required in definition.action_any_dependencies if source == action],
                      "requires_fields": [required for source, required in definition.action_field_dependencies if source == action]}
                     for action in sorted(definition.actions)],
         "scopes": [{"id": scope, "label": scope, "relationship_kind": None,
@@ -373,8 +374,8 @@ def two_resource_pdp(tmp_path, monkeypatch):
     for resource, scope, field in (("s1_probe_a", "all", "cost"),
                                     ("s1_probe_b", "assigned_customers", "customer")):
         definitions[resource] = catalog.ResourceDefinition(
-            resource, frozenset({"read", "export"}), frozenset({scope}),
-            frozenset({field}), frozenset(), action_dependencies=(("export", "read"),),
+            resource, frozenset({"read_orders", "export"}), frozenset({scope}),
+            frozenset({field}), frozenset(), action_dependencies=(("export", "read_orders"),),
             denial_scope=scope)
         policy = f"""apiVersion: api.cerbos.dev/v1
 resourcePolicy:
@@ -382,7 +383,7 @@ resourcePolicy:
   resource: {resource}
   rules:
 """
-        for action in ("read", "export"):
+        for action in ("read_orders", "export"):
             policy += f"""    - actions: [{action}]
       effect: EFFECT_ALLOW
       roles: [registered_account]
@@ -454,9 +455,9 @@ def test_real_batch_pairs_heterogeneous_grants_and_rejects_corrupt_results(
 
     user = _user(db, "independent-multi-resource")
     rows = [SysAuthorizationGrant(user_id=user.id, resource="s1_probe_a", scope="all",
-                                  actions=["read", "export"], field_permissions=["cost"], version=3),
+                                  actions=["read_orders", "export"], field_permissions=["cost"], version=3),
             SysAuthorizationGrant(user_id=user.id, resource="s1_probe_b", scope="assigned_customers",
-                                  actions=["read"], field_permissions=["customer"], version=7)]
+                                  actions=["read_orders"], field_permissions=["customer"], version=7)]
     db.add_all(rows)
     db.commit()
     grants = {row.resource: engine.Grant(tuple(row.actions), row.scope,
@@ -482,15 +483,15 @@ def test_real_batch_pairs_heterogeneous_grants_and_rejects_corrupt_results(
 
     monkeypatch.setattr(CerbosClient, "check_resources", observed)
     attributes = {resource: {} for resource in grants}
-    requested = {resource: ("read", "export") for resource in grants}
+    requested = {resource: ("read_orders", "export") for resource in grants}
     if corruption:
         with pytest.raises(engine.AuthorizationUnavailable):
             engine.check_resources(user.id, grants, attributes, requested)
     else:
         decisions = engine.check_resources(user.id, grants, attributes, requested)
-        assert decisions["s1_probe_a"].allowed_actions == {"read", "export"}
+        assert decisions["s1_probe_a"].allowed_actions == {"read_orders", "export"}
         assert decisions["s1_probe_a"].field_permissions == {"cost"}
-        assert decisions["s1_probe_b"].allowed_actions == {"read"}
+        assert decisions["s1_probe_b"].allowed_actions == {"read_orders"}
         assert decisions["s1_probe_b"].field_permissions == {"customer"}
     assert len(calls) == 1
 
@@ -512,7 +513,7 @@ def test_multi_resource_snapshot_batches_sql_and_pdp_without_object_enumeration(
     monkeypatch.setattr(settings, "authz_sales_analysis_suspended", False)
     runtime.activate_configured_resources(db.get_bind())
     user = _user(db, "independent-snapshot")
-    db.add(SysAuthorizationGrant(user_id=user.id, resource="s1_probe_a", actions=["read"],
+    db.add(SysAuthorizationGrant(user_id=user.id, resource="s1_probe_a", actions=["read_orders"],
                                  scope="all", field_permissions=["cost"], version=1))
     db.commit()
     token = _headers(user)["Authorization"].removeprefix("Bearer ")
@@ -537,7 +538,7 @@ def test_multi_resource_snapshot_batches_sql_and_pdp_without_object_enumeration(
         first_statements = list(statements)
         # Release reader SHARE before modifying the test fixture in its own tx.
         db.rollback()
-        db.add(SysAuthorizationGrant(user_id=user.id, resource="s1_probe_b", actions=["read"],
+        db.add(SysAuthorizationGrant(user_id=user.id, resource="s1_probe_b", actions=["read_orders"],
                                      scope="assigned_customers", field_permissions=["customer"], version=1))
         db.commit()
         statements.clear()
@@ -552,7 +553,7 @@ def test_multi_resource_snapshot_batches_sql_and_pdp_without_object_enumeration(
         assert sum("from sys_authorization_cutover" in query for query in queries) == 1
         assert not any("sys_customer_assignment" in query or "maintenance_project" in query
                        for query in queries)
-    assert one["resources"]["s1_probe_b"]["decisions"]["read"]["effect"] == "deny"
+    assert one["resources"]["s1_probe_b"]["decisions"]["read_orders"]["effect"] == "deny"
     assert two["resources"]["s1_probe_a"]["field_permissions"] == ["cost"]
     assert two["resources"]["s1_probe_b"]["field_permissions"] == ["customer"]
     assert two["resources"]["s1_probe_a"]["scope_kind"] == "all"
@@ -604,7 +605,7 @@ def test_saved_template_clear_and_latest_sync_preserve_equal_and_deny_overrides(
     target = _user(db, "independent-target")
     catalog_version = _read(s1_client, actor, target)["catalog_version"]
     a = _configuration(fields=["data_customer"])
-    b = _configuration(actions=["read", "export"], fields=["data_customer", "data_purchase_cost"])
+    b = _configuration(actions=["read_orders", "export"], fields=["data_customer", "data_purchase_cost"])
     created = _json(s1_client.post("/api/role-templates", headers=_headers(actor), json={
         "schema_version": 1, "catalog_version": catalog_version,
         "metadata": {"code": "independent-template", "name": "独立快照"},
@@ -687,15 +688,15 @@ def test_context_scoped_resource_cannot_turn_module_probe_into_object_access(
     monkeypatch.setattr(settings, "authz_sales_analysis_suspended", False)
     runtime.activate_configured_resources(db.get_bind())
     user = _user(db, "independent-context")
-    db.add(SysAuthorizationGrant(user_id=user.id, resource=resource, actions=["read"],
+    db.add(SysAuthorizationGrant(user_id=user.id, resource=resource, actions=["read_orders"],
                                  scope="assigned_customers", field_permissions=["customer"], version=1))
     db.commit()
     token = _headers(user)["Authorization"].removeprefix("Bearer ")
     identity = current_verified_identity(HTTPAuthorizationCredentials(scheme="Bearer", credentials=token), db)
     snapshot = service.my_snapshot(db, identity)
-    assert snapshot["resources"][resource]["decisions"]["read"]["effect"] == "requires_context"
+    assert snapshot["resources"][resource]["decisions"]["read_orders"]["effect"] == "requires_context"
     with pytest.raises(HTTPException) as error:
-        service.resource_access(db, identity, resource, "read")
+        service.resource_access(db, identity, resource, "read_orders")
     assert error.value.status_code == 403
     assert error.value.detail["code"] == "AUTHZ_CONTEXT_REQUIRED"
 
@@ -738,7 +739,7 @@ def test_seed_eligibility_migration_labels_only_existing_rows_and_keeps_old_snap
             VALUES ('eligibility-old-template','Old empty canonical','readonly',
                     '{"page_profit": true}'::jsonb,false,true,4)"""))
         db.commit()
-        command.upgrade(config, 'head')
+        command.upgrade(config, 'a7c2e9f4b6d1')
         old = db.scalar(select(SysUser).where(SysUser.username == 'eligibility-old-empty'))
         template = db.scalar(select(SysRoleTemplate).where(SysRoleTemplate.code == 'eligibility-old-template'))
         assert old.authorization_legacy_seed_eligible is True
@@ -799,13 +800,13 @@ def test_seed_eligibility_is_neither_runtime_allow_nor_rewritten_by_canonical_up
     user = _user(db, 'eligibility-runtime-target', authorization_legacy_seed_eligible=eligible,
                  template_perms={'page_sales_analysis': True})
     snapshot = _json(s1_client.get('/api/authz/me', headers=_headers(user)))
-    assert snapshot['resources']['sales_analysis']['decisions']['read']['effect'] == 'deny'
+    assert snapshot['resources']['sales_analysis']['decisions']['read_orders']['effect'] == 'deny'
     state = _read(s1_client, actor, user)
     _json(_write(s1_client, actor, user, _command(state)))
     db.refresh(user)
     assert user.authorization_legacy_seed_eligible is eligible
     allowed = _json(s1_client.get('/api/authz/me', headers=_headers(user)))
-    assert allowed['resources']['sales_analysis']['decisions']['read']['effect'] == 'allow'
+    assert allowed['resources']['sales_analysis']['decisions']['read_orders']['effect'] == 'allow'
 
 
 @pytest.mark.parametrize('where', ['root', 'profile', 'template_metadata'])
@@ -885,6 +886,7 @@ def test_downgrade_waits_for_uncommitted_canonical_origin_before_running_guards(
     config = Config(str(backend / 'alembic.ini'))
     config.set_main_option('script_location', str(backend / 'alembic'))
     db.rollback()
+    command.downgrade(config, "a7c2e9f4b6d1")
     engine = db.get_bind()
     try:
         with ThreadPoolExecutor(max_workers=1) as executor, engine.connect() as writer:

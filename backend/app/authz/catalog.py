@@ -1,4 +1,4 @@
-"""Closed vocabulary for the first migrated resource.
+"""Closed executable vocabulary; descriptive metadata never registers a resource.
 
 Adding an existing legacy data key does not automatically register it here.
 """
@@ -9,9 +9,10 @@ import hashlib
 import json
 from pathlib import Path
 from types import MappingProxyType
+from app.authz.business_definitions import BUSINESS_SPECS
 
 SALES_RESOURCE = "sales_analysis"
-SALES_ACTIONS = frozenset({"read", "export"})
+SALES_ACTIONS = frozenset(BUSINESS_SPECS[SALES_RESOURCE]["actions"])
 SALES_SCOPES = frozenset({"all", "assigned_customers"})
 SALES_FIELD_PERMISSIONS = frozenset({
     "data_supplier", "data_customer", "data_purchase_cost", "data_profit",
@@ -31,19 +32,20 @@ class ResourceDefinition:
     action_field_dependencies: tuple[tuple[str, str], ...] = ()
     denial_scope: str = "all"
     context_scopes: frozenset[str] = frozenset()
+    action_any_dependencies: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 # Closed registry. A legacy page key or an arbitrary DB resource string does
 # not become a migrated resource merely by being passed to the engine.
 RESOURCE_DEFINITIONS = MappingProxyType({
-    SALES_RESOURCE: ResourceDefinition(
-        SALES_RESOURCE, SALES_ACTIONS, SALES_SCOPES, SALES_FIELD_PERMISSIONS,
-        frozenset({"request.resource.attr.customer_id"}),
-        action_dependencies=(("export", "read"),),
-        field_dependencies=(("data_profit", "data_purchase_cost"),
-                            ("data_reconciliation", "data_purchase_cost")),
-        denial_scope="assigned_customers",
-    ),
+    name: ResourceDefinition(
+        name, frozenset(spec["actions"]), frozenset(spec["scopes"]), frozenset(spec["fields"]),
+        frozenset({"request.resource.attr.customer_id"}) if name == SALES_RESOURCE else frozenset(),
+        action_dependencies=spec["action_dependencies"], field_dependencies=spec["field_dependencies"],
+        action_field_dependencies=spec["action_field_dependencies"],
+        action_any_dependencies=spec["action_any_dependencies"],
+        denial_scope="assigned_customers" if name == SALES_RESOURCE else "all",
+    ) for name, spec in BUSINESS_SPECS.items()
 })
 
 
@@ -71,6 +73,9 @@ def validate_grant(resource: str, actions: Sequence[str], scope: str,
     for action, required in definition.action_dependencies:
         if action in action_set and required not in action_set:
             raise ValueError(f"{action}必须同时授予{required}权限")
+    for action, alternatives in definition.action_any_dependencies:
+        if action in action_set and not action_set.intersection(alternatives):
+            raise ValueError(f"{action}必须至少授予一个依赖动作：{'、'.join(alternatives)}")
     for permission, required in definition.field_dependencies:
         if permission in fields and required not in fields:
             raise ValueError(f"{permission}必须同时具有{required}权限")
@@ -86,10 +91,11 @@ def validate_sales_grant(actions: Sequence[str], scope: str, field_permissions: 
 # Planned metadata is deliberately separate from executable definitions. It
 # cannot authorize a request or make a database grant valid.
 _DESCRIPTORS = json.loads(Path(__file__).with_name("catalog_manifest.json").read_text())
-CATALOG_VERSION = "authz-s1-" + hashlib.sha256(json.dumps(
+CATALOG_VERSION = "authz-s2-" + hashlib.sha256(json.dumps(
     {"policy_protocol_version": 2, "descriptors": _DESCRIPTORS, "executable": {key: {
         "actions": sorted(value.actions), "scopes": sorted(value.scopes),
         "fields": sorted(value.field_permissions), "action_dependencies": value.action_dependencies,
+        "action_any_dependencies": value.action_any_dependencies,
         "field_dependencies": value.field_dependencies, "action_fields": value.action_field_dependencies,
         "denial_scope": value.denial_scope,
         "query_attributes": sorted(value.query_attributes),
@@ -118,6 +124,21 @@ def validate_catalog() -> None:
             raise ValueError("目录 ID 不能重复")
         return values
 
+    def acyclic(graph):
+        visited, active = set(), set()
+        def visit(node):
+            if node in active:
+                raise ValueError('目录依赖存在环')
+            if node in visited:
+                return
+            active.add(node)
+            for dependency in graph.get(node, ()):
+                visit(dependency)
+            active.remove(node)
+            visited.add(node)
+        for node in graph:
+            visit(node)
+
     ids(_DESCRIPTORS)
     by_id = {item["id"]: item for item in _DESCRIPTORS}
     implemented = {item["id"] for item in _DESCRIPTORS if item["migration_state"] == "implemented"}
@@ -133,9 +154,12 @@ def validate_catalog() -> None:
             if action["kind"] not in ("data", "display", "mutation"):
                 raise ValueError("目录动作类型无效")
             _registered_values(action["requires_actions"], actions, "目录动作依赖")
+            _registered_values(action["requires_any_actions"], actions, "目录动作可选依赖")
             _registered_values(action["requires_fields"], fields, "目录动作字段依赖")
         for field in item["field_permissions"]:
             _registered_values(field["requires_fields"], fields, "目录字段依赖")
+        acyclic({a['id']: a['requires_actions'] + a['requires_any_actions'] for a in item['actions']})
+        acyclic({f['id']: f['requires_fields'] for f in item['field_permissions']})
         for scope in item["scopes"]:
             if type(scope["requires_context"]) is not bool:
                 raise ValueError("目录对象上下文标记无效")
@@ -149,17 +173,38 @@ def validate_catalog() -> None:
                 if other is None:
                     raise ValueError("目录数据要求引用未知资源")
                 _registered_values(requirement["actions"], ids(other["actions"]), "目录数据动作")
+            if type(surface["route_entry"]) is not bool or type(surface["page_routes"]) is not list:
+                raise ValueError("目录页面入口标记无效")
+            if any(type(route) is not str or not route.startswith('/') for route in surface["page_routes"]):
+                raise ValueError("目录路由无效")
+            rule = surface["data_rule"]
+            if (type(rule) is not dict or set(rule) != {"anyOf"} or type(rule["anyOf"]) is not list
+                    or (item["id"] in implemented and not rule["anyOf"])):
+                raise ValueError("目录数据规则必须是非空 OR 数组")
+            for alternative in rule["anyOf"]:
+                if type(alternative) is not list or not alternative:
+                    raise ValueError("目录数据规则不能包含空允许条件")
+                for need in alternative:
+                    if type(need) is not dict or set(need) != {"resource_id", "actions", "field_permissions"}:
+                        raise ValueError("目录数据规则格式无效")
+                    other = by_id.get(need["resource_id"])
+                    if other is None:
+                        raise ValueError("目录数据规则引用未知资源")
+                    _registered_values(need["actions"], ids(other["actions"]), "目录数据动作")
+                    _registered_values(need["field_permissions"], ids(other["field_permissions"]), "目录数据字段")
         if item["id"] not in implemented:
             continue
         definition = RESOURCE_DEFINITIONS[item["id"]]
         action_dependencies = {(a["id"], dep) for a in item["actions"] for dep in a["requires_actions"]}
         action_fields = {(a["id"], dep) for a in item["actions"] for dep in a["requires_fields"]}
+        action_any = {(a["id"], tuple(a["requires_any_actions"])) for a in item["actions"] if a["requires_any_actions"]}
         field_dependencies = {(f["id"], dep) for f in item["field_permissions"] for dep in f["requires_fields"]}
         context_scopes = {s["id"] for s in item["scopes"] if s["requires_context"]}
         if (definition.name != item["id"] or actions != definition.actions or scopes != definition.scopes
                 or fields != definition.field_permissions or context_scopes != definition.context_scopes
                 or item["denial_scope"] != definition.denial_scope or definition.denial_scope not in scopes
                 or action_dependencies != set(definition.action_dependencies)
+                or action_any != set(definition.action_any_dependencies)
                 or action_fields != set(definition.action_field_dependencies)
                 or field_dependencies != set(definition.field_dependencies)):
             raise ValueError("目录动作、范围、字段或依赖与执行定义不一致")

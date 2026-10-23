@@ -1,0 +1,109 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "pool_price_analysis",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.pool_price_analysis.actions && P.attr.grants.pool_price_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_price_analysis\", \"scope\": P.attr.grants.pool_price_analysis.scope, \"version\": P.attr.grants.pool_price_analysis.version, \"field_permissions\": P.attr.grants.pool_price_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-list",
+        "actions": [
+          "show_list"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_list\" in P.attr.grants.pool_price_analysis.actions && \"read\" in P.attr.grants.pool_price_analysis.actions && P.attr.grants.pool_price_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_price_analysis\", \"scope\": P.attr.grants.pool_price_analysis.scope, \"version\": P.attr.grants.pool_price_analysis.version, \"field_permissions\": P.attr.grants.pool_price_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-members",
+        "actions": [
+          "show_members"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_members\" in P.attr.grants.pool_price_analysis.actions && \"read\" in P.attr.grants.pool_price_analysis.actions && P.attr.grants.pool_price_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_price_analysis\", \"scope\": P.attr.grants.pool_price_analysis.scope, \"version\": P.attr.grants.pool_price_analysis.version, \"field_permissions\": P.attr.grants.pool_price_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-part-reference",
+        "actions": [
+          "show_part_reference"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_part_reference\" in P.attr.grants.pool_price_analysis.actions && \"read\" in P.attr.grants.pool_price_analysis.actions && P.attr.grants.pool_price_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_price_analysis\", \"scope\": P.attr.grants.pool_price_analysis.scope, \"version\": P.attr.grants.pool_price_analysis.version, \"field_permissions\": P.attr.grants.pool_price_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-price-map",
+        "actions": [
+          "show_price_map"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_price_map\" in P.attr.grants.pool_price_analysis.actions && \"read\" in P.attr.grants.pool_price_analysis.actions && P.attr.grants.pool_price_analysis.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"pool_price_analysis\", \"scope\": P.attr.grants.pool_price_analysis.scope, \"version\": P.attr.grants.pool_price_analysis.version, \"field_permissions\": P.attr.grants.pool_price_analysis.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

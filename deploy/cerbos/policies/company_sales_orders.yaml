@@ -1,0 +1,49 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "company_sales_orders",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.company_sales_orders.actions && P.attr.grants.company_sales_orders.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_sales_orders\", \"scope\": P.attr.grants.company_sales_orders.scope, \"version\": P.attr.grants.company_sales_orders.version, \"field_permissions\": P.attr.grants.company_sales_orders.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-recent-orders",
+        "actions": [
+          "show_recent_orders"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_recent_orders\" in P.attr.grants.company_sales_orders.actions && \"read\" in P.attr.grants.company_sales_orders.actions && P.attr.grants.company_sales_orders.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"company_sales_orders\", \"scope\": P.attr.grants.company_sales_orders.scope, \"version\": P.attr.grants.company_sales_orders.version, \"field_permissions\": P.attr.grants.company_sales_orders.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

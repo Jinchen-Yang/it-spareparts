@@ -1,12 +1,11 @@
-"""智能体对话持久化：会话 / 消息（平台化 P1）。
+"""Agent 会话与消息。
 
-owner_sub 存 token 的 sub（用户名）而非 FK sys_user.id——登录层存在
-"sys_user 无此账号回退共享口令"的兼容路径（auth.py），这类身份没有
-sys_user 行；用字符串归属对两种路径一致。会话只对 owner 本人可见。
+新授权以稳定 owner_user_id 和服务端消息来源校验归属；owner_sub 只供旧兼容协议
+及历史显示使用，不能替代规范来源。旧消息缺少来源时不得在新权威下重新提供。
 """
 from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKey, Index, String, Text, func
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -19,6 +18,7 @@ class ChatSession(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     owner_sub: Mapped[str] = mapped_column(String(64))
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("sys_user.id"), nullable=True)
     title: Mapped[str] = mapped_column(String(80), default="新对话", server_default="新对话")
     archived: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
@@ -28,6 +28,7 @@ class ChatSession(Base):
 
     __table_args__ = (
         Index("ix_chat_session_owner_updated", "owner_sub", "updated_at"),
+        Index("ix_chat_session_owner_user_updated", "owner_user_id", "updated_at"),
     )
 
 
@@ -42,6 +43,7 @@ class ChatMessage(Base):
     content: Mapped[str] = mapped_column(Text)
     # assistant 轮的工具轨迹 [{name,args}]；none_as_null：无轨迹存 SQL NULL 而非 JSON 'null'
     tools: Mapped[list | None] = mapped_column(JSONB(none_as_null=True))
+    authorization_provenance: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     stopped: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
