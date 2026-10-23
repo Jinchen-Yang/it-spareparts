@@ -38,7 +38,7 @@ from app.services import maintenance_periods
 from app.services import maintenance_project_catalog as catalog
 from app.services import maintenance_project_operations as operations
 from app.services.maintenance_collection_milestones import write_collection_milestone
-from app.services.maintenance_boss_board import _card_contracts
+from app.services.maintenance_contract_reference import current_contract_references
 from app.services.maintenance_manager_workbook_v3 import (
     SCHEMA_VERSION,
     TEMPLATE_VERSION,
@@ -536,7 +536,7 @@ class MaintenanceManagerWorkbookAdapter:
 
         # 项目卡、项目总表与经理月表共用同一套“当前合同事实完整性”：未映射、
         # 缺含税额、同项目重复稳定合同、跨项目共享都不得计算合同总额及回款率。
-        contract_facts = _card_contracts(self.db, project_ids)
+        contract_facts = current_contract_references(self.db, project_ids)
 
         projects: list[dict] = []
         for assignment, project in assignment_rows:

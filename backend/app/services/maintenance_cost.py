@@ -1240,9 +1240,9 @@ def projects_aggregate(db: Session, date_from: date | None = None,
         })
         if stable_ids:
             from app.models.maintenance_project import MaintenanceProjectContract
-            from app.services.maintenance_boss_board import _card_contracts
+            from app.services.maintenance_contract_reference import current_contract_references
 
-            project_contract_facts = _card_contracts(db, stable_ids)
+            project_contract_facts = current_contract_references(db, stable_ids)
             canonical_contract_project_ids = set(db.scalars(
                 select(MaintenanceProjectContract.project_id).where(
                     MaintenanceProjectContract.project_id.in_(stable_ids),

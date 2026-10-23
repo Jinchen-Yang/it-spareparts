@@ -26,8 +26,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart
-from app.models.maintenance import FMaintenanceOrder
-from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
+from app.services.maintenance_demand_project_reference import demand_has_active_project_assignment
 from app.services import (
     maintenance_consumption_cost,
     maintenance_site_return_requirements as requirements,
@@ -91,21 +90,9 @@ def _resolve_demand_project(
 ) -> None:
     """关联需求单必须是本项目的活跃需求——按归属表判定，绝不按项目名猜。"""
 
-    row = db.execute(
-        select(FMaintenanceOrder.id)
-        .join(
-            MaintenanceSourceOrderAssignment,
-            (MaintenanceSourceOrderAssignment.source_order_id
-             == FMaintenanceOrder.raw_order_id)
-            & (MaintenanceSourceOrderAssignment.is_active.is_(True)),
-        )
-        .where(
-            FMaintenanceOrder.order_no == demand_order_no,
-            MaintenanceSourceOrderAssignment.project_id == project_id,
-        )
-        .limit(1)
-    ).first()
-    if row is None:
+    if not demand_has_active_project_assignment(
+        db, project_id=project_id, demand_order_no=demand_order_no,
+    ):
         raise MaintenanceOperationError(
             "关联需求单不属于当前项目，请核对单号或留空"
         )

@@ -38,6 +38,7 @@ from app.services import (
     maintenance_source_health,
     project_names,
 )
+from app.services.maintenance_contract_reference import current_contract_references
 from app.services.maintenance_expense_integrity import (
     normalize_contract_no,
     normalized_contract_no_sql,
@@ -1376,7 +1377,7 @@ def projects(
         all_cost_bundles = _cost_bundles_by_project(
             db, window=window, project_ids=candidate_ids, can_cost=True
         )
-        all_contracts = _card_contracts(db, candidate_ids)
+        all_contracts = current_contract_references(db, candidate_ids)
         ordered_ids = sort_project_ids_by_cost_ratio(
             candidate_ids, cost_bundles=all_cost_bundles, contracts=all_contracts
         )
@@ -1411,7 +1412,7 @@ def projects(
     pre_delivery = _pre_delivery_counts(db, project_ids)
     source_states = maintenance_source_health.source_health(db)["sources"]
     # 项目卡墙补充数据（REQUIREMENTS #34/#35/#41），逐项一次分组查询，与页大小无关
-    contracts = _card_contracts(db, project_ids)
+    contracts = current_contract_references(db, project_ids)
     procured = _card_procured_qty(db, window, project_ids)
     collections = _card_collections(db, project_ids)
     manager_names = _manager_display_names(db, [p.project_manager_id for p in rows])
@@ -1725,264 +1726,8 @@ def card_status(cost_ratio_pct: Decimal | None) -> str | None:
     return "normal"
 
 
-def _card_contracts(db: Session, project_ids: list[str]) -> dict[str, dict]:
-    """逐项目：合同总额（含税）+ 合同号清单 + 诚实标注（#51 两层取数）。
-
-    1. **台账合同**（MaintenanceProjectContract，只认当前 included_in_total）＝权威源；
-       缺含税额、未映射、重复稳定合同或跨项目冲突均 fail-closed。
-    2. **XSDD 回退**（v1.17 老版口径，业务指示 2026-08-17）：台账缺位时按项目挂靠
-       单据的 distinct XSDD 去成功销售批次取金额——只有生效、未税额和税率均
-       明确，且同一单号的全部有效候选经济值一致时，才计算
-       `amount_ex_tax×(1+tax_rate)`，跨单求和。两个诚实标注随行返回：
-       - `contract_shared`：某 XSDD 同时挂在多个项目上（生产 13 张共用单），合同额
-         会在项目间重复计入——只标注，不擅自分摊（Q5：合同额仅参考，不出毛利）；
-       - `contract_incomplete`：有 XSDD 不在销售表（生产 5 个 2023 老单），合同额被
-         低估——标注而非静默按 0（铁律 5）。
-
-    合同号即 XSDD 销售订单号（#45 归属判定依据）；回退层的合同号=挂靠 XSDD 清单。
-    """
-    from app import config
-    from app.models.maintenance_project import MaintenanceProjectContract
-    from app.models.sales import FSalesOrder
-    from app.models.system import SysImportBatch
-
-    if not project_ids:
-        return {}
-    rows = db.execute(
-        select(
-            MaintenanceProjectContract.project_id,
-            MaintenanceProjectContract.contract_id,
-            MaintenanceProjectContract.contract_no,
-            MaintenanceProjectContract.amount_inc_tax,
-            MaintenanceProjectContract.included_in_total,
-            MaintenanceProjectContract.status_mapping_state,
-        )
-        .where(
-            MaintenanceProjectContract.project_id.in_(project_ids),
-            MaintenanceProjectContract.effective_from <= business_today(),
-            or_(
-                MaintenanceProjectContract.effective_to.is_(None),
-                MaintenanceProjectContract.effective_to > business_today(),
-            ),
-        )
-        .order_by(MaintenanceProjectContract.effective_from)
-    ).all()
-    included_contract_ids = {
-        contract_id
-        for _pid, contract_id, _no, _amount, included, _mapping in rows
-        if included
-    }
-    included_contract_nos = {
-        no
-        for _pid, _contract_id, no, _amount, included, _mapping in rows
-        if included and no
-    }
-    projects_by_contract_id: dict[str, set[str]] = {}
-    projects_by_contract_no: dict[str, set[str]] = {}
-    if included_contract_ids or included_contract_nos:
-        for contract_id, contract_no, related_project_id in db.execute(
-            select(
-                MaintenanceProjectContract.contract_id,
-                MaintenanceProjectContract.contract_no,
-                MaintenanceProjectContract.project_id,
-            )
-            .where(
-                or_(
-                    MaintenanceProjectContract.contract_id.in_(included_contract_ids),
-                    MaintenanceProjectContract.contract_no.in_(included_contract_nos),
-                ),
-                MaintenanceProjectContract.included_in_total.is_(True),
-                MaintenanceProjectContract.effective_from <= business_today(),
-                or_(
-                    MaintenanceProjectContract.effective_to.is_(None),
-                    MaintenanceProjectContract.effective_to > business_today(),
-                ),
-            )
-            .group_by(
-                MaintenanceProjectContract.contract_id,
-                MaintenanceProjectContract.contract_no,
-                MaintenanceProjectContract.project_id,
-            )
-        ):
-            projects_by_contract_id.setdefault(contract_id, set()).add(
-                related_project_id
-            )
-            if contract_no:
-                projects_by_contract_no.setdefault(contract_no, set()).add(
-                    related_project_id
-                )
-    conflicting_contract_ids = {
-        contract_id
-        for contract_id, related_projects in projects_by_contract_id.items()
-        if len(related_projects) > 1
-    }
-    conflicting_contract_nos = {
-        contract_no
-        for contract_no, related_projects in projects_by_contract_no.items()
-        if len(related_projects) > 1
-    }
-    out: dict[str, dict] = {}
-    for pid, contract_id, no, amount, included, mapping_state in rows:
-        bucket = out.setdefault(
-            pid,
-            {
-                "contract_nos": [],
-                "amount_inc_tax": None,
-                "contract_shared": False,
-                "contract_incomplete": False,
-                "_included_contract_ids": [],
-                "_included_contract_nos": [],
-                "_included_count": 0,
-            },
-        )
-        if no and no not in bucket["contract_nos"]:
-            bucket["contract_nos"].append(no)
-        if mapping_state != "mapped":
-            bucket["contract_incomplete"] = True
-        elif included:
-            bucket["_included_count"] += 1
-            bucket["_included_contract_ids"].append(contract_id)
-            bucket["_included_contract_nos"].append(no)
-            if amount is not None:
-                bucket["amount_inc_tax"] = (
-                    bucket["amount_inc_tax"] or Decimal(0)
-                ) + amount
-            else:
-                bucket["contract_incomplete"] = True
-
-    for bucket in out.values():
-        contract_ids = bucket.pop("_included_contract_ids")
-        contract_nos = bucket.pop("_included_contract_nos")
-        included_count = bucket.pop("_included_count")
-        duplicate = len(contract_ids) != len(set(contract_ids)) or len(
-            contract_nos
-        ) != len(set(contract_nos))
-        shared = any(
-            contract_id in conflicting_contract_ids for contract_id in contract_ids
-        ) or any(
-            contract_no in conflicting_contract_nos for contract_no in contract_nos
-        )
-        if included_count == 0 or duplicate or shared:
-            bucket["contract_incomplete"] = True
-        if duplicate or shared:
-            # 重复或跨项目冲突时连“已知小计”都可能双计，不返回伪精确金额。
-            bucket["amount_inc_tax"] = None
-        bucket["contract_shared"] = shared
-
-    # —— XSDD 回退：只对「台账没给出金额」的项目生效，台账永远优先 ——
-    # 只有“完全没有当前合同行”的项目才走销售事实回退。已有合同行但含税额
-    # 缺失时必须诚实标 incomplete，不能用 13%/0% 猜测覆盖权威事实。
-    fallback_ids = [pid for pid in project_ids if pid not in out]
-    if not fallback_ids:
-        return out
-    active = and_(
-        MaintenanceSourceOrderAssignment.source_order_id
-        == FMaintenanceOrder.raw_order_id,
-        MaintenanceSourceOrderAssignment.is_active.is_(True),
-    )
-    # 全量「XSDD→挂了哪些项目」映射：shared 判定必须看全局（不止本页），
-    # 否则翻页会把共用单误标成独占。
-    xsdd_rows = db.execute(
-        active_orders(
-            select(
-                MaintenanceSourceOrderAssignment.project_id,
-                FMaintenanceOrder.linked_sales_order_no,
-            )
-            .select_from(FMaintenanceOrder)
-            .join(MaintenanceSourceOrderAssignment, active)
-            .where(FMaintenanceOrder.linked_sales_order_no.is_not(None))
-            .group_by(
-                MaintenanceSourceOrderAssignment.project_id,
-                FMaintenanceOrder.linked_sales_order_no,
-            ),
-            FMaintenanceOrder,
-        )
-    ).all()
-    order_projects: dict[str, set] = {}
-    project_orders: dict[str, list] = {}
-    for pid, ono in xsdd_rows:
-        order_projects.setdefault(ono, set()).add(pid)
-        if pid in fallback_ids:
-            project_orders.setdefault(pid, []).append(ono)
-    all_orders = sorted(
-        {o for pid in fallback_ids for o in project_orders.get(pid, [])}
-    )
-    amounts: dict[str, Decimal] = {}
-    ambiguous_orders: set[str] = set()
-    if all_orders:
-        # One batched evidence query for every fallback project.  Failed or
-        # wrong-type import batches are not facts, and ACTIVE_STATUS_ONLY must
-        # not weaken this financial boundary when disabled elsewhere.
-        candidates = db.execute(
-            select(
-                FSalesOrder.order_no,
-                FSalesOrder.amount_ex_tax,
-                FSalesOrder.tax_rate,
-            )
-            .join(
-                SysImportBatch,
-                SysImportBatch.id == FSalesOrder.import_batch_id,
-            )
-            .where(
-                FSalesOrder.order_no.in_(all_orders),
-                FSalesOrder.data_status == config.ACTIVE_STATUS,
-                FSalesOrder.amount_ex_tax.is_not(None),
-                FSalesOrder.tax_rate.is_not(None),
-                SysImportBatch.file_type == "sales",
-                SysImportBatch.status == "success",
-            )
-            .order_by(
-                FSalesOrder.order_no,
-                SysImportBatch.uploaded_at,
-                FSalesOrder.created_at,
-                SysImportBatch.id,
-                FSalesOrder.id,
-            )
-        ).all()
-        economics_by_order: dict[str, set[tuple[Decimal, Decimal, Decimal]]] = {}
-        for order_no, amount_ex_tax, tax_rate in candidates:
-            ex_tax = Decimal(str(amount_ex_tax))
-            rate = Decimal(str(tax_rate))
-            inc_tax = tax_policy.round_money(ex_tax * (Decimal("1") + rate))
-            economics_by_order.setdefault(order_no, set()).add((ex_tax, rate, inc_tax))
-        for order_no, economics in economics_by_order.items():
-            if len(economics) != 1:
-                ambiguous_orders.add(order_no)
-                continue
-            amounts[order_no] = next(iter(economics))[2]
-    for pid in fallback_ids:
-        onos = sorted(project_orders.get(pid, []))
-        if not onos:
-            continue
-        bucket = out.setdefault(
-            pid,
-            {
-                "contract_nos": [],
-                "amount_inc_tax": None,
-                "contract_shared": False,
-                "contract_incomplete": False,
-            },
-        )
-        if not bucket["contract_nos"]:
-            bucket["contract_nos"] = onos
-        total = sum((amounts.get(o) or Decimal(0)) for o in onos)
-        missing = [o for o in onos if o not in amounts]
-        conflicts = [o for o in onos if o in ambiguous_orders]
-        if conflicts:
-            # One ambiguous XSDD invalidates the project total: returning the
-            # remaining known subtotal would look like a precise contract cap.
-            bucket["amount_inc_tax"] = None
-        elif total > 0:
-            bucket["amount_inc_tax"] = total
-        bucket["contract_shared"] = any(
-            len(order_projects.get(o, set())) > 1 for o in onos
-        )
-        # 共享 XSDD 可保留金额作“参考”，但不能据此给多个项目计算成本率/红黄绿；
-        # 否则同一合同总额会被重复当成每个项目的独占预算。
-        bucket["contract_incomplete"] = (
-            bool(missing) or bool(conflicts) or bucket["contract_shared"]
-        )
-    return out
+# Compatibility export for existing internal callers.
+_card_contracts = current_contract_references
 
 
 def _card_salesperson_modes(db: Session, project_ids: list[str]) -> dict[str, str]:
@@ -2147,14 +1892,14 @@ def _card_collections(db: Session, project_ids: list[str]) -> dict[str, Decimal]
 def _payment_complete_ids(db: Session, project_ids: list[str]) -> set[str]:
     """回款已完成项目集合（2026-09-04 客户反馈：收满回款的项目不用再盯）。
 
-    判定与卡片「回款 / 合同总额（含税）」完全同源——直接复用 _card_contracts /
+    判定与卡片「回款 / 合同总额（含税）」完全同源——直接复用 current_contract_references /
     _card_collections，绝不另写一份 SQL（两处口径漂移会让桶和卡片各说各话）：
     合同事实完整（⾮不完整/共用/重复/缺额）且总额 > 0，且已回款 ≥ 合同总额
     （超额回款也算完成）。合同事实不完整或⽆回款快照的项目不判定，留在原期限桶。
     """
     if not project_ids:
         return set()
-    contracts = _card_contracts(db, project_ids)
+    contracts = current_contract_references(db, project_ids)
     collections = _card_collections(db, project_ids)
     complete: set[str] = set()
     for pid in project_ids:

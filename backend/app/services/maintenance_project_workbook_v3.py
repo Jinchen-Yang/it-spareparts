@@ -39,7 +39,7 @@ from app.services import maintenance_front_stock as front_stock
 from app.services import maintenance_cost_quality
 from app.services import maintenance_periods
 from app.services import maintenance_project_operations as operations
-from app.services.maintenance_boss_board import _card_contracts
+from app.services.maintenance_contract_reference import current_contract_references
 from app.services.maintenance_workbook_export import safe_xlsx_text
 from app.services.query_filters import active_orders
 
@@ -397,7 +397,7 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     missing_amount_nos = [
         c.contract_no for c in included if c.amount_inc_tax is None
     ]
-    contract_card = _card_contracts(db, [project_id]).get(project_id)
+    contract_card = current_contract_references(db, [project_id]).get(project_id)
     # 只认当前、mapped、计入总额且不存在重复关系/跨项目共享冲突的台账事实。
     total_inc = (
         contract_card.get("amount_inc_tax")
