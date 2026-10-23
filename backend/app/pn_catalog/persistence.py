@@ -106,6 +106,17 @@ def capture_states(db: Session, part_ids: Iterable[int]) -> dict[int, dict]:
     return snapshots_for_parts(db, parts)
 
 
+def read_states(db: Session, part_ids: Iterable[int]) -> dict[int, dict]:
+    """Bounded consistent batch read; retain ordered SHARE parent locks until commit."""
+    ids = sorted(set(part_ids))
+    if not ids:
+        return {}
+    with db.no_autoflush:
+        parts = db.scalars(select(DimPart).where(DimPart.id.in_(ids)).order_by(DimPart.id)
+                           .with_for_update(read=True).execution_options(populate_existing=True)).all()
+    return snapshots_for_parts(db, parts)
+
+
 def snapshots_for_parts(db: Session, parts: list[DimPart]) -> dict[int, dict]:
     ids = [part.id for part in parts]
     if not ids:
@@ -145,7 +156,7 @@ def legacy_context(*, operated_by: str | None = None, principal_id: str | None =
         provenance=Provenance(kind=source, evidence_id=evidence_id)))
 
 
-def append_audit(db: Session, part_id: int, *, context: CommandContext, action: str,
+def append_audit(db: Session, part_id: int | None, *, context: CommandContext, action: str,
                  changes: dict, before_revision: int, after_revision: int,
                  authorization: dict | None = None, payload_hash: str | None = None,
                  revisions: dict | None = None) -> AuditEvent:
@@ -196,7 +207,8 @@ def _change_state(state: PartState, before: dict | None, after: dict, *,
         provenance[path] = {**context.actor.provenance.model_dump(mode="json", exclude_none=True),
                             "request_id": str(context.request_id),
                             "principal_id": context.actor.principal_id,
-                            "confirmed_by": context.confirmed_by}
+                            "confirmed_by": context.confirmed_by,
+                            "adopted_from_candidate_id": context.adopted_from_candidate_id}
     if changed:
         state.profile_revision += 1
         state.field_versions = versions

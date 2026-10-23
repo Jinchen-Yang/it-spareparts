@@ -1,6 +1,7 @@
 """Versioned HTTP adapter. The facade owns domain rules; this owns commit."""
 import logging
 import re
+from functools import partial
 from typing import Annotated
 from uuid import UUID
 
@@ -28,9 +29,14 @@ from app.pn_catalog.http_controls import CatalogHttpControls, error_body
 from app.pn_catalog.wire import (
     AuditListResponse,
     ErrorResponse,
+    PageMeta,
     PartListResponse,
     PartResponse,
+    WireModel,
 )
+from app.pn_catalog.wire_content import CandidateResponse, ContentResponse
+from app.pn_catalog.wire_jobs import IdentityResponse, JobResponse
+from app.pn_catalog.wire_media import MediaReceiptResponse
 
 _log = logging.getLogger(__name__)
 PartId = Annotated[int, Path(gt=0)]
@@ -116,6 +122,28 @@ def _commit(db, operation):
         raise
 
 
+class CapabilitySnapshot(WireModel):
+    media: bool
+    bundle: bool
+    research: bool
+    recognition: bool
+
+
+class CapabilityResponse(WireModel):
+    data: CapabilitySnapshot
+    meta: PageMeta
+
+
+@router.get("/capabilities", response_model=CapabilityResponse)
+def capabilities(request: Request, access: AccessDep):
+    """Enabled host features; actual operations still verify current grants and configuration."""
+    configured = getattr(request.app.state, "pn_catalog_capabilities", {})
+    context = _context(request, access)
+    return {"data": {key: bool(configured.get(key, False)) for key in
+                     ("media", "bundle", "research", "recognition")},
+            "meta": {"request_id": str(context.request_id), "replayed": False, "next_cursor": None}}
+
+
 @router.get("/parts", response_model=PartListResponse)
 def list_parts(request: Request, db: DbDep, access: AccessDep, q: str | None = Query(default=None, max_length=256),
                cursor: str | None = Query(default=None, max_length=2048),
@@ -178,11 +206,15 @@ def reactivate(part_id: PartId, command: AvailabilityCommand, request: Request,
     return _availability(part_id, command, request, db, access, "active")
 
 
-@router.get("/requests/{request_id}", response_model=PartResponse)
+@router.get("/requests/{request_id}", response_model=PartResponse | ContentResponse | CandidateResponse | MediaReceiptResponse | JobResponse | IdentityResponse,
+            response_model_exclude_unset=True)
 def get_receipt(request_id: UUID, request: Request, db: DbDep,
                 access: AccessDep):
     from app.pn_catalog import api
-    return api.get_receipt(db, request_id, context=_context(request, access), authorize=access.authorize)
+
+    from .http_jobs import project_host_receipt
+    return api.get_receipt(db, request_id, context=_context(request, access), authorize=access.authorize,
+                           projector=partial(project_host_receipt, access=access))
 
 
 @router.get("/parts/{part_id}/audit-events", response_model=AuditListResponse)
@@ -211,3 +243,10 @@ def install_http(app, *, api_prefix="/api"):
     app.add_exception_handler(StarletteHTTPException, host_http_error)
     app.add_middleware(CatalogHttpControls, path_prefix=prefix)
     app.include_router(router, prefix=api_prefix)
+
+
+# Resource adapters attach to this single versioned router after boundary helpers exist.
+from . import http_content as _content_routes  # noqa: F401
+from . import http_enrichment as _enrichment_routes  # noqa: F401
+from . import http_jobs as _job_routes  # noqa: F401
+from . import http_media as _media_routes  # noqa: F401

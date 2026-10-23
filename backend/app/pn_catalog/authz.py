@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.pn_catalog.dto import ActorContext, Authorize
 from app.pn_catalog.errors import CatalogError
+from app.pn_catalog.jobs import JobAuthorize
 
 
 @dataclass(frozen=True)
@@ -21,6 +22,7 @@ class CatalogAccess:
     actor: ActorContext
     authorize: Authorize
     confirmation_secret: bytes | None = None
+    authorize_job: JobAuthorize | None = None
 
 
 AccessResolver = Callable[[Request, Session], CatalogAccess]

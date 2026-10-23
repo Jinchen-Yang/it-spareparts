@@ -125,6 +125,14 @@ except BaseException:
 _app_engine = engine
 
 _TABLES = [
+    # Include globally scoped resources: a NULL PN FK does not participate in CASCADE.
+    "pn_catalog_legacy_record", "pn_catalog_migration_batch",
+    "pn_catalog_job_event", "pn_catalog_job",
+    "pn_media_inbox", "pn_media_inbox_group", "pn_media_multipart", "pn_media_upload",
+    "pn_media_suppression", "pn_media_entry", "pn_media_gallery_member", "pn_media_gallery_group",
+    "pn_media_derivative", "pn_media_asset",
+    "pn_catalog_candidate", "pn_catalog_content", "pn_catalog_receipt", "pn_catalog_audit",
+
     "chat_message", "chat_session",
     "replenishment_review_line",
     "replenishment_review",

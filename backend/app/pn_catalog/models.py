@@ -2,12 +2,12 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, String, func, text
+from sqlalchemy import DateTime, BigInteger, CheckConstraint, ForeignKey, Index, String, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-from app.models._types import TZDateTime
+TZDateTime = DateTime(timezone=True)
 
 
 class PartState(Base):
@@ -31,7 +31,7 @@ class PartState(Base):
 class AuditEvent(Base):
     __tablename__ = "pn_catalog_audit"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    part_id: Mapped[int] = mapped_column(ForeignKey("dim_part.id"))
+    part_id: Mapped[int | None] = mapped_column(ForeignKey("dim_part.id"))
     action: Mapped[str] = mapped_column(String(64))
     principal_id: Mapped[str] = mapped_column(String(256))
     client_id: Mapped[str] = mapped_column(String(128))
@@ -54,7 +54,7 @@ class CommandReceipt(Base):
     client_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     request_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True)
     operation: Mapped[str] = mapped_column(String(64))
-    part_id: Mapped[int] = mapped_column(ForeignKey("dim_part.id"))
+    part_id: Mapped[int | None] = mapped_column(ForeignKey("dim_part.id"))
     payload_hash: Mapped[str] = mapped_column(String(64))
     applied_revision: Mapped[int] = mapped_column(BigInteger)
     audit_id: Mapped[int] = mapped_column(ForeignKey("pn_catalog_audit.id"))
