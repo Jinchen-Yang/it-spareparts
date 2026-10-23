@@ -3,6 +3,7 @@ import { act, cleanup, render, screen, waitFor, fireEvent } from "../test/antdRe
 import { authzSnapshot } from "../test/authzFixtures";
 import { vocabulary } from "../authz/rules";
 import App from "../App";
+import { NAV_ITEMS } from "../nav";
 import api from "../api";
 const get = vi.spyOn(api, "get");
 const mocks = vi.hoisted(() => ({ snapshot: vi.fn(), settings: vi.fn(), accounts: vi.fn(), beta: vi.fn() }));
@@ -42,7 +43,17 @@ it.each([false, true])("inventory quantity remains usable without shared read, w
     warehouses: [{ id: 1, warehouse: "QUANTITY-WAREHOUSE", qty: 17, unit_cost: 923444, inventory_value: 923444 }] }], total: 1 } } as never);
   window.history.replaceState({}, "", "/inventory");
   render(<App />);
+  expect(get).not.toHaveBeenCalled();
+  expect(mocks.settings).not.toHaveBeenCalled();
+  // Await the same real import factory used by React.lazy before starting RTL's
+  // data assertion window; cold CI transforms are not a business request timeout.
+  await act(async () => { await NAV_ITEMS.find(item => item.path === "/inventory")!.load(); });
   expect(await screen.findByText("QUANTITY-PN")).toBeVisible();
+  expect(get).toHaveBeenCalledExactlyOnceWith("/inventory/dynamic", expect.objectContaining({
+    params: { q: undefined, page: 1, page_size: 20 },
+    headers: { Authorization: "Bearer read-accounts-owner" },
+    signal: expect.any(AbortSignal),
+  }));
   fireEvent.click(document.querySelector(".ant-table-row-expand-icon")!);
   expect(await screen.findByText("QUANTITY-WAREHOUSE")).toBeVisible();
   expect(screen.queryByText(/单位成本\(/)).toBeNull();

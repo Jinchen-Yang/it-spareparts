@@ -102,3 +102,18 @@ S1 wire、5 份共 45 个 DTO 样例已完成前后端对拍和独立设计复�
 `47fd3f2` 的 [CI 40017516780](https://github.com/Jinchen-Yang/it-spareparts/actions/runs/40017516780) 前端为 2,016 passed / 1 failed，构建与生成目录检查通过。唯一失败是 `BusinessTimestampSites.test.tsx` 的旧整模块 TaxBasis mock 未包含新 `useTaxDisplayPolicy` 导出。原样复现 1 failed / 1 passed 后，改为保留真实导出的部分 mock，并使用既有 hook 的合法 `ex` 值；两条日期输入及北京时间断言保持不变。作者原文件 2 passed、治理组合 4 文件 / 8 tests passed、TypeScript 检查通过；跨模型独审原文件 2 passed。未改生产代码、未跳过或削弱断言。该修订仍需新精确提交的完整 CI。
 
 根代理补做隔离浏览器的 trend-only 账号验证：仅授 `sales_analysis.read_trend/show_overview`，销售页面只出现概览/趋势；网络记录中销售业务请求只有 `/sales/analytics/trend` 且返回 200，未查询 options、summary、groups 或 orders。证据为 `output/playwright/s2-trend-only.png` 与 `/tmp/itsp-s2-browser-trend-requests.txt`。这是开发验证，不是用户验收或生产证据。
+
+
+### S2 后端顺序污染的复现与隔离
+
+`47fd3f2` 完整后端回归的两个失败分片只有 8 项失败：7 条 BOM 文件测试与 1 条型号歧义测试；分片 0/2、迁移链及 ORM 检查通过。两组失败均以真实前置用例重现，生产身份门与型号解析器没有改动。
+
+- BOM 局部 module fixture 绕过标准清表，前置 Agent 测试留下持久授权标记。以真实 marker 用例为前置，修前 7 failed / 1 passed；改为公共 `ctx(db)` 依赖标准隔离后作者和根代理独立均 8 passed，7 个业务测试函数 AST 不变。
+- resolver 局部 module fixture 继承前一模块提交的 30,000 条无关目录行，却没有提供歧义型号样本。真实三万行遍历用例接歧义测试，修前 1 failed / 1 passed。改为扩展标准逐项隔离 fixture 并显式种入精确/变体/歧义样本，三项条件断言变为必检；其余 13 个函数 AST 不变。根代理与跨模型独审分别运行三万行前置加完整 resolver，均 17 passed。
+
+证据：`/tmp/itsp-authz-s2-bom-root-review.log`、`/tmp/itsp-authz-s2-resolver-sequence-red.log`、`/tmp/itsp-authz-s2-resolver-sequence-final.log`、`/tmp/itsp-authz-s2-resolver-sequence-independent.log`。精确 `50bbe55` 的后续 CI 已确认旧 TaxBasis mock 失败消失，但新增首个库存路由冷加载断言超时，正在独立复现和修订；该提交仍不能作为阶段通过依据。S3 只有只读执行方案，尚未开始实现。
+
+
+库存前端失败已用临时延迟真实路由 import 的探针重现：原断言 1 failed / 1 passed，等待 React.lazy 共用的真实 nav.load promise 后 2 passed。最终删除临时延迟，仅显式等待加载；保留可见性和金额保护断言，并新增初始无请求及业务请求恰好一次的 token/参数/AbortSignal 断言。六个冷进程各 12 passed、TypeScript 通过，不将重复运行累计为新覆盖数。测试修订等待独立复核及新完整 CI，生产代码未改变。
+
+跨模型独立复核最终库存文件 **12 passed**（`/tmp/itsp-s2-app-lazy-independent.log`），确认没有生产改动、timeout 放宽或遗留延迟。BOM/解析器/库存三组修订合并进入下一精确提交完整 CI。

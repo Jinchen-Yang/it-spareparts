@@ -48,6 +48,16 @@ S2 前端已完成可集成实现，app/tests 已冻结交主代理提交与精�
 
 本地完整回归早期失败已定位：历史 isolated-page fixture 缺少显式授权快照、异步 capture 调度改变、以及 F3 query-key 修订期间采集到中间状态。实际授权、安全、迟到响应断言保留；新版 canonical 反例使用真实 Provider。最新局部修订的完整组合交主代理精确 CI，不用前版 2005 绿冒充最终远端结果。
 
+## 精确 CI 后的测试接缝修订
+
+`50bbe55` 的完整 CI `40019408836` 前端为 2016 passed / 1 failed。失败在 `AppAuthorizationDependencies` 首个库存数量用例：RTL 的默认 1 秒 `findByText` 同时承担首次路由模块转换、Provider 提交、业务请求和表格渲染。CI 首条耗时 1383ms，下一条相同库存页面的成本字段变体通过；本地原样 12 项通过，首条也达到 1104ms。生产授权、查询和金额保护代码没有因此修改。
+
+诊断时仅临时将**真实** InventoryPage 模块 import 延后 1.2 秒，原断言同位置复现 1 failed / 1 passed；等待 `NAV_ITEMS` 与 React.lazy 共用的原 `.load()` promise 后，同一探针 2 passed。日志为 `/tmp/itsp-s2-app-lazy-delay-red.log`、`/tmp/itsp-s2-app-lazy-delay-green.log`。临时延迟已删除，最终测试无固定 sleep、无增大全局 timeout，也没有以重试通过代替首次结果。
+
+最终 diff 只为该测试显式等待真实模块加载，并新增初始无请求、`/inventory/dynamic` 恰好一次、正确 params、捕获 token 和 AbortSignal 的断言。原 PN/仓库实际可见、成本列与金额不显示、金额依赖提示两态、零 settings 请求均保留。完整文件用 6 个独立冷进程、最多 2 个并行重复验证，六次均 12 passed；`/tmp/itsp-s2-app-dependencies-stress-{1..6}.log`。`tsc --noEmit` 通过，日志 `/tmp/itsp-s2-app-dependencies-tsc.log`。这些是重复稳定性证据，不新增 72 个独立覆盖用例。
+
+前一次 `BusinessTimestampSites` 的 TaxBasis 全量 mock 缺新 hook 已在 `50bbe55` 修为保留真实导出的 partial mock，并使用合法 `ex` 值；两条跨午夜日期输入和断言不变。原文件 2 passed、治理组合 4 files / 8 passed、独审原样 2 passed。此处记录测试适配，不将其视为生产行为修订。
+
 ## 复核结论与剩余边界
 
 根代理审 F2 发现并修复 analysis/policy 治理字段混用、policy-only 缺失成员与 total 语义；独审发现并修复 Tax owner 首帧；本代理审 F3 发现并修复 URL 首帧/query abort 与 quick-pricing OR 误用。新的反例均通过相应专项。生成的 72 面闭集是入口协议证据，不能替代所有 Grant 组合的穷举测试；本轮重点反例覆盖独立授权、字段两向量、共享数据、直接深链、撤权、503、迟到与导出完成提交。真实隔离浏览器由主代理记录；未做生产发布或用户最终验收。

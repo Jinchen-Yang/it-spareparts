@@ -24,3 +24,15 @@ B1 / core 由 root 著作，本代理另写 `test_authz_s2_b1_adversarial.py` �
 覆盖销售动作隔离及拒绝前无事实 SQL、非 boss 显式采购分析授权、供应商过滤侧信道、财务衍生字段与 CSV 投影、库存写后投影与真实操作者审计、设置审计身份单独授权、PDP 故障不写。两连接并发用例持有库存 / 设置领域锁，写请求等待时另一事务撤 epoch 可提交，放锁后请求 401 且业务和审计不变，证明不存在提前 actor SHARE 阻挡撤权及锁后旧身份提交。
 
 此结论限于上述攻击面；不代替全模块覆盖、迁移差分、独立 Agent 复审、完整 CI 或用户验收。
+
+## CI 旧 BOM 夹具隔离修订
+
+`test_bom.py` 自定义 module-scoped `db` 只打开 Session，遮蔽标准清表 fixture；前四项文件测试还完全不依赖 db。前置 canonical Agent 用例提交 artifact protocol marker 后，BOM 正确进入新权威并拒绝 None 身份，因此整文件 7 项失败。未削弱生产身份/文件门：删除该局部 fixture，令所有测试共用的 `ctx(db)` 显式触发标准隔离。
+
+真实 PostgreSQL/Cerbos 同一命令：`test_authz_s2_agent_provenance.py::test_standalone_file_marks_authority_without_resource_cutover` 随后 `test_bom.py`，修前 **7 failed / 1 passed**，修后 **8 passed**。证据 `/tmp/itsp-authz-s2-bom-marker-before.log` 与 `/tmp/itsp-authz-s2-bom-marker-after.log`；7 个测试函数 AST 与修前完全相同，输入/业务断言未变。此修订由本包作者完成，交 root 独立复审，不能冒称独立批准。
+
+## Resolver 夹具修订的独立复核
+
+root 修订 `test_resolver.py`：局部 fixture 扩展标准逐项清表 db，显式提供 4089/别名、ST8000 精确及变体、V100 两种规格。原“有数据才断言”的三个条件删除，精确 top1/匹配证据和歧义结果直接断言；其余 13 个测试函数 AST 不变。独审指出初稿新增“变体必须在 items”与 resolver 的精确唯一合同冲突，最终改为保留变体背景、验证精确证据；没有修改生产解析器。
+
+独立真实顺序复跑 `test_resale_catalog_list.py::test_thirty_thousand_rows_full_walk` 后接完整 `test_resolver.py`，**17 passed**，日志 `/tmp/itsp-authz-s2-resolver-sequence-independent.log`。根提供的修前前置+歧义红例为 **1 failed / 1 passed**（`/tmp/itsp-authz-s2-resolver-sequence-red.log`）。这证明测试不再继承前一模块的 3 万行残留，也不再靠空数据绕过三项断言；最小测试修订可进入新精确提交 CI，不替代完整 CI/用户验收。
