@@ -113,3 +113,9 @@ CERBOS_BINARY=/tmp/itsp-authz-engine-feasibility-20261023/binary/cerbos \
 独立复核 `ModuleControlPlane.test.tsx` 单文件 diff：冲突测试参数化为已显示/正在入场两种状态；后者明确构造错误已在 DOM、祖先 dialog 尚隐藏，再由一次真实零延时 timer 恢复可见。作者红日志 `/tmp/itsp-authz-s1-modal-red.log` 证明原即时可见断言在入场分支失败；修订使用 `waitFor` 等待实际可见，没有把可见性降为仅存在。原执行按钮禁用、API 总计两次、未成功回调仍保持，并新增点击禁用按钮不重放、未关闭窗口断言。成功等待依赖恢复可见的 timer 已执行，不遗留该 timer；afterEach 继续标准 cleanup。这是组件异步可见性契约的确定性模拟，不宣称验证浏览器动画引擎。
 
 独立运行该文件 **13 passed in 6.74s**，日志 `/tmp/itsp-authz-s1-modal-independent.log`；`git diff --check` 通过。未修改测试或业务代码。本修订无阻断，可提交精确 SHA CI；不等同远端 CI 已通过。
+
+### 池序列迁移测试的跨用例隔离
+
+独立检查 `test_migration_pool_seq.py`：`preserve_pool_seq(migrated)` 改依赖标准 `db`，先清除前序测试已提交的业务数据，再保存独立池序列状态。该序列不归属表列，标准 TRUNCATE RESTART IDENTITY 不会重置它；原 last_value/is_called 保存与恢复完全保留。独立 AST 比较确认除 fixture 参数和说明文字外与 HEAD 相同：空库 nextval=1、落后序列推进到 41、已有水位保持 101、finally 清理并升级回 head 均未减弱，未修改生产降级 guard。
+
+读取作者真实 PG 组合证据：先执行 `test_maintenance_ledger::test_apply_syncs_canonical_tables`（服务真实 commit），再执行池序列整个文件，修前 **3 failed / 2 passed**，修后 **5 passed in 13.97s**；日志 `/tmp/itsp-authz-s1-pool-seq-ledger-{before,final}.log`。本次未重复实跑；隔离发生在本例建立事实之前，不会清除本例的被测序列/池状态。无独审阻断，可纳入最小修订后重新跑完整 CI。
