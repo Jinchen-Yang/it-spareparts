@@ -414,10 +414,12 @@ def test_corrupt_persisted_sources_are_diagnostic_not_500(db,client,damage):
 def test_cutover_marker_prevents_schema_downgrade(db,client):
     backend=Path(__file__).parents[1];config=Config(str(backend/'alembic.ini'))
     config.set_main_option('script_location',str(backend/'alembic'));db.rollback()
+    previous_heads = set(db.scalars(text('SELECT version_num FROM alembic_version')))
+    db.rollback()
     with pytest.raises(RuntimeError,match='Cannot downgrade after authorization cutover'):
         command.downgrade(config,'f1a3c5e7b9d2')
     assert db.scalar(select(func.count()).select_from(SysAuthorizationCutover))==1
-    assert db.execute(text('SELECT version_num FROM alembic_version')).scalar_one()=='a7c2e9f4b6d1'
+    assert set(db.scalars(text('SELECT version_num FROM alembic_version'))) == previous_heads
     assert db.execute(text("SELECT count(*) FROM information_schema.columns WHERE table_name='sys_user' AND column_name='authorization_profile' AND table_schema=current_schema()" )).scalar_one()==1
     db.rollback()
 

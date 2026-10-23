@@ -1,0 +1,266 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: part_master
+  rules:
+    - name: explicit-adopt_candidate
+      actions: ["adopt_candidate"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "adopt_candidate" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-create
+      actions: ["create"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "create" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-create_candidate
+      actions: ["create_candidate"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "create_candidate" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-edit
+      actions: ["edit"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "edit" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-enrichment-research
+      actions: ["enrichment.research"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "enrichment.research" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-enrichment-research-text
+      actions: ["enrichment.research.text"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "enrichment.research.text" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-normalize
+      actions: ["normalize"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "normalize" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-read
+      actions: ["read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-read_audit
+      actions: ["read_audit"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "read_audit" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-read_candidates
+      actions: ["read_candidates"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "read_candidates" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-read_inactive
+      actions: ["read_inactive"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "read_inactive" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-reject_candidate
+      actions: ["reject_candidate"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "reject_candidate" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-set_availability
+      actions: ["set_availability"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "set_availability" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-confirm-distinct
+      actions: ["confirm_distinct"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "confirm_distinct" in P.attr.grants.part_master.actions && "create" in P.attr.grants.part_master.actions &&
+            "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-job-read
+      actions: ["job.read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "job.read" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-job-cancel
+      actions: ["job.cancel"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "job.cancel" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && "job.read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-job-retry
+      actions: ["job.retry"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "job.retry" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && "job.read" in P.attr.grants.part_master.actions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-stage-migration
+      actions: ["stage_migration"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "stage_migration" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && "read_legacy" in P.attr.grants.part_master.actions && "legacy_evidence" in P.attr.grants.part_master.field_permissions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-materialize-migration
+      actions: ["materialize_migration"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "materialize_migration" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && "read_legacy" in P.attr.grants.part_master.actions && "legacy_evidence" in P.attr.grants.part_master.field_permissions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}
+    - name: explicit-read-legacy
+      actions: ["read_legacy"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "read_legacy" in P.attr.grants.part_master.actions && "read" in P.attr.grants.part_master.actions && "legacy_evidence" in P.attr.grants.part_master.field_permissions && P.attr.grants.part_master.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_master", "scope": P.attr.grants.part_master.scope, "version": P.attr.grants.part_master.version,
+             "field_permissions": P.attr.grants.part_master.field_permissions}

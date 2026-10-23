@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 from types import MappingProxyType
 
+from app.authz.pn_resources import PN_RESOURCES
+
 SALES_RESOURCE = "sales_analysis"
 SALES_ACTIONS = frozenset({"read", "export"})
 SALES_SCOPES = frozenset({"all", "assigned_customers"})
@@ -36,6 +38,11 @@ class ResourceDefinition:
 # Closed registry. A legacy page key or an arbitrary DB resource string does
 # not become a migrated resource merely by being passed to the engine.
 RESOURCE_DEFINITIONS = MappingProxyType({
+    **{name: ResourceDefinition(name, frozenset(value["actions"]), frozenset({"all"}),
+        frozenset(value["fields"]), frozenset(),
+        action_dependencies=tuple(tuple(pair) for pair in value["dependencies"]),
+        action_field_dependencies=tuple(tuple(pair) for pair in value.get("action_fields", ())))
+       for name, value in PN_RESOURCES.items()},
     SALES_RESOURCE: ResourceDefinition(
         SALES_RESOURCE, SALES_ACTIONS, SALES_SCOPES, SALES_FIELD_PERMISSIONS,
         frozenset({"request.resource.attr.customer_id"}),

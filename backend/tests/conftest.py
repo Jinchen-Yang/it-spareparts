@@ -125,6 +125,7 @@ except BaseException:
 _app_engine = engine
 
 _TABLES = [
+    "sys_catalog_proof_nonce", "sys_catalog_subject_binding",
     "chat_message", "chat_session",
     "replenishment_review_line",
     "replenishment_review",

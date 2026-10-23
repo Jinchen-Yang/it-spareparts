@@ -21,6 +21,7 @@ class CatalogAccess:
     actor: ActorContext
     authorize: Authorize
     confirmation_secret: bytes | None = None
+    authorize_job: Callable | None = None
 
 
 AccessResolver = Callable[[Request, Session], CatalogAccess]
