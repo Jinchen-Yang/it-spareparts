@@ -44,8 +44,15 @@ python3 scripts/shared-pn-local/configure.py /tmp/pn-network-fixture --itsp /pat
 12. 当前撤权能阻止原写入回执重放，随后恢复合成授权。
 13. 共享写入不改变原本地库存关联。
 
-## 本轮浏览器证据
+## 固定构建浏览器证据
 
-已实际登录两站，ITSP 保存描述后 Shop 读取；Shop 再保存后 ITSP 刷新得到相同描述。ITSP 审计列表同时出现两个客户端来源。PM `output/playwright/` 中保留 `itsp-shared-pn-roundtrip.png`、`shop-shared-pn-roundtrip.png`、`itsp-shared-pn-audit.png`。
+2026-10-23 20:36–20:40 UTC，在 Vite preview 提供的生产构建上重新核验：ITSP `45e6959`、Shop `115a1eb`；后续修正测试夹具与库存导入，不改变该页面链路。使用合成 PN `NET-79DA886C`（共享 part 5、Shop UUID `23c91364-2fd6-432e-b75a-de5cc1dd1e54`）。
 
-开发期曾在 Vite 正在更新 AuthContext 时出现 HMR 上下文错误，不能把该过程截图当稳定构建验收。最终验收需要固定提交/构建后重新核查请求与页面。代理浏览器仅用于开发验证；用户点按、真实数据副本守恒和 OSS 对象核验仍分别记录。
+- ITSP 保存描述，Shop 刷新后读到同值；Shop 再保存，ITSP 刷新后的文本框值相同。
+- 两端审计表同时显示这两次修改；主体为同一映射账号，入口分别为 `itsp`、`shop`，来源为 `manual`。
+- Shop 390 × 844 移动布局自动进入 `/m/pn/...`，保留商品资料、好坏件和图库入口。
+- 最终页面会话 console 检查两站均 0 errors / 0 warnings。开发期 HMR 日志单独保留，不混入固定构建证据。
+
+截图在 PM `output/playwright/`：`itsp-stable-save.png`、`itsp-stable-audit.png`、`shop-stable-audit.png`、`shop-stable-mobile.png`。真实 HTTP 联调报告 `network-report.json` 的 13 项全部通过。
+
+代理浏览器用于开发验证，不替代用户点按验收；生产数据副本守恒和真实 OSS 对象核验也未由本轮合成数据测试代替。图库提供方在该环境关闭，页面明确提示，未调用真实 OSS、FC 或模型。
