@@ -574,7 +574,7 @@ def list_parts(db: Session, *, context: CommandContext, authorize: Authorize,
                query: str = "", cursor: str | None = None, limit: int = 50,
                include_inactive: bool = False, category_major: str | None = None,
                part_ids: list[int] | None = None, include_gallery: bool = False,
-               missing_image: bool | None = None) -> dict:
+               missing_image: bool | None = None, fill_status: str | None = None) -> dict:
     decision = _authorize(db, context, authorize, "list", None)
     # A registered SQL scope adapter is required before narrower row grants can list.
     if decision.metadata.get("scope") != "all":
@@ -588,6 +588,11 @@ def list_parts(db: Session, *, context: CommandContext, authorize: Authorize,
             raise CatalogError("auth.forbidden", "不能按无权读取的品类筛选", status_code=403)
     if part_ids is not None and (len(part_ids) > 200 or any(type(pid) is not int or pid < 1 for pid in part_ids)):
         raise CatalogError("request.validation_failed", "型号范围超出限制", status_code=422)
+    if fill_status is not None:
+        if fill_status not in {"pending", "ai_filled", "confirmed", "needs_review", "unrecorded"}:
+            raise CatalogError("request.validation_failed", "资料状态无效", status_code=422)
+        if not _allowed(decision.readable_fields, "fill_status"):
+            raise CatalogError("auth.forbidden", "不能按无权读取的资料状态筛选", status_code=403)
     gallery_columns = []
     has_image = None
     if include_gallery or missing_image is not None:
@@ -601,7 +606,7 @@ def list_parts(db: Session, *, context: CommandContext, authorize: Authorize,
     fingerprint = _digest({"query": query, "principal": context.actor.principal_id,
                             "client": context.actor.client_id, "include_inactive": include_inactive,
                             "category_major": category_major, "part_ids": sorted(set(part_ids)) if part_ids is not None else None,
-                            "include_gallery": include_gallery, "missing_image": missing_image})
+                            "include_gallery": include_gallery, "missing_image": missing_image, "fill_status": fill_status})
     after_id = _decode_cursor(cursor, fingerprint)
     columns = [DimPart.id.label("part_id"), DimPart.pn_std,
                func.coalesce(PartState.identity_revision, 0).label("identity_revision"),
@@ -622,6 +627,8 @@ def list_parts(db: Session, *, context: CommandContext, authorize: Authorize,
         stmt = stmt.where(DimPart.id.in_(part_ids))
     if category_major is not None:
         stmt = stmt.where(DimPart.category_major == category_major)
+    if fill_status is not None:
+        stmt = stmt.where(PartState.fill_status.is_(None) if fill_status == "unrecorded" else PartState.fill_status == fill_status)
     if missing_image is not None:
         stmt = stmt.where(~has_image if missing_image else has_image)
     if not include_inactive:
