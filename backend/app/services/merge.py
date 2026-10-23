@@ -46,6 +46,18 @@ class MergeError(Exception):
     """合并前置条件不满足。"""
 
 
+def require_latest_merge_log(db: Session, log: ProductMergeLog) -> None:
+    """A source's older merge cycle can never undo its newer cycle (ABA).
+
+    Caller holds the identity topology lock. A previous successful command may
+    still replay its immutable receipt; this guard applies only to new mutations.
+    """
+    latest_id = db.scalar(select(func.max(ProductMergeLog.id)).where(
+        ProductMergeLog.source_part_id == log.source_part_id))
+    if latest_id != log.id:
+        raise MergeError("该合并记录已被同一来源 PN 的后续合并替代，请读取最新记录")
+
+
 def _field_protected(field: str, locked: set[str]) -> bool:
     if field == "brand_id":
         return "brand" in locked
@@ -266,6 +278,7 @@ def unmerge_in_transaction(db: Session, merge_log_id: int, operated_by: str | No
     log_row = db.get(ProductMergeLog, merge_log_id)
     if log_row is None:
         raise MergeError(f"合并日志不存在: {merge_log_id}")
+    require_latest_merge_log(db, log_row)
 
     # 锁源/目标（升序）
     ids = sorted({log_row.source_part_id, log_row.target_part_id}
