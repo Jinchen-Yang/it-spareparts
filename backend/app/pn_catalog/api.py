@@ -30,7 +30,8 @@ __all__ = ["get_part", "list_parts", "create_part", "patch_profile", "set_availa
            "get_receipt", "list_audit_events", "capture_state", "capture_states",
            "record_legacy_change", "record_legacy_changes", "legacy_context",
            "blocked_spec_keys", "read_states", "read_versions", "acquire_identity_lock", "acquire_creation_locks",
-           "CommandHandle", "begin_command", "finish_command", "receipt_meta", "record_audit"]
+           "CommandHandle", "begin_command", "finish_command", "receipt_meta", "record_audit",
+           "check_description_spec_access"]
 
 
 def _json(value) -> str:
@@ -303,11 +304,24 @@ def _derived_spec_paths(before: dict | None, changes: dict, manual_specs: dict) 
 
 
 def _check_derived_access(before: dict | None, changes: dict, specs: dict,
-                          write_decision: AuthorizationDecision, read_decision: AuthorizationDecision) -> None:
+                          write_decision: AuthorizationDecision, read_decision: AuthorizationDecision) -> set[str]:
     paths = _derived_spec_paths(before, changes, specs)
     _check_fields(write_decision, paths)
     if any(not _allowed(read_decision.readable_fields, path) for path in paths):
         raise CatalogError("auth.forbidden", "描述变更需要对应派生规格的读取权限", status_code=403)
+    return paths
+
+
+def check_description_spec_access(before: dict | None, description: str | None, *,
+                                  write_decision: AuthorizationDecision,
+                                  read_decision: AuthorizationDecision) -> set[str]:
+    """Validate a locked writer's effective extraction delta before any mutation.
+
+    Import adapters share manual/tombstone protection semantics with profile edits;
+    unchanged or protected specs require no unrelated field grant.
+    """
+    return _check_derived_access(before, {"description": description}, {},
+                                 write_decision, read_decision)
 
 
 def _reject_unadopted_ai(context: CommandContext) -> None:
@@ -534,7 +548,9 @@ def _encode_cursor(row_id: int, fingerprint: str) -> str:
 
 def list_parts(db: Session, *, context: CommandContext, authorize: Authorize,
                query: str = "", cursor: str | None = None, limit: int = 50,
-               include_inactive: bool = False) -> dict:
+               include_inactive: bool = False, category_major: str | None = None,
+               part_ids: list[int] | None = None, include_gallery: bool = False,
+               missing_image: bool | None = None) -> dict:
     decision = _authorize(db, context, authorize, "list", None)
     # A registered SQL scope adapter is required before narrower row grants can list.
     if decision.metadata.get("scope") != "all":
@@ -543,8 +559,25 @@ def list_parts(db: Session, *, context: CommandContext, authorize: Authorize,
         _authorize(db, context, authorize, "read_inactive", None)
     if not 1 <= limit <= 200 or len(query) > 256:
         raise CatalogError("request.validation_failed", "查询参数超出范围", status_code=422)
+    if category_major is not None:
+        if len(category_major) > 128 or not _allowed(decision.readable_fields, "category_major"):
+            raise CatalogError("auth.forbidden", "不能按无权读取的品类筛选", status_code=403)
+    if part_ids is not None and (len(part_ids) > 200 or any(type(pid) is not int or pid < 1 for pid in part_ids)):
+        raise CatalogError("request.validation_failed", "型号范围超出限制", status_code=422)
+    gallery_columns = []
+    has_image = None
+    if include_gallery or missing_image is not None:
+        gallery_access = _authorize(db, context, authorize, "gallery.read", None)
+        if gallery_access.metadata.get("scope") != "all" or not _allowed(gallery_access.readable_fields, "gallery"):
+            raise CatalogError("auth.forbidden", "缺少图库读取权限", status_code=403)
+        from .directory import gallery_expressions
+        has_image, main_entry = gallery_expressions()
+        if include_gallery:
+            gallery_columns = [has_image.label("has_image"), main_entry.label("main_entry_id")]
     fingerprint = _digest({"query": query, "principal": context.actor.principal_id,
-                            "client": context.actor.client_id, "include_inactive": include_inactive})
+                            "client": context.actor.client_id, "include_inactive": include_inactive,
+                            "category_major": category_major, "part_ids": sorted(set(part_ids)) if part_ids is not None else None,
+                            "include_gallery": include_gallery, "missing_image": missing_image})
     after_id = _decode_cursor(cursor, fingerprint)
     columns = [DimPart.id.label("part_id"), DimPart.pn_std,
                func.coalesce(PartState.identity_revision, 0).label("identity_revision"),
@@ -557,7 +590,13 @@ def list_parts(db: Session, *, context: CommandContext, authorize: Authorize,
             columns.append(getattr(DimPart, key))
     if _allowed(decision.readable_fields, "manufacturer"):
         columns.append(PartState.manufacturer)
-    stmt = select(*columns).select_from(DimPart).outerjoin(PartState, PartState.part_id == DimPart.id).where(DimPart.id > after_id)
+    stmt = select(*columns, *gallery_columns).select_from(DimPart).outerjoin(PartState, PartState.part_id == DimPart.id).where(DimPart.id > after_id)
+    if part_ids is not None:
+        stmt = stmt.where(DimPart.id.in_(part_ids))
+    if category_major is not None:
+        stmt = stmt.where(DimPart.category_major == category_major)
+    if missing_image is not None:
+        stmt = stmt.where(~has_image if missing_image else has_image)
     if not include_inactive:
         stmt = stmt.where(DimPart.status == "active", or_(PartState.part_id.is_(None), PartState.availability == "active"))
     if query:

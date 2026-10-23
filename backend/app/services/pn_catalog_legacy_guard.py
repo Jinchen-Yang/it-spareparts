@@ -150,3 +150,27 @@ def guard_import(db, context):
             db, context=context, action="update_profile", fields=fields
         ),
     }
+
+
+def guard_import_description_specs(db, context, plans):
+    """Authorize exactly the derived delta before the source upsert changes any row."""
+    if not plans or not is_authoritative(db, "part_master"):
+        return {}
+    from app.pn_catalog import api as catalog
+    from app.services.pn_catalog_access import resolve_job_access
+
+    access = resolve_job_access(db, context.actor)
+    write = access.authorize(db, context, "update_profile", None)
+    read = access.authorize(db, context, "read", None)
+    # Current part_master supports all-PN grants. Do not silently reuse one
+    # decision across rows if a future adapter introduces narrower scopes.
+    if write.metadata.get("scope") != "all" or read.metadata.get("scope") != "all":
+        raise CatalogError(
+            "auth.forbidden", "导入需要明确的全型号权限", status_code=403
+        )
+    fields = set()
+    for before, description in plans:
+        fields |= catalog.check_description_spec_access(
+            before, description, write_decision=write, read_decision=read
+        )
+    return {"fields": sorted(fields), "decision": dict(write.metadata)}

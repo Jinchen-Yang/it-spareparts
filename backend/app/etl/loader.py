@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from app.etl import expense_void, mapping
 from app.etl.transform import SOFT_ERROR_TYPES, TransformResult
 from app.pn_catalog import api as catalog
-from app.services.pn_catalog_legacy_guard import guard_import, import_context, prepare_import_actor
+from app.services.pn_catalog_legacy_guard import guard_import, guard_import_description_specs, import_context, prepare_import_actor
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inventory import Inventory
 from app.models.maintenance import (
@@ -283,6 +283,25 @@ def _upsert_parts(session: Session, part_attrs: dict[str, dict], is_sales: bool,
     ids = list(session.scalars(select(DimPart.id).where(
         DimPart.pn_std.in_(sorted(part_attrs))).order_by(DimPart.id)))
     before = catalog.capture_states(session, ids)
+
+    # Predict the same fill-if-empty / locked-field result as the SQL below.
+    # Parent and creation locks keep this baseline stable until extraction.
+    # Validate every PN first so a denied later row cannot leave earlier writes.
+    by_pn = {state["identity"]["pn_std"]: state for state in before.values()}
+    extraction_plans = []
+    for pn, attrs in part_attrs.items():
+        previous = by_pn.get(pn)
+        if previous and previous["identity"]["status"] == "merged":
+            continue
+        old_description = previous["profile"]["description"] if previous else None
+        description = old_description
+        if not previous or (old_description is None and "description" not in previous["locked_fields"]):
+            description = attrs.get("description")
+        if description != old_description:
+            extraction_plans.append((previous, description))
+    derived = guard_import_description_specs(session, catalog_context, extraction_plans)
+    if derived:
+        authorization["source_derived_specs"] = derived
 
     def _respect_lock(field: str, normal):
         """采购人工维护过(locked_fields 含该字段)→ 一律保留人工值；否则走原优先级。
