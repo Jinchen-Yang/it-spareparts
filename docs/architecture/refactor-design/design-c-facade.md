@@ -1,5 +1,7 @@
 # 方案 C：按常用流程提供 Application Facade，以兼容 Adapter 逐个替换旧入口
 
+> 口径时效更正（2026-10-23）：以下是独立设计备选。业务规则须以[近15天口径台账](recent-policy-baseline.md)为准；文中“保留/冻结/继续”描述不得把旧代码或旧文件升级为当前业务授权，未重申的历史条款待核。
+
 > 综合稿说明：本文件保留独立备选方案，未来的 fresh 授权、Session 所有权和接口类型不是当前已实现状态。近期实施以[总体设计](../maintenance-refactor-design.md)及[批次计划](migration-and-acceptance.md)为准；尤其 V2 全面锁后重新鉴权尚需 R3 调查，不从本方案流程示意推断现状。
 
 状态：设计备选，仅文档。基线 `fa97e2490f480336e29f51c84bfdaac3ee4f12fe`，main `7a9fd20`。没有修改业务代码，没有把下面的接口当作已实现。
