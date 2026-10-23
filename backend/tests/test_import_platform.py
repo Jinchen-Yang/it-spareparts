@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 
 from app.api.imports import _process_import_job
 from app.etl import loader, pipeline, reader
-from app.models.system import SysAuditLog, SysImportBatch, SysImportJob, SysRawFile
+from app.models.system import SysAuditLog, SysImportBatch, SysImportJob, SysRawFile, SysUser
 from tests import factories as f
 
 
@@ -307,15 +307,22 @@ def test_excluded_warehouse_rows_skipped():
 def test_shared_catalog_import_audit_uses_verified_account_and_file_evidence(db, tmp_path):
     from app.pn_catalog.models import AuditEvent
 
-    path = _inv_xlsx(tmp_path)
-    batch = pipeline.run_import(db, path, "inv.xlsx", uploaded_by="当前显示名", actor_user_id=731)
+    user = SysUser(username="verified-importer", display_name="当前显示名",
+                   role="readonly", password_hash="unused", token_version=7)
+    db.add(user)
     db.commit()
-    assert batch.actor_user_id == 731
+    path = _inv_xlsx(tmp_path)
+    batch = pipeline.run_import(db, path, "inv.xlsx", uploaded_by=user.display_name,
+                                actor_user_id=user.id, actor_authorization_epoch=user.token_version)
+    db.commit()
+    assert batch.actor_user_id == user.id
+    assert batch.actor_authorization_epoch == 7
     events = list(db.scalars(select(AuditEvent).where(AuditEvent.action.in_(
         ["profile.ingest", "identity.ingest_aliases"]))))
     assert events
     for event in events:
-        assert event.principal_id == "account:731"
+        assert event.principal_id == f"account:{user.id}"
+        assert event.actor["authorization_epoch"] == 7
         assert event.actor["display_name"] == "当前显示名"
         assert event.actor["executor_id"] == "itsp-import-worker"
         assert event.actor["provenance"]["evidence_id"] == f"import_batch:{batch.id}"
@@ -325,18 +332,51 @@ def test_shared_catalog_import_audit_uses_verified_account_and_file_evidence(db,
 def test_import_worker_preserves_persisted_actor_across_name_changes(db, tmp_path):
     from app.pn_catalog.models import AuditEvent
 
+    user = SysUser(username="submitted-importer", display_name="提交时名字",
+                   role="readonly", password_hash="unused", token_version=11)
+    db.add(user)
+    db.flush()
     path = _inv_xlsx(tmp_path)
-    job = SysImportJob(created_by="提交时名字", actor_user_id=732, total_files=1, mode="skip")
+    job = SysImportJob(created_by=user.display_name, actor_user_id=user.id,
+                      actor_authorization_epoch=user.token_version, total_files=1, mode="skip")
     db.add(job)
     db.commit()
     job_id = job.id
-    _process_import_job(job_id, [(path, "inv.xlsx")], "skip", "当前执行显示名")
+    user.username, user.display_name = "renamed-importer", "当前执行显示名"
+    db.commit()
+    _process_import_job(job_id, [(path, "inv.xlsx")], "skip", user.display_name)
     db.expire_all()
     batch = db.scalar(select(SysImportBatch).where(SysImportBatch.import_job_id == job_id))
     assert db.get(SysImportJob, job_id).status == "done"
-    assert batch.actor_user_id == 732
+    assert batch.actor_user_id == user.id
+    assert batch.actor_authorization_epoch == 11
     event = db.scalar(select(AuditEvent).where(AuditEvent.action == "profile.ingest"))
-    assert event.principal_id == "account:732"
+    assert event.principal_id == f"account:{user.id}"
+    assert event.actor["authorization_epoch"] == 11
+    assert event.actor["display_name"] == "当前执行显示名"
+
+
+@pytest.mark.parametrize("actor_epoch", [None, 0])
+def test_import_actor_epoch_is_explicit_and_never_reconstructed_from_current_account(db, tmp_path, actor_epoch):
+    from app.pn_catalog.models import AuditEvent
+
+    user = SysUser(username="historical-importer", display_name="旧显示名",
+                   role="readonly", password_hash="unused", token_version=23)
+    db.add(user)
+    db.flush()
+    job = SysImportJob(created_by=user.display_name, actor_user_id=user.id,
+                      actor_authorization_epoch=actor_epoch, total_files=1, mode="skip")
+    db.add(job)
+    db.commit()
+    _process_import_job(job.id, [(_inv_xlsx(tmp_path), "inv.xlsx")], "skip", "新显示名")
+    db.expire_all()
+    batch = db.scalar(select(SysImportBatch).where(SysImportBatch.import_job_id == job.id))
+    assert batch.actor_user_id == user.id and batch.actor_authorization_epoch == actor_epoch
+    event = db.scalar(select(AuditEvent).where(AuditEvent.action == "profile.ingest"))
+    # Epoch 0 is valid evidence; NULL is unknown. Neither becomes the current 23.
+    assert event.actor["authorization_epoch"] == actor_epoch
+    assert event.principal_id == ("legacy:unknown" if actor_epoch is None else f"account:{user.id}")
+    assert event.actor["actor_kind"] == ("unknown" if actor_epoch is None else "human")
 
 
 def test_historical_import_name_is_not_upgraded_to_canonical_actor(db, tmp_path):
