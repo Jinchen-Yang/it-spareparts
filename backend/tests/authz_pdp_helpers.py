@@ -1,7 +1,9 @@
 """Real pinned PDP fixture shared by authorization and sales integration tests."""
 from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -10,6 +12,32 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 import pytest
+
+
+def local_cerbos_config(source: str, *, http_port: int, grpc_port: int, policies: Path) -> str:
+    """Render fixture fields once; generated addresses must never be substituted again."""
+    replacements = {
+        "httpListenAddr": f"127.0.0.1:{http_port}",
+        "grpcListenAddr": f"127.0.0.1:{grpc_port}",
+        # A JSON string is also a YAML quoted scalar, including spaces and colons.
+        "directory": json.dumps(str(policies)),
+    }
+    counts = dict.fromkeys(replacements, 0)
+
+    def replace_field(match):
+        field = match["field"]
+        counts[field] += 1
+        return f'{match["indent"]}{field}: {replacements[field]}'
+
+    config = re.sub(
+        r"^(?P<indent>[ \t]*)(?P<field>httpListenAddr|grpcListenAddr|directory):[^\n]*$",
+        replace_field,
+        source,
+        flags=re.MULTILINE,
+    )
+    if any(count != 1 for count in counts.values()):
+        raise ValueError("Cerbos fixture requires exactly one HTTP, gRPC and policy-directory field")
+    return config
 
 
 @contextmanager
@@ -32,10 +60,10 @@ def running_cerbos(directory: Path):
         for sock in sockets:
             sock.close()
     directory.mkdir(parents=True, exist_ok=True)
-    config = (root / "deploy/cerbos/config.yaml").read_text()
-    config = config.replace("0.0.0.0:3592", f"127.0.0.1:{http_port}")
-    config = config.replace("127.0.0.1:3593", f"127.0.0.1:{grpc_port}")
-    config = config.replace("directory: /policies", f"directory: {policies}")
+    config = local_cerbos_config(
+        (root / "deploy/cerbos/config.yaml").read_text(),
+        http_port=http_port, grpc_port=grpc_port, policies=policies,
+    )
     config_path = directory / "config.yaml"
     config_path.write_text(config)
     url = f"http://127.0.0.1:{http_port}"
