@@ -364,6 +364,7 @@ def create_account(response: Response, body: dict = Body(...), db: Session = Dep
 
     u = SysUser(username=uname, role="readonly", display_name=body.display_name,
                 salesperson_name=body.salesperson_name,
+                authorization_legacy_seed_eligible=True,
                 password_hash=hash_password(body.password))
     if body.role == "admin":
         # 直接建管理员：仅 admin 操作者（模板层无 admin 套用路径）

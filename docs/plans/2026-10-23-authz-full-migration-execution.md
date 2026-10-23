@@ -65,3 +65,9 @@ S1 wire、5 份共 45 个 DTO 样例已完成前后端对拍和独立设计复�
 终轮本地后端组合 268 passed（`/tmp/itsp-authz-s1-all-targeted-final.log`），涵盖 core、管理、独立反例、销售集成和旧账号/权限中心/改密；其后第三角新增两例通过 `pg_blocking_pids` 观察真实等锁再撤权的用例，独立 2 passed。另旧销售 163 passed。前端完整一轮 164 文件、1,964 tests 通过；随后新增中心 3 例和独立第 7 例均在专项组合通过。最终 TypeScript + Vite build 通过。这些不是所有后端测试，也不是最终精确提交 CI 的替代证据。
 
 实施/复审记录：`s1-management-implementation-report.md`、`s1-root-control-plane-review.md`、`s1-implementation-independent-review.md`、`s1-core-business-cutover-review.md`（位于 `docs/reviews/authz-rewrite-20261023/`）。当前运行 396 个 method/path，目录为 1 implemented / 84 planned / 2 retired；S2–S4 未实施，不能据目录条目数宣称已迁完。S1 精确提交 CI 全绿之前只做下一阶段只读准备。
+
+### S1 后续迁移来源修订
+
+下一阶段的只读检查发现：规范建号 `none` 和规范空模板，与部分旧对象一样可能没有 Grant 或有效包，后续 seed 不能以空值判断旧来源。S1 补持久的旧迁移资格标记，规范创建/复制默认不具备旧种子资格，旧存量与旧创建入口明确记录来源；已有规范资源仍优先保留。该修订须通过独立迁移/越权测试及新精确提交的全量 CI 后才能进入 S2。此前 `bad6976` 的 CI 仅能证明修订前候选。
+
+修订已完成：规范/旧来源明确区分，降级先锁相关表再检查，拒绝擦除 cutover 或非旧来源。作者来源与管理组合 82 passed；独审与三个旧回归文件组合 84 passed；历史降级调用的完整选集最终 123 passed（`/tmp/itsp-authz-s1-all-downgrades-final.log`）。修订前完整 CI 的 10 个失败均已定位为旧测试接入问题并保留原断言修复；新增来源守卫所影响的旧 fixture 明确标注来源，另修池迁移未依赖标准数据库清理导致的顺序污染（前置维保历史 + 全池文件 16 passed）。这些补充结果须由修订提交的新全量 CI 再确认；S2 仍未开始实现。

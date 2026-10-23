@@ -963,6 +963,8 @@ def test_new_actions_backfilled_false_in_custom_template_and_seeded_accounts(db)
 def test_downgrade_removes_only_new_objects_and_keeps_existing_milestones(db):
     prefix = "downgrade"
     user_id = _seed_parents(db, prefix=prefix)
+    # This roundtrip preserves a legacy owner and its existing business facts.
+    db.execute(text("UPDATE sys_user SET authorization_legacy_seed_eligible=true WHERE id=:id"), {"id": user_id})
     pid, pcid = f"{prefix}-project", f"{prefix}-contract"
     _insert_milestone(
         db,

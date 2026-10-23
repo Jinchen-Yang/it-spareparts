@@ -320,9 +320,11 @@ def test_real_postgres_s0_seed_and_s1_source_backfill_are_distinct(db):
         assert users['old-sales'].authorization_profile['template_snapshot'] is None
         assert users['old-sales'].token_version==1 and users['old-admin'].token_version==1
         assert users['old-denied'].authorization_profile==management.empty_profile() and users['old-denied'].token_version==0
+        assert all(u.authorization_legacy_seed_eligible is True for u in users.values())
         assert db.scalar(select(func.count()).select_from(SysAuthorizationCutover))==0
         assert db.scalar(select(func.count()).select_from(SysCustomerAssignment))==0
         assert all(t.authorization_bundle=={} for t in db.scalars(select(SysRoleTemplate)))
+        assert all(t.authorization_legacy_seed_eligible is True for t in db.scalars(select(SysRoleTemplate)))
     finally:
         db.rollback();command.upgrade(config,'head')
 
@@ -421,6 +423,7 @@ def test_cutover_marker_prevents_schema_downgrade(db,client):
     assert db.scalar(select(func.count()).select_from(SysAuthorizationCutover))==1
     assert set(db.scalars(text('SELECT version_num FROM alembic_version'))) == previous_heads
     assert db.execute(text("SELECT count(*) FROM information_schema.columns WHERE table_name='sys_user' AND column_name='authorization_profile' AND table_schema=current_schema()" )).scalar_one()==1
+    assert db.execute(text("SELECT count(*) FROM information_schema.columns WHERE table_name IN ('sys_user','sys_role_template') AND column_name='authorization_legacy_seed_eligible' AND table_schema=current_schema()")).scalar_one()==2
     db.rollback()
 
 
