@@ -235,7 +235,7 @@ it("bulk executes the normalized command once; editing options invalidates an ol
     fingerprint: preview.fingerprint,
   });
 });
-it("bulk conflict discards fingerprint and never automatically replays", async () => {
+it.each([false, true])("bulk conflict discards fingerprint and never automatically replays (modal entering: %s)", async (modalEntering) => {
   mocks.authzCommand.mockResolvedValueOnce(preview).mockRejectedValueOnce({
     response: {
       status: 409,
@@ -257,10 +257,21 @@ it("bulk conflict discards fingerprint and never automatically replays", async (
     expect(screen.getByRole("button", { name: "确认执行预览" })).toBeEnabled(),
   );
   fireEvent.click(screen.getByRole("button", { name: "确认执行预览" }));
-  expect(await screen.findByText("目标版本已改变")).toBeVisible();
+  const dialog = screen.getByRole("dialog");
+  if (modalEntering) dialog.style.visibility = "hidden";
+  const conflict = await screen.findByText("目标版本已改变");
+  if (modalEntering) {
+    // Reproduce a conflict arriving before the portal's enter transition ends:
+    // finding the error in the DOM must not be mistaken for a visible alert.
+    expect(conflict).not.toBeVisible();
+    setTimeout(() => { dialog.style.visibility = ""; }, 0);
+  }
+  await waitFor(() => expect(screen.getByText("目标版本已改变")).toBeVisible());
   expect(screen.getByRole("button", { name: "确认执行预览" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "确认执行预览" }));
   expect(mocks.authzCommand).toHaveBeenCalledTimes(2);
   expect(done).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled();
 });
 it("account clear override uses saved source operation and expected epoch/version, without copying latest template", async () => {
   render(

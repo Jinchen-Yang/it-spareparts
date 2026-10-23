@@ -107,3 +107,9 @@ CERBOS_BINARY=/tmp/itsp-authz-engine-feasibility-20261023/binary/cerbos \
 追加逐项审查 data_quality、collection_reminders、manager_workbook_v3、project_note、contract_amount_remediation、maintenance_roundtrip、replenishment_atomic，以及 maintenance_beta/boss、replenishment_beta、sales_analytics 四个 permission migration diff。改动仅把被测历史账号/模板声明为 legacy 来源；JSON null/array、快照回退、权限覆盖、历史事实与降级拒绝的原断言均未减少。project_note 同 no_return_note，新增旧 token 401 后真实重新登录，继续原非空备注保护验证。
 
 `test_migration_manual_pool.py::preserve_pool_seq` 从仅依赖 migrated 改为依赖标准 db 清理合理：清理发生在每个测试自己建立历史事实之前；同时使用 db 的测试复用同一个 fixture，不会再次清掉本例种入的数据。原池 metadata/policy/multi-pool/manual-source 降级保护及回滚断言全部保留，生产 guard 未修改。跨模块 assignment history 的保护仍由 manager_workbook_v3 用例在本例显式种入后验证，不依赖前序测试遗留数据。此处未重复运行；根代理负责完整 downgrade 节点组合证据，静态审查无新增阻断。
+
+### Modal 入场期间冲突提示的测试修订
+
+独立复核 `ModuleControlPlane.test.tsx` 单文件 diff：冲突测试参数化为已显示/正在入场两种状态；后者明确构造错误已在 DOM、祖先 dialog 尚隐藏，再由一次真实零延时 timer 恢复可见。作者红日志 `/tmp/itsp-authz-s1-modal-red.log` 证明原即时可见断言在入场分支失败；修订使用 `waitFor` 等待实际可见，没有把可见性降为仅存在。原执行按钮禁用、API 总计两次、未成功回调仍保持，并新增点击禁用按钮不重放、未关闭窗口断言。成功等待依赖恢复可见的 timer 已执行，不遗留该 timer；afterEach 继续标准 cleanup。这是组件异步可见性契约的确定性模拟，不宣称验证浏览器动画引擎。
+
+独立运行该文件 **13 passed in 6.74s**，日志 `/tmp/itsp-authz-s1-modal-independent.log`；`git diff --check` 通过。未修改测试或业务代码。本修订无阻断，可提交精确 SHA CI；不等同远端 CI 已通过。
