@@ -1,21 +1,16 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useLayoutEffect, useMemo, useRef } from "react";
 
 export type AsyncGuard = () => boolean;
 
 /** Own callback validity and portal cleanup; callers own data, permissions and APIs. */
 export function useAsyncContext(scopeKey: string) {
-  const state = useRef({ key: scopeKey, generation: 0, epoch: 0, sequence: 0, mounted: false });
+  const scope = useMemo(() => ({ key: scopeKey }), [scopeKey]);
+  const state = useRef<{
+    scope: typeof scope | null; epoch: number; sequence: number; mounted: boolean;
+  }>({ scope: null, epoch: 0, sequence: 0, mounted: false });
   const confirmation = useRef<{ close: () => void } | null>(null);
-  if (state.current.key !== scopeKey) {
-    // Invalidate during render, before an old callback can run ahead of effects.
-    state.current.key = scopeKey;
-    state.current.generation += 1;
-    state.current.epoch += 1;
-    state.current.sequence += 1;
-  }
 
   const context = useMemo(() => {
-    const generation = state.current.generation;
     const closeConfirmation = () => {
       const owned = confirmation.current;
       confirmation.current = null;
@@ -23,8 +18,8 @@ export function useAsyncContext(scopeKey: string) {
     };
     const capture = (): AsyncGuard => {
       const epoch = state.current.epoch;
-      return () => state.current.mounted && state.current.key === scopeKey
-        && state.current.generation === generation && state.current.epoch === epoch;
+      return () => state.current.mounted && state.current.scope === scope
+        && state.current.epoch === epoch;
     };
     return {
       capture,
@@ -36,11 +31,13 @@ export function useAsyncContext(scopeKey: string) {
         return () => current() && state.current.sequence === sequence;
       },
       invalidate() {
+        if (state.current.scope !== scope) return;
         state.current.epoch += 1;
         state.current.sequence += 1;
         closeConfirmation();
       },
       ownConfirmation(close: () => void) {
+        if (!capture()()) { close(); return () => {}; }
         const owned = { close };
         confirmation.current = owned;
         // A retiring dialog must not unregister the next dialog in the same flow.
@@ -49,15 +46,19 @@ export function useAsyncContext(scopeKey: string) {
         };
       },
     };
-  }, [scopeKey]);
+  }, [scope]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    // Abandoned concurrent renders must not retire the still-visible scope.
+    state.current.scope = scope;
     state.current.mounted = true;
     return () => {
-      state.current.mounted = false;
-      context.invalidate();
+      if (state.current.scope === scope) {
+        state.current.mounted = false;
+        context.invalidate();
+      }
     };
-  }, [scopeKey, context]);
+  }, [scope, context]);
 
   return context;
 }

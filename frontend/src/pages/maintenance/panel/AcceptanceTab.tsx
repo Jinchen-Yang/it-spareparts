@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { App, Alert, Button, Card, Modal, Space, Table, Tag, Typography, Upload } from "antd";
 import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -71,13 +71,14 @@ export function AcceptanceTab({
   const [uploadInputVersion, setUploadInputVersion] = useState(0);
   const session = localStorage.getItem("token");
   const importAllowed = useRef(canImport);
-  importAllowed.current = canImport;
+  useLayoutEffect(() => { importAllowed.current = canImport; }, [canImport]);
   const readContext = useAsyncContext(JSON.stringify([projectId, session]));
   const uploadContext = useAsyncContext(JSON.stringify([projectId, session, canImport]));
   const scopeGuard = () => {
     const inScope = readContext.capture();
     const requestSession = localStorage.getItem("token");
-    return () => inScope() && localStorage.getItem("token") === requestSession;
+    return () => inScope() && requestSession === session
+      && localStorage.getItem("token") === requestSession;
   };
 
   const load = async (operationCurrent = scopeGuard()) => {

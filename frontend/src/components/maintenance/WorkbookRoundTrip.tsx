@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { App, Alert, Button, List, Modal, Space, Typography, Upload } from "antd";
 import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
 import type {
@@ -130,7 +130,7 @@ export function WorkbookRoundTrip({
   const [retainedDraft, setRetainedDraft] = useState<{ file: File; session: string | null } | null>(null);
   const uploadSession = localStorage.getItem("token");
   const uploadAllowed = useRef(canUpload);
-  uploadAllowed.current = canUpload;
+  useLayoutEffect(() => { uploadAllowed.current = canUpload; }, [canUpload]);
   const downloadContext = useAsyncContext(JSON.stringify([uploadSession]));
   const uploadContext = useAsyncContext(JSON.stringify([uploadSession, canUpload]));
   const activeUpload = useRef<AsyncGuard | null>(null);
@@ -152,7 +152,7 @@ export function WorkbookRoundTrip({
     // 与上传同口径：请求返回时页面已卸载或已切换账号，就不再落文件、不再写反馈。
     const requestSession = localStorage.getItem("token");
     const requestCurrent = downloadContext.begin();
-    const isCurrent = () => requestCurrent()
+    const isCurrent = () => requestCurrent() && requestSession === uploadSession
       && localStorage.getItem("token") === requestSession;
     if (!isCurrent()) return;
     setDownloading(true);
@@ -326,7 +326,7 @@ export function WorkbookRoundTrip({
     if (!uploadAllowed.current || activeUpload.current?.()) return false;
     const requestSession = localStorage.getItem("token");
     const requestCurrent = uploadContext.begin();
-    const isCurrent = () => requestCurrent() && uploadAllowed.current
+    const isCurrent = () => requestCurrent() && requestSession === uploadSession && uploadAllowed.current
       && localStorage.getItem("token") === requestSession;
     if (!isCurrent()) return false;
     activeUpload.current = isCurrent;

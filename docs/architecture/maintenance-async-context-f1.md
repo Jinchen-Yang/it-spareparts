@@ -26,7 +26,7 @@ WorkbookRoundTrip 的六个挂载点为总览、项目面板、备件订单、�
 | 名称 | 类型 | 用途 | 为何这样定义 |
 | --- | --- | --- | --- |
 | scopeKey | string | 当前项目/账号/权限的组合 | 调用方用 JSON 数组编码，hook 不认识业务字段 |
-| generation | number | scope 每次变化的世代 | A→B→A 后旧 A handler 不能重新捕获当前上下文 |
+| scope | 唯一对象 | 提交后的上下文身份 | useMemo 创建、useLayoutEffect 激活；放弃 render 不污染仍显示的页面，A→B→A 也不复活旧 handler |
 | epoch | number | 挂载/手动失效的生命周期 | StrictMode 清理后第二次 effect 可用，第一次回调失效 |
 | sequence | number | 同范围最新请求 | 新请求退役旧请求的本地落地权 |
 | mounted | boolean | effect 是否有效挂载 | 卸载后不得继续旧页面副作用 |
@@ -37,8 +37,8 @@ WorkbookRoundTrip 的六个挂载点为总览、项目面板、备件订单、�
 | readContext / downloadContext | hook 返回对象 | 读取范围 | 不依赖上传权限；撤销上传不等于禁止读取 |
 | uploadContext | hook 返回对象 | 写流程范围 | 权限变化使迟到预检、旧确认及旧刷新失效 |
 | activeUpload | ref<AsyncGuard或null> | 工作簿单次上传 | 已排队的原生 change 不能只靠按钮 disabled 拦截 |
-| importAllowed / uploadAllowed | ref<boolean> | 当前 render 的资格 | await 后核验，避免旧 prop 闭包 |
-| isCurrent / operationCurrent | () => boolean | 组合上下文、请求与实时 token | token 改变但组件尚未重绘时也拒绝旧结果 |
+| importAllowed / uploadAllowed | ref<boolean> | 当前提交页面的资格 | useLayoutEffect 更新，放弃的权限 render 不影响仍显示的页面 |
+| isCurrent / operationCurrent | () => boolean | 组合上下文、请求与实时 token | 实时 token 还必须等于当前提交页面捕获的 token；未重绘时拒绝旧结果及新发起请求 |
 
 不承诺中止网络请求或撤销服务端已提交写入。后端仍执行最终权限校验；hook 仅管理本地回调和门户生命周期。
 
@@ -58,3 +58,11 @@ WorkbookRoundTrip 的六个挂载点为总览、项目面板、备件订单、�
 首轮全前端 1,919 项通过；追加撤权读回用例和旧 handler 世代修正后相关 70 项通过。最终全量、TypeScript、构建及生产依赖扫描结果随 PR 记录。后端/schema/文件协议未改，当前提交 CI 仍验证后端与迁移，不把前端 mocks 当数据库证据。常规门禁后另安排两名独立测试设计者。
 
 可单独 revert，无数据转换。用户点按验收和生产发布均未发生。
+
+## 第二阶段独立反例和修复
+
+常规门禁后两名代理分别从 React 生命周期和真实路由消费者设计新用例，新增 19 项，根代理交叉阅读并合跑 19 项通过。生命周期代理使用 gpt-6-astra，与根代理模型不同。
+
+复核发现三类可复现缺口并已修复：hook 在 render 写 ref 会被未提交的 Suspense transition 污染；上传资格 ref 也有同类问题；旧 UI 在 token 已改变但尚未重绘时发起请求会借用新身份。前两处改为 layout 提交阶段更新，第三处在请求开始和返回均核验页面捕获 token 与实时 token 一致。放弃 transition 后原 UI 继续可用、新账号提交后立即可用都有正控。
+
+真实 App 的 BrowserRouter key={token} 及项目内容 key={projectId} 原来已经使正常账号/项目切换重建子树；不能将孤立组件的 token 窗口外推为已发生的生产泄漏。四个新下载/上传入口反例对精确 main 旧组件也失败，证明此窗口是既有缺口。新增 hook 的 Suspense 问题属于本次回归，已由独立反例捕获。最终修复 SHA 全量结果在 PR 单列；旧 SHA CI 不替代新提交验证。
