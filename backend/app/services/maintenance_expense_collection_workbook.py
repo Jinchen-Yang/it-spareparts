@@ -20,14 +20,13 @@ from __future__ import annotations
 
 import hashlib
 import io
-from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from uuid import uuid4
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app import config
@@ -45,10 +44,22 @@ from app.models.maintenance_project_operations import (
 )
 from app.models.system import SysImportBatch
 
-PROTOCOL_VERSION = "expense-collection-v1"
-SHEET_EXPENSE = "04_报销订单"
-SHEET_COLLECTION = "05_项目经理回款单"
-_META_SHEET = "99_元数据"
+
+# Compatibility exports keep standalone and embedded workbook callers aligned.
+from app.services.maintenance_workbook_protocol import (
+    EXPENSE_COLLECTION_PROTOCOL_VERSION as PROTOCOL_VERSION,
+    SHEET_EXPENSE,
+    SHEET_COLLECTION,
+    _META_SHEET,
+    _EXPENSE_HEADERS,
+    _COLLECTION_HEADERS,
+)
+from app.services.maintenance_workbook_plans import (
+    WorkbookError,
+    ExpenseUpdate,
+    CollectionOp,
+    WorkbookPlan,
+)
 
 # 与 ck_maintenance_collection_status 一致；状态列是自由文本，不校验就会在
 # flush 时撞 CHECK 约束变成 500（直连接口对同样输入是 422「回款确认状态无效」）
@@ -57,86 +68,20 @@ _COLLECTION_STATUSES = frozenset({"confirmed", "unconfirmed", "void"})
 # 与 f_project_expense 的 CHECK 约束一致（税率固定 13%，双口径保留原值）
 TAX_RATE = Decimal("0.13")
 
-_EXPENSE_HEADERS = ["报销单号", "报销日期", "报销人员", "报销类别", "费用分类",
-                    "支出事由", "合同编号", "未税金额", "含税金额(系统计算)",
-                    "流程状态", "备注"]
-_COLLECTION_HEADERS = ["操作", "合同编号", "报告月份", "累计回款金额(含税)",
-                       "回款凭证号", "状态(系统)", "备注"]
 
 _EDITABLE = PatternFill("solid", fgColor="FFF3C4")   # 黄底=可编辑
 _READONLY = PatternFill("solid", fgColor="EFEFEF")
 
 
-class WorkbookError(ValueError):
-    """回传给 API 层映射 422 的用户可读校验错误。"""
-
-    def __init__(
-        self, code: str, message: str, issues: list[dict] | None = None,
-        *, details: dict | None = None,
-    ):
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.issues = issues or []
-        self.details = details or {}
-
-
-@dataclass(frozen=True)
-class ExpenseUpdate:
-    raw_line_id: str
-    is_create: bool = False
-    bxd_no: str | None = None
-    line_no: int | None = None
-    # 2026-08-17 全面放开：所有事实列可改后回传覆盖
-    expense_date: date | None = None
-    person: str | None = None
-    expense_type: str | None = None
-    fee_category: str | None = None
-    reason: str | None = None
-    contract_no: str | None = None
-    amount_ex_tax: Decimal | None = None
-    amount_inc_tax: Decimal | None = None
-    # Source amount basis is read-only in workbooks but must be preserved when
-    # another field or the displayed ex-tax amount is updated.
-    tax_basis: str | None = None
-    data_status: str | None = None
-    remark: str | None = None
-
-
-@dataclass(frozen=True)
-class CollectionOp:
-    operation: str                       # CREATE | VOID | UPDATE
-    project_contract_id: str
-    contract_no: str
-    report_month: date
-    cumulative_amount: Decimal | None    # VOID 时为 None
-    receipt_reference: str | None
-    remark: str | None
-    # 2026-08-17 全面放开：非 VOID 时可覆盖状态
-    collection_status: str | None = None
-
-
-@dataclass(frozen=True)
-class WorkbookPlan:
-    project_id: str
-    expense_updates: tuple[ExpenseUpdate, ...]
-    collection_ops: tuple[CollectionOp, ...]
-
-    @property
-    def summary(self) -> dict:
-        creates = sum(1 for op in self.collection_ops if op.operation == "CREATE")
-        updates = sum(1 for op in self.collection_ops if op.operation == "UPDATE")
-        voids = sum(1 for op in self.collection_ops if op.operation == "VOID")
-        return {
-            "expense_creates": sum(item.is_create for item in self.expense_updates),
-            "expense_updates": sum(not item.is_create for item in self.expense_updates),
-            "collection_creates": creates,
-            "collection_updates": updates,
-            "collection_voids": voids,
-        }
-
-
 # ------------------------------------------------------------------ 导出
+
+
+# Compatibility exports for helpers with independent ownership.
+from app.services.maintenance_workbook_queries import (
+    _current_unique_contracts,
+    project_expenses,
+)
+
 
 def _contracts(db: Session, project_id: str) -> list[MaintenanceProjectContract]:
     return list(db.execute(
@@ -144,117 +89,6 @@ def _contracts(db: Session, project_id: str) -> list[MaintenanceProjectContract]
         .where(MaintenanceProjectContract.project_id == project_id)
         .order_by(MaintenanceProjectContract.effective_from)
     ).scalars())
-
-
-def _current_unique_contracts(
-    db: Session,
-    project_id: str,
-    *,
-    contract_nos: set[str] | None = None,
-    lock: bool = False,
-) -> dict[str, MaintenanceProjectContract]:
-    """Return current contract identities owned by exactly one live relation.
-
-    ``linked_sales_order_no`` is not a foreign key.  Treating it as project
-    ownership leaked the same BXD row through every project that happened to
-    share a contract number.  Expense mutation is therefore allowed only when
-    the URL project owns one current relation and no other current relation in
-    any project uses that contract number.
-
-    During apply, all matching live relationship rows are locked in one global
-    order before uniqueness is recomputed.  This prevents two workbook applies
-    from observing different subsets or taking cross-project rows in reverse
-    order.
-    """
-
-    today = business_today()
-    current_condition = (
-        (MaintenanceProjectContract.effective_from <= today)
-        & (
-            MaintenanceProjectContract.effective_to.is_(None)
-            | (MaintenanceProjectContract.effective_to > today)
-        )
-    )
-    candidates = set(db.scalars(
-        select(MaintenanceProjectContract.contract_no)
-        .where(
-            MaintenanceProjectContract.project_id == project_id,
-            current_condition,
-        )
-        .order_by(
-            MaintenanceProjectContract.contract_no,
-            MaintenanceProjectContract.project_contract_id,
-        )
-    ).all())
-    if contract_nos is not None:
-        candidates &= {str(value) for value in contract_nos if value}
-    if not candidates:
-        return {}
-
-    statement = (
-        select(MaintenanceProjectContract)
-        .where(
-            MaintenanceProjectContract.contract_no.in_(sorted(candidates)),
-            current_condition,
-        )
-        .order_by(
-            MaintenanceProjectContract.contract_no,
-            MaintenanceProjectContract.project_id,
-            MaintenanceProjectContract.project_contract_id,
-        )
-    )
-    if lock:
-        statement = statement.with_for_update()
-    rows = list(db.scalars(statement).all())
-    by_no: dict[str, list[MaintenanceProjectContract]] = {}
-    for row in rows:
-        by_no.setdefault(row.contract_no, []).append(row)
-    return {
-        contract_no: matches[0]
-        for contract_no, matches in by_no.items()
-        if len(matches) == 1 and matches[0].project_id == project_id
-    }
-
-
-def project_expenses(db: Session, project_id: str) -> list[FProjectExpense]:
-    """Project-scoped editable expenses from canonical attribution.
-
-    作废行（data_status='已作废'）彻底不导出（#264/#267 读侧修复 3：
-    用户拍板 2026-08-19）——导出口径即回传口径，缺行=作废的对账语义
-    要求导出侧从源头剔除已作废行，否则作废行永远循环出现在往返文件里。
-    """
-    writable_contracts = _current_unique_contracts(db, project_id)
-    contract_nos = set(writable_contracts)
-    if not contract_nos:
-        return []
-    rows = list(db.execute(
-        select(FProjectExpense, MaintenanceProjectExpenseAttribution)
-        .join(
-            MaintenanceProjectExpenseAttribution,
-            MaintenanceProjectExpenseAttribution.raw_expense_line_id
-            == FProjectExpense.raw_line_id,
-        )
-        .where(
-            MaintenanceProjectExpenseAttribution.project_id == project_id,
-            MaintenanceProjectExpenseAttribution.project_contract_id.in_([
-                contract.project_contract_id
-                for contract in writable_contracts.values()
-            ]),
-            FProjectExpense.linked_sales_order_no.in_(contract_nos),
-            or_(FProjectExpense.data_status.is_(None),
-                FProjectExpense.data_status != "已作废"),
-        )
-        .order_by(FProjectExpense.expense_date, FProjectExpense.raw_line_id)
-    ).all())
-    return [
-        expense
-        for expense, attribution in rows
-        if (
-            expense.linked_sales_order_no in writable_contracts
-            and attribution.project_contract_id
-            == writable_contracts[expense.linked_sales_order_no].project_contract_id
-        )
-    ]
 
 
 def _expense_in_project(
