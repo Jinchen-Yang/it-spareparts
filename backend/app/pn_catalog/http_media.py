@@ -765,3 +765,9 @@ def upload_inbox(upload_id: UUID, request: Request, db: DbDep, access: AccessDep
 def get_entry(entry_id: UUID, request: Request, db: DbDep, access: AccessDep):
     from .media_derivatives import get_entry as read_entry
     return read_entry(db, entry_id, context=_context(request, access), authorize=access.authorize)
+
+
+@router.get("/inbox-groups/{group_id}", response_model=InboxGroupResponse)
+def get_inbox_group(group_id: UUID, request: Request, db: DbDep, access: AccessDep):
+    from .media_inbox import get_inbox_group as read_group
+    return read_group(db, group_id, context=_context(request, access), authorize=access.authorize)

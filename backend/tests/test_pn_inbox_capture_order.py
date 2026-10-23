@@ -13,6 +13,7 @@ from app.pn_catalog.errors import CatalogError
 from app.pn_catalog.media_dto import AddInboxGroupItem, ArrangeInboxGroup, CreateInboxGroup
 from app.pn_catalog.media_models import InboxItem
 from tests.test_pn_catalog_media import allow, context, create_ticket
+from tests.test_pn_catalog_media_http import media_client  # noqa: F401
 
 
 def group(db):
@@ -72,6 +73,24 @@ def test_capture_order_collision_and_change_are_explicit_conflicts(db):
     with pytest.raises(CatalogError) as error:
         add(db, gid, first, 1, state["revision"])
     assert error.value.code == "inbox.group_conflict"
+
+
+def test_current_group_read_has_owner_gate_and_current_order(db, media_client):  # noqa: F811
+    from app.pn_catalog.media_inbox import get_inbox_group
+    gid = group(db)
+    current = add(db, gid, create_ticket(db), 0, 1)
+    response = media_client.get(f"/api/pn-catalog/v1/inbox-groups/{gid}")
+    assert response.status_code == 200, response.text
+    assert response.json()["data"] == current
+    assert response.headers["Cache-Control"] == "no-store"
+    def no_management(session, actor, action, part_id):
+        if action == "inbox.manage":
+            raise CatalogError("auth.forbidden", "no management", status_code=403)
+        return allow(session, actor, action, part_id)
+    with pytest.raises(CatalogError) as error:
+        get_inbox_group(db, gid, context=context("account:99"), authorize=no_management)
+    assert error.value.status_code == 403
+    assert get_inbox_group(db, gid, context=context("account:99"), authorize=allow)["data"] == current
 
 
 def test_two_devices_add_and_arrange_from_one_baseline_have_only_one_winner(db):
