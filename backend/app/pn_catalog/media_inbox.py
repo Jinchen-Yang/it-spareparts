@@ -372,10 +372,17 @@ def assign_inbox(db, inbox_id, command, *, context, authorize):
               "expected_identity_revision": command.expected_identity_revision,
               "claim_revision": command.claim_revision}
     if item.assignment_key == command.assignment_key and item.status == "assigned":
-        if item.assignment_intent is None:
+        recorded = item.assignment_intent or {}
+        if type(recorded.get("audit_id")) is not int or type(recorded.get("applied_revision")) is not int:
             raise CatalogError("inbox.assignment_recovery_required", "原归档意图未留存，请用原请求编号恢复回执")
-        if item.assignment_intent != intent:
+        if {key: recorded.get(key) for key in intent} != intent:
             raise CatalogError("request.idempotency_mismatch", "同一归档编号的目标、用途或确认基线已改变")
+        from . import api
+        receipt = api.finish_command(db, handle, part_id=command.part_id,
+            applied_revision=recorded["applied_revision"], audit_id=recorded["audit_id"],
+            result={"resource": "media.inbox", "id": str(item.id),
+                    "identity_revision": command.expected_identity_revision})
+        return response(db, receipt, inbox_data(db, item, context=context), replayed=True)
     else:
         if item.status != "ready" or upload.status == "cancelled":
             raise CatalogError("inbox.claim_conflict", "图片当前不可归档")
@@ -414,6 +421,7 @@ def assign_inbox(db, inbox_id, command, *, context, authorize):
         },
         identity_revision=command.expected_identity_revision,
     )
+    item.assignment_intent = {**intent, "audit_id": receipt.audit_id, "applied_revision": receipt.applied_revision}
     return response(db, receipt, inbox_data(db, item, context=context), replayed=False)
 
 
