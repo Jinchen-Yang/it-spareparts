@@ -67,6 +67,50 @@ def bind_created_reference(db, reference, *, part_id, identity_revision, context
         context=context, authorization=authorization)
 
 
+def render_receipt(db, receipt, *, context, authorize, replayed):
+    from . import api
+    value = receipt.result
+    api._authorize(db, context, authorize, "read", receipt.part_id)
+    result = resolve_references(db, namespace=value["namespace"], source_ids=[UUID(value["source_id"])],
+                                context=context, authorize=authorize)
+    current = result["data"][0]
+    if current["state"] != "bound":
+        raise CatalogError("identity.invalid_state", "已提交的来源绑定缺失")
+    return {"data": current, "meta": api.receipt_meta(receipt, data_revision=current["binding_version"],
+        identity_revision=current["identity_revision"], replayed=replayed)}
+
+
+def bind_existing_reference(db, part_id, command, *, context, authorize):
+    """Create a new immutable source identity for an explicitly selected active PN.
+
+    This permits a Shop zero-stock shell for a PN originally created by ITSP.
+    It cannot reassign a source UUID or move any existing business facts.
+    """
+    from . import api
+    _namespace(context, command.namespace, writing=True)
+    handle = api.begin_command(db, context=context, authorize=authorize, operation="create",
+        part_id=part_id, resource_type="external_reference", resource_id=command.source_id, payload=command)
+    api._authorize(db, context, authorize, "read", part_id)
+    if handle.receipt is not None:
+        return render_receipt(db, handle.receipt, context=context, authorize=authorize, replayed=True)
+    if context.if_match_revision is not None:
+        raise CatalogError("request.validation_failed", "来源绑定须使用身份版本基线", status_code=422)
+    prepare_new_reference(db, command, context=context)
+    acquire_identity_lock(db, shared=True)
+    part = lock_part(db, part_id, shared=True)
+    state = db.get(PartState, part_id, populate_existing=True)
+    revision = state.identity_revision if state else 0
+    if part.status != "active" or command.expected_identity_revision != revision:
+        raise CatalogError("catalog.identity_changed", "型号身份已变化，请重新选择目标")
+    binding = _bind(db, namespace=command.namespace, source_id=command.source_id, part_id=part_id,
+        identity_revision=revision, decision_ref=f"selected:{context.request_id}", context=context,
+        authorization=handle.decision.metadata)
+    receipt = api.finish_command(db, handle, part_id=part_id, applied_revision=binding.version,
+        audit_id=binding.audit_id, result={"resource": "external_reference", "part_id": part_id,
+        "namespace": binding.namespace, "source_id": str(binding.source_id), "identity_revision": revision})
+    return render_receipt(db, receipt, context=context, authorize=authorize, replayed=False)
+
+
 def bind_migration_reference(db, *, namespace, source_id, part_id, expected_identity_revision,
                              decision_ref, context, authorize):
     """Local audited resolution of an unmapped UUID, never implicit reassignment.

@@ -1,9 +1,14 @@
 """Exact reference input and bounded public projections."""
 from typing import Literal
 from uuid import UUID
+from pydantic import Field
 
 from .dto import ExternalReferenceInput  # noqa: F401
-from .wire import PageMeta, WireModel
+from .wire import PageMeta, ResponseMeta, WireModel
+
+
+class BindReference(ExternalReferenceInput):
+    expected_identity_revision: int = Field(ge=0)
 
 
 class ReferenceSnapshot(WireModel):
@@ -25,3 +30,8 @@ class ReferenceResponse(WireModel):
 class ReferenceListResponse(WireModel):
     data: list[ReferenceSnapshot]
     meta: PageMeta
+
+
+class ReferenceMutationResponse(WireModel):
+    data: ReferenceSnapshot
+    meta: ResponseMeta
