@@ -1,8 +1,9 @@
 """Generated-client contract for the managed attributes aggregate."""
 from typing import Any
 
-from pydantic import Field, JsonValue
+from pydantic import Field
 
+from .json_types import JsonValue
 from .wire import ResponseMeta, WireModel
 
 

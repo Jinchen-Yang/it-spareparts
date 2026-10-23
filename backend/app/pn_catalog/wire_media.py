@@ -4,17 +4,11 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import Field
-from typing_extensions import TypeAliasType
 
 from .wire import PageMeta, WireModel
 from .enrichment_dto import RecognitionResult
 
-# Pydantic's built-in JsonValue emits an unconstrained serialization schema.
-# An explicit recursive alias preserves the exact wire contract in OpenAPI.
-JsonValue = TypeAliasType(
-    "JsonValue",
-    dict[str, "JsonValue"] | list["JsonValue"] | str | int | float | bool | None,
-)
+from .json_types import JsonValue
 
 
 class MediaMeta(WireModel):
