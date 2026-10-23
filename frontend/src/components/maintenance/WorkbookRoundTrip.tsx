@@ -13,6 +13,7 @@ import type {
   WorkbookValidateResult,
 } from "../../api/maintenanceWorkbooks";
 import { saveBlob } from "../../api/maintenanceWorkbooks";
+import { useAsyncContext, type AsyncGuard } from "../../hooks/useAsyncContext";
 
 const { Text } = Typography;
 const SITE_ISSUE_HEADER_LABELS: Record<string, string> = {
@@ -130,45 +131,30 @@ export function WorkbookRoundTrip({
   const uploadSession = localStorage.getItem("token");
   const uploadAllowed = useRef(canUpload);
   uploadAllowed.current = canUpload;
-  const mounted = useRef(false);
-  const downloadEpoch = useRef(0);
-  const uploadEpoch = useRef(0);
-  const closeConfirmation = useRef<(() => void) | null>(null);
+  const downloadContext = useAsyncContext(JSON.stringify([uploadSession]));
+  const uploadContext = useAsyncContext(JSON.stringify([uploadSession, canUpload]));
+  const activeUpload = useRef<AsyncGuard | null>(null);
   const retainedFile = retainedDraft?.session === uploadSession ? retainedDraft.file : null;
 
   useEffect(() => {
     // 新账号可立即下载；即使 token 切回原值，也不能接收旧会话的响应。
-    downloadEpoch.current += 1;
     setDownloading(false);
   }, [uploadSession]);
 
   useEffect(() => {
     // 文件仅留在当前页面内存；账号或权限变化后不能复用上个操作上下文的草稿。
-    uploadEpoch.current += 1;
-    closeConfirmation.current?.();
     setRetainedDraft(null);
     setApplying(false);
     setFeedback(null);
   }, [canUpload, uploadSession]);
 
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      downloadEpoch.current += 1;
-      uploadEpoch.current += 1;
-      // Modal.confirm 渲染在门户中，需要随页面显式销毁。
-      closeConfirmation.current?.();
-    };
-  }, []);
-
   const handleDownload = async () => {
     // 与上传同口径：请求返回时页面已卸载或已切换账号，就不再落文件、不再写反馈。
     const requestSession = localStorage.getItem("token");
-    const requestEpoch = ++downloadEpoch.current;
-    const isCurrent = () => mounted.current
-      && downloadEpoch.current === requestEpoch
+    const requestCurrent = downloadContext.begin();
+    const isCurrent = () => requestCurrent()
       && localStorage.getItem("token") === requestSession;
+    if (!isCurrent()) return;
     setDownloading(true);
     setFeedback(null);
     try {
@@ -226,9 +212,10 @@ export function WorkbookRoundTrip({
     const reassignRows = preview.will_reassign_orders ?? [];
     const voidedRows = preview.voided_rows ?? [];
     await new Promise<void>((resolve, reject) => {
+      let releaseConfirmation = () => {};
       const finish = () => {
         modal.destroy();
-        if (closeConfirmation.current === finish) closeConfirmation.current = null;
+        releaseConfirmation();
         resolve();
       };
       const modal = Modal.confirm({
@@ -305,21 +292,22 @@ export function WorkbookRoundTrip({
             finish();
           } catch (error) {
             modal.destroy();
-            if (closeConfirmation.current === finish) closeConfirmation.current = null;
+            releaseConfirmation();
             reject(error);
           }
         },
       });
-      closeConfirmation.current = finish;
+      releaseConfirmation = uploadContext.ownConfirmation(finish);
     });
   };
 
   const showSiteReplayError = (detail: WorkbookSiteReplayErrorDetail) => {
     setRetainedDraft(null);
     return new Promise<void>((resolve) => {
+      let releaseConfirmation = () => {};
       const finish = () => {
         modal.destroy();
-        if (closeConfirmation.current === finish) closeConfirmation.current = null;
+        releaseConfirmation();
         resolve();
       };
       const modal = Modal.error({
@@ -330,16 +318,18 @@ export function WorkbookRoundTrip({
         onOk: finish,
         onCancel: finish,
       });
-      closeConfirmation.current = finish;
+      releaseConfirmation = uploadContext.ownConfirmation(finish);
     });
   };
 
   const handleUpload = async (file: File) => {
-    if (!uploadAllowed.current) return false;
+    if (!uploadAllowed.current || activeUpload.current?.()) return false;
     const requestSession = localStorage.getItem("token");
-    const requestEpoch = uploadEpoch.current;
-    const isCurrent = () => mounted.current && uploadAllowed.current
-      && uploadEpoch.current === requestEpoch && localStorage.getItem("token") === requestSession;
+    const requestCurrent = uploadContext.begin();
+    const isCurrent = () => requestCurrent() && uploadAllowed.current
+      && localStorage.getItem("token") === requestSession;
+    if (!isCurrent()) return false;
+    activeUpload.current = isCurrent;
     setRetainedDraft(null);
     setApplying(true);
     setFeedback(null);
@@ -362,9 +352,10 @@ export function WorkbookRoundTrip({
         await showSiteReplayError(siteReplay);
       } else if (conflicts?.length) {
         await new Promise<void>((resolve) => {
+          let releaseConfirmation = () => {};
           const finish = () => {
             modal.destroy();
-            if (closeConfirmation.current === finish) closeConfirmation.current = null;
+            releaseConfirmation();
             resolve();
           };
           const modal = Modal.confirm({
@@ -422,7 +413,7 @@ export function WorkbookRoundTrip({
             },
             onCancel: finish,
           });
-          closeConfirmation.current = finish;
+          releaseConfirmation = uploadContext.ownConfirmation(finish);
         });
       } else {
         // 后端整份拒绝时把原文 message 显示出来：告诉用户**哪一行**不合法，
@@ -430,7 +421,8 @@ export function WorkbookRoundTrip({
         setFeedback({ type: "error", text: readError(error, "上传失败") });
       }
     } finally {
-      if (mounted.current && uploadEpoch.current === requestEpoch) {
+      if (activeUpload.current === isCurrent) activeUpload.current = null;
+      if (requestCurrent()) {
         setApplying(false);
         // 浏览器不会为同一个原生 file input 的同文件重选再次触发 change。
         // 无论成功、失败还是预检弹窗取消，都重建 input，让用户能直接重试原文件。

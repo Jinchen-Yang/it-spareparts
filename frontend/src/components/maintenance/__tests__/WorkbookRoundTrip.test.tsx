@@ -605,6 +605,50 @@ describe("WorkbookRoundTrip", () => {
     }
   });
 
+  it("同一渲染周期重复上传回调只启动一次预检", async () => {
+    const pending = deferred<{ will_void_rows: [] }>();
+    const onValidate = vi.fn().mockReturnValue(pending.promise);
+    const onApply = vi.fn();
+    const { container } = render(<WorkbookRoundTrip title="总表" filename="a.xlsx"
+      canUpload onDownload={vi.fn()} onValidate={onValidate} onApply={onApply} />);
+    act(() => {
+      uploadFile(container, makeFile());
+      uploadFile(container, makeFile());
+    });
+    await waitFor(() => expect(onValidate).toHaveBeenCalledOnce());
+    await act(async () => { pending.resolve({ will_void_rows: [] }); });
+    await waitFor(() => expect(screen.getByRole("button", { name: "确认回传" })).toBeVisible());
+    fireEvent.click(screen.getByRole("button", { name: /取\s*消/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(onApply).not.toHaveBeenCalled();
+  });
+
+  it("账号A到B再到A后旧预检不能复活，也不阻止新上传", async () => {
+    localStorage.setItem("token", "synthetic-session-a");
+    const old = deferred<{ will_void_rows: [] }>();
+    const current = deferred<{ will_void_rows: [] }>();
+    const onValidate = vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+    const onApply = vi.fn();
+    const props = { title: "总表", filename: "a.xlsx", canUpload: true,
+      onDownload: vi.fn(), onValidate, onApply };
+    const { container, rerender } = render(<WorkbookRoundTrip {...props} />);
+    uploadFile(container, makeFile());
+    await waitFor(() => expect(onValidate).toHaveBeenCalledOnce());
+    localStorage.setItem("token", "synthetic-session-b");
+    rerender(<WorkbookRoundTrip {...props} />);
+    localStorage.setItem("token", "synthetic-session-a");
+    rerender(<WorkbookRoundTrip {...props} />);
+    uploadFile(container, makeFile());
+    await waitFor(() => expect(onValidate).toHaveBeenCalledTimes(2));
+    await act(async () => { old.resolve({ will_void_rows: [] }); });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("button", { name: /上传覆盖/ })).toHaveClass("ant-btn-loading");
+    await act(async () => { current.resolve({ will_void_rows: [] }); });
+    fireEvent.click(await screen.findByRole("button", { name: /取\s*消/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(onApply).not.toHaveBeenCalled();
+  });
+
   it("账号切换后旧上传的409晚到响应不能留下文件草稿", async () => {
     localStorage.setItem("token", "synthetic-session-a");
     let rejectOld!: (error: unknown) => void;
