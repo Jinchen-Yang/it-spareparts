@@ -79,3 +79,14 @@ cd frontend && npm ci && npx tsc && npx vitest run && npx vite build
 
 `.ai/AI_WORKFLOW.md` 是早期工作流草稿，其引用的 `.ai/*.md` 上下文文件多数不存在，
 **以本文件为准**；`.ai/` 其余内容为各期实现方案归档，仅作历史参考。
+
+## 8. 维保与 Agent 扩展接口
+
+修改维保模块前读 [`docs/architecture/maintenance-modularity.md`](docs/architecture/maintenance-modularity.md)。
+维保服务不得反向 import `app.api`；共用项目范围、有效需求明细和项目审计分别用
+`maintenance_project_access`、`maintenance_assigned_lines`、`maintenance_project_audit`。
+领域命令共用错误从 `maintenance_errors` 引入，不为了异常类型依赖Excel实现。
+公共查询接收已授权范围，`None` 与空集合不能混用；审计不接管调用方事务。
+新增维保 Agent 查询工具在 `agent/maintenance_tools.py` 用同一 `catalog.register` 声明 schema 与 handler，
+保持只读和既有权限，不再维护第二份派发登记。新增功能必须带接口行为回归；
+运行 `test_maintenance_module_boundaries.py`、`test_agent_tool_catalog.py` 及实际受影响业务测试。

@@ -10,12 +10,12 @@ from xlsxwriter import Workbook
 
 from app import config, permissions
 from app.config import get_settings
-from app.api.maintenance_project_scope import (
+from app.services.maintenance_project_access import (
     enforce_maintenance_project_access, resolve_visible_project_ids,
 )
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.services import maintenance_project_assignments as assignments
-from app.services import maintenance_project_master_workbook as master
+from app.services.maintenance_assigned_lines import assigned_lines_query
 from app.services.maintenance_row_filter_registry import FIELDS, apply_row_filters, field_expression
 from app.services.maintenance_expense_integrity import normalized_contract_no_sql, normalize_contract_no
 from app.services.excel_text_safety import excel_safe
@@ -75,7 +75,7 @@ def query(db, ctx, *, project_id=None, window=None, filters=(), export_order=Fal
     if project_id:
         enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     # 单项目直达与全局目录有既有权限差异（canonical 销售），不可相互替换。
-    stmt = master.assigned_lines_query(
+    stmt = assigned_lines_query(
         project_id=project_id, window=window,
         allowed_project_ids=None if direct_project else resolve_visible_project_ids(db, ctx),
         export_order=export_order,
