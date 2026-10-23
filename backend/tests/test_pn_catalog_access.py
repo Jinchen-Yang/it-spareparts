@@ -169,6 +169,7 @@ def test_four_closed_resources_use_actual_grant_and_pdp(db, authority):
         assert decision.metadata["scope"] == "all"
     assert "description" in call(db, resolved).writable_fields
     assert call(db, resolved, "read").writable_fields == frozenset()
+    assert CATALOG_ACTIONS["identity.alias_reassign"] == ("part_identity", "review_alias")
 
 
 def test_named_admin_has_no_implicit_business_permission(db, authority):

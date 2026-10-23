@@ -271,3 +271,6 @@ CATALOG_ACTIONS = {
     "materialize_migration": ("part_master", "materialize_migration"),
     "read_legacy": ("part_master", "read_legacy"),
 }
+
+# Host identity command vocabulary retains the independently granted alias review.
+CATALOG_ACTIONS["identity.alias_reassign"] = ("part_identity", "review_alias")
