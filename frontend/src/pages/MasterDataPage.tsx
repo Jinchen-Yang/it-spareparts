@@ -15,11 +15,12 @@ import {
 
 type FormState = MasterFields & { pn_std: string };
 const EMPTY: FormState = {
-  pn_std: "", description: "", brand: "", category_major: null, category_minor: null,
+  pn_std: "", description: "", brand: "", manufacturer: "", summary: "",
+  category_major: null, category_minor: null,
   machine_or_part: "备件", unit: "",
 };
-const EDITABLE = ["description", "brand", "category_major", "category_minor",
-  "machine_or_part", "unit"] as const;
+const EDITABLE = ["description", "brand", "manufacturer", "summary",
+  "category_major", "category_minor", "machine_or_part", "unit"] as const;
 const PAGE_SIZE = 20;
 const normalized = (value: string | null | undefined) => value?.trim() || null;
 
@@ -151,6 +152,7 @@ export default function MasterDataPage() {
       const p = snapshot.fields;
       const f: FormState = {
         pn_std: snapshot.pn_std, description: p.description ?? "", brand: p.brand ?? "",
+        manufacturer: p.manufacturer ?? "", summary: p.summary ?? "",
         category_major: p.category_major ?? null, category_minor: p.category_minor ?? null,
         machine_or_part: p.machine_or_part, unit: p.unit ?? "",
       };
@@ -375,6 +377,31 @@ export default function MasterDataPage() {
             识别为整机/扩展柜——通常不作为备件主数据（可改类型为"整机"）。
           </div>
         )}
+      </div>
+
+      <Space size={12} style={{ width: "100%" }} wrap>
+        <div style={{ flex: 1, minWidth: 220 }}>
+          <label htmlFor="master-edit-manufacturer" style={{ display: "block", marginBottom: 4 }}>制造商</label>
+          <Input
+            id="master-edit-manufacturer"
+            value={form.manufacturer ?? ""}
+            placeholder="如 希捷 / 惠普"
+            disabled={saving || rebasing}
+            onChange={(e) => set({ manufacturer: e.target.value })}
+          />
+        </div>
+      </Space>
+
+      <div>
+        <label htmlFor="master-edit-summary" style={{ display: "block", marginBottom: 4 }}>简介</label>
+        <Input.TextArea
+          id="master-edit-summary"
+          value={form.summary ?? ""}
+          rows={2}
+          placeholder="面向商城展示的中文简介"
+          disabled={saving || rebasing}
+          onChange={(e) => set({ summary: e.target.value })}
+        />
       </div>
 
       <Space size={12} style={{ width: "100%" }} wrap>

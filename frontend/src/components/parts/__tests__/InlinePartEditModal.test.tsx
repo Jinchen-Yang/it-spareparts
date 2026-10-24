@@ -296,3 +296,37 @@ it.each(["账号", "上下文"])("冲突基线慢加载期间切换%s，迟到�
   expect(screen.getByLabelText("描述")).toHaveValue(change === "账号" ? "原账号草稿" : "新上下文描述");
   expect(localStorage.getItem("token")).toBe(change === "账号" ? "new-account" : "editor-token");
 });
+
+it("制造商与简介可加载、编辑并随保存提交", async () => {
+  const patches: any[] = [];
+  const snapshot = {
+    ...baseline,
+    fields: {
+      ...baseline.fields, manufacturer: "希捷", summary: "旧简介",
+    },
+  };
+  api.defaults.adapter = async (config) => {
+    if (config.method === "patch") {
+      patches.push(JSON.parse(config.data));
+      return response(config, { id: 42, pn_std: "PN-42", updated: ["manufacturer", "summary"] });
+    }
+    if (config.url === "/parts/master/42/edit-state") return response(config, snapshot);
+    return response(config, { categories: [] });
+  };
+  const onSaved = vi.fn();
+  render(<InlinePartEditModal open canEdit contextKey="42" partId={42} pn="PN-42"
+    onClose={vi.fn()} onSaved={onSaved} />);
+
+  expect(await screen.findByLabelText("制造商")).toHaveValue("希捷");
+  expect(screen.getByLabelText("简介")).toHaveValue("旧简介");
+  fireEvent.change(screen.getByLabelText("制造商"), { target: { value: "西部数据" } });
+  fireEvent.change(screen.getByLabelText("简介"), { target: { value: "新简介" } });
+  fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+
+  await waitFor(() => expect(patches).toHaveLength(1));
+  expect(patches[0]).toEqual({
+    part_id: 42, pn_std: "PN-42", base_snapshot: snapshot,
+    manufacturer: "西部数据", summary: "新简介",
+  });
+  await waitFor(() => expect(onSaved).toHaveBeenCalledOnce());
+});

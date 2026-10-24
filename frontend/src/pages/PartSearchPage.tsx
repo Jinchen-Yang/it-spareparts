@@ -8,6 +8,7 @@ import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import PoolReferencePanel from "../components/pools/PoolReferencePanel";
 import InlinePartEditModal from "../components/parts/InlinePartEditModal";
+import PartGalleryPanel from "../components/parts/PartGalleryPanel";
 import api from "../api";
 import type { Overview, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { unifiedSearch, fetchOverview } from "../api/search";
@@ -511,6 +512,13 @@ export default function PartSearchPage() {
               <Descriptions.Item label="规格">{ov.part.category_minor || "-"}</Descriptions.Item>
             </Descriptions>
           </section>
+
+          <PartGalleryPanel
+            key={ov.part.id}
+            partId={ov.part.id}
+            pn={ov.part.pn_std}
+            canWrite={canEditPartDetails}
+          />
 
           <section aria-label="型号库存" className="part-section">
             <h3>库存</h3>
