@@ -14,6 +14,7 @@ spec = importlib.util.spec_from_file_location('frozen_s3', Path(__file__).parent
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 S2 = 'c9d4e8f2a6b1'
 S1 = 'a7c2e9f4b6d1'
+S3 = 'd6e9f2a4b7c1'
 EMPTY = {'schema_version': 1, 'template_snapshot': None, 'resource_overrides': {}}
 
 def migrate(db, target, *, down=False):
@@ -50,40 +51,50 @@ def test_frozen_effective_graph_and_explicit_whitelist(role):
 
 def test_real_upgrade_preserves_canonical_empty_and_inactive_legacy(db):
     migrate(db, S2, down=True)
-    uid = insert(db,'s3-inactive',active=False,role='admin')
-    canonical = insert(db,'s3-explicit-none',eligible=False,role='admin')
-    migrate(db, 'head')
-    actual = user(db,uid)
-    assert len(actual['authorization_profile']['resource_overrides']) == 73 and not actual['is_active']
-    assert user(db,canonical)['authorization_profile'] == EMPTY
-    assert not db.execute(text('SELECT EXISTS(SELECT 1 FROM sys_authorization_grant WHERE user_id=:id)'),{'id':canonical}).scalar()
-    first = deepcopy(actual['authorization_profile']);epoch=actual['token_version']
-    migrate(db,S2,down=True)
-    assert user(db,uid)['authorization_profile']==EMPTY and user(db,uid)['token_version']>epoch
-    migrate(db,'head')
-    assert user(db,uid)['authorization_profile']==first and user(db,uid)['token_version']>epoch+1
+    try:
+        uid = insert(db,'s3-inactive',active=False,role='admin')
+        canonical = insert(db,'s3-explicit-none',eligible=False,role='admin')
+        # These counts describe the frozen S3 boundary, not later-stage seeds.
+        migrate(db, S3)
+        assert db.scalar(text('SELECT version_num FROM alembic_version')) == S3
+        actual = user(db,uid)
+        assert len(actual['authorization_profile']['resource_overrides']) == 73 and not actual['is_active']
+        assert user(db,canonical)['authorization_profile'] == EMPTY
+        assert not db.execute(text('SELECT EXISTS(SELECT 1 FROM sys_authorization_grant WHERE user_id=:id)'),{'id':canonical}).scalar()
+        first = deepcopy(actual['authorization_profile']);epoch=actual['token_version']
+        migrate(db,S2,down=True)
+        assert user(db,uid)['authorization_profile']==EMPTY and user(db,uid)['token_version']>epoch
+        migrate(db,S3)
+        assert user(db,uid)['authorization_profile']==first and user(db,uid)['token_version']>epoch+1
+    finally:
+        db.rollback();migrate(db,'head')
 
 
 def test_proven_adjacent_s2_s3_downgrade_forwards_only_counters(db):
     migrate(db,S1,down=True)
-    uid=insert(db,'s3-adjacent',role='admin')
-    migrate(db,'head')
-    full=user(db,uid); assert len(full['authorization_profile']['resource_overrides'])==95
-    assert 'sales_analysis' not in full['authorization_profile']['resource_overrides']
-    migrate(db,S1,down=True)
-    restored=user(db,uid)
-    assert restored['authorization_profile']==EMPTY and restored['token_version']>full['token_version']
-    migrate(db,'head')
+    try:
+        uid=insert(db,'s3-adjacent',role='admin')
+        migrate(db,S3)
+        assert db.scalar(text('SELECT version_num FROM alembic_version')) == S3
+        full=user(db,uid); assert len(full['authorization_profile']['resource_overrides'])==95
+        assert 'sales_analysis' not in full['authorization_profile']['resource_overrides']
+        migrate(db,S1,down=True)
+        restored=user(db,uid)
+        assert restored['authorization_profile']==EMPTY and restored['token_version']>full['token_version']
+    finally:
+        db.rollback();migrate(db,'head')
 
 
 def test_manual_change_between_stages_cannot_be_laundered_into_s2_receipt(db):
     migrate(db,S1,down=True)
-    uid=insert(db,'s3-gap',role='admin');migrate(db,S2)
-    db.execute(text('UPDATE sys_user SET token_version=token_version+2 WHERE id=:id'),{'id':uid})
-    migrate(db,'head')
-    with pytest.raises(RuntimeError,match='Authorization changed'):
-        migrate(db,S1,down=True)
-    db.rollback();migrate(db,'head')
+    try:
+        uid=insert(db,'s3-gap',role='admin');migrate(db,S2)
+        db.execute(text('UPDATE sys_user SET token_version=token_version+2 WHERE id=:id'),{'id':uid})
+        migrate(db,S3)
+        with pytest.raises(RuntimeError,match='Authorization changed'):
+            migrate(db,S1,down=True)
+    finally:
+        db.rollback();migrate(db,'head')
 
 
 @pytest.mark.parametrize('marker', ['sidecar','owner','actor','external'])

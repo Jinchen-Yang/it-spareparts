@@ -13,6 +13,7 @@ from tests.conftest import _alembic_cfg
 spec=importlib.util.spec_from_file_location('frozen_s4',Path(__file__).parents[1]/'alembic/versions/e4a7c9f2b6d8_platform_import_authorization.py')
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 S3='d6e9f2a4b7c1'
+S1='a7c2e9f4b6d1'
 EMPTY={'schema_version':1,'template_snapshot':None,'resource_overrides':{}}
 
 def migrate(db,target,down=False):
@@ -57,6 +58,50 @@ def test_eligible_inactive_seed_and_false_none_roundtrip(db):
     assert stored(db,uid)['token_version']>first['token_version']
     migrate(db,'head')
     assert stored(db,uid)['authorization_profile']==first['authorization_profile']
+
+def test_latest_chain_roundtrip_preserves_all_stage_receipts_and_monotonic_versions(db):
+    """S1 -> current head -> S1 remains separate from frozen S3 count assertions."""
+    from app.authz.catalog import RESOURCE_DEFINITIONS
+
+    def versions(uid):
+        return dict(db.execute(text('SELECT resource,version FROM sys_authorization_grant WHERE user_id=:id'),
+            {'id':uid}).all())
+
+    migrate(db,S1,True)
+    try:
+        uid=insert(db,'s4-full-chain-inactive',active=False,
+            perms={'page_import':True,'page_chat':True,'page_accounts':True})
+        none=insert(db,'s4-full-chain-none',eligible=False,perms={'page_import':True})
+        migrate(db,'head')
+        first=deepcopy(stored(db,uid));first_versions=versions(uid)
+        # Sales has no old explicit Grant; the other 22 + 73 + 11 are recorded,
+        # including explicit denials. No stage may infer sales access from role.
+        expected=set(RESOURCE_DEFINITIONS)-{'sales_analysis'}
+        assert len(expected)==106
+        assert set(first['authorization_profile']['resource_overrides'])==expected
+        assert set(first_versions)==expected
+        assert set(db.scalars(text("SELECT migration_key FROM sys_authorization_migration_receipt WHERE entity_kind='user' AND entity_id=:id"),
+            {'id':str(uid)}))=={'authz_s2','authz_s3','authz_s4'}
+        assert stored(db,none)['authorization_profile']==EMPTY and versions(none)=={}
+        assert db.scalar(text('SELECT is_active FROM sys_user WHERE id=:id'),{'id':uid}) is False
+
+        migrate(db,S1,True)
+        restored=stored(db,uid)
+        assert restored['authorization_profile']==EMPTY and versions(uid)=={}
+        assert restored['token_version']>max(first['token_version'],*first_versions.values())
+        assert stored(db,none)['authorization_profile']==EMPTY and versions(none)=={}
+
+        migrate(db,'head')
+        second=stored(db,uid);second_versions=versions(uid)
+        assert second['authorization_profile']==first['authorization_profile']
+        assert second['token_version']>restored['token_version']
+        assert set(second_versions)==expected
+        assert all(second_versions[key]>first_versions[key] for key in expected)
+        assert stored(db,none)['authorization_profile']==EMPTY and versions(none)=={}
+        migrate(db,'head')
+        assert stored(db,uid)==second and versions(uid)==second_versions
+    finally:
+        db.rollback();migrate(db,'head')
 
 @pytest.mark.parametrize('marker',['job','batch','protocol','grant'])
 def test_new_protocol_or_grant_prevents_rollback(db,marker):
