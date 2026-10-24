@@ -15,6 +15,7 @@ from starlette.formparsers import MultiPartException
 
 from app import config
 from app.auth import current_identity, current_role
+from app.authz.runtime import guard_legacy_execution
 from app.config import get_settings
 from app.db import SessionLocal, get_db
 from app.models.system import SysUser
@@ -241,6 +242,9 @@ def _apply_worker(
 ) -> dict:
     db = SessionLocal()
     try:
+        # Queued legacy work may outlive the request's mode check. Keep the
+        # first-cutover barrier through this worker's actual commit/rollback.
+        guard_legacy_execution(db, ("maintenance_warehouse_import",))
         result = maintenance_warehouse.apply_import(
             db,
             content,

@@ -883,6 +883,15 @@ def test_validate_worker_owns_session_and_runs_outside_event_loop(
         def close(self):
             events.append(("close", threading.get_ident()))
 
+    # This test isolates thread/session ownership. Real PostgreSQL cutover
+    # serialization is covered by test_authz_s4_project_monthly_worker_cutover.
+    def guard(worker_db, resources):
+        assert isinstance(worker_db, FakeSession)
+        assert resources == ("maintenance_project_roundtrip",)
+        events.append(("guard", threading.get_ident()))
+
+    monkeypatch.setattr(maintenance_project_workbooks, "guard_legacy_execution", guard)
+
     class FakeAdapter:
         def __init__(self, worker_db, **_kwargs):
             worker_threads.append(threading.get_ident())
@@ -948,6 +957,8 @@ def test_validate_worker_owns_session_and_runs_outside_event_loop(
     assert result["validation_token"] == "validation-worker"
     assert worker_threads and worker_threads[0] != loop_thread
     assert events == [
+        ("guard", worker_threads[0]),
+        ("guard", worker_threads[0]),
         ("commit", worker_threads[0]),
         ("close", worker_threads[0]),
     ]

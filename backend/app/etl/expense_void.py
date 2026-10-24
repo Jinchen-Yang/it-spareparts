@@ -228,9 +228,33 @@ def assert_fingerprint(decision: VoidDecision, inputs: VoidInputs, existing: Map
     """expected 为 None ⇒ 无承诺可核（直接调用 run_import 的既有路径），不检查。"""
     if expected is None:
         return
-    actual = fingerprint(decision, inputs, existing)
+    actual = (fingerprint_v2(decision, inputs, existing) if expected.startswith('v2:')
+              else fingerprint(decision, inputs, existing))
     if not hmac.compare_digest(actual, expected):
         raise VoidPlanDrift()
+
+
+def fingerprint_v2(decision: VoidDecision, inputs: VoidInputs, existing: Mapping) -> str:
+    """Canonical commitment: preview can supply a DB-only amount digest.
+
+    The mutation already reads actual amounts for its business calculation. It
+    uses the identical normalized numeric text after domain locks; the preview
+    does not need to load an amount it is forbidden to display.
+    """
+    def item(raw_id):
+        row = existing[raw_id]
+        commitment = getattr(row, 'amount_commitment', None)
+        if commitment is None:
+            commitment = hashlib.sha256(_money(getattr(row, 'amount', None)).encode()).hexdigest()
+        return [raw_id, getattr(row, 'data_status', None), commitment,
+                getattr(row, 'linked_sales_order_no', None)]
+    payload = {'v': 2, 'upsert': inputs.upsert, 'reason': decision.suppressed_reason,
+        'dropped': inputs.dropped_no_contract, 'anchored': inputs.anchored,
+        'contracts': sorted(inputs.contracts),
+        'void': [item(raw_id) for raw_id in sorted(decision.void_ids)],
+        'already_void': sorted(decision.already_void_ids)}
+    return 'v2:' + hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
+        separators=(',', ':')).encode()).hexdigest()
 
 
 def void_rows(decision: VoidDecision, existing: Mapping) -> list[dict]:

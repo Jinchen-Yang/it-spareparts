@@ -1,3 +1,4 @@
+import { accountAccess } from "./authz/accountAccess";
 import { hasControlledRoute, routeRule, ruleState, type Rule } from "./authz/rules";
 import { AuthzProvider, AuthorizationBoundary, AuthzUnavailable, actorAllowed, resourceAllowed, resourceUsesLegacy, useAuthz } from "./authz/AuthzProvider";
 import { AUTHZ_SESSION_INVALIDATED } from "./authz/events";
@@ -120,11 +121,11 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
     // admin 全通；组合能力入口优先按完整能力判断；其余沿用单权限/任一权限规则。
     return NAV_ITEMS.filter((it) => {
       if (it.betaFeature && betaFeatures[it.betaFeature] !== true) return false;
+      if (it.key === "accounts") return authz.status === "ready" && accountAccess(authz.snapshot).enter;
       if (hasControlledRoute(it.path)) {
         const oldAllowed = isAdmin || (it.visibleWhen ? it.visibleWhen() : it.perm ? !!perms[it.perm] : it.anyPerm ? it.anyPerm.some(p => !!perms[p]) : false);
         return authz.status === "ready" && allowedRoute(routeRule(it.path), oldAllowed);
       }
-      if (it.key === "accounts") return authz.status === "ready" && actorAllowed(authz.snapshot, "read_accounts");
       return (!it.betaFeature || betaFeatures[it.betaFeature] === true) && (isAdmin
         || (it.visibleWhen ? it.visibleWhen()
           : it.perm ? !!perms[it.perm]

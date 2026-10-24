@@ -1,7 +1,9 @@
 """Resource activation is persistent; removing configuration suspends access."""
 from dataclasses import dataclass
+from hashlib import sha256
+from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
@@ -63,10 +65,64 @@ def activate_configured_resources(bind) -> None:
             raise authz_error(503, "AUTHZ_CATALOG_INVALID", "已切换授权资源缺少执行定义")
         if suspended - enabled - existing:
             raise authz_error(503, "AUTHZ_CONFIGURATION_INVALID", "尚未切换的资源不能仅设置暂停")
+        if enabled - existing:
+            # Agent's historical authority predicate is global: even a first
+            # non-Agent marker retires its old publication contract.
+            db.execute(text('SELECT pg_advisory_xact_lock(:key)'),
+                {'key': _legacy_execution_lock_key('__canonical_management_transition__')})
         for resource in sorted(enabled):
+            if resource in existing:
+                continue
+            # First activation waits for already authorized legacy transactions.
+            # Both sides use resource order, independent of business lock order.
+            db.execute(text('SELECT pg_advisory_xact_lock(:key)'),
+                {'key': _legacy_execution_lock_key(resource)})
             db.execute(insert(SysAuthorizationCutover).values(
                 resource=resource, activated_catalog_version=CATALOG_VERSION,
             ).on_conflict_do_nothing(index_elements=[SysAuthorizationCutover.resource]))
+
+
+def _legacy_execution_lock_key(resource: str) -> int:
+    return int.from_bytes(sha256(('itsp.authz.legacy_execution.v1:' + resource).encode()).digest()[:8],
+        byteorder='big', signed=True)
+
+
+def _require_current_legacy_transaction(db: Session) -> None:
+    if db.scalar(text("SELECT current_setting('transaction_isolation')")) != 'read committed':
+        raise authz_error(503, 'AUTHZ_LEGACY_EXECUTION_RETIRED', '旧执行入口需要当前事务观察，不能复用历史快照')
+
+
+def guard_legacy_management_execution(db: Session) -> None:
+    """Serialize only short legacy Agent commits/publication with global cutover.
+
+    Never hold this across LLM calls or document formatting. Deployment config
+    changes are process lifecycle operations, not database transactions.
+    """
+    _require_current_legacy_transaction(db)
+    db.execute(text('SELECT pg_advisory_xact_lock_shared(:key)'),
+        {'key': _legacy_execution_lock_key('__canonical_management_transition__')})
+    if canonical_management_required(db):
+        raise authz_error(503, 'AUTHZ_LEGACY_EXECUTION_RETIRED', '旧 Agent 执行已退役，请按当前权限重新提交')
+
+
+def guard_legacy_execution(db: Session, resources: Sequence[str]) -> None:
+    """Hold resource authority through a legacy business transaction's commit.
+
+    Call before any domain/user locks. Startup activation takes the corresponding
+    exclusive locks; queue-time permissions cannot survive a completed cutover.
+    READ COMMITTED is required so a lock waiter observes the committed marker.
+    """
+    if (isinstance(resources, (str, bytes)) or not isinstance(resources, Sequence)
+            or not resources or any(type(r) is not str or r not in RESOURCE_DEFINITIONS for r in resources)):
+        raise authz_error(503, 'AUTHZ_RESOURCE_INVALID', '旧执行入口未登记完整授权资源')
+    _require_current_legacy_transaction(db)
+    ordered = sorted(set(resources))
+    for resource in ordered:
+        db.execute(text('SELECT pg_advisory_xact_lock_shared(:key)'),
+            {'key': _legacy_execution_lock_key(resource)})
+    states = runtime_states(db)
+    if any(states[r].migration_state != 'implemented' or states[r].runtime_state != 'legacy' for r in ordered):
+        raise authz_error(503, 'AUTHZ_LEGACY_EXECUTION_RETIRED', '资源已切换，旧任务必须按当前权限重新提交')
 
 
 def runtime_states(db: Session) -> dict[str, RuntimeState]:
@@ -110,7 +166,7 @@ def canonical_management_required(db: Session) -> bool:
     return (authorization_mode() == "unified_modules"
             or db.scalar(select(SysAuthorizationCutover.resource).limit(1)) is not None
             or db.scalar(select(SysAuthorizationMigrationReceipt.entity_id).where(
-                SysAuthorizationMigrationReceipt.migration_key.in_(('authz_s2', 'authz_s3')),
+                SysAuthorizationMigrationReceipt.migration_key.in_(('authz_s2', 'authz_s3', 'authz_s4')),
                 SysAuthorizationMigrationReceipt.entity_kind == 'artifact_protocol').limit(1)) is not None)
 
 
@@ -121,11 +177,18 @@ def mark_artifact_protocol_used(bind: Engine, *, protocol: str = 'authz_s2') -> 
     withdrawing configuration or downgrading must not restore a legacy reader.
     """
     from app.models.authorization import SysAuthorizationMigrationReceipt
-    if not isinstance(bind, Engine) or protocol not in ('authz_s2', 'authz_s3'):
+    if not isinstance(bind, Engine) or protocol not in ('authz_s2', 'authz_s3', 'authz_s4'):
         raise ValueError('产物权威标记必须使用独立引擎事务')
     with Session(bind) as db, db.begin():
+        if db.scalar(select(SysAuthorizationMigrationReceipt.entity_id).where(
+                SysAuthorizationMigrationReceipt.migration_key == protocol,
+                SysAuthorizationMigrationReceipt.entity_kind == 'artifact_protocol',
+                SysAuthorizationMigrationReceipt.entity_id == 'global')) is not None:
+            return
+        db.execute(text('SELECT pg_advisory_xact_lock(:key)'),
+            {'key': _legacy_execution_lock_key('__canonical_management_transition__')})
         db.execute(insert(SysAuthorizationMigrationReceipt).values(
             migration_key=protocol, entity_kind='artifact_protocol', entity_id='global',
-            before_state={}, after_state={'schema_version': 2 if protocol == 'authz_s3' else 1,
+            before_state={}, after_state={'schema_version': 2 if protocol in ('authz_s3', 'authz_s4') else 1,
                                           'authority': 'unified_modules'},
         ).on_conflict_do_nothing(index_elements=['migration_key', 'entity_kind', 'entity_id']))

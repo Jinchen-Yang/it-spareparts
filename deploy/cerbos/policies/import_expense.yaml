@@ -1,0 +1,249 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "import_expense",
+    "rules": [
+      {
+        "name": "explicit-export-errors",
+        "actions": [
+          "export_errors"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"export_errors\" in P.attr.grants.import_expense.actions && \"data_customer\" in P.attr.grants.import_expense.field_permissions && \"data_supplier\" in P.attr.grants.import_expense.field_permissions && \"data_purchase_cost\" in P.attr.grants.import_expense.field_permissions && \"data_profit\" in P.attr.grants.import_expense.field_permissions && (R.attr.module_probe || ((P.attr.grants.import_expense.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense\", \"scope\": P.attr.grants.import_expense.scope, \"version\": P.attr.grants.import_expense.version, \"field_permissions\": P.attr.grants.import_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-precheck",
+        "actions": [
+          "precheck"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"precheck\" in P.attr.grants.import_expense.actions && (R.attr.module_probe || ((P.attr.grants.import_expense.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense\", \"scope\": P.attr.grants.import_expense.scope, \"version\": P.attr.grants.import_expense.version, \"field_permissions\": P.attr.grants.import_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-report",
+        "actions": [
+          "read_report"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_report\" in P.attr.grants.import_expense.actions && \"data_customer\" in P.attr.grants.import_expense.field_permissions && \"data_supplier\" in P.attr.grants.import_expense.field_permissions && \"data_purchase_cost\" in P.attr.grants.import_expense.field_permissions && \"data_profit\" in P.attr.grants.import_expense.field_permissions && (R.attr.module_probe || ((P.attr.grants.import_expense.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense\", \"scope\": P.attr.grants.import_expense.scope, \"version\": P.attr.grants.import_expense.version, \"field_permissions\": P.attr.grants.import_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-status",
+        "actions": [
+          "read_status"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_status\" in P.attr.grants.import_expense.actions && (R.attr.module_probe || ((P.attr.grants.import_expense.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense\", \"scope\": P.attr.grants.import_expense.scope, \"version\": P.attr.grants.import_expense.version, \"field_permissions\": P.attr.grants.import_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-errors",
+        "actions": [
+          "show_errors"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_errors\" in P.attr.grants.import_expense.actions && \"export_errors\" in P.attr.grants.import_expense.actions && \"data_customer\" in P.attr.grants.import_expense.field_permissions && \"data_supplier\" in P.attr.grants.import_expense.field_permissions && \"data_purchase_cost\" in P.attr.grants.import_expense.field_permissions && \"data_profit\" in P.attr.grants.import_expense.field_permissions && (R.attr.module_probe || ((P.attr.grants.import_expense.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense\", \"scope\": P.attr.grants.import_expense.scope, \"version\": P.attr.grants.import_expense.version, \"field_permissions\": P.attr.grants.import_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-history",
+        "actions": [
+          "show_history"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_history\" in P.attr.grants.import_expense.actions && \"read_status\" in P.attr.grants.import_expense.actions && (R.attr.module_probe || ((P.attr.grants.import_expense.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense\", \"scope\": P.attr.grants.import_expense.scope, \"version\": P.attr.grants.import_expense.version, \"field_permissions\": P.attr.grants.import_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-jobs",
+        "actions": [
+          "show_jobs"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_jobs\" in P.attr.grants.import_expense.actions && \"read_status\" in P.attr.grants.import_expense.actions && (R.attr.module_probe || ((P.attr.grants.import_expense.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense\", \"scope\": P.attr.grants.import_expense.scope, \"version\": P.attr.grants.import_expense.version, \"field_permissions\": P.attr.grants.import_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-report",
+        "actions": [
+          "show_report"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_report\" in P.attr.grants.import_expense.actions && \"read_report\" in P.attr.grants.import_expense.actions && \"data_customer\" in P.attr.grants.import_expense.field_permissions && \"data_supplier\" in P.attr.grants.import_expense.field_permissions && \"data_purchase_cost\" in P.attr.grants.import_expense.field_permissions && \"data_profit\" in P.attr.grants.import_expense.field_permissions && (R.attr.module_probe || ((P.attr.grants.import_expense.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense\", \"scope\": P.attr.grants.import_expense.scope, \"version\": P.attr.grants.import_expense.version, \"field_permissions\": P.attr.grants.import_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-submit",
+        "actions": [
+          "show_submit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_submit\" in P.attr.grants.import_expense.actions && \"precheck\" in P.attr.grants.import_expense.actions && (\"submit_skip\" in P.attr.grants.import_expense.actions || \"submit_upsert\" in P.attr.grants.import_expense.actions) && (R.attr.module_probe || ((P.attr.grants.import_expense.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense\", \"scope\": P.attr.grants.import_expense.scope, \"version\": P.attr.grants.import_expense.version, \"field_permissions\": P.attr.grants.import_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-upload",
+        "actions": [
+          "show_upload"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_upload\" in P.attr.grants.import_expense.actions && \"precheck\" in P.attr.grants.import_expense.actions && (R.attr.module_probe || ((P.attr.grants.import_expense.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense\", \"scope\": P.attr.grants.import_expense.scope, \"version\": P.attr.grants.import_expense.version, \"field_permissions\": P.attr.grants.import_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-submit-skip",
+        "actions": [
+          "submit_skip"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"submit_skip\" in P.attr.grants.import_expense.actions && (R.attr.module_probe || ((P.attr.grants.import_expense.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense\", \"scope\": P.attr.grants.import_expense.scope, \"version\": P.attr.grants.import_expense.version, \"field_permissions\": P.attr.grants.import_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-submit-upsert",
+        "actions": [
+          "submit_upsert"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"submit_upsert\" in P.attr.grants.import_expense.actions && (R.attr.module_probe || ((P.attr.grants.import_expense.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense\", \"scope\": P.attr.grants.import_expense.scope, \"version\": P.attr.grants.import_expense.version, \"field_permissions\": P.attr.grants.import_expense.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

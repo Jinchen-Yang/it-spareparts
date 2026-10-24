@@ -73,22 +73,25 @@ export function actionState(snapshot: AuthzSnapshot | null, resource: string, ac
   const contextMatches = !!context && context.catalog_version === snapshot.catalog_version &&
     context.authorization_epoch === snapshot.authorization_epoch && !!bound &&
     (bound.grant_version ?? 0) === state.grant_version;
-  const visit = (id: string, visited: ReadonlySet<string>): RuleState => {
+  const visit = (id: string, visited: ReadonlySet<string>, moduleDependency = false): RuleState => {
     const descriptor = definition.actions[id];
     const probe = state.decisions[id]?.effect;
     if (!descriptor || visited.has(id) || !probe || probe === "deny") return "deny";
     // Display is an explicit module switch. It never borrows read access or grants facts.
-    const needsContext = descriptor.kind !== "display" && (contextual || probe === "requires_context");
+    const needsContext = !moduleDependency && descriptor.kind !== "display" && (contextual || probe === "requires_context");
     let own: RuleState = "allow";
     if (needsContext) {
       if (!context) own = "resolve";
       else if (!contextMatches || bound?.decisions[id]?.effect !== "allow") return "deny";
-    } else if (probe !== "allow") return "deny";
+    } else if (!moduleDependency && probe !== "allow") return "deny";
     const fields = needsContext && context ? bound?.field_permissions ?? [] : state.field_permissions;
     if (!descriptor.requires_fields.every(f => state.field_permissions.includes(f) && fields.includes(f))) return "deny";
     const next = new Set(visited).add(id);
-    return everyState([own, ...descriptor.requires_actions.map(a => visit(a, next)),
-      ...(descriptor.requires_any_actions.length ? [someState(descriptor.requires_any_actions.map(a => visit(a, next)))] : [])]);
+    // Display dependencies describe the module configuration, not a capability for
+    // another object/operation. Surface data_rule and the entry independently resolve facts.
+    const declarationOnly = moduleDependency || descriptor.kind === "display";
+    return everyState([own, ...descriptor.requires_actions.map(a => visit(a, next, declarationOnly)),
+      ...(descriptor.requires_any_actions.length ? [someState(descriptor.requires_any_actions.map(a => visit(a, next, declarationOnly)))] : [])]);
   };
   return visit(action, new Set());
 }

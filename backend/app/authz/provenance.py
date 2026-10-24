@@ -89,7 +89,7 @@ def validate_provenance(db: Session, identity: VerifiedIdentity, value: dict, *,
         for row in value["resources"]:
             ref = ObjectRef.from_dict(row['object_ref']) if row.get('object_ref') is not None else None
             if ref is not None:
-                from app.services.maintenance_authorization import revalidate_dependency
+                from app.authz.domain_contexts import revalidate_dependency
                 current = revalidate_dependency(db, identity, ref, entry_id=row['entry_id'], branch=row['branch'],
                     actions_by_resource={row['resource_id']: tuple(row['actions'])},
                     read_snapshot=read_snapshot, locked_user=locked_user)
@@ -100,6 +100,45 @@ def validate_provenance(db: Session, identity: VerifiedIdentity, value: dict, *,
                 if (access.grant_version != row['grant_version'] or (ref is not None and
                         access.authorization_revision != row['authorization_revision'])):
                     raise unavailable()
+
+
+def validate_agent_provenance(db, identity, value, *, read_snapshot=None, locked_user=None, _seen=None):
+    """Agent file references also bind actual immutable filesystem bytes."""
+    if read_snapshot is None and locked_user is None:
+        from app.authz.context import read_snapshot as open_snapshot
+        with open_snapshot(lambda: Session(db.get_bind())) as (snapshot_db, proof):
+            return validate_agent_provenance(snapshot_db, identity, value, read_snapshot=proof, _seen=_seen)
+    validate_provenance(db, identity, value, read_snapshot=read_snapshot, locked_user=locked_user)
+    seen = set() if _seen is None else _seen
+    for dependency in value['resources']:
+        ref = dependency.get('object_ref')
+        if ref is None or ref['kind'] != 'agent_file':
+            continue
+        fid = ref['id']
+        if fid in seen:
+            raise unavailable()
+        seen.add(fid)
+        try:
+            from app.services import agent_file_authorization as files
+            from app.services import authorization_artifacts as artifacts
+            from app.authz.context import plain
+            from hashlib import sha256
+            header, _ = files.metadata(db, fid)
+            binding = artifacts.load_artifact_binding(db, target=artifacts.ArtifactTarget(files.KIND, fid, 1))
+            # This dependency's full current preview/download has already passed.
+            meta = files._metadata(fid, header)
+            path = files.paths(fid, header['ext'])
+            if path.is_symlink() or sha256(path.read_bytes()).hexdigest() != header['bytes_sha256']:
+                raise unavailable()
+            source = plain(binding.provenance)
+            if source != meta['authorization_provenance']:
+                raise unavailable()
+            validate_agent_provenance(db, identity, source, read_snapshot=read_snapshot,
+                                      locked_user=locked_user, _seen=seen)
+        except OSError:
+            raise unavailable() from None
+        finally:
+            seen.remove(fid)
 
 
 def _as_schema2(value):
@@ -190,6 +229,8 @@ class AgentAccess:
     """One execution's identity/lineage, with short independent validation sessions."""
     def __init__(self, bind, identity: VerifiedIdentity | None):
         self.bind, self.identity = bind, identity
+        self.execution_contracts = ()
+        self.execution_wire = None
         with Session(bind) as db:
             self.authoritative = runtime.canonical_management_required(db)
             self.collector = None
@@ -200,18 +241,64 @@ class AgentAccess:
                 self.collector = AccessCollector(principal.id, principal.authorization_epoch,
                                                  catalog.CATALOG_VERSION)
 
-    def check(self) -> None:
+    def check_sources(self) -> None:
         with Session(self.bind) as db:
             required = runtime.canonical_management_required(db)
             if required and not self.authoritative:
                 raise unavailable()  # An in-flight legacy run cannot survive a cutover.
             if self.authoritative:
-                validate_provenance(db, self.identity, self.collector.snapshot())
+                validate_agent_provenance(db, self.identity, self.collector.snapshot())
+
+    def bind_execution(self, contract, *, precondition=None):
+        from app.services.agent_authorization import ExecutionContract
+        if type(contract) is not ExecutionContract:
+            raise unavailable()
+        if not self.authoritative:
+            return
+        # Execution checks never become historical data obligations.
+        with service.access_recorder(lambda _: None):
+            accesses, ref = contract.authorize(self.bind, self.identity, precondition=precondition)
+        self.execution_contracts = (contract,)
+        self.execution_wire = accesses.wire(ref)
+
+    def check(self) -> None:
+        self.check_sources()
+        if self.authoritative:
+            if not self.execution_contracts:
+                raise authz_error(403, 'AUTHZ_CONTEXT_REQUIRED', '缺少本次 Agent 执行合同')
+            with service.access_recorder(lambda _: None):
+                for contract in self.execution_contracts:
+                    contract.authorize(self.bind, self.identity)
+
+    def check_locked(self, db, actor):
+        if not self.authoritative:
+            return
+        if not self.execution_contracts:
+            raise unavailable()
+        with service.access_recorder(lambda _: None):
+            for contract in self.execution_contracts:
+                contract.authorize_in(db, self.identity, locked_user=actor)
+        validate_agent_provenance(db, self.identity, self.snapshot(), locked_user=actor)
+
+    @contextmanager
+    def command(self, contract):
+        """A named nested command; keep the parent run contract and all data reads."""
+        from app.services.agent_authorization import ExecutionContract
+        if type(contract) is not ExecutionContract:
+            raise unavailable()
+        prior = self.execution_contracts
+        self.execution_contracts = (*prior, contract)
+        try:
+            self.check()
+            yield
+            self.check()
+        finally:
+            self.execution_contracts = prior
 
     def inherit(self, value: dict) -> None:
         if self.authoritative:
             with Session(self.bind) as db:
-                validate_provenance(db, self.identity, value)
+                validate_agent_provenance(db, self.identity, value)
             self.collector.inherit(value)
 
     def snapshot(self):
@@ -219,7 +306,7 @@ class AgentAccess:
 
     def mark_used(self) -> None:
         if self.authoritative:
-            runtime.mark_artifact_protocol_used(self.bind)
+            runtime.mark_artifact_protocol_used(self.bind, protocol='authz_s4')
             self.check()
 
 

@@ -6,8 +6,8 @@ import App from "../App";
 import { NAV_ITEMS } from "../nav";
 import api from "../api";
 const get = vi.spyOn(api, "get");
-const mocks = vi.hoisted(() => ({ snapshot: vi.fn(), settings: vi.fn(), accounts: vi.fn(), beta: vi.fn() }));
-vi.mock("../api/authz", async original => ({ ...await original<typeof import("../api/authz")>(), getAuthzSnapshot: mocks.snapshot }));
+const mocks = vi.hoisted(() => ({ snapshot: vi.fn(), settings: vi.fn(), accounts: vi.fn(), beta: vi.fn(), catalog: vi.fn() }));
+vi.mock("../api/authz", async original => ({ ...await original<typeof import("../api/authz")>(), getAuthzSnapshot: mocks.snapshot, getAuthzCatalog: mocks.catalog }));
 vi.mock("../api/accounts", async original => ({ ...await original<typeof import("../api/accounts")>(), listCanonicalAccounts: mocks.accounts }));
 vi.mock("../api/systemSettings", async original => ({ ...await original<typeof import("../api/systemSettings")>(), getSystemSettings: mocks.settings }));
 vi.mock("../api", async original => ({ ...await original<typeof import("../api")>(), getBetaFeatures: mocks.beta }));
@@ -19,6 +19,9 @@ function actor() {
       decisions: Object.fromEntries(Object.keys(definition.actions).map(action => [action, decision(false)])) };
   }
   snapshot.actor_capabilities.read_accounts = decision(true);
+  Object.assign(snapshot.resources.account_directory, { scope_kind: "all" });
+  snapshot.resources.account_directory.decisions.read = decision(true);
+  snapshot.resources.account_directory.decisions.show_list = decision(true);
   const sales = snapshot.resources.company_sales_orders;
   sales.scope_kind = "all";
   sales.decisions.read = decision(true);
@@ -30,6 +33,7 @@ beforeEach(() => {
   localStorage.setItem("role", "readonly");
   mocks.snapshot.mockResolvedValue({ data: actor() });
   mocks.accounts.mockResolvedValue({ data: [] });
+  mocks.catalog.mockResolvedValue({ schema_version: 1, authorization_mode: "unified_modules", catalog_version: "authz-s1-v1", modules: [], boundaries: [] });
   mocks.beta.mockResolvedValue({ data: {} });
   get.mockResolvedValue({ data: {} } as never);
 });
@@ -122,7 +126,7 @@ it("governance parts keep identity and counts visible while monetary columns alo
   expect(mocks.settings).not.toHaveBeenCalled();
 });
 afterEach(cleanup);
-it.each([true, false])("an accounts deep link stays pending while other legacy routes are available, then enforces read_accounts=%s", async allowed => {
+it.each([true, false])("an accounts deep link stays pending while other legacy routes are available, then enforces explicit account surface=%s", async allowed => {
   let resolve!: (value: unknown) => void;
   mocks.snapshot.mockReturnValue(new Promise(done => { resolve = done; }));
   localStorage.setItem("role", "admin");
@@ -133,6 +137,8 @@ it.each([true, false])("an accounts deep link stays pending while other legacy r
   expect(window.location.pathname).toBe("/accounts");
   expect(mocks.accounts).not.toHaveBeenCalled();
   const value = actor(); value.actor_capabilities.read_accounts = decision(allowed);
+  value.resources.account_directory.decisions.read = decision(allowed);
+  value.resources.account_directory.decisions.show_list = decision(allowed);
   await act(async () => resolve({ data: value }));
   if (allowed) expect(await screen.findByText("账号与权限中心")).toBeVisible();
   else {
@@ -155,4 +161,19 @@ it("a real financial route fails closed with an explicit shared permission messa
   expect(await screen.findByText("缺少金额展示设置的读取权限")).toBeVisible();
   expect(screen.queryByText("金额展示口径加载失败")).toBeNull();
   expect(mocks.settings).not.toHaveBeenCalled();
+});
+
+it("management capability recovers the real App without ordinary directory or shared display-policy grants", async () => {
+  const value = actor();
+  value.actor_capabilities.read_accounts = decision(false);
+  for (const key of Object.keys(value.resources.account_directory.decisions)) value.resources.account_directory.decisions[key] = decision(false);
+  value.actor_capabilities.manage_authorization = decision(true);
+  mocks.snapshot.mockResolvedValue({ data: value });
+  get.mockResolvedValue({ data: { schema_version: 1, authorization_mode: "unified_modules", catalog_version: "authz-s1-v1", items: [] } } as never);
+  const route = NAV_ITEMS.find(item => item.key === "accounts")!; await route.load?.();
+  window.history.replaceState({}, "", "/accounts"); render(<App />);
+  expect(await screen.findByText("账号与权限中心")).toBeVisible();
+  await waitFor(() => expect(get).toHaveBeenCalledWith("/authz/accounts", expect.objectContaining({ headers: { Authorization: "Bearer read-accounts-owner" } })));
+  expect(mocks.accounts).not.toHaveBeenCalled(); expect(mocks.settings).not.toHaveBeenCalled();
+  expect(window.location.pathname).toBe("/accounts");
 });

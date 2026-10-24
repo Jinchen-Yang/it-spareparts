@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "account_directory",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.account_directory.actions && P.attr.grants.account_directory.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"account_directory\", \"scope\": P.attr.grants.account_directory.scope, \"version\": P.attr.grants.account_directory.version, \"field_permissions\": P.attr.grants.account_directory.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-activity",
+        "actions": [
+          "read_activity"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_activity\" in P.attr.grants.account_directory.actions && P.attr.grants.account_directory.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"account_directory\", \"scope\": P.attr.grants.account_directory.scope, \"version\": P.attr.grants.account_directory.version, \"field_permissions\": P.attr.grants.account_directory.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-activity",
+        "actions": [
+          "show_activity"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_activity\" in P.attr.grants.account_directory.actions && \"read_activity\" in P.attr.grants.account_directory.actions && P.attr.grants.account_directory.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"account_directory\", \"scope\": P.attr.grants.account_directory.scope, \"version\": P.attr.grants.account_directory.version, \"field_permissions\": P.attr.grants.account_directory.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-list",
+        "actions": [
+          "show_list"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_list\" in P.attr.grants.account_directory.actions && \"read\" in P.attr.grants.account_directory.actions && P.attr.grants.account_directory.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"account_directory\", \"scope\": P.attr.grants.account_directory.scope, \"version\": P.attr.grants.account_directory.version, \"field_permissions\": P.attr.grants.account_directory.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

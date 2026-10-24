@@ -1,3 +1,5 @@
+import { createDomainApi, type ContextRequestTransport } from "./authz/domainApi";
+import { consumeSSE } from "./api/chatStream";
 import type { BlockAccess } from "./authz/rules";
 import { transportConfig, type CapturedTransport } from "./authz/transport";
 import { invalidateAuthzSession } from "./authz/events";
@@ -92,25 +94,22 @@ export interface ChatMessageRow {
   created_at: string;
 }
 
-export const listChatSessions = () =>
-  api.get<{ items: ChatSessionMeta[] }>("/agent/sessions");
-export const createChatSession = (title?: string) =>
-  api.post<ChatSessionMeta>("/agent/sessions", { title: title ?? null });
-export const renameChatSession = (id: number, title: string) =>
-  api.patch(`/agent/sessions/${id}`, { title });
-export const deleteChatSession = (id: number) =>
-  api.delete(`/agent/sessions/${id}`);
-export const getChatMessages = (id: number) =>
-  api.get<{ id: number; title: string; items: ChatMessageRow[] }>(
+export const listChatSessions = (capture?: ContextRequestTransport) =>
+  createDomainApi(api, capture).get<{ items: ChatSessionMeta[] }>("/agent/sessions");
+export const createChatSession = (title?: string, capture?: ContextRequestTransport) =>
+  createDomainApi(api, capture).post<ChatSessionMeta>("/agent/sessions", { title: title ?? null });
+export const renameChatSession = (id: number, title: string, capture?: ContextRequestTransport) =>
+  createDomainApi(api, capture).patch(`/agent/sessions/${id}`, { title });
+export const deleteChatSession = (id: number, capture?: ContextRequestTransport) =>
+  createDomainApi(api, capture).delete(`/agent/sessions/${id}`);
+export const getChatMessages = (id: number, capture?: ContextRequestTransport) =>
+  createDomainApi(api, capture).get<{ id: number; title: string; items: ChatMessageRow[] }>(
     `/agent/sessions/${id}/messages`,
   );
 /** 停止当前生成：服务端 worker 收束并把已生成部分以"已中断"落库。
  * 用 fetch 而非 axios：避开全局 401 拦截器的整页 reload。 */
-export const cancelChatStream = (id: number) =>
-  fetch(`/api/agent/sessions/${id}/chat/cancel`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
-  }).catch(() => undefined);
+export const cancelChatStream = (id: number, capture?: ContextRequestTransport) =>
+  createDomainApi(api, capture).post(`/agent/sessions/${id}/chat/cancel`, {});
 
 export type SessionStreamEvent =
   | AgentStreamEvent
@@ -121,29 +120,17 @@ async function _consumeSSE(
   resp: Response,
   onEvent: (ev: SessionStreamEvent) => void,
 ): Promise<void> {
-  if (!resp.ok || !resp.body) {
-    // 不在这里 reload：调用方要先把用户刚输入的内容存草稿，避免 reload 丢稿
-    throw new Error(`stream http ${resp.status}`);
-  }
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const blocks = buf.split("\n\n");
-    buf = blocks.pop()!;
-    for (const block of blocks) {
-      const line = block.split("\n").find((l) => l.startsWith("data: "));
-      if (!line) continue;
-      try {
-        onEvent(JSON.parse(line.slice(6)) as SessionStreamEvent);
-      } catch {
-        /* 跳过坏帧 */
-      }
-    }
-  }
+  let terminal = false;
+  await consumeSSE(resp, {
+    parse: value => {
+      if (!value || typeof value !== "object" || !("type" in value) || terminal) throw new Error("聊天流协议无效");
+      const event = value as SessionStreamEvent;
+      terminal = ["done", "error", "no_active"].includes(event.type);
+      return event;
+    },
+    onEvent,
+    complete: () => terminal,
+  });
 }
 
 /** 会话内流式问答：只发新消息，历史由服务端持有。 */
@@ -307,16 +294,16 @@ export const fetchPurchaseDrill = (params: { part_id: number; days?: number; exc
 
 export interface AgentUploadResult {
   file_id: string;
-  filename: string;
+  filename?: string;
   ext: string;
-  file_kind: string; // 表格/Word/PDF/图片/文本
+  file_kind?: string; // 表格/Word/PDF/图片/文本
   sheets?: { name: string; n_rows: number; n_cols: number }[];
 }
 
-export const agentUpload = (file: File) => {
+export const agentUpload = (file: File, capture?: ContextRequestTransport) => {
   const fd = new FormData();
   fd.append("file", file);
-  return api.post<AgentUploadResult>("/agent/upload", fd);
+  return createDomainApi(api, capture).post<AgentUploadResult>("/agent/upload", fd);
 };
 
 /** 带鉴权下载智能体文件。

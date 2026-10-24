@@ -11,6 +11,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -160,6 +161,11 @@ class SysImportJob(Base):
     __tablename__ = "sys_import_job"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey('sys_user.id', ondelete='RESTRICT'))
+    authorization_protocol: Mapped[str | None] = mapped_column(String(16))
+    enqueued_epoch: Mapped[int | None] = mapped_column(Integer)
+    authorization_generation: Mapped[int | None] = mapped_column(Integer)
+    manifest_digest: Mapped[str | None] = mapped_column(String(64))
     created_by: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(TZDateTime)
@@ -172,11 +178,47 @@ class SysImportJob(Base):
     note: Mapped[str | None] = mapped_column(Text)
 
 
+class SysImportJobItem(Base):
+    """Canonical source manifest; source filtering precedes history pagination.
+
+    Immutable input metadata is independently bound by SysAuthorizationArtifact.
+    A filename or a legacy job's created_by string never establishes authority.
+    """
+    __tablename__ = 'sys_import_job_item'
+    __table_args__ = (
+        UniqueConstraint('job_id', 'ordinal', name='uq_import_job_item_ordinal'),
+        CheckConstraint('ordinal >= 0', name='ck_import_job_item_ordinal'),
+        CheckConstraint("source_domain IN ('purchase','sales','inventory','maintenance','expense')", name='ck_import_job_item_source'),
+        CheckConstraint("mode IN ('skip','upsert')", name='ck_import_job_item_mode'),
+        CheckConstraint("status IN ('queued','processing','success','partial','failed','authorization_failed')", name='ck_import_job_item_status'),
+        CheckConstraint("content_sha256 ~ '^[0-9a-f]{64}$'", name='ck_import_job_item_digest'),
+        CheckConstraint('content_size >= 0', name='ck_import_job_item_size'),
+        Index('ix_import_job_item_source_job', 'source_domain', 'job_id'),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey('sys_import_job.id', ondelete='CASCADE'))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    source_domain: Mapped[str] = mapped_column(String(16))
+    filename: Mapped[str] = mapped_column(String(256))
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    content_size: Mapped[int] = mapped_column(BigInteger)
+    mode: Mapped[str] = mapped_column(String(16))
+    parser_version: Mapped[int] = mapped_column(Integer)
+    input_manifest: Mapped[dict] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(32), default='queued', server_default='queued')
+    batch_id: Mapped[int | None] = mapped_column(ForeignKey('sys_import_batch.id', ondelete='RESTRICT'))
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+
 class SysImportBatch(Base):
     __tablename__ = "sys_import_batch"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("sys_user.id", ondelete="RESTRICT"), nullable=True)
+    authorization_protocol: Mapped[str | None] = mapped_column(String(16))
+    source_domain: Mapped[str | None] = mapped_column(String(16))
     filename: Mapped[str] = mapped_column(String(256))
     file_type: Mapped[str] = mapped_column(String(16))  # purchase/sales/inventory/inquiry
     file_hash: Mapped[str] = mapped_column(String(64))
@@ -198,6 +240,7 @@ class SysImportBatch(Base):
     # maint_bulk（全项目批量传输）file_hash 保存原件 sha256，同一原件允许分次
     # 勾选提交多次（幂等由收款单台账 + report_json.selection_hash 保证），不入偏唯一索引。
     __table_args__ = (
+        Index('ix_import_batch_authorization_source', 'authorization_protocol', 'source_domain', 'id'),
         Index(
             "ux_batch_success_hash",
             "file_type",

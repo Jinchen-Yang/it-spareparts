@@ -11,6 +11,8 @@ from pathlib import Path
 from types import MappingProxyType
 from app.authz.business_definitions import BUSINESS_SPECS
 from app.authz.maintenance_definitions import MAINTENANCE_SPECS
+from app.authz.platform_definitions import PLATFORM_SPECS
+from app.authz.boundaries import boundary_descriptors, BOUNDARY_ENTRY_CONTRACTS, validate_boundaries
 
 SALES_RESOURCE = "sales_analysis"
 SALES_ACTIONS = frozenset(BUSINESS_SPECS[SALES_RESOURCE]["actions"])
@@ -49,7 +51,7 @@ RESOURCE_DEFINITIONS = MappingProxyType({
         denial_scope=spec.get('denial_scope', "assigned_customers" if name == SALES_RESOURCE else "all"),
         context_scopes=frozenset(spec.get('context_scopes', ())),
         display_actions=frozenset(spec.get('display_actions', ())),
-    ) for name, spec in (BUSINESS_SPECS | MAINTENANCE_SPECS).items()
+    ) for name, spec in (BUSINESS_SPECS | MAINTENANCE_SPECS | PLATFORM_SPECS).items()
 })
 
 
@@ -95,8 +97,10 @@ def validate_sales_grant(actions: Sequence[str], scope: str, field_permissions: 
 # Planned metadata is deliberately separate from executable definitions. It
 # cannot authorize a request or make a database grant valid.
 _DESCRIPTORS = json.loads(Path(__file__).with_name("catalog_manifest.json").read_text())
-CATALOG_VERSION = "authz-s3-" + hashlib.sha256(json.dumps(
-    {"policy_protocol_version": 3, "descriptors": _DESCRIPTORS, "executable": {key: {
+CATALOG_VERSION = "authz-s4-" + hashlib.sha256(json.dumps(
+    {"policy_protocol_version": 4, "descriptors": _DESCRIPTORS,
+     "boundaries": boundary_descriptors(), "boundary_entries": BOUNDARY_ENTRY_CONTRACTS,
+     "executable": {key: {
         "actions": sorted(value.actions), "scopes": sorted(value.scopes),
         "fields": sorted(value.field_permissions), "action_dependencies": value.action_dependencies,
         "action_any_dependencies": value.action_any_dependencies,
@@ -145,6 +149,7 @@ def validate_catalog() -> None:
             visit(node)
 
     ids(_DESCRIPTORS)
+    validate_boundaries(resource_ids=[item['id'] for item in _DESCRIPTORS])
     by_id = {item["id"]: item for item in _DESCRIPTORS}
     implemented = {item["id"] for item in _DESCRIPTORS if item["migration_state"] == "implemented"}
     if implemented != set(RESOURCE_DEFINITIONS):
@@ -208,7 +213,7 @@ def validate_catalog() -> None:
         display_actions = {a['id'] for a in item['actions'] if a['kind'] == 'display'}
         if (definition.name != item["id"] or actions != definition.actions or scopes != definition.scopes
                 or fields != definition.field_permissions or context_scopes != definition.context_scopes
-                or (item['id'] in MAINTENANCE_SPECS and display_actions != definition.display_actions)
+                or (item['id'] in MAINTENANCE_SPECS | PLATFORM_SPECS and display_actions != definition.display_actions)
                 or item["denial_scope"] != definition.denial_scope or definition.denial_scope not in scopes
                 or action_dependencies != set(definition.action_dependencies)
                 or action_any != set(definition.action_any_dependencies)

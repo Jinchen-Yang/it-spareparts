@@ -243,7 +243,7 @@ def test_download_deletes_temp_file_when_csv_generation_raises(db, monkeypatch):
     monkeypatch.setattr(imports_api, "record_access_log", lambda *args: None)
 
     with pytest.raises(RuntimeError, match="original query failed"):
-        imports_api.batch_errors_csv(
+        imports_api._legacy_batch_errors_csv(
             batch.id,
             FailingDb(),
             UserContext(user_id="admin", role="admin", is_authenticated=True),

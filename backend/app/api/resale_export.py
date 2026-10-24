@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 from typing import Annotated
 from uuid import UUID
 
@@ -18,17 +16,9 @@ from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
 router = APIRouter(prefix="/integrations/resale", tags=["resale-readonly"])
 
 
-def _integration_key(authorization: Annotated[str | None, Header()] = None) -> None:
-    expected = get_settings().resale_export_token_sha256.get_secret_value()
-    if not expected:
-        raise HTTPException(status_code=404, detail="返件只读导出尚未启用")
-    scheme, separator, token = (authorization or "").partition(" ")
-    if separator != " " or scheme.lower() != "bearer" or not 32 <= len(token) <= 256:
-        raise HTTPException(status_code=401, detail="只读导出凭据无效")
-    provided = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    if not hmac.compare_digest(provided, expected):
-        raise HTTPException(status_code=401, detail="只读导出凭据无效")
+from app.authz.machine_access import ServiceAccess, require_service
 
+_integration_key = require_service('resale_export', 'resale_return_feed', 'read')
 
 def _source_id(value: str) -> str:
     try:
@@ -69,7 +59,7 @@ def _receipt_item(row: MaintenanceRkdReturnLine, *, contract: int = 1) -> dict:
 @router.get("/bad-receipts")
 def list_bad_receipts(
     response: Response,
-    _key: Annotated[None, Depends(_integration_key)],
+    _key: Annotated[ServiceAccess, Depends(_integration_key)],
     db: Annotated[Session, Depends(get_db)],
     after: str | None = Query(default=None, max_length=36),
     receipt_id: str | None = Query(default=None, max_length=36),

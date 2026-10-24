@@ -188,7 +188,7 @@ _TABLES = [
     "maintenance_manager_upload_batch_project", "maintenance_manager_upload_batch",
     "maintenance_project_user_assignment",
     "maintenance_project_contract", "maintenance_project",
-    "sys_audit_log", "sys_access_log", "sys_raw_file", "sys_import_error", "sys_import_batch",
+    "sys_audit_log", "sys_access_log", "sys_raw_file", "sys_import_error", "sys_import_job_item", "sys_import_batch",
     "sys_import_job", "sys_customer_assignment", "sys_authorization_grant", "sys_authorization_cutover", "sys_authorization_migration_receipt", "sys_user",
     "sys_business_setting",
     # 职位模板（权限中心 v2）：清掉用例改过/新建的模板后重播内置 5 条（下方 _reseed_templates），
@@ -289,7 +289,7 @@ def db(migrated):
         # The fixture resets all canonical state, including migration receipts.
         # Re-establish the empty S2/S3 boundaries rather than pretending a deleted
         # production receipt is a valid downgrade proof.
-        for migration_key in ('authz_s2', 'authz_s3'):
+        for migration_key in ('authz_s2', 'authz_s3', 'authz_s4'):
             conn.execute(text("""INSERT INTO sys_authorization_migration_receipt
                 (migration_key, entity_kind, entity_id, before_state, after_state)
                 VALUES (:key, 'boundary', 'global', '{}'::jsonb,

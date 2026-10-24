@@ -10,24 +10,25 @@ import logging
 import queue
 import threading
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.agent import provider, runtime
+from app.agent import provider, runtime, stream_protocol as wire
+from app.api.agent_route import AgentRoute
 from app.auth import current_identity
 from app.config import get_settings
 from app.db import get_db
 from app.security import UserContext, get_current_user_context, record_access_log, require_page
-from app.services import chat_store
+from app.services import chat_store, agent_authorization as authorization
 from app.authz.principal import VerifiedIdentity, current_verified_identity
 from app.authz.provenance import AgentAccess
 
 _log = logging.getLogger("agent")
 # 后端页面准入：page_chat=False 的角色连会话接口都进不来（PR-审计 HUB-1）。
-router = APIRouter(prefix="/agent/sessions", tags=["agent"],
-                   dependencies=[Depends(require_page("page_chat"))])
+router = APIRouter(route_class=AgentRoute, prefix="/agent/sessions", tags=["agent"],
+                   dependencies=[Depends(authorization.page_gate)])
 
 _NOT_CONFIGURED_MSG = (
     "AI 助手尚未配置：请在服务器 .env 设置 LLM_API_KEY（如 DeepSeek 密钥）后重启服务。"
@@ -36,14 +37,20 @@ _NOT_CONFIGURED_MSG = (
 
 
 class CreateSessionRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    authorization_precondition: dict | None = None
     title: str | None = Field(None, max_length=80)
 
 
 class RenameSessionRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    authorization_precondition: dict | None = None
     title: str = Field(..., min_length=1, max_length=80)
 
 
 class SendMessageRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    authorization_precondition: dict | None = None
     message: str = Field(..., min_length=1, max_length=8000)
 
 
@@ -74,13 +81,18 @@ def list_sessions(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     identity: VerifiedIdentity = Depends(current_verified_identity),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     _require_real_identity(ident)
     access = AgentAccess(db.get_bind(), identity)
+    resolution = authorization.prepare(access, authorization.LIST, {}, view=view, precondition=authorization_precondition)
+    if resolution is not None:
+        return resolution
     items = chat_store.list_sessions(db, ident["sub"], access=access)
     for it in items:   # 标出后台仍在生成的会话，前端给「生成中」角标
         it["generating"] = is_generating(it["id"])
-    return {"items": items}
+    return {"items": items, **({'authorization_context': access.execution_wire} if access.authoritative else {})}
 
 
 @router.post("")
@@ -89,9 +101,14 @@ def create_session(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     identity: VerifiedIdentity = Depends(current_verified_identity),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     _require_real_identity(ident)
     access = AgentAccess(db.get_bind(), identity)
+    resolution = authorization.prepare(access, authorization.CREATE, {'title': req.title}, view=view, precondition=authorization.precondition(authorization_precondition, req.authorization_precondition) if access.authoritative else None)
+    if resolution is not None:
+        return resolution
     s = chat_store.create_session(db, ident["sub"], req.title, access=access)
     return {"id": s.id, "title": s.title, "updated_at": s.updated_at}
 
@@ -103,8 +120,13 @@ def rename_session(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     identity: VerifiedIdentity = Depends(current_verified_identity),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     access = AgentAccess(db.get_bind(), identity)
+    resolution = authorization.prepare(access, authorization.RENAME, {'session_id': session_id, 'title': req.title}, view=view, precondition=authorization.precondition(authorization_precondition, req.authorization_precondition) if access.authoritative else None)
+    if resolution is not None:
+        return resolution
     s = _owned_or_404(db, ident, session_id, access=access)
     chat_store.rename_session(db, s, req.title, access=access)
     return {"id": s.id, "title": s.title}
@@ -116,8 +138,13 @@ def delete_session(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     identity: VerifiedIdentity = Depends(current_verified_identity),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     access = AgentAccess(db.get_bind(), identity)
+    resolution = authorization.prepare(access, authorization.DELETE, {'session_id': session_id}, view=view, precondition=authorization_precondition)
+    if resolution is not None:
+        return resolution
     s = _owned_or_404(db, ident, session_id, access=access)
     chat_store.delete_session(db, s, access=access)
     return {"ok": True}
@@ -129,9 +156,16 @@ def list_messages(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     identity: VerifiedIdentity = Depends(current_verified_identity),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     access = AgentAccess(db.get_bind(), identity)
+    resolution = authorization.prepare(access, authorization.HISTORY, {'session_id': session_id}, view=view, precondition=authorization_precondition)
+    if resolution is not None:
+        return resolution
     s = _owned_or_404(db, ident, session_id, access=access)
+    if access.authoritative:
+        return {**chat_store._canonical_history(db, s.id, access), 'authorization_context': access.execution_wire}
     return {"id": s.id, "title": s.title,
             "items": chat_store.list_messages(db, s.id, access=access)}
 
@@ -155,6 +189,9 @@ class _RunHub:
 
     def __init__(self) -> None:
         self.access = None
+        self.run_id = wire.new_run_id()
+        self._seq = 0
+        self._terminal = False
         self.cancel = threading.Event()
         self._lock = threading.Lock()
         self._buffer: list[dict] = []          # 本轮全部事件，供晚到订阅者回放
@@ -166,6 +203,12 @@ class _RunHub:
         if self.access is not None and ev.get("type") != "error":
             self.access.check()
         with self._lock:
+            if self.access is not None and self.access.authoritative:
+                if self._terminal:
+                    raise ValueError('Cannot publish after terminal event')
+                ev = wire.frame(ev, self.run_id, self._seq + 1)
+                self._seq += 1
+                self._terminal = ev['type'] in wire.TERMINAL
             if len(self._buffer) < _BUFFER_EVENT_CAP:
                 self._buffer.append(ev)
             elif not self._buffer_capped:
@@ -191,6 +234,17 @@ class _RunHub:
             q: "queue.Queue[dict | None]" = queue.Queue()
             self._subs.append(q)
             return replay, q
+
+    def subscribe_complete(self):
+        with self._lock:
+            if self._buffer_capped:
+                return [], None, False
+            replay = list(self._buffer)
+            if self._done:
+                return replay, None, True
+            q = queue.Queue()
+            self._subs.append(q)
+            return replay, q, True
 
     def unsubscribe(self, q: "queue.Queue[dict | None]") -> None:
         with self._lock:
@@ -242,35 +296,53 @@ def _sse(ev: dict) -> str:
     return f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
 
 
-def _hub_event_stream(hub: _RunHub, *, access=None):
-    """订阅一个生成中枢：先回放已发生事件（切回会话补齐已生成部分），
-    再续实时事件，直到结束哨兵。客户端断开则 finally 注销订阅。"""
+def _hub_event_stream(hub: _RunHub, *, access=None, session_id=None):
     def check():
         if hub.access is not None:
-            hub.access.check()
+            hub.access.check_sources()
             if access is not None and access.authoritative:
                 access.inherit(hub.access.snapshot())
         if access is not None:
             access.check()
-    check()
-    replay, sub_q = hub.subscribe()
+    canonical = access is not None and access.authoritative
+    replay, sub_q, complete = hub.subscribe_complete() if canonical else (*hub.subscribe(), True)
+    expected = 1
+    terminal = False
     try:
+        if canonical:
+            yield wire.encode(wire.ready(session_id, hub.run_id, access.execution_wire, replay_complete=complete))
+            check()
+            if not complete:
+                yield wire.encode(wire.frame(wire.error_payload('CHAT_REPLAY_GAP'), hub.run_id, 1))
+                return
+        def send(ev):
+            nonlocal expected, terminal
+            check()
+            if canonical:
+                if ev['seq'] != expected or ev['run_id'] != hub.run_id or terminal:
+                    raise ValueError('Invalid hub sequence')
+                expected += 1
+                terminal = ev['type'] in wire.TERMINAL
+            return wire.encode(ev)
         for ev in replay:
-            check()
-            yield _sse(ev)
-        if sub_q is None:          # 订阅时已结束：回放完即收
-            return
-        while True:
-            try:
-                ev = sub_q.get(timeout=600)
-            except queue.Empty:
-                return
-            if ev is None:         # 结束哨兵
-                return
-            check()
-            yield _sse(ev)
-    except HTTPException:
-        yield _sse({"type": "error", "message": "授权已失效，请重新生成", "code": "AUTHZ_ARTIFACT_STALE"})
+            yield send(ev)
+        if sub_q is not None and not terminal:
+            while True:
+                try:
+                    ev = sub_q.get(timeout=600)
+                except queue.Empty:
+                    break
+                if ev is None:
+                    break
+                yield send(ev)
+                if terminal:
+                    break
+        if canonical and not terminal:
+            yield wire.encode(wire.frame(wire.error_payload('CHAT_STREAM_PROTOCOL_ERROR'), hub.run_id, expected))
+    except Exception as exc:
+        if not terminal:
+            error = wire.exception_payload(exc)
+            yield wire.encode(wire.frame(error, hub.run_id, expected) if canonical else error)
     finally:
         if sub_q is not None:
             hub.unsubscribe(sub_q)
@@ -282,11 +354,16 @@ def chat_cancel(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     identity: VerifiedIdentity = Depends(current_verified_identity),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """停止当前生成：worker 收到信号后把已生成部分以 stopped=True 落库——
     前端显示的"已中断"与库内状态一致。"""
     access = AgentAccess(db.get_bind(), identity)
+    resolution = authorization.prepare(access, authorization.CANCEL, {'session_id': session_id}, view=view, precondition=authorization_precondition)
+    if resolution is not None:
+        return resolution
     s = _owned_or_404(db, ident, session_id, access=access)
     record_access_log(ctx, "chat_cancel", "agent", {"session_id": s.id})
     return {"cancelled": request_cancel(s.id)}
@@ -299,6 +376,8 @@ def chat_stream(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     identity: VerifiedIdentity = Depends(current_verified_identity),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     """会话内流式问答。SSE 事件与旧 /agent/chat/stream 一致，外加
@@ -309,6 +388,9 @@ def chat_stream(
     完整答案落库（重新打开会话可见全文）。"""
     _require_agent_enabled()
     access = AgentAccess(db.get_bind(), identity)
+    resolution = authorization.prepare(access, authorization.RUN, {'session_id': session_id, 'message': req.message}, view=view, precondition=authorization.precondition(authorization_precondition, req.authorization_precondition) if access.authoritative else None)
+    if resolution is not None:
+        return resolution
     s = _owned_or_404(db, ident, session_id, access=access)
     record_access_log(ctx, "chat_stream", "agent",
                       {"session_id": s.id, "q": req.message[:200]})
@@ -316,15 +398,16 @@ def chat_stream(
     hub = acquire_session(s.id)
     if hub is None:
         raise HTTPException(status.HTTP_409_CONFLICT,
-                            "该会话上一轮回答还在生成中，请稍候或先停止")
+                            {"code": "CHAT_RUN_BUSY", "message": "该会话上一轮回答仍在生成", "accepted": False})
 
     hub.access = access
     sid = s.id  # 捕获纯标量：流式期间不再触碰请求级 ORM 对象/会话
     try:
         # 先落用户消息（即使后面中断，提问也不丢）；首条消息顺带定标题
         title_before = s.title
-        chat_store.append_message(db, s, "user", req.message, access=access)
         history = chat_store.history_for_llm(db, s.id, access=access)
+        chat_store.append_message(db, s, "user", req.message, access=access)
+        history.append({'role': 'user', 'content': req.message})
         new_title = s.title if s.title != title_before else None
         configured = provider.is_configured()
         if not configured:
@@ -357,8 +440,6 @@ def chat_stream(
             nonlocal msg_id, since_ckpt, finalized
             if finalized or authorization_failed:
                 return
-            if final:
-                finalized = True
             content = "".join(buf).strip()
             if not content and not trace:
                 return
@@ -366,12 +447,15 @@ def chat_stream(
                 msg_id = chat_store.save_assistant_progress(
                     sid, msg_id, content or "(无内容)", trace, stopped, access=access)
                 since_ckpt = 0
+                if final:
+                    finalized = True
             except HTTPException:
                 raise
             except Exception:  # noqa: BLE001 —— 落库失败不能炸生成
                 _log.exception("checkpoint assistant message failed (session=%s)", sid)
                 if access.authoritative:
-                    raise
+                    from app.authz.errors import authz_error
+                    raise authz_error(503, 'CHAT_PERSISTENCE_FAILED', '回答保存失败') from None
 
         wdb = SessionLocal()
         try:
@@ -395,19 +479,33 @@ def chat_stream(
                 elif ev.get("type") == "done":
                     _save(stopped=False, final=True)
                 hub.publish(ev)
-        except HTTPException:
+        except HTTPException as exc:
             authorization_failed = True
-            hub.publish({"type": "error", "message": "授权已失效，请重新生成", "code": "AUTHZ_ARTIFACT_STALE"})
+            hub.publish(wire.exception_payload(exc))
         except Exception as exc:  # noqa: BLE001 —— 上游 LLM 错误：保留已生成部分
             _log.error("agent session stream failed: %r", exc)
-            _save(stopped=True, final=True)
-            hub.publish({"type": "error", "message": "AI 服务调用失败，请稍后重试"})
+            try:
+                _save(stopped=True, final=True)
+            except Exception as save_exc:
+                exc = save_exc
+            authorization_failed = True
+            hub.publish(wire.exception_payload(exc))
         finally:
             try:
                 _save(stopped=True, final=True)
             finally:
                 wdb.close()
                 release_session(sid)  # → hub.finish() 给所有订阅者发结束哨兵
+
+    try:
+        if new_title:
+            hub.publish({'type': 'title', 'title': new_title})
+        if not configured:
+            hub.publish({'type': 'delta', 'text': _NOT_CONFIGURED_MSG})
+            hub.publish({'type': 'done', 'tool_calls': [], 'configured': False})
+    except BaseException:
+        release_session(sid)
+        raise
 
     # worker 在 handler 里启动而非 gen 里：客户端若在响应体被拉取前断开，
     # gen 可能永远不被迭代——锁释放/落库必须不依赖 gen 跑起来。
@@ -422,16 +520,7 @@ def chat_stream(
         release_session(sid)
 
     def gen():
-        access.check()
-        if new_title:
-            yield _sse({"type": "title", "title": new_title})
-        if not configured:
-            access.check()
-            yield _sse({"type": "delta", "text": _NOT_CONFIGURED_MSG})
-            access.check()
-            yield _sse({"type": "done", "tool_calls": [], "configured": False})
-            return
-        yield from _hub_event_stream(hub, access=access)
+        yield from _hub_event_stream(hub, access=access, session_id=sid)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-store",
@@ -444,23 +533,39 @@ def chat_attach(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     identity: VerifiedIdentity = Depends(current_verified_identity),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     """重新订阅会话进行中的生成（切回会话续看连续直播）：先回放已生成部分、再续实时。
     无进行中的生成 → 单个 {type:"no_active"} 事件，前端转为加载历史消息即可。"""
     _require_agent_enabled()
     access = AgentAccess(db.get_bind(), identity)
+    resolution = authorization.prepare(access, authorization.ATTACH, {'session_id': session_id}, view=view, precondition=authorization_precondition)
+    if resolution is not None:
+        return resolution
     s = _owned_or_404(db, ident, session_id, access=access)
     sid = s.id
     db.rollback()  # 释放请求连接：订阅期间不再触碰请求级会话
     hub = get_run(sid)
+    if access.authoritative and hub is not None and hub.access is not None:
+        access.inherit(hub.access.snapshot())
+        access.check()
 
     def gen():
-        access.check()
         if hub is None:
-            yield _sse({"type": "no_active"})
+            if access.authoritative:
+                yield wire.encode(wire.ready(sid, None, access.execution_wire))
+                try:
+                    access.check()
+                    yield wire.encode(wire.frame({'type': 'no_active'}, None, 1))
+                except Exception as exc:
+                    yield wire.encode(wire.frame(wire.exception_payload(exc), None, 1))
+            else:
+                access.check()
+                yield _sse({'type': 'no_active'})
             return
-        yield from _hub_event_stream(hub, access=access)
+        yield from _hub_event_stream(hub, access=access, session_id=sid)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-store",

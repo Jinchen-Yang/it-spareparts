@@ -1,0 +1,1909 @@
+{
+  "schema_version": 1,
+  "status": "frozen_readonly_declarations_pending_S3_exact_CI_and_S4_start",
+  "authority": "Runtime definitions/catalog/registry generated during S4; never import this audit file at runtime",
+  "resource_count": 11,
+  "surface_count": 44,
+  "resources": [
+    {
+      "id": "import_purchase",
+      "scopes": [
+        "all"
+      ],
+      "denial_scope": "all",
+      "context_scopes": [
+        "all"
+      ],
+      "query_attributes": [],
+      "field_permissions": [
+        "data_customer",
+        "data_supplier",
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_seed": {
+        "data_customer": {
+          "key": "data_customer"
+        },
+        "data_supplier": {
+          "key": "data_supplier"
+        },
+        "data_purchase_cost": {
+          "key": "data_purchase_cost"
+        },
+        "data_profit": {
+          "key": "data_profit"
+        }
+      },
+      "actions": [
+        {
+          "id": "precheck",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "submit_skip",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "submit_upsert",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "read_status",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "read_report",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "export_errors",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "show_upload",
+          "label": "采购文件预检",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_submit",
+          "label": "采购文件提交",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [
+            "submit_skip",
+            "submit_upsert"
+          ],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_history",
+          "label": "采购批次历史",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_jobs",
+          "label": "采购作业状态",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_report",
+          "label": "采购批次报告",
+          "kind": "display",
+          "requires_actions": [
+            "read_report"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "show_errors",
+          "label": "采购问题文件导出",
+          "kind": "display",
+          "requires_actions": [
+            "export_errors"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        }
+      ],
+      "surfaces_ref": "s4-frontend-manifest-surfaces-fragment.json#/resources/3/surfaces"
+    },
+    {
+      "id": "import_sales",
+      "scopes": [
+        "all"
+      ],
+      "denial_scope": "all",
+      "context_scopes": [
+        "all"
+      ],
+      "query_attributes": [],
+      "field_permissions": [
+        "data_customer",
+        "data_supplier",
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_seed": {
+        "data_customer": {
+          "key": "data_customer"
+        },
+        "data_supplier": {
+          "key": "data_supplier"
+        },
+        "data_purchase_cost": {
+          "key": "data_purchase_cost"
+        },
+        "data_profit": {
+          "key": "data_profit"
+        }
+      },
+      "actions": [
+        {
+          "id": "precheck",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "submit_skip",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "submit_upsert",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "read_status",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "read_report",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "export_errors",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "show_upload",
+          "label": "销售文件预检",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_submit",
+          "label": "销售文件提交",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [
+            "submit_skip",
+            "submit_upsert"
+          ],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_history",
+          "label": "销售批次历史",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_jobs",
+          "label": "销售作业状态",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_report",
+          "label": "销售批次报告",
+          "kind": "display",
+          "requires_actions": [
+            "read_report"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "show_errors",
+          "label": "销售问题文件导出",
+          "kind": "display",
+          "requires_actions": [
+            "export_errors"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        }
+      ],
+      "surfaces_ref": "s4-frontend-manifest-surfaces-fragment.json#/resources/4/surfaces"
+    },
+    {
+      "id": "import_inventory",
+      "scopes": [
+        "all"
+      ],
+      "denial_scope": "all",
+      "context_scopes": [
+        "all"
+      ],
+      "query_attributes": [],
+      "field_permissions": [
+        "data_customer",
+        "data_supplier",
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_seed": {
+        "data_customer": {
+          "key": "data_customer"
+        },
+        "data_supplier": {
+          "key": "data_supplier"
+        },
+        "data_purchase_cost": {
+          "key": "data_purchase_cost"
+        },
+        "data_profit": {
+          "key": "data_profit"
+        }
+      },
+      "actions": [
+        {
+          "id": "precheck",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "submit_skip",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "submit_upsert",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "read_status",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "read_report",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "export_errors",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "show_upload",
+          "label": "库存文件预检",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_submit",
+          "label": "库存文件提交",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [
+            "submit_skip",
+            "submit_upsert"
+          ],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_history",
+          "label": "库存批次历史",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_jobs",
+          "label": "库存作业状态",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_report",
+          "label": "库存批次报告",
+          "kind": "display",
+          "requires_actions": [
+            "read_report"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "show_errors",
+          "label": "库存问题文件导出",
+          "kind": "display",
+          "requires_actions": [
+            "export_errors"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        }
+      ],
+      "surfaces_ref": "s4-frontend-manifest-surfaces-fragment.json#/resources/5/surfaces"
+    },
+    {
+      "id": "import_maintenance",
+      "scopes": [
+        "all"
+      ],
+      "denial_scope": "all",
+      "context_scopes": [
+        "all"
+      ],
+      "query_attributes": [],
+      "field_permissions": [
+        "data_customer",
+        "data_supplier",
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_seed": {
+        "data_customer": {
+          "key": "data_customer"
+        },
+        "data_supplier": {
+          "key": "data_supplier"
+        },
+        "data_purchase_cost": {
+          "key": "data_purchase_cost"
+        },
+        "data_profit": {
+          "key": "data_profit"
+        }
+      },
+      "actions": [
+        {
+          "id": "precheck",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "submit_skip",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "submit_upsert",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "read_status",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "read_report",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "export_errors",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "show_upload",
+          "label": "维保出库文件预检",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_submit",
+          "label": "维保出库文件提交",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [
+            "submit_skip",
+            "submit_upsert"
+          ],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_history",
+          "label": "维保出库批次历史",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_jobs",
+          "label": "维保出库作业状态",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_report",
+          "label": "维保出库批次报告",
+          "kind": "display",
+          "requires_actions": [
+            "read_report"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "show_errors",
+          "label": "维保出库问题文件导出",
+          "kind": "display",
+          "requires_actions": [
+            "export_errors"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        }
+      ],
+      "surfaces_ref": "s4-frontend-manifest-surfaces-fragment.json#/resources/6/surfaces"
+    },
+    {
+      "id": "import_expense",
+      "scopes": [
+        "all"
+      ],
+      "denial_scope": "all",
+      "context_scopes": [
+        "all"
+      ],
+      "query_attributes": [],
+      "field_permissions": [
+        "data_customer",
+        "data_supplier",
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_seed": {
+        "data_customer": {
+          "key": "data_customer"
+        },
+        "data_supplier": {
+          "key": "data_supplier"
+        },
+        "data_purchase_cost": {
+          "key": "data_purchase_cost"
+        },
+        "data_profit": {
+          "key": "data_profit"
+        }
+      },
+      "actions": [
+        {
+          "id": "precheck",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "submit_skip",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "submit_upsert",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "read_status",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "read_report",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "export_errors",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "show_upload",
+          "label": "报销文件预检",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_submit",
+          "label": "报销文件提交",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [
+            "submit_skip",
+            "submit_upsert"
+          ],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_history",
+          "label": "报销批次历史",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_jobs",
+          "label": "报销作业状态",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_report",
+          "label": "报销批次报告",
+          "kind": "display",
+          "requires_actions": [
+            "read_report"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        },
+        {
+          "id": "show_errors",
+          "label": "报销问题文件导出",
+          "kind": "display",
+          "requires_actions": [
+            "export_errors"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_import"
+              },
+              {
+                "key": "data_customer"
+              },
+              {
+                "key": "data_supplier"
+              },
+              {
+                "key": "data_purchase_cost"
+              },
+              {
+                "key": "data_profit"
+              }
+            ]
+          }
+        }
+      ],
+      "surfaces_ref": "s4-frontend-manifest-surfaces-fragment.json#/resources/7/surfaces"
+    },
+    {
+      "id": "import_expense_void",
+      "scopes": [
+        "all"
+      ],
+      "denial_scope": "all",
+      "context_scopes": [
+        "all"
+      ],
+      "query_attributes": [],
+      "field_permissions": [
+        "data_purchase_cost"
+      ],
+      "field_seed": {
+        "data_purchase_cost": {
+          "key": "data_purchase_cost"
+        }
+      },
+      "actions": [
+        {
+          "id": "preview",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        },
+        {
+          "id": "show_preview",
+          "label": "报销作废预演",
+          "kind": "display",
+          "requires_actions": [
+            "preview"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_import"
+          }
+        }
+      ],
+      "surfaces_ref": "s4-frontend-manifest-surfaces-fragment.json#/resources/8/surfaces"
+    },
+    {
+      "id": "agent_chat",
+      "scopes": [
+        "self"
+      ],
+      "denial_scope": "self",
+      "context_scopes": [
+        "self"
+      ],
+      "query_attributes": [
+        "request.resource.attr.is_owner"
+      ],
+      "field_permissions": [],
+      "field_seed": {},
+      "actions": [
+        {
+          "id": "use",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "show_conversation",
+          "label": "发送消息与工具结果",
+          "kind": "display",
+          "requires_actions": [
+            "use"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        }
+      ],
+      "surfaces_ref": "s4-frontend-manifest-surfaces-fragment.json#/resources/0/surfaces",
+      "notice": "会话发送另需私人会话 run；没有目标会话时创建另需 create；工具来源逐项复验。stateless use 不自动依赖 run/create。"
+    },
+    {
+      "id": "private_chat_session",
+      "scopes": [
+        "self"
+      ],
+      "denial_scope": "self",
+      "context_scopes": [
+        "self"
+      ],
+      "query_attributes": [
+        "request.resource.attr.is_owner"
+      ],
+      "field_permissions": [],
+      "field_seed": {},
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "attach",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "create",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "rename",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "delete",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "run",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "cancel",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "show_sessions",
+          "label": "会话列表",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "show_history",
+          "label": "历史正文",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "show_create",
+          "label": "创建会话",
+          "kind": "display",
+          "requires_actions": [
+            "create"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "show_live",
+          "label": "接续实时结果",
+          "kind": "display",
+          "requires_actions": [
+            "attach"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "show_cancel",
+          "label": "停止生成",
+          "kind": "display",
+          "requires_actions": [
+            "cancel"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "show_delete",
+          "label": "删除会话",
+          "kind": "display",
+          "requires_actions": [
+            "delete"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        }
+      ],
+      "surfaces_ref": "s4-frontend-manifest-surfaces-fragment.json#/resources/1/surfaces"
+    },
+    {
+      "id": "agent_file",
+      "scopes": [
+        "self"
+      ],
+      "denial_scope": "self",
+      "context_scopes": [
+        "self"
+      ],
+      "query_attributes": [
+        "request.resource.attr.is_owner"
+      ],
+      "field_permissions": [],
+      "field_seed": {},
+      "actions": [
+        {
+          "id": "preview",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "download",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "upload",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "generate",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "show_upload",
+          "label": "上传附件",
+          "kind": "display",
+          "requires_actions": [
+            "upload"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "show_preview",
+          "label": "预览附件",
+          "kind": "display",
+          "requires_actions": [
+            "preview"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        },
+        {
+          "id": "show_download",
+          "label": "下载附件及图片原件",
+          "kind": "display",
+          "requires_actions": [
+            "download"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_chat"
+          }
+        }
+      ],
+      "surfaces_ref": "s4-frontend-manifest-surfaces-fragment.json#/resources/2/surfaces"
+    },
+    {
+      "id": "account_directory",
+      "scopes": [
+        "all"
+      ],
+      "denial_scope": "all",
+      "context_scopes": [],
+      "query_attributes": [],
+      "field_permissions": [],
+      "field_seed": {},
+      "actions": [
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_accounts"
+          }
+        },
+        {
+          "id": "read_activity",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_accounts"
+          }
+        },
+        {
+          "id": "show_list",
+          "label": "账号目录",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_accounts"
+          }
+        },
+        {
+          "id": "show_activity",
+          "label": "账号活动",
+          "kind": "display",
+          "requires_actions": [
+            "read_activity"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "key": "page_accounts"
+          }
+        }
+      ],
+      "surfaces_ref": "s4-frontend-manifest-surfaces-fragment.json#/resources/9/surfaces"
+    },
+    {
+      "id": "account_profile",
+      "scopes": [
+        "all"
+      ],
+      "denial_scope": "all",
+      "context_scopes": [],
+      "query_attributes": [],
+      "field_permissions": [],
+      "field_seed": {},
+      "actions": [
+        {
+          "id": "update",
+          "kind": "mutation",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_accounts"
+              },
+              {
+                "key": "action_account_manage"
+              }
+            ]
+          }
+        },
+        {
+          "id": "show_edit",
+          "label": "修改显示资料",
+          "kind": "display",
+          "requires_actions": [
+            "update"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [],
+          "legacy_seed_if": {
+            "all": [
+              {
+                "key": "page_accounts"
+              },
+              {
+                "key": "action_account_manage"
+              }
+            ]
+          }
+        }
+      ],
+      "surfaces_ref": "s4-frontend-manifest-surfaces-fragment.json#/resources/10/surfaces"
+    }
+  ],
+  "seed_contract": {
+    "legacy_source": "Frozen runtime_safe(effective_for_user) / corresponding template effective permission map; role is never runtime allow",
+    "eligibility": "Persisted authorization_legacy_seed_eligible=true, nondeleted; inactive retains entitlement",
+    "existing_keys": "Do not overwrite existing Grant/profile override/saved template snapshot/bundle key, including explicit empty denial",
+    "empty_result": "Persist explicit canonical empty config as migrated; do not consume legacy origin flag",
+    "expression_language": {
+      "key": "an exact legacy effective key equal to True",
+      "all": "AND of child expressions"
+    },
+    "named_principal": "Agent runtime always typed named principal; template grants represent named users, no shared fallback grant"
+  },
+  "boundaries": {
+    "ids": [
+      "account_lifecycle",
+      "legacy_template",
+      "authorization_admin",
+      "authentication",
+      "authorization_snapshot",
+      "health_probe",
+      "framework_documentation",
+      "resale_return_feed",
+      "resale_catalog",
+      "resale_price_reference"
+    ],
+    "owner": "root",
+    "source_contract": "s4-platform-and-context-contract.md",
+    "runtime_exports": [
+      "boundary_descriptors",
+      "BOUNDARY_ENTRY_CONTRACTS"
+    ],
+    "catalog_version_includes": [
+      "boundary_descriptors",
+      "BOUNDARY_ENTRY_CONTRACTS"
+    ],
+    "module_ids_disjoint": true,
+    "employee_grantable": false
+  },
+  "retired_aliases": [
+    {
+      "id": "data_import",
+      "migration_state": "retired",
+      "actions": [],
+      "surfaces": [],
+      "replacement_resources": [
+        "import_purchase",
+        "import_sales",
+        "import_inventory",
+        "import_maintenance",
+        "import_expense",
+        "import_expense_void"
+      ]
+    },
+    {
+      "id": "maintenance_source_document",
+      "migration_state": "retired",
+      "actions": [],
+      "surfaces": [],
+      "replacement_resources": [
+        "maintenance_wbdd_snapshot",
+        "maintenance_wbdd_reconciliation",
+        "maintenance_source_cancellation"
+      ]
+    },
+    {
+      "id": "maintenance_ai_assist",
+      "migration_state": "retired",
+      "actions": [],
+      "surfaces": [],
+      "replacement_resources": [
+        "maintenance_ai_document",
+        "maintenance_ai_ledger",
+        "maintenance_ai_proposals"
+      ]
+    }
+  ],
+  "policy_additions": {
+    "self": "R.attr.is_owner"
+  },
+  "non_http_entries": [
+    {
+      "entry_id": "TOOL agent.write_excel",
+      "channel": "tool",
+      "requirements": {
+        "agent_file": [
+          "generate"
+        ]
+      },
+      "carrier": "operation_input",
+      "selection": {
+        "tool": "write_excel",
+        "command_sha256": "server canonical full actual arguments digest"
+      },
+      "http_authorization_view": false
+    },
+    {
+      "entry_id": "TOOL agent.write_report",
+      "channel": "tool",
+      "requirements": {
+        "agent_file": [
+          "generate"
+        ]
+      },
+      "carrier": "operation_input",
+      "selection": {
+        "tool": "write_report",
+        "command_sha256": "server canonical full actual arguments digest"
+      },
+      "http_authorization_view": false
+    }
+  ],
+  "artifact_protocol": {
+    "new": "authz_s4",
+    "reuses": "SysAuthorizationMigrationReceipt artifact_protocol + SysAuthorizationArtifact/schema2",
+    "adapter_default": "authz_s3",
+    "selection": "Only the registered server ArtifactDomainAdapter.protocol; not caller/client input",
+    "guard": "Commit durable marker before filesystem publication; marker withdrawal or downgrade never restores legacy reader",
+    "strict_epoch_catalog_history": true
+  },
+  "ownership": {
+    "backend_owner": [
+      "catalog",
+      "runtime",
+      "models",
+      "single_alembic_migration",
+      "frozen_seed",
+      "context_registry",
+      "import_api_and_worker"
+    ],
+    "root": [
+      "boundaries",
+      "control_access",
+      "domain_contexts",
+      "principal/service/control API glue",
+      "machine APIs"
+    ],
+    "agent_owner": [
+      "Agent APIs/runtime/store/files",
+      "registered ArtifactDomainAdapter.protocol expansion"
+    ],
+    "frontend_owner": [
+      "generated consumption",
+      "all UI"
+    ]
+  }
+}

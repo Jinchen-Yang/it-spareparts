@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.authz.runtime import guard_legacy_execution
+
 from app.authz.service import context_resolution
 
 import asyncio
@@ -202,6 +204,7 @@ def _validate_in_worker(
     db: Session | None = None
     try:
         db = SessionLocal()
+        guard_legacy_execution(db, (_RESOURCE,))
         adapter = _adapter(db, ident=ident, ctx=ctx)
         content = FilePath(upload_path).read_bytes()
         validation, batch = adapter.validate(

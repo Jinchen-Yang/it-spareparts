@@ -2815,6 +2815,9 @@ def test_roundtrip_import_worker_exception_rolls_back_closes_session_and_removes
         failed_import,
     )
     monkeypatch.setattr(maintenance_api, "record_access_log", lambda *_args, **_kwargs: None)
+    # This is a session-cleanup unit test; real PG cutover races are covered by
+    # test_authz_s4_roundtrip_worker_cutover, not this SQL-less session double.
+    monkeypatch.setattr(maintenance_api.runtime, "guard_legacy_execution", lambda *_args: None)
 
     response = client.post(
         "/api/maintenance/roundtrip-import",
@@ -2873,6 +2876,9 @@ def test_roundtrip_import_worker_cleanup_errors_preserve_import_primary(
         failed_import,
     )
     monkeypatch.setattr(maintenance_api, "record_access_log", lambda *_args, **_kwargs: None)
+    # This is a session-cleanup unit test; real PG cutover races are covered by
+    # test_authz_s4_roundtrip_worker_cutover, not this SQL-less session double.
+    monkeypatch.setattr(maintenance_api.runtime, "guard_legacy_execution", lambda *_args: None)
 
     with pytest.raises(RuntimeError, match="import primary") as exc_info:
         maintenance_api._import_roundtrip_in_worker(
@@ -2912,6 +2918,9 @@ def test_roundtrip_import_worker_close_error_after_success_is_warning_only(
         successful_import,
     )
     monkeypatch.setattr(maintenance_api, "record_access_log", lambda *_args, **_kwargs: None)
+    # This is a session-cleanup unit test; real PG cutover races are covered by
+    # test_authz_s4_roundtrip_worker_cutover, not this SQL-less session double.
+    monkeypatch.setattr(maintenance_api.runtime, "guard_legacy_execution", lambda *_args: None)
     monkeypatch.setattr(
         maintenance_api.logger,
         "warning",

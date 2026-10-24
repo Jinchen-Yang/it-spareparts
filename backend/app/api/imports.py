@@ -7,13 +7,18 @@ import threading
 
 import time
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status, Request, Response
 from fastapi.responses import FileResponse
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.exc import DataError
 from sqlalchemy.orm import Session
 
 from app.auth import current_role
+from app.authz.principal import VerifiedIdentity, current_verified_identity
+from app.authz import runtime as authorization_runtime
+from app.authz.errors import authz_error
+from app.api.authz_route import AuthorizationRoute
+from app.services import source_import_access as canonical_import
 from app.config import MAX_IMPORT_FILES, MAX_UPLOAD_MB, get_settings
 from app.db import SessionLocal, get_db
 from app.security import (
@@ -31,10 +36,27 @@ from app.etl.reader import ReaderError
 from app.etl.transform import SOFT_ERROR_TYPES
 from app.models.system import SysImportBatch, SysImportError, SysImportJob
 
+
+async def _form_contract(request: Request):
+    if request.method != 'POST':
+        return
+    allowed = {
+        '/precheck': {'files', 'authorization_precondition'},
+        '/upload': {'file', 'preview_token', 'authorization_precondition'},
+        '/upload-batch': {'files', 'preview_tokens', 'authorization_precondition'},
+        '/expense-void-preview': {'file', 'files', 'authorization_precondition'},
+    }.get(request.url.path.removeprefix('/api/import'))
+    if allowed is None:
+        return
+    form = await request.form()
+    if set(form) - allowed or len(form.getlist('authorization_precondition')) > 1:
+        raise authz_error(422, 'AUTHZ_INVALID_REQUEST', '请求含未知或重复字段')
+
 router = APIRouter(
     prefix="/import",
     tags=["import"],
-    dependencies=[Depends(current_role), Depends(require_page("page_import"))],
+    dependencies=[Depends(current_role), Depends(_form_contract)],
+    route_class=AuthorizationRoute,
 )
 _log = logging.getLogger("imports")
 
@@ -193,8 +215,7 @@ def _fingerprints_by_file(payloads: list[dict], saved: list[tuple[str, str]]) ->
     return {tmp: by_hash[h] for tmp, h in hashes.items() if h in by_hash}
 
 
-@router.post("/upload")
-def upload(
+def _legacy_upload(
     file: UploadFile = File(...),
     mode: str = Query("skip"),    # skip(默认,跳过已存在) | upsert(更新已存在,修复数据)
     preview_token: str | None = Form(None),   # 作废预演令牌（修复模式单合同报销页必需）
@@ -324,8 +345,7 @@ def upload(
             os.remove(tmp)
 
 
-@router.post("/precheck")
-def precheck(
+def _legacy_precheck(
     files: list[UploadFile] = File(...),
     mode: str = Query("skip"),
     db: Session = Depends(get_db),
@@ -418,6 +438,11 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
     try:
         for tmp, name in files:
             try:
+                # Identification only reads these request-owned bytes. A queued
+                # legacy job must acquire authority again before business locks.
+                source = canonical_import.inspect_input(tmp, name, '').source_domain
+                authorization_runtime.guard_legacy_execution(db,
+                    ('import_' + source,) if source else tuple('import_' + s for s in canonical_import.SOURCES))
                 batch = pipeline.run_import(
                     db,
                     tmp,
@@ -450,7 +475,7 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                 db.rollback()
                 errored += 1
                 notes.append(f"并发冲突：{name}（{_IMPORT_CONFLICT_ERROR}）")
-            except loader.ImportIntegrityError:
+            except loader.ImportIntegrityError as exc:
                 db.rollback()
                 errored += 1
                 notes.append(f"完整性失败：{name}（{str(exc)[:300]}）")
@@ -458,6 +483,10 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                 db.rollback()
                 errored += 1
                 notes.append(f"并发冲突：{name}（{_IMPORT_CONFLICT_ERROR}）")
+            except HTTPException:
+                db.rollback()
+                errored += 1
+                notes.append(f"权限已变更：{name}（请按当前权限重新提交）")
             except Exception as exc:  # noqa: BLE001
                 db.rollback()
                 errored += 1
@@ -498,8 +527,7 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
 
 
 
-@router.post("/expense-void-preview")
-def expense_void_preview(
+def _legacy_expense_void_preview(
     file: UploadFile = File(...),
     mode: str = Query("upsert"),
     db: Session = Depends(get_db),
@@ -533,8 +561,7 @@ def expense_void_preview(
     return apply_field_visibility(payload, ctx)
 
 
-@router.post("/upload-batch")
-def upload_batch(
+def _legacy_upload_batch(
     files: list[UploadFile] = File(...),
     mode: str = Query("skip"),
     preview_tokens: list[str] = Form([]),   # 作废预演令牌（每个会作废的报销页一枚）
@@ -589,16 +616,14 @@ def _job_dict(j: SysImportJob) -> dict:
     }
 
 
-@router.get("/jobs")
-def list_jobs(db: Session = Depends(get_db)) -> list[dict]:
+def _legacy_list_jobs(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.execute(
         select(SysImportJob).order_by(desc(SysImportJob.created_at)).limit(50)
     ).scalars().all()
     return [_job_dict(j) for j in rows]
 
 
-@router.get("/jobs/{job_id}")
-def job_detail(job_id: int, db: Session = Depends(get_db)) -> dict:
+def _legacy_job_detail(job_id: int, db: Session = Depends(get_db)) -> dict:
     j = db.get(SysImportJob, job_id)
     if j is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "作业不存在")
@@ -614,8 +639,7 @@ def job_detail(job_id: int, db: Session = Depends(get_db)) -> dict:
     } for b in batches]}
 
 
-@router.get("/batches")
-def list_batches(db: Session = Depends(get_db)) -> list[dict]:
+def _legacy_list_batches(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.execute(
         select(SysImportBatch).order_by(desc(SysImportBatch.uploaded_at)).limit(100)
     ).scalars().all()
@@ -627,8 +651,7 @@ def list_batches(db: Session = Depends(get_db)) -> list[dict]:
     } for b in rows]
 
 
-@router.get("/batches/{batch_id}")
-def batch_detail(batch_id: int, db: Session = Depends(get_db)) -> dict:
+def _legacy_batch_detail(batch_id: int, db: Session = Depends(get_db)) -> dict:
     b = db.get(SysImportBatch, batch_id)
     if b is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "批次不存在")
@@ -652,8 +675,7 @@ def batch_detail(batch_id: int, db: Session = Depends(get_db)) -> dict:
     }
 
 
-@router.get("/batches/{batch_id}/errors.csv")
-def batch_errors_csv(
+def _legacy_batch_errors_csv(
     batch_id: int,
     db: Session = Depends(get_db),
     ctx: UserContext = Depends(get_current_user_context),
@@ -712,3 +734,127 @@ def batch_errors_csv(
         except Exception:
             _log.warning("Failed to remove error CSV temporary file", exc_info=True)
         raise
+
+
+# Canonical dispatch is per actual source. Only a never-cutover source retains
+# the old page gate; a withdrawn marker is suspended and cannot enter legacy.
+def _legacy_page(ctx, view=None):
+    if view is not None:
+        raise authz_error(503,'AUTHZ_RESOURCE_UNAVAILABLE','此来源尚未启用统一授权')
+    require_page('page_import')(ctx)
+
+
+def _transport(request, response, form_precondition=None, *, allowed=()):
+    if request is None:return None,None
+    response.headers['Cache-Control']='no-store'
+    unknown=set(request.query_params)-{'view','authorization_precondition',*allowed}
+    if unknown:raise authz_error(422,'AUTHZ_INVALID_REQUEST','请求含未知参数')
+    query=request.query_params.get('authorization_precondition')
+    if query is not None and form_precondition is not None:
+        raise authz_error(422,'AUTHZ_INVALID_REQUEST','授权前置条件只能提供一次')
+    view=request.query_params.get('view')
+    if view not in (None,'authorization'):raise authz_error(422,'AUTHZ_INVALID_REQUEST','未知授权视图')
+    return view,form_precondition if form_precondition is not None else query
+
+
+@router.post('/precheck')
+def precheck(request: Request,response:Response,files:list[UploadFile]=File(...),mode:str=Query('skip'),
+    authorization_precondition:str|None=Form(None),db:Session=Depends(get_db),
+    identity:VerifiedIdentity=Depends(current_verified_identity),ctx:UserContext=Depends(get_current_user_context)):
+    view,condition=_transport(request,response,authorization_precondition,allowed=('mode',))
+    if not canonical_import.canonical(db):
+        _legacy_page(ctx,view)
+        return _legacy_precheck(files=files,mode=mode,db=db,ctx=ctx)
+    with canonical_import.uploaded_inputs(files) as inputs:
+        if canonical_import.canonical(db,inputs=inputs,entry_id=canonical_import.PRECHECK):
+            return canonical_import.precheck(lambda:Session(db.get_bind()),identity,inputs,mode,view=view,precondition=condition)
+    _legacy_page(ctx,view)
+    for file in files:file.file.seek(0)
+    return _legacy_precheck(files=files,mode=mode,db=db,ctx=ctx)
+
+
+@router.post('/upload')
+def upload(request:Request,response:Response,file:UploadFile=File(...),mode:str=Query('skip'),
+    preview_token:str|None=Form(None),authorization_precondition:str|None=Form(None),db:Session=Depends(get_db),
+    identity:VerifiedIdentity=Depends(current_verified_identity),ctx:UserContext=Depends(get_current_user_context)):
+    view,condition=_transport(request,response,authorization_precondition,allowed=('mode',))
+    if not canonical_import.canonical(db):
+        _legacy_page(ctx,view)
+        return _legacy_upload(file=file,mode=mode,preview_token=preview_token,db=db,ctx=ctx)
+    with canonical_import.uploaded_inputs([file]) as inputs:
+        if canonical_import.canonical(db,inputs=inputs,entry_id=canonical_import.UPLOAD):
+            return canonical_import.submit(db,identity,inputs,mode,preview_tokens=[preview_token] if preview_token else [],view=view,precondition=condition)
+    _legacy_page(ctx,view);file.file.seek(0)
+    return _legacy_upload(file=file,mode=mode,preview_token=preview_token,db=db,ctx=ctx)
+
+
+@router.post('/upload-batch')
+def upload_batch(request:Request,response:Response,files:list[UploadFile]=File(...),mode:str=Query('skip'),
+    preview_tokens:list[str]=Form([]),authorization_precondition:str|None=Form(None),db:Session=Depends(get_db),
+    identity:VerifiedIdentity=Depends(current_verified_identity),ctx:UserContext=Depends(get_current_user_context)):
+    view,condition=_transport(request,response,authorization_precondition,allowed=('mode',))
+    if not canonical_import.canonical(db):
+        _legacy_page(ctx,view)
+        return _legacy_upload_batch(files=files,mode=mode,preview_tokens=preview_tokens,db=db,ctx=ctx)
+    with canonical_import.uploaded_inputs(files) as inputs:
+        if canonical_import.canonical(db,inputs=inputs,entry_id=canonical_import.UPLOAD_BATCH):
+            return canonical_import.submit(db,identity,inputs,mode,preview_tokens=preview_tokens,view=view,
+                precondition=condition,batch_upload=True)
+    _legacy_page(ctx,view)
+    for file in files:file.file.seek(0)
+    return _legacy_upload_batch(files=files,mode=mode,preview_tokens=preview_tokens,db=db,ctx=ctx)
+
+
+@router.post('/expense-void-preview')
+def expense_void_preview(request:Request,response:Response,file:UploadFile|None=File(None),files:list[UploadFile]|None=File(None),mode:str=Query('upsert'),
+    authorization_precondition:str|None=Form(None),db:Session=Depends(get_db),
+    identity:VerifiedIdentity=Depends(current_verified_identity),ctx:UserContext=Depends(get_current_user_context)):
+    view,condition=_transport(request,response,authorization_precondition,allowed=('mode',))
+    if canonical_import.canonical(db,entry_id=canonical_import.VOID):
+        if file is not None or not files:
+            raise authz_error(422,'AUTHZ_INVALID_REQUEST','统一作废预演使用 files 文件列表')
+        with canonical_import.uploaded_inputs(files) as inputs:
+            return canonical_import.void_preview(lambda:Session(db.get_bind()),identity,inputs,mode,view=view,precondition=condition)
+    _legacy_page(ctx,view)
+    if file is None or files is not None:
+        raise authz_error(422,'AUTHZ_INVALID_REQUEST','旧作废预演使用单 file')
+    return _legacy_expense_void_preview(file=file,mode=mode,db=db,ctx=ctx)
+
+
+def _read_canonical(request,response,db,identity,ctx,entry,params,legacy):
+    view,condition=_transport(request,response)
+    if canonical_import.canonical(db,entry_id=entry):
+        return canonical_import.read(lambda:Session(db.get_bind()),identity,entry,params,view=view,precondition=condition,
+            before_publish=(lambda:record_access_log(ctx,'download_errors',f"import_batch:{params['batch_id']}")) if entry==canonical_import.ERRORS and not view else None)
+    _legacy_page(ctx,view)
+    return legacy()
+
+
+@router.get('/jobs')
+def list_jobs(request:Request,response:Response,db:Session=Depends(get_db),
+    identity:VerifiedIdentity=Depends(current_verified_identity),ctx:UserContext=Depends(get_current_user_context)):
+    return _read_canonical(request,response,db,identity,ctx,canonical_import.JOBS,{},lambda:_legacy_list_jobs(db))
+
+
+@router.get('/jobs/{job_id}')
+def job_detail(job_id:int,request:Request,response:Response,db:Session=Depends(get_db),
+    identity:VerifiedIdentity=Depends(current_verified_identity),ctx:UserContext=Depends(get_current_user_context)):
+    return _read_canonical(request,response,db,identity,ctx,canonical_import.JOB,{'job_id':job_id},lambda:_legacy_job_detail(job_id,db))
+
+
+@router.get('/batches')
+def list_batches(request:Request,response:Response,db:Session=Depends(get_db),
+    identity:VerifiedIdentity=Depends(current_verified_identity),ctx:UserContext=Depends(get_current_user_context)):
+    return _read_canonical(request,response,db,identity,ctx,canonical_import.BATCHES,{},lambda:_legacy_list_batches(db))
+
+
+@router.get('/batches/{batch_id}')
+def batch_detail(batch_id:int,request:Request,response:Response,db:Session=Depends(get_db),
+    identity:VerifiedIdentity=Depends(current_verified_identity),ctx:UserContext=Depends(get_current_user_context)):
+    return _read_canonical(request,response,db,identity,ctx,canonical_import.BATCH,{'batch_id':batch_id},lambda:_legacy_batch_detail(batch_id,db))
+
+
+@router.get('/batches/{batch_id}/errors.csv')
+def batch_errors_csv(batch_id:int,db:Session=Depends(get_db),ctx:UserContext=Depends(get_current_user_context),
+    request:Request=None,response:Response=None,identity:VerifiedIdentity=Depends(current_verified_identity)):
+    return _read_canonical(request,response,db,identity,ctx,canonical_import.ERRORS,{'batch_id':batch_id},lambda:_legacy_batch_errors_csv(batch_id,db,ctx))

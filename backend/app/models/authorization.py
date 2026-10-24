@@ -64,7 +64,7 @@ class SysAuthorizationGrant(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "resource", name="uq_authorization_grant_user_resource"),
         CheckConstraint("version >= 1", name="ck_authorization_grant_version"),
-        CheckConstraint("scope IN ('all', 'all_contracts', 'all_imports', 'all_projects', 'all_sources', 'assigned_customers', 'assigned_or_sales_projects', 'assigned_projects', 'canonical_sales_projects', 'own_applications', 'own_imports', 'own_proposals', 'own_source_sales', 'primary_managed_active_projects', 'primary_managed_projects')", name="ck_authorization_grant_scope"),
+        CheckConstraint("scope IN ('all', 'all_contracts', 'all_imports', 'all_projects', 'all_sources', 'assigned_customers', 'assigned_or_sales_projects', 'assigned_projects', 'canonical_sales_projects', 'own_applications', 'own_imports', 'own_proposals', 'own_source_sales', 'primary_managed_active_projects', 'primary_managed_projects', 'self')", name="ck_authorization_grant_scope"),
         CheckConstraint("jsonb_typeof(actions) = 'array'", name="ck_authorization_grant_actions_array"),
         CheckConstraint("jsonb_typeof(field_permissions) = 'array'", name="ck_authorization_grant_fields_array"),
     )

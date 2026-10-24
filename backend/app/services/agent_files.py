@@ -12,6 +12,11 @@
 import json
 import re
 import uuid
+import inspect
+from contextlib import ExitStack, suppress
+from contextvars import ContextVar
+from tempfile import TemporaryDirectory
+from hashlib import sha256
 from functools import wraps
 from app.authz.provenance import AgentAccess, current_access, execution_access, file_access, unavailable
 from datetime import datetime, timezone
@@ -43,6 +48,10 @@ class FileError(Exception):
     """文件层业务错误（消息可直接回给模型/用户）。"""
 
 
+_READ_FILES = ContextVar('agent_verified_files', default=None)
+_FILE_DOWNLOAD = ContextVar('agent_file_download', default=False)
+
+
 def _guarded_file(fn):
     @wraps(fn)
     def guarded(*args, **kwargs):
@@ -50,7 +59,28 @@ def _guarded_file(fn):
         if access is None:
             from app.db import engine
             access = AgentAccess(engine, None)
-        with execution_access(access):
+        with ExitStack() as stack:
+            stack.enter_context(execution_access(access))
+            if access.authoritative and fn.__name__ in ('write_excel', 'write_report', 'save_upload'):
+                from app.services.agent_authorization import ExecutionContract, EXCEL, REPORT, UPLOAD
+                if fn.__name__ in ('write_excel', 'write_report'):
+                    from app.services.agent_authorization import CHAT, STREAM, RUN
+                    if not access.execution_contracts or access.execution_contracts[0].entry_id not in (CHAT, STREAM, RUN):
+                        raise unavailable()
+                bound = inspect.signature(fn).bind(*args, **kwargs)
+                bound.apply_defaults()
+                command = {k: v for k, v in bound.arguments.items() if k != 'operated_by'}
+                if fn.__name__ == 'save_upload':
+                    command['content'] = sha256(command['content']).hexdigest()
+                entry = {'write_excel': EXCEL, 'write_report': REPORT, 'save_upload': UPLOAD}[fn.__name__]
+                stack.enter_context(access.command(ExecutionContract(entry, command)))
+            cache = _READ_FILES.get()
+            if cache is None:
+                temporary = stack.enter_context(TemporaryDirectory(prefix='agent-verified-'))
+                token = _READ_FILES.set(({}, Path(temporary)))
+                stack.callback(_READ_FILES.reset, token)
+            token = _FILE_DOWNLOAD.set(fn.__name__ == 'get_download')
+            stack.callback(_FILE_DOWNLOAD.reset, token)
             result = fn(*args, **kwargs)
             access.check()
             return result
@@ -75,6 +105,9 @@ def _ext_of(filename: str) -> str:
 
 
 def _data_path(file_id: str, ext: str) -> Path:
+    cache = _READ_FILES.get()
+    if cache is not None and file_id in cache[0]:
+        return cache[0][file_id][1]
     return _dir() / f"{file_id}.{ext}"
 
 
@@ -86,6 +119,18 @@ def _check_id(file_id: str) -> str:
 
 
 def _load_meta(file_id: str) -> dict:
+    access = current_access()
+    if access is not None and access.authoritative:
+        from app.services import agent_file_authorization as protected
+        cache = _READ_FILES.get()
+        if cache is None:
+            raise unavailable()
+        # Even cached bytes require a current module/source check at each read.
+        meta, content = protected.materialize(access, file_id, download=_FILE_DOWNLOAD.get())
+        target = cache[1] / (file_id + '.' + meta['ext'])
+        target.write_bytes(content)
+        cache[0][file_id] = (meta, target)
+        return meta
     p = _meta_path(file_id)
     if not p.exists():
         raise FileError(f"文件不存在或已清理: {file_id}")
@@ -103,22 +148,43 @@ def _load_meta(file_id: str) -> dict:
     return meta
 
 
-def _save_meta(file_id: str, meta: dict) -> None:
-    access = file_access()
-    if access is not None:
-        access.mark_used()
-        meta = {**meta, "schema_version": 1, "owner_user_id": access.snapshot()["principal_id"],
-                "authorization_provenance": access.snapshot()}
-    target = _meta_path(file_id)
-    temporary = target.with_name(target.name + "." + uuid.uuid4().hex + ".tmp")
+def _publish_legacy(file_id: str, meta: dict, content: bytes) -> None:
+    """Publish only this candidate under a short global authority transaction.
+
+    Bytes/metadata rendering precedes the lock. Exclusive creation never replaces
+    a colliding original; failure removes only paths this invocation created.
+    """
+    from sqlalchemy.orm import Session
+    from app.authz import runtime
+    current = current_access()
+    if current is None or current.authoritative:
+        raise unavailable()
+    serialized = json.dumps(meta, ensure_ascii=False).encode('utf-8')
+    base = _dir()
+    target = base / f'{_check_id(file_id)}.meta.json'
+    data = base / f'{file_id}.{meta["ext"]}'
+    temporary = target.with_name(target.name + '.' + uuid.uuid4().hex + '.tmp')
+    created = []
     try:
-        temporary.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-        current = current_access()
-        if current is not None:
+        with Session(current.bind) as publication, publication.begin():
+            runtime.guard_legacy_management_execution(publication)
             current.check()
-        temporary.replace(target)
-    finally:
-        temporary.unlink(missing_ok=True)
+            if target.exists() or data.exists():
+                raise FileExistsError('文件标识冲突，请重新生成')
+            with data.open('xb') as output:
+                created.append(data)
+                output.write(content)
+            with temporary.open('xb') as output:
+                created.append(temporary)
+                output.write(serialized)
+            target.hardlink_to(temporary)  # atomic, fails if another target exists
+            created.append(target)
+            temporary.unlink()
+    except BaseException:
+        for candidate in reversed(created):
+            with suppress(OSError):
+                candidate.unlink(missing_ok=True)
+        raise
 
 
 def _cell_str(v) -> str:
@@ -154,8 +220,11 @@ def save_upload(content: bytes, filename: str, operated_by: str | None) -> dict:
         except Exception as exc:  # noqa: BLE001
             raise FileError(f"无法解析 xlsx（可能损坏，请用 Excel 重新另存）: {type(exc).__name__}") from exc
 
-    _data_path(file_id, ext).write_bytes(content)
-    _save_meta(file_id, meta)
+    access = current_access()
+    if access is not None and access.authoritative:
+        from app.services.agent_file_authorization import publish
+        return publish(access, file_id, meta, content)
+    _publish_legacy(file_id, meta, content)
     out = {"file_id": file_id, "filename": filename, "ext": ext,
            "file_kind": ("表格" if ext == "xlsx" else "Word" if ext == "docx"
                          else "PDF" if ext == "pdf" else "图片" if ext in _IMG_EXT else "文本")}
@@ -415,9 +484,17 @@ def write_excel(base_file_id: str | None, sheet: str | None,
             converted.seek(0)
             image.ref = converted
             image.format = "png"
-    wb.save(_data_path(file_id, "xlsx"))
+    access = current_access()
+    if access is not None and access.authoritative:
+        from app.services.agent_file_authorization import publish
+        output = BytesIO()
+        wb.save(output)
+        wb.close()
+        return publish(access, file_id, meta, output.getvalue())
+    output = BytesIO()
+    wb.save(output)
     wb.close()
-    _save_meta(file_id, meta)
+    _publish_legacy(file_id, meta, output.getvalue())
     return {"file_id": file_id, "filename": meta["filename"], "cells_written": written,
             "download_url": f"/api/agent/files/{file_id}"}
 
@@ -495,9 +572,17 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
 
     name = output_name or (title or "报表")
     file_id, meta = _new_file({"report": True}, operated_by, name)
-    wb.save(_data_path(file_id, "xlsx"))
+    access = current_access()
+    if access is not None and access.authoritative:
+        from app.services.agent_file_authorization import publish
+        output = BytesIO()
+        wb.save(output)
+        wb.close()
+        return publish(access, file_id, meta, output.getvalue())
+    output = BytesIO()
+    wb.save(output)
     wb.close()
-    _save_meta(file_id, meta)
+    _publish_legacy(file_id, meta, output.getvalue())
     return {"file_id": file_id, "filename": meta["filename"], "rows_written": len(rows),
             "download_url": f"/api/agent/files/{file_id}"}
 

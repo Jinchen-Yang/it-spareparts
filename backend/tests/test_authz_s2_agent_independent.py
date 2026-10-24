@@ -11,7 +11,7 @@ from app.authz.provenance import AgentAccess, execution_access
 from app.config import get_settings
 from app.models.authorization import SysAuthorizationCutover, SysAuthorizationMigrationReceipt
 from app.services import agent_files, chat_store
-from tests.test_authz_s2_agent_provenance import setup_agent, cerbos_url  # noqa: F401
+from tests.test_authz_s2_agent_provenance import setup_agent, cerbos_url, bind, contracts  # noqa: F401
 
 
 def _legacy(db, monkeypatch):
@@ -60,10 +60,13 @@ def test_legacy_file_vision_result_cannot_cross_cutover(db, setup_agent, monkeyp
 
 def test_canonical_session_ownership_uses_stable_id_not_old_display_subject(db, setup_agent):
     _, identity, access, _ = setup_agent
+    bind(access, contracts.CREATE)
     session = chat_store.create_session(db, identity.username, access=access)
     session.owner_sub = 'historical-name-before-rename'
     db.commit()
+    bind(access, contracts.HISTORY, session_id=session.id)
     assert chat_store.get_owned(db, identity.username, session.id, access=access).id == session.id
+    bind(access, contracts.LIST)
     assert chat_store.list_sessions(db, identity.username, access=access)[0]['id'] == session.id
 
 
@@ -90,19 +93,21 @@ def test_artifact_marker_transaction_precedes_chat_actor_lock(db, setup_agent, m
     from sqlalchemy.orm import Session
     from app.models.system import SysUser
     user, identity, access, _ = setup_agent
+    bind(access, contracts.CREATE)
     session = chat_store.create_session(db, identity.username, access=access)
     sid, uid = session.id, user.id
     db.rollback()
     original = runtime.mark_artifact_protocol_used
     calls = []
-    def mark(bind):
+    def mark(bind, *, protocol="authz_s2"):
         # Separate backend connection proves no actor SHARE is retained here.
         with Session(bind) as other:
             assert other.scalar(select(SysUser.id).where(SysUser.id == uid)
                                 .with_for_update(nowait=True)) == uid
         calls.append(True)
-        original(bind)
+        original(bind, protocol=protocol)
     monkeypatch.setattr(runtime, 'mark_artifact_protocol_used', mark)
+    bind(access, contracts.RUN, session_id=sid, message='fixture')
     if operation == 'append':
         chat_store.append_message(db, session, 'assistant', 'safe', access=access)
     else:

@@ -1,20 +1,27 @@
 import PageHeader from "../components/PageHeader";
 import { useEffect, useRef, useState } from "react";
-import { App, Button, Drawer, Grid, Input, Modal, Popconfirm, Spin, Tag, Tooltip, Upload } from "antd";
+import { Alert, App, Button, Drawer, Grid, Input, Modal, Popconfirm, Spin, Tag, Tooltip, Upload } from "antd";
 import {
   CopyOutlined, DeleteOutlined, DownloadOutlined, EyeOutlined, FileExcelOutlined,
-  PaperClipOutlined, PlusOutlined, RobotOutlined, SendOutlined, StopOutlined,
+  PaperClipOutlined, PlusOutlined, RobotOutlined, SendOutlined,
 } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  agentDownload, agentFileBlobUrl, agentPreview, agentUpload, attachChatStream, cancelChatStream,
-  createChatSession, deleteChatSession, getChatMessages, listChatSessions, sessionChatStream,
+  agentUpload, cancelChatStream,
+  createChatSession, deleteChatSession, getChatMessages, listChatSessions,
 } from "../api";
 import type {
   AgentToolCall, AgentUploadResult, ChatSessionMeta, FilePreview, SessionStreamEvent,
 } from "../api";
-import { clearSessionScopedPreferences } from "../sessionPreferences";
+import { useLocation, useSearchParams } from "react-router-dom";
+import { useContextAdmission, legacyRouteAllowed, withRouteAccess } from "../authz/access";
+import { useContextTransport, domainApi } from "../authz/domainTransport";
+import { useContextQuery } from "../authz/contextQuery";
+import { surfaceRule } from "../authz/rules";
+import { useChatStream } from "./chat/useChatStream";
+import { AuthorizationCancelled } from "../authz/requestLifecycle";
+import type { CanonicalStreamEvent } from "../api/chatStream";
 import { COLORS, TAG_STYLES } from "../theme";
 
 import { tokens } from "../tokens";
@@ -56,13 +63,11 @@ interface StreamCtl {
   sessionId: number;
   abort: AbortController;
   settled: boolean;
-  conflict: boolean;     // 409：会话锁未释放，交 send 退避重试
   trace: AgentToolCall[];
   userTurn?: Turn;
   done: Promise<void>;
   resolveDone: () => void;
 }
-const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const cellStyle = (head: boolean): React.CSSProperties => ({
   border: `1px solid ${COLORS.border}`, padding: "5px 10px",
@@ -84,39 +89,33 @@ function FileCard({ href, label }: { href: string; label?: string }) {
   const { message } = App.useApp();
   const fileId = /\/api\/agent\/files\/([a-z0-9]{6,})/i.exec(href)?.[1] || "";
   const [open, setOpen] = useState(false);
-  const [pv, setPv] = useState<FilePreview | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [imgUrl, setImgUrl] = useState<string | null>(null);
   const [tab, setTab] = useState(0);
-  const name = pv?.filename || label || "结果文件.xlsx";
-
-  useEffect(() => () => { if (imgUrl) URL.revokeObjectURL(imgUrl); }, [imgUrl]);
-
-  const download = () =>
-    agentDownload(href).catch((e: Error) =>
-      message.error(e.message === "auth-expired"
-        ? "登录已过期，请重新登录后再下载（聊天记录不会丢失）"
-        : "下载失败，文件可能已清理"));
-
-  const openPreview = async () => {
-    setOpen(true);
-    if (pv || !fileId) return;
-    setLoading(true);
+  const [legacyAllowed] = useState(() => legacyRouteAllowed("/chat"));
+  const admission = useContextAdmission();
+  const canPreview = admission.surface("agent_file.preview", legacyAllowed) !== "deny";
+  const canDownload = admission.surface("agent_file.download", legacyAllowed) !== "deny";
+  const transport = useContextTransport(JSON.stringify([fileId, open]), legacyAllowed);
+  const preview = useContextQuery<FilePreview>({ entryId: "GET /api/agent/files/{file_id}/preview",
+    rule: surfaceRule("agent_file.preview"), queryKey: [fileId, open], legacyAllowed,
+    enabled: open && !!fileId && canPreview,
+    query: async capture => (await domainApi(capture).get<FilePreview>(`/agent/files/${fileId}/preview`)).data,
+  });
+  const pv = preview.data, loading = preview.loading;
+  const name = pv?.filename || label || "结果文件";
+  const download = async () => {
+    if (!fileId || !canDownload) return;
     try {
-      const data = await agentPreview(fileId);
-      setPv(data);
-      if (data.kind === "image") {
-        try { setImgUrl(await agentFileBlobUrl(fileId)); } catch { /* 退化为仅下载 */ }
-      }
-    } catch (e) {
-      const msg = (e as Error)?.message;
-      message.error(msg === "auth-expired" ? "登录已过期，请重新登录" : "预览失败，文件可能已清理");
-      setOpen(false);
-    } finally {
-      setLoading(false);
-    }
+      const response = await domainApi(transport).get<Blob>(`/agent/files/${fileId}`, { responseType: "blob" });
+      if (!transport.isCurrent()) return;
+      const cd = String(response.headers["content-disposition"] || "");
+      const match = /filename\*=UTF-8''([^;]+)/.exec(cd) || /filename="?([^";]+)"?/.exec(cd);
+      const a = document.createElement("a");
+      a.download = match ? decodeURIComponent(match[1]) : name;
+      a.href = URL.createObjectURL(response.data); a.click(); URL.revokeObjectURL(a.href);
+    } catch (error) { if (transport.isCurrent()) message.error((error as Error)?.message || "下载不可用"); }
   };
-
+  const openPreview = () => { if (canPreview && fileId) setOpen(true); };
+  if (!canPreview && !canDownload) return <span>文件操作未授权</span>;
   const sheet = pv?.sheets?.[tab];
   return (
     <>
@@ -131,13 +130,13 @@ function FileCard({ href, label }: { href: string; label?: string }) {
         }}><FileExcelOutlined /></span>
         <span style={{ fontSize: 13, color: COLORS.text, overflow: "hidden",
                        textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>{name}</span>
-        <Button size="small" icon={<EyeOutlined />} onClick={openPreview}>预览</Button>
-        <Button size="small" type="primary" icon={<DownloadOutlined />} onClick={download}>下载</Button>
+        {canPreview && <Button size="small" icon={<EyeOutlined />} onClick={openPreview}>预览</Button>}
+        {canDownload && <Button size="small" type="primary" icon={<DownloadOutlined />} onClick={download}>下载</Button>}
       </span>
 
       <Modal open={open} onCancel={() => setOpen(false)} width={820} title={name} destroyOnHidden
-        footer={<Button type="primary" icon={<DownloadOutlined />} onClick={download}>下载文件</Button>}>
-        {loading ? (
+        footer={canDownload ? <Button type="primary" icon={<DownloadOutlined />} onClick={download}>下载文件</Button> : null}>
+        {preview.error ? <Alert type="error" message="文件预览不可用" /> : loading ? (
           <div style={{ textAlign: "center", padding: 40 }}><Spin /></div>
         ) : pv?.kind === "table" ? (
           <>
@@ -170,9 +169,7 @@ function FileCard({ href, label }: { href: string; label?: string }) {
             )}
           </>
         ) : pv?.kind === "image" ? (
-          imgUrl
-            ? <img src={imgUrl} alt={name} style={{ maxWidth: "100%", borderRadius: 8 }} />
-            : <div style={{ color: COLORS.text3, padding: 20, textAlign: "center" }}>图片加载失败，请下载查看</div>
+          <div style={{ color: COLORS.text3, padding: 20, textAlign: "center" }}>这是图片文件。查看原件需要单独的下载权限。</div>
         ) : (
           <div style={{ color: COLORS.text2, padding: 20, textAlign: "center" }}>
             该文件类型暂不支持在线预览，请点「下载文件」查看。
@@ -307,7 +304,7 @@ function UserContent({ text }: { text: string }) {
   );
 }
 
-export default function ChatPage() {
+function ChatPage() {
   const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
   // 与 AppShell 共用 AntD md 断点（768px），首帧未测量时保留桌面布局。
@@ -317,7 +314,20 @@ export default function ChatPage() {
   // 会话与消息都在服务端（平台化 P1）：刷新/换设备记录不丢。
   // activeId=null 表示"未落库的新对话"，首次发送时才真正建会话。
   const [sessions, setSessions] = useState<ChatSessionMeta[]>([]);
-  const [activeId, setActiveId] = useState<number | null>(null);
+  const [search] = useSearchParams();
+  const [legacyAllowed] = useState(() => legacyRouteAllowed("/chat"));
+  const admission = useContextAdmission();
+  const can = (id: string) => admission.surface(id, legacyAllowed) !== "deny";
+  const canList = can("private_chat_session.list"), canHistory = can("private_chat_session.messages");
+  const canCreate = can("private_chat_session.create"), canRun = can("agent_chat.conversation");
+  const canAttach = can("private_chat_session.attach"), canCancel = can("private_chat_session.cancel");
+  const canDelete = can("private_chat_session.delete"), canUpload = can("agent_file.upload");
+  const initialId = Number(search.get("session_id"));
+  const [activeId, setActiveId] = useState<number | null>(Number.isSafeInteger(initialId) && initialId > 0 ? initialId : null);
+  const [locator, setLocator] = useState("");
+  const [viewGeneration, setViewGeneration] = useState(0);
+  const transport = useContextTransport(`chat:${viewGeneration}`, legacyAllowed);
+  const stream = useChatStream(`chat:${viewGeneration}`, legacyAllowed);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [loadingTurns, setLoadingTurns] = useState(false);
   const [input, setInput] = useState("");
@@ -335,7 +345,7 @@ export default function ChatPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollBoxRef = useRef<HTMLDivElement>(null);
-  const activeIdRef = useRef<number | null>(null);
+  const activeIdRef = useRef<number | null>(activeId);
   const openSeqRef = useRef(0);
   const ctlRef = useRef<StreamCtl | null>(null);     // 当前活跃流的控制块
 
@@ -347,7 +357,18 @@ export default function ChatPage() {
       return next;
     });
 
-  const switchTo = (id: number | null) => { activeIdRef.current = id; setActiveId(id); };
+  const switchTo = (id: number | null, continueCurrentIntent = false) => {
+    if (!continueCurrentIntent) {
+      // A target change invalidates uploads/commands as well as the visible stream.
+      openSeqRef.current++;
+      setViewGeneration(value => value + 1);
+      detachActive(); clearFlush();
+      streamBufRef.current = ""; thinkBufRef.current = "";
+      setStreamText(""); setThinkText(""); setToolRuns([]);
+      setTurns([]); setPendingFile(null); setUploading(false); setBusy(false);
+    }
+    activeIdRef.current = id; setActiveId(id);
+  };
   const flushStream = () => { setStreamText(streamBufRef.current); setThinkText(thinkBufRef.current); };
   const clearFlush = () => {
     if (flushTimerRef.current) { window.clearInterval(flushTimerRef.current); flushTimerRef.current = null; }
@@ -361,27 +382,30 @@ export default function ChatPage() {
       return [{ ...s, updated_at: new Date().toISOString() }, ...next];
     });
 
+  const listQuery = useContextQuery<{ items: ChatSessionMeta[] }>({
+    entryId: "GET /api/agent/sessions", rule: surfaceRule("private_chat_session.list"), queryKey: [],
+    legacyAllowed, enabled: canList, query: async capture => (await listChatSessions(capture)).data,
+  });
   useEffect(() => {
-    listChatSessions()
-      .then(({ data }) => {
-        setSessions(data.items);
-        setGeneratingIds(new Set(data.items.filter((s) => s.generating).map((s) => s.id)));
-      })
-      .catch(() => message.error("加载会话列表失败"));
-    const draft = localStorage.getItem("chat_draft");
-    if (draft) {
-      localStorage.removeItem("chat_draft");
-      setInput(draft);
-      message.info("已恢复上次未发送的内容");
-    }
-    return () => clearFlush();
-  }, []);
+    setSessions(listQuery.data?.items ?? []);
+    setGeneratingIds(new Set((listQuery.data?.items ?? []).filter(s => s.generating).map(s => s.id)));
+  }, [listQuery.data]);
+  const historyQuery = useContextQuery<{ items: { role: "user" | "assistant"; content: string; tools?: AgentToolCall[]; stopped?: boolean }[] }>({
+    entryId: "GET /api/agent/sessions/{session_id}/messages", rule: surfaceRule("private_chat_session.messages"),
+    queryKey: [activeId], legacyAllowed, enabled: canHistory && activeId !== null,
+    query: async capture => (await getChatMessages(activeId!, capture)).data,
+  });
+  useEffect(() => {
+    setLoadingTurns(historyQuery.loading);
+    setTurns((historyQuery.data?.items ?? []).map(m => ({ role: m.role, content: m.content, tools: m.tools, stopped: m.stopped })));
+  }, [historyQuery.data, historyQuery.loading]);
+  useEffect(() => () => { clearFlush(); ctlRef.current?.abort.abort(); }, []);
 
   // 启动一路流：opts.message 有值=发新消息(send)，无值=重新订阅(attach 续直播)。
   // 闭包/异步 resolve 都在 await 之后，state 已过期 → 全程走 ref + ctl 自带标志。
   const startStream = (sessionId: number, opts: { message?: string; userTurn?: Turn }): StreamCtl => {
     const ctl: StreamCtl = {
-      sessionId, abort: new AbortController(), settled: false, conflict: false, trace: [],
+      sessionId, abort: new AbortController(), settled: false, trace: [],
       userTurn: opts.userTurn, done: Promise.resolve(), resolveDone: () => {},
     };
     ctl.done = new Promise<void>((res) => { ctl.resolveDone = res; });
@@ -421,20 +445,7 @@ export default function ChatPage() {
       ctl.resolveDone();
     };
 
-    const reload = async (id: number) => {
-      const seq = ++openSeqRef.current;
-      try {
-        const { data } = await getChatMessages(id);
-        if (seq === openSeqRef.current && activeIdRef.current === id) {
-          setTurns(data.items.map((m) => ({
-            role: m.role, content: m.content,
-            tools: m.tools?.length ? m.tools : undefined, stopped: m.stopped,
-          })));
-        }
-      } catch { /* 忽略 */ }
-    };
-
-    const onEvent = (ev: SessionStreamEvent) => {
+    const onEvent = (ev: SessionStreamEvent | CanonicalStreamEvent) => {
       if (ctl.settled || !isCurrent()) return;     // 已切走/停止：忽略后续事件
       if (ev.type === "delta") streamBufRef.current += ev.text;
       else if (ev.type === "thinking") thinkBufRef.current += ev.text;
@@ -450,132 +461,73 @@ export default function ChatPage() {
           const idx = t.length - 1 - i;
           return t.map((x, j) => (j === idx ? { ...x, done: true } : x));
         });
-      else if (ev.type === "done") finish(streamBufRef.current, !!ev.stopped);
-      else if (ev.type === "error") { message.error(ev.message); finish(streamBufRef.current, true); }
+      else if (ev.type === "done") finish(streamBufRef.current || ev.answer || "", !!ev.stopped);
+      else if (ev.type === "error") {
+        ctl.trace = []; thinkBufRef.current = ""; setTurns([]);
+        message.error(ev.message); finish("", true);
+      }
       else if (ev.type === "no_active") {
         // attach 时该会话已生成完：之前为防重复去掉了末尾 in-progress 气泡，这里重载补回最终消息
         ctl.settled = true;
         if (isCurrent()) { clearFlush(); setStreamText(""); setThinkText(""); setToolRuns([]); setBusy(false); thinkBufRef.current = ""; }
         markGenerating(sessionId, false);
-        if (activeIdRef.current === sessionId) reload(sessionId);
+        if (canHistory && activeIdRef.current === sessionId) void historyQuery.retry();
         ctl.resolveDone();
       }
     };
 
-    const run = opts.message != null
-      ? sessionChatStream(sessionId, opts.message, onEvent, ctl.abort.signal)
-      : attachChatStream(sessionId, onEvent, ctl.abort.signal);
-
-    run.then(() => finish(streamBufRef.current, false)).catch((e: any) => {
-      if (ctl.settled) { ctl.resolveDone(); return; }   // detach/停止 已处理过
-      if (e?.name === "AbortError") {
-        finish(streamBufRef.current + "\n\n*(已停止生成)*", true);   // 用户主动停止
-        return;
+    void stream(sessionId, opts.message, onEvent, ctl.abort.signal).catch((error: unknown) => {
+      if (!isCurrent() || ctl.abort.signal.aborted) return;
+      // Failed/unauthorized/incomplete streams never become successful assistant history.
+      ctl.trace = []; thinkBufRef.current = "";
+      if (isCurrent()) {
+        setTurns([]);
+        if (!(error instanceof AuthorizationCancelled) && (error as Error)?.name !== "AbortError")
+          message.error((error as Error)?.message || "聊天连接失败，没有自动重发。");
       }
-      const code = /stream http (\d+)/.exec(e?.message || "")?.[1];
-      if (code === "409") {   // 会话锁未释放：标记冲突交 send 退避重试，保留用户气泡、不打扰
-        ctl.conflict = true;
-        ctl.settled = true;
-        if (isCurrent()) { clearFlush(); setBusy(false); }
-        markGenerating(sessionId, false);
-        ctl.resolveDone();
-        return;
-      }
-      if (code === "401") {
-        localStorage.setItem("chat_draft", opts.message || "");
-        clearSessionScopedPreferences();
-        localStorage.removeItem("token");
-        message.error("登录已过期，请重新登录");
-        setTimeout(() => location.reload(), 800);
-      } else if (opts.message != null) message.error("连接失败，请稍后重试");
-      markGenerating(sessionId, false);
-      if (!streamBufRef.current && !ctl.trace.length) {   // 无产出：回滚乐观追加的用户气泡
-        ctl.settled = true;
-        if (isCurrent()) { clearFlush(); setBusy(false); }
-        if (ctl.userTurn && activeIdRef.current === sessionId)
-          setTurns((prev) => (prev.length && prev[prev.length - 1] === ctl.userTurn ? prev.slice(0, -1) : prev));
-        ctl.resolveDone();
-      } else finish(streamBufRef.current, true);
+      ctl.settled = false; finish("", true);
     });
     return ctl;
   };
 
   // 切走当前会话：停本地显示，但服务端 worker 续跑（会话留在 generatingIds，后台生成）。
-  // keepPartial=true（打断同会话续问时）：把已生成的半截作为「已中断」气泡留在视图，与库内一致。
-  const detachActive = (keepPartial = false) => {
+  // 任何断连都不把未获终止确认的半截存成成功记录。
+  const detachActive = () => {
     const ctl = ctlRef.current;
     if (!ctl || ctl.settled) return;
     ctl.settled = true;          // run 的 catch 因 settled 短路，不再落「已停止」气泡
     clearFlush();
-    const partial = streamBufRef.current;
-    const sid = ctl.sessionId;
     thinkBufRef.current = "";
     setStreamText("");
     setThinkText("");
     setToolRuns([]);
     setBusy(false);
     ctlRef.current = null;
-    if (keepPartial && partial.trim() && activeIdRef.current === sid) {
-      setTurns((prev) => [...prev, {
-        role: "assistant", content: partial, tools: [...ctl.trace], stopped: true,
-      }]);
-    }
     ctl.abort.abort();           // 仅断本地 fetch；未调 cancel → 服务端继续生成
     ctl.resolveDone();
   };
 
   const openSession = async (id: number) => {
-    if (id === activeIdRef.current) return;
-    if (busy) detachActive();    // 切走生成中的会话：后台续跑
-    const seq = ++openSeqRef.current;
+    if (!Number.isSafeInteger(id) || id <= 0 || id === activeIdRef.current) return;
     switchTo(id);
-    setLoadingTurns(true);
+  };
+  const newChat = async () => {
+    if (!canCreate || busy) return;
     try {
-      const { data } = await getChatMessages(id);
-      if (seq !== openSeqRef.current) return;
-      let items: Turn[] = data.items.map((m) => ({
-        role: m.role, content: m.content,
-        tools: m.tools?.length ? m.tools : undefined, stopped: m.stopped,
-      }));
-      const isGen = generatingIds.has(id);
-      // 后台生成中：末尾若是 in-progress 的 assistant checkpoint，先去掉，由 attach 重建直播
-      if (isGen && items.length && items[items.length - 1].role === "assistant") items = items.slice(0, -1);
-      setTurns(items);
-      setLoadingTurns(false);
-      if (isGen) startStream(id, {});   // attach：回放已生成 + 续实时（连续直播）
-    } catch (e: any) {
-      if (seq !== openSeqRef.current) return;
-      setLoadingTurns(false);
-      if (e?.response?.status === 404) {
-        message.error("会话已不存在");
-        setSessions((prev) => prev.filter((s) => s.id !== id));
-        markGenerating(id, false);
-        switchTo(null);
-        setTurns([]);
-      } else message.error("加载会话失败，请重试");
-    }
+      const { data } = await createChatSession(undefined, transport);
+      if (!transport.isCurrent()) return;
+      switchTo(data.id);
+      if (canList) void listQuery.retry();
+    } catch (error) { if (transport.isCurrent()) message.error((error as Error)?.message || "创建会话失败"); }
   };
-
-  const newChat = () => {
-    if (busy) detachActive();    // 留当前会话后台跑，开新空对话
-    openSeqRef.current++;
-    switchTo(null);
-    setTurns([]);
-  };
-
   const removeSession = async (id: number) => {
-    if (id === activeIdRef.current && busy) detachActive();
+    if (!canDelete) return;
     try {
-      await deleteChatSession(id);
-    } catch {
-      /* 已删/网络错都按本地移除处理 */
-    }
-    setSessions((prev) => prev.filter((s) => s.id !== id));
-    markGenerating(id, false);
-    if (id === activeIdRef.current) {
-      switchTo(null);
-      setTurns([]);
-    }
+      await deleteChatSession(id, transport);
+      if (!transport.isCurrent()) return;
+      setSessions(prev => prev.filter(s => s.id !== id)); markGenerating(id, false);
+      if (id === activeIdRef.current) switchTo(null);
+    } catch (error) { if (transport.isCurrent()) message.error((error as Error)?.message || "删除失败；会话未从列表移除"); }
   };
 
   const scrollToBottom = () => {
@@ -590,76 +542,56 @@ export default function ChatPage() {
   };
 
   const doUpload = async (file: File) => {
-    if (uploading) return false;   // 防在途重复上传：竞态会让先上传那张的 pendingFile 被覆盖丢弃
+    if (!canUpload || uploading || busy) return false;   // 防在途重复上传：竞态会让先上传那张的 pendingFile 被覆盖丢弃
+    const targetGeneration = openSeqRef.current;
+    const current = () => targetGeneration === openSeqRef.current && transport.isCurrent();
     setUploading(true);
     try {
-      const { data } = await agentUpload(file);
-      setPendingFile(data);
-      message.success(`已附加 ${data.filename}，输入要求后发送`);
+      const { data } = await agentUpload(file, transport);
+      if (!current()) return false;
+      setPendingFile({ ...data, filename: file.name });
+      message.success(`已附加 ${file.name}，输入要求后发送`);
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || "上传失败");
+      if (current()) message.error(e?.response?.data?.detail || "上传失败");
     } finally {
-      setUploading(false);
+      if (current()) setUploading(false);
     }
     return false;
   };
 
   const send = async (text: string) => {
     let q = text.trim();
-    if (!q && !pendingFile) return;
-
-    // 生成中发新消息 = 打断当前轮 + 用新消息续问：服务端历史已含被打断的半截 → 一起考量
-    if (busy) {
-      const sid0 = activeIdRef.current;
-      if (sid0 != null) cancelChatStream(sid0);  // 服务端收束当前轮，半截以「已中断」落库
-      detachActive(true);                         // 本地把半截留为「已中断」气泡
-      // worker 每个 token 都查取消信号、通常很快释放会话锁；先给个常见时间，
-      // 不够则靠下面的 409 退避重试兜底（不会让用户手动重发）
-      await delay(350);
-    }
-
-    if (pendingFile) {
-      const meta = pendingFile.sheets
-        ? `sheets: ${pendingFile.sheets.map((s) => `${s.name}(${s.n_rows}行x${s.n_cols}列)`).join("、")}`
-        : `类型: ${pendingFile.file_kind}`;
-      q = `[已上传文件「${pendingFile.filename}」 file_id=${pendingFile.file_id}，${meta}]\n\n${q || "请处理这个文件"}`;
-      setPendingFile(null);
-    }
-
-    setInput("");
-    let sid = activeIdRef.current;
-    if (sid == null) {   // 懒建会话：第一条消息才落库
-      try {
-        const { data } = await createChatSession();
-        sid = data.id;
-        switchTo(sid);
-        setSessions((prev) => [data, ...prev]);
-      } catch {
-        message.error("创建会话失败，请稍后重试");
-        return;
+    if (!canRun || busy || uploading || (!q && !pendingFile) || (activeIdRef.current === null && !canCreate)) return;
+    setBusy(true);
+    const attachment = pendingFile;
+    if (attachment) q = `[已上传文件 file_id=${attachment.file_id}]\n\n${q || "请处理这个文件"}`;
+    try {
+      let sid = activeIdRef.current;
+      if (sid === null) {
+        const { data } = await createChatSession(undefined, transport);
+        if (!transport.isCurrent()) return;
+        // The session is the result of this same send intent; its captured stream may continue.
+        sid = data.id; switchTo(sid, true);
+        if (canList) void listQuery.retry();
       }
-    }
-    const userTurn: Turn = { role: "user", content: q };
-    setTurns((prev) => [...prev, userTurn]);
-    // 打断后服务端释放会话锁可能稍有延迟：遇 409 退避重试，让「打断续问」尽量无感
-    let ctl = startStream(sid, { message: q, userTurn });
-    await ctl.done;
-    for (let i = 0; ctl.conflict && i < 4; i++) {
-      await delay(500 + i * 400);
-      ctl = startStream(sid, { message: q, userTurn });
-      await ctl.done;
-    }
-    if (ctl.conflict && activeIdRef.current === sid) {   // 几次仍未拿到锁：回滚气泡 + 提示重发
-      message.warning("上一轮还在收尾，请稍后重发");
-      setTurns((prev) => (prev.length && prev[prev.length - 1] === userTurn ? prev.slice(0, -1) : prev));
+      if (!transport.isCurrent()) return;
+      setInput(""); setPendingFile(null);
+      const userTurn: Turn = { role: "user", content: q };
+      setTurns(prev => [...prev, userTurn]);
+      startStream(sid, { message: q, userTurn });
+    } catch (error) {
+      if (transport.isCurrent()) { setBusy(false); message.error((error as Error)?.message || "发送失败，没有自动重发。"); }
     }
   };
-
-  const stop = () => {
-    // 真取消：通知服务端 worker 收束（已生成部分以"已中断"落库），再断开本地流
+  const stop = async () => {
     const sid = activeIdRef.current;
-    if (sid != null) cancelChatStream(sid);
-    ctlRef.current?.abort.abort();
+    if (sid === null || !canCancel) return;
+    try {
+      await cancelChatStream(sid, transport);
+      if (!transport.isCurrent()) return;
+      detachActive(); setTurns([]);
+      if (canHistory) void historyQuery.retry();
+    } catch (error) { if (transport.isCurrent()) message.error((error as Error)?.message || "停止请求失败，未确认停止。"); }
   };
 
   const copyText = (t: string) =>
@@ -670,9 +602,9 @@ export default function ChatPage() {
   const sessionList = (
     <>
       <div style={{ padding: 12 }}>
-        <Button block icon={<PlusOutlined />} onClick={() => { newChat(); setSessionsOpen(false); }}>
+        {canCreate && <Button block icon={<PlusOutlined />} onClick={() => { newChat(); setSessionsOpen(false); }}>
           新对话
-        </Button>
+        </Button>}
       </div>
       <div style={{ flex: 1, overflowY: "auto", minHeight: 0, padding: "0 8px 12px" }}>
         {sessions.map((s) => (
@@ -695,11 +627,11 @@ export default function ChatPage() {
                 animation: "chat-blink 1.2s step-start infinite",
               }} />
             )}
-            <Popconfirm title="删除该对话？" onConfirm={() => removeSession(s.id)}>
+            {canDelete && <Popconfirm title="删除该对话？" onConfirm={() => removeSession(s.id)}>
               <Button className="chat-sess-del" type="text" size="small" danger
                 aria-label={`删除对话：${s.title}`} icon={<DeleteOutlined />}
                 style={{ opacity: isMobile ? 1 : undefined, flexShrink: 0 }} />
-            </Popconfirm>
+            </Popconfirm>}
           </div>
         ))}
       </div>
@@ -714,13 +646,13 @@ export default function ChatPage() {
 
 
       {/* 会话栏 */}
-      {!isMobile && (
+      {!isMobile && (canList || canCreate) && (
         <aside aria-label="会话列表" style={{ width: 230, borderRight: "1px solid var(--mb-border-soft)", background: COLORS.inset,
                         display: "flex", flexDirection: "column", flexShrink: 0 }}>
           {sessionList}
         </aside>
       )}
-      {isMobile && (
+      {isMobile && (canList || canCreate) && (
         <Drawer title="会话" placement="left" open={sessionsOpen}
           onClose={() => setSessionsOpen(false)} width="min(320px, 100vw)"
           styles={{ body: { padding: 0, display: "flex", flexDirection: "column" } }}>
@@ -731,10 +663,20 @@ export default function ChatPage() {
       {/* 主区 */}
       <main aria-label="AI 助手对话区" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
         <div className="chat-page-header">
-          <PageHeader title="AI 定价助手" extra={isMobile
+          <PageHeader title="AI 定价助手" extra={isMobile && (canList || canCreate)
             ? <Button aria-label="会话" onClick={() => setSessionsOpen(true)} aria-expanded={sessionsOpen}>会话</Button>
             : undefined} />
         </div>
+        <div style={{ padding: "0 16px 8px", display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <Input aria-label="已知会话 ID" placeholder="输入已知会话 ID" value={locator} style={{ width: 180 }} onChange={e => setLocator(e.target.value)} />
+          <Button onClick={() => void openSession(Number(locator))} disabled={!/^\d+$/.test(locator) || Number(locator) <= 0}>打开会话</Button>
+          {activeId !== null && <Tag>会话 #{activeId}</Tag>}
+          {activeId !== null && canAttach && <Button disabled={busy} onClick={() => startStream(activeId, {})}>接续实时结果</Button>}
+          {activeId !== null && canCancel && <Button onClick={stop}>停止生成</Button>}
+          {activeId !== null && canDelete && <Popconfirm title="删除该对话？" onConfirm={() => removeSession(activeId)}><Button danger>删除当前会话</Button></Popconfirm>}
+        </div>
+        {listQuery.error && <Alert type="error" message="会话列表加载失败" action={<Button onClick={() => void listQuery.retry()}>重试</Button>} />}
+        {historyQuery.error && <Alert type="error" message="历史正文不可用" action={<Button onClick={() => void historyQuery.retry()}>重试</Button>} />}
         <div ref={scrollBoxRef} onScroll={onScroll} style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
           <div style={{ maxWidth: 860, margin: "0 auto", padding: "24px var(--mb-shell-content-padding) 8px" }}>
             {loadingTurns && (
@@ -754,7 +696,7 @@ export default function ChatPage() {
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "repeat(2, minmax(0, 1fr))", gap: 12,
                               maxWidth: 640, margin: "0 auto", textAlign: "left" }}>
-                  {EXAMPLES.map((ex) => {
+                  {canRun && (activeId !== null || canCreate) && EXAMPLES.map((ex) => {
                     const clickable = !ex.q.startsWith("点左下角");
                     return (
                     <div key={ex.title} role={clickable ? "button" : undefined} tabIndex={clickable ? 0 : -1}
@@ -852,15 +794,17 @@ export default function ChatPage() {
               display: "flex", alignItems: "flex-end", gap: 8, border: "1px solid var(--mb-border)",
               borderRadius: 14, padding: "8px 10px", boxShadow: tokens.shadow.input,
             }}>
-              <Upload accept=".xlsx,.docx,.pdf,.txt,.csv,.jpg,.jpeg,.png,.webp"
-                showUploadList={false} disabled={uploading}
+              {canUpload && <Upload accept=".xlsx,.docx,.pdf,.txt,.csv,.jpg,.jpeg,.png,.webp"
+                showUploadList={false} disabled={uploading || busy}
                 beforeUpload={(f) => doUpload(f as unknown as File)}>
                 <Tooltip title="上传文件：询价单/整机配置（Excel/Word/PDF/txt/图片）；图片可直接 Ctrl+V 粘贴">
                   <Button type="text" icon={<PaperClipOutlined />} loading={uploading}
                     style={{ color: COLORS.text2 }} />
                 </Tooltip>
-              </Upload>
-              <Input.TextArea
+              </Upload>}
+              {canRun && <Input.TextArea
+                disabled={busy || (activeId === null && !canCreate)}
+                aria-label="聊天消息"
                 autoSize={{ minRows: 1, maxRows: 6 }}
                 variant="borderless"
                 placeholder={pendingFile ? "对这个文件想做什么？如：查最近采购价填进去发我"
@@ -878,7 +822,7 @@ export default function ChatPage() {
                   const img = Array.from(dt.items).find(
                     (it) => it.kind === "file" && it.type.startsWith("image/"));
                   const f = img?.getAsFile();
-                  if (f) {
+                  if (f && canUpload) {
                     e.preventDefault();
                     const named = f.name && f.name !== "image.png"
                       ? f : new File([f], `粘贴图片-${Date.now()}.png`, { type: f.type || "image/png" });
@@ -892,17 +836,11 @@ export default function ChatPage() {
                   }
                 }}
                 style={{ flex: 1, minWidth: 0, fontSize: 14 }}
-              />
-              {busy && !input.trim() && !pendingFile ? (
-                <Tooltip title="停止生成">
-                  <Button danger type="primary" shape="circle" icon={<StopOutlined />} onClick={stop} />
-                </Tooltip>
-              ) : (
-                <Tooltip title={busy ? "打断当前回答，带上你的新消息继续" : "发送"}>
-                  <Button type="primary" shape="circle" icon={<SendOutlined />}
-                    disabled={!input.trim() && !pendingFile} onClick={() => send(input)} />
-                </Tooltip>
-              )}
+              />}
+              {canRun && <Tooltip title="发送">
+                <Button type="primary" shape="circle" aria-label="发送" icon={<SendOutlined />}
+                  disabled={busy || uploading || (!input.trim() && !pendingFile) || (activeId === null && !canCreate)} onClick={() => send(input)} />
+              </Tooltip>}
             </div>
             <div style={{ textAlign: "center", color: "var(--mb-text-2)", fontSize: 11, padding: "6px 0 4px" }}>
               AI 基于库内数据回答，可能出错——重要报价请人工复核
@@ -912,4 +850,10 @@ export default function ChatPage() {
       </main>
     </div>
   );
+}
+
+const ControlledChatPage = withRouteAccess(ChatPage, "/chat");
+export default function ChatRoute() {
+  const location = useLocation();
+  return <ControlledChatPage key={location.search} />;
 }

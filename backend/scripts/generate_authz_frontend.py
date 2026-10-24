@@ -13,6 +13,8 @@ import sys
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 from app.authz.catalog import RESOURCE_DEFINITIONS, resource_descriptors, validate_catalog
+from app.authz.boundaries import boundary_descriptors, validate_boundaries
+from app.authz.import_contract import JOB_ITEM_CODES, JOB_ITEM_STATE_CODES
 from app.authz.context_registry import (
     CLOSED_KINDS, COLLECTION_REFS, ENTRY_CONTRACTS, AUTHORIZATION_VIEWS,
 )
@@ -23,6 +25,8 @@ OUTPUT = BACKEND.parent / "frontend/src/authz/generated.ts"
 def generate() -> str:
     validate_catalog()
     descriptors = resource_descriptors()
+    validate_boundaries(RESOURCE_DEFINITIONS)
+    boundaries = boundary_descriptors()
     known = {m["id"]: m["migration_state"] for m in descriptors}
     executable = {}
     surfaces = {}
@@ -69,6 +73,10 @@ def generate() -> str:
             surfaces[surface["id"]] = {"resource_id": resource, **{
                 k: surface[k] for k in ("display_actions", "page_routes", "route_entry", "data_rule")
             }}
+    for entry, value in ENTRY_CONTRACTS.items():
+        channel = value.get("channel", "http")
+        if channel not in {"http", "tool", "worker"} or (channel != "http" and entry in AUTHORIZATION_VIEWS):
+            raise ValueError(f"Non-HTTP entry cannot be a browser authorization view: {entry}")
     context_entries = {
         key: {
             "branches": value["branches"],
@@ -80,6 +88,7 @@ def generate() -> str:
             },
         }
         for key, value in ENTRY_CONTRACTS.items()
+        if value.get("channel", "http") == "http"
     }
     context_views = {key: {field: value[field] for field in (
         "method", "path", "view", "only_entry_actions", "no_business_payload",
@@ -87,7 +96,8 @@ def generate() -> str:
     ) if field in value} for key, value in AUTHORIZATION_VIEWS.items()}
     if not set(context_views) <= set(context_entries):
         raise ValueError("Authorization view has no executable entry contract")
-    payload = {"known": known, "resources": executable, "surfaces": surfaces,
+    payload = {"known": known, "resources": executable, "surfaces": surfaces, "boundaries": boundaries,
+               "import_status": {"codes": JOB_ITEM_CODES, "states": JOB_ITEM_STATE_CODES},
                "contexts": {"kinds": CLOSED_KINDS, "collections": COLLECTION_REFS,
                             "entries": context_entries, "views": context_views}}
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -98,6 +108,9 @@ def generate() -> str:
         "export const AUTHZ_PROTOCOL_VERSION = 1 as const;\n"
         f'export const AUTHZ_VOCABULARY_HASH = "{hashlib.sha256(canonical.encode()).hexdigest()}";\n'
         f"export const KNOWN_MODULES = {dump(known)} as const;\n"
+        f"export const KNOWN_BOUNDARIES = {dump(boundaries)} as const;\n"
+        f"export const IMPORT_JOB_ITEM_CODES = {dump(JOB_ITEM_CODES)} as const;\n"
+        f"export const IMPORT_JOB_ITEM_STATE_CODES = {dump(JOB_ITEM_STATE_CODES)} as const;\n"
         f"export const EXECUTABLE_RESOURCES = {dump(executable)} as const;\n"
         f"export const EXECUTABLE_SURFACES = {dump(surfaces)} as const;\n"
         f"export const CONTEXT_KINDS = {dump(CLOSED_KINDS)} as const;\n"

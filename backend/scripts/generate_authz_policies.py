@@ -16,6 +16,7 @@ SCOPE_EXPRESSIONS = {
     'all': 'true', 'all_sources': 'true', 'own_source_sales': 'R.attr.is_source_sales',
     'all_contracts': 'true', 'own_imports': 'R.attr.is_owner', 'all_imports': 'true',
     'own_proposals': 'R.attr.is_owner', 'own_applications': 'R.attr.is_owner',
+    'self': 'R.attr.is_owner',
 }
 
 

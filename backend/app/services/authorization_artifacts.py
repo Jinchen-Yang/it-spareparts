@@ -160,6 +160,7 @@ class ArtifactDomainAdapter:
     document_access: Callable[..., Any] | None
     formats: tuple[ArtifactFormat, ...]
     private: bool = True
+    protocol: str = "authz_s3"
 
     def __post_init__(self):
         if (not callable(self.load_state)
@@ -167,7 +168,9 @@ class ArtifactDomainAdapter:
                 or type(self.formats) is not tuple
                 or any(type(item) is not ArtifactFormat for item in self.formats)
                 or len({item.purpose for item in self.formats}) != len(self.formats)
-                or type(self.private) is not bool):
+                or type(self.private) is not bool
+                or type(self.protocol) is not str
+                or self.protocol not in ("authz_s2", "authz_s3", "authz_s4")):
             raise ValueError('Invalid artifact domain adapter')
 
 
@@ -284,7 +287,7 @@ def register_artifact_binding(db, identity, *, target: ArtifactTarget, input_dig
     to claim ownership; they require an explicit new generation operation.
     """
     _digest(input_digest)
-    if db.get(SysAuthorizationMigrationReceipt, ('authz_s3', 'artifact_protocol', 'global')) is None:
+    if db.get(SysAuthorizationMigrationReceipt, (_adapter(target).protocol, 'artifact_protocol', 'global')) is None:
         raise authz_error(503, 'AUTHZ_ARTIFACT_PROTOCOL_REQUIRED', '产物协议尚未激活')
     state = _state(db, target)
     locked_user = locked_user or service.lock_actor(db, identity)
@@ -314,9 +317,11 @@ def register_artifact_binding(db, identity, *, target: ArtifactTarget, input_dig
     return _binding(row)
 
 
-def begin_artifact_protocol(bind) -> None:
+def begin_artifact_protocol(bind, *, protocol: str = "authz_s3") -> None:
     """Before any domain/actor transaction, protect external bytes from downgrade."""
-    runtime.mark_artifact_protocol_used(bind, protocol='authz_s3')
+    if protocol not in ('authz_s2', 'authz_s3', 'authz_s4'):
+        raise ValueError('Unknown artifact protocol')
+    runtime.mark_artifact_protocol_used(bind, protocol=protocol)
 
 
 def stable_operation_key(identity_id: int, namespace: str, key: str) -> str:

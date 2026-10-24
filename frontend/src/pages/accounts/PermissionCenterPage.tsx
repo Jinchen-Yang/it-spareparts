@@ -1,3 +1,4 @@
+import { accountAccess } from "../../authz/accountAccess";
 import UnifiedPermissionCenter from "./UnifiedPermissionCenter";
 import PageHeader from "../../components/PageHeader";
 /** 账号与权限中心（v2 壳）：账号 | 职位模板 两页签，共享一次加载的 meta。 */
@@ -66,6 +67,6 @@ function LegacyPermissionCenterPage() {
 export default function PermissionCenterPage() {
  const authz=useAuthz();
  if(authz.status!=="ready"||!authz.snapshot)return <AuthzUnavailable/>;
- if(!actorAllowed(authz.snapshot,"read_accounts"))return <Alert type="warning" message="没有账号中心访问权限"/>;
+ if(!accountAccess(authz.snapshot).enter)return <Alert type="warning" message="没有账号中心访问权限"/>;
  return authz.snapshot.authorization_mode==="unified_modules"?<UnifiedPermissionCenter key={authz.snapshot.version}/>:<LegacyPermissionCenterPage/>;
 }

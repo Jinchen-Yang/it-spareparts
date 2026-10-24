@@ -1,4 +1,6 @@
 import api from "../api";
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
+import { importEnvelope, IMPORT_SOURCES, type ImportSource } from "./importProtocol";
 
 export type ImportSeverity = "info" | "warning" | "error";
 export type ImportSheetAction = "selected" | "ignored_recognized" | "ignored_unrecognized";
@@ -38,6 +40,7 @@ export interface ImportPrecheckResult {
   blocked: boolean;
   mode: ImportMode | null;
   files: ImportPrecheckFile[];
+  sourceDomains?: (ImportSource | null)[];
 }
 
 const SEVERITIES = new Set<ImportSeverity>(["info", "warning", "error"]);
@@ -276,16 +279,23 @@ function filesFormData(files: readonly File[]) {
 }
 
 export async function precheckImportFiles(
-  files: readonly File[], mode: ImportMode, signal?: AbortSignal,
+  files: readonly File[], mode: ImportMode, signal?: AbortSignal, capture?: ContextRequestTransport, canonical = false,
 ) {
-  const { data } = await api.post("/import/precheck", filesFormData(files), {
+  const { data } = await (capture ? domainApi(capture) : api).post<Record<string, any>>("/import/precheck", filesFormData(files), {
     params: { mode },
     signal,
     // 氚云累积导出越滚越大，后端逐 cell 安全扫描可达数十秒（18.8MB 实测 94s）；
     // 30s 会让正常的销售单预检直接报「超时」，给到 120s。
     timeout: 120_000,
   });
-  const result = normalizeImportPrecheck(data);
+  if (canonical) {
+    importEnvelope(data);
+    if (!Array.isArray(data.inputs) || data.inputs.length !== files.length || data.inputs.some((item: any, index: number) =>
+      !isRecord(item) || item.file_index !== index || typeof item.input_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(item.input_sha256) ||
+      item.source_domain !== null && !(IMPORT_SOURCES as readonly unknown[]).includes(item.source_domain))) throw new Error("预检输入绑定无效");
+  }
+  const result = normalizeImportPrecheck(canonical ? data.content : data);
+  if (canonical) result.sourceDomains = data.inputs.map((item: any) => item.source_domain);
   if (result.contract === "v2"
     && (result.mode !== mode
       || result.files.length !== files.length
@@ -301,15 +311,20 @@ export interface UploadImportBatchResult {
 }
 
 export async function uploadImportBatch(
-  files: readonly File[], mode: ImportMode, previewTokens: readonly string[] = [],
+  files: readonly File[], mode: ImportMode, previewTokens: readonly string[] = [], capture?: ContextRequestTransport, canonical = false,
 ) {
   const form = filesFormData(files);
   previewTokens.forEach((token) => form.append("preview_tokens", token));
-  const { data } = await api.post<UploadImportBatchResult>(
+  const { data } = await (capture ? domainApi(capture) : api).post<UploadImportBatchResult>(
     "/import/upload-batch",
     form,
     { params: { mode } },
   );
+  if (canonical) {
+    importEnvelope(data);
+    if (data.status !== "processing" || data.committed !== true || data.accepted_files !== files.length || !isPositiveInteger(data.job_id)) throw new Error("正式提交回执无效");
+    return { job_id: data.job_id, total_files: data.accepted_files };
+  }
   if (!isRecord(data) || !isPositiveInteger(data.job_id)
     || !isNonNegativeInteger(data.total_files) || data.total_files !== files.length) {
     throw new Error("正式提交响应无效");
@@ -317,10 +332,11 @@ export async function uploadImportBatch(
   return data;
 }
 
-export async function downloadImportErrors(batchId: number) {
-  const response = await api.get<Blob>(`/import/batches/${batchId}/errors.csv`, {
+export async function downloadImportErrors(batchId: number, capture?: ContextRequestTransport) {
+  const response = await (capture ? domainApi(capture) : api).get<Blob>(`/import/batches/${batchId}/errors.csv`, {
     responseType: "blob",
   });
+  if (capture && !capture.isCurrent()) return;
   const disposition = response.headers["content-disposition"] || "";
   const match = /filename="?([^";]+)"?/.exec(disposition);
   const filename = match?.[1] || `import-batch-${batchId}-issues.csv`;
@@ -449,13 +465,17 @@ export function normalizeExpenseVoidPreview(value: unknown): ExpenseVoidPreview 
   };
 }
 
-export async function previewExpenseVoid(file: File, mode: ImportMode, signal?: AbortSignal) {
+export async function previewExpenseVoid(file: File, mode: ImportMode, signal?: AbortSignal, capture?: ContextRequestTransport, canonical = false) {
   const form = new FormData();
-  form.append("file", file);
-  const { data } = await api.post("/import/expense-void-preview", form, {
+  form.append(canonical ? "files" : "file", file);
+  const { data } = await (capture ? domainApi(capture) : api).post<Record<string, any>>("/import/expense-void-preview", form, {
     params: { mode }, signal, timeout: 120_000,
   });
-  const preview = normalizeExpenseVoidPreview(data);
+  if (canonical) {
+    importEnvelope(data);
+    if (data.fingerprint_version !== 2 || !Array.isArray(data.previews) || data.previews.length !== 1) throw new Error("作废预演协议无效");
+  }
+  const preview = normalizeExpenseVoidPreview(canonical ? data.previews[0] : data);
   if (!preview || preview.filename !== file.name) {
     throw new Error(`「${file.name}」作废预演响应无效，无法安全确认`);
   }

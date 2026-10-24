@@ -131,7 +131,22 @@ def _tpl_view(db: Session, t: SysRoleTemplate) -> dict:
 
 @router.get("")
 def list_templates(include_archived: bool = True, db: Session = Depends(get_db),
-                   _: None = Depends(_read_gate)) -> list[dict]:
+                   ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity)) -> list[dict]:
+    if runtime.canonical_management_required(db):
+        from app.authz.context import read_snapshot
+        with read_snapshot(lambda: Session(db.get_bind())) as (reader, proof):
+            proof.validate(reader)
+            management.actor(reader, ident)
+            fields = ('code', 'name', 'description', 'base_role', 'is_system', 'is_active', 'version',
+                      'created_by', 'created_at', 'updated_by', 'updated_at')
+            q = select(*(getattr(SysRoleTemplate, k) for k in fields), SysRoleTemplate.authorization_bundle)
+            if not include_archived:
+                q = q.where(SysRoleTemplate.is_active.is_(True))
+            rows = list(reader.execute(q.order_by(SysRoleTemplate.is_system.desc(), SysRoleTemplate.id)))
+            summaries = management.template_summaries(reader, rows)
+            return [{**management.envelope(), **{k: getattr(t, k) for k in fields},
+                     'locked': t.code == 'admin', 'authorization_summary': summaries[t.code]} for t in rows]
+    _read_gate(ident, db)
     q = select(SysRoleTemplate).order_by(SysRoleTemplate.is_system.desc(), SysRoleTemplate.id)
     if not include_archived:
         q = q.where(SysRoleTemplate.is_active.is_(True))

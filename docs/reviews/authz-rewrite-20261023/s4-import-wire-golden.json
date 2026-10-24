@@ -1,0 +1,762 @@
+{
+  "schema_version": 1,
+  "status": "docs_only_dto_examples_not_runtime_or_hash_vectors",
+  "contract": "s4-import-wire-contract.md",
+  "cases": [
+    {
+      "id": "mixed_precheck_authorization_view",
+      "entry_id": "POST /api/import/precheck",
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "locator": {
+          "object_type": "operation_input",
+          "object_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "authorization_context": {
+          "schema_version": 1,
+          "catalog_version": "s4-design-catalog-placeholder",
+          "authorization_epoch": 12,
+          "context": {
+            "kind": "object",
+            "object_type": "operation_input",
+            "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "authorization_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "resources": {
+            "import_purchase": {
+              "grant_version": 3,
+              "decisions": {
+                "precheck": {
+                  "effect": "allow",
+                  "reason": null
+                }
+              },
+              "field_permissions": []
+            },
+            "import_sales": {
+              "grant_version": 3,
+              "decisions": {
+                "precheck": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "NOT_GRANTED",
+                    "message": "未获得当前业务对象的操作权限"
+                  }
+                }
+              },
+              "field_permissions": []
+            }
+          }
+        }
+      },
+      "note": "只有预检决定，顶层严格两键；销售 deny 导致正式请求 403，无 partial content。不能授权 upload。"
+    },
+    {
+      "id": "mixed_precheck_formal_denied",
+      "entry_id": "POST /api/import/precheck",
+      "status": 403,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "detail": {
+          "code": "AUTHZ_FORBIDDEN",
+          "message": "未获得全部实际来源的预检权限",
+          "committed": false
+        }
+      },
+      "note": "保持旧内容 parser 真值；不伪造 severity/error/can_import。"
+    },
+    {
+      "id": "unrecognized_input_content_only",
+      "entry_id": "POST /api/import/precheck",
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "schema_version": 1,
+        "authorization_mode": "unified_modules",
+        "catalog_version": "s4-design-catalog-placeholder",
+        "authorization_context": {
+          "schema_version": 1,
+          "catalog_version": "s4-design-catalog-placeholder",
+          "authorization_epoch": 12,
+          "context": {
+            "kind": "object",
+            "object_type": "operation_input",
+            "id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "authorization_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "resources": {
+            "import_purchase": {
+              "grant_version": 3,
+              "decisions": {
+                "precheck": {
+                  "effect": "allow",
+                  "reason": null
+                }
+              },
+              "field_permissions": []
+            },
+            "import_sales": {
+              "grant_version": 3,
+              "decisions": {
+                "precheck": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "NOT_GRANTED",
+                    "message": "未获得当前业务对象的操作权限"
+                  }
+                }
+              },
+              "field_permissions": []
+            },
+            "import_inventory": {
+              "grant_version": 3,
+              "decisions": {
+                "precheck": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "NOT_GRANTED",
+                    "message": "未获得当前业务对象的操作权限"
+                  }
+                }
+              },
+              "field_permissions": []
+            },
+            "import_maintenance": {
+              "grant_version": 3,
+              "decisions": {
+                "precheck": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "NOT_GRANTED",
+                    "message": "未获得当前业务对象的操作权限"
+                  }
+                }
+              },
+              "field_permissions": []
+            },
+            "import_expense": {
+              "grant_version": 3,
+              "decisions": {
+                "precheck": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "NOT_GRANTED",
+                    "message": "未获得当前业务对象的操作权限"
+                  }
+                }
+              },
+              "field_permissions": []
+            }
+          }
+        },
+        "content": {
+          "mode": "skip",
+          "files": [
+            {
+              "filename": "unknown.xlsx",
+              "file_type": null,
+              "ok": false,
+              "missing_price": false,
+              "warning": "未识别可导入表格",
+              "can_import": false,
+              "severity": "error",
+              "selected_sheets": [],
+              "sheets": [],
+              "issues": [
+                {
+                  "severity": "error",
+                  "code": "unrecognized_format",
+                  "message": "未识别可导入表格"
+                }
+              ],
+              "exact_success_match": null,
+              "blocked_reason": null
+            }
+          ],
+          "any_warning": true,
+          "missing_price_any": false,
+          "has_errors": true,
+          "can_import_all": false
+        },
+        "inputs": [
+          {
+            "file_index": 0,
+            "input_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "source_domain": null
+          }
+        ]
+      },
+      "note": "真实纯函数生成旧 v2 content；明确任一 precheck Grant 允许格式诊断，零业务/duplicate SQL。submit 仍 422。"
+    },
+    {
+      "id": "batch_status_without_diagnostics",
+      "entry_id": "GET /api/import/batches/{batch_id}",
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "schema_version": 1,
+        "authorization_mode": "unified_modules",
+        "catalog_version": "s4-design-catalog-placeholder",
+        "authorization_context": {
+          "schema_version": 1,
+          "catalog_version": "s4-design-catalog-placeholder",
+          "authorization_epoch": 12,
+          "context": {
+            "kind": "object",
+            "object_type": "generic_import_batch",
+            "id": "101",
+            "authorization_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "resources": {
+            "import_purchase": {
+              "grant_version": 3,
+              "decisions": {
+                "read_status": {
+                  "effect": "allow",
+                  "reason": null
+                },
+                "read_report": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "NOT_GRANTED",
+                    "message": "未获得当前业务对象的操作权限"
+                  }
+                }
+              },
+              "field_permissions": []
+            }
+          }
+        },
+        "batch_id": 101,
+        "source_domain": "purchase",
+        "metadata": {
+          "filename": "采购.xlsx",
+          "file_type": "purchase",
+          "status": "success",
+          "uploaded_at": "2026-10-23T00:00:00Z",
+          "uploaded_by": "historical-display-name",
+          "rows_total": 3,
+          "rows_inserted": 3,
+          "rows_skipped": 0,
+          "rows_error": 0,
+          "rows_inactive": 0
+        },
+        "report": null,
+        "errors": [],
+        "issue_count": null,
+        "block_access": {
+          "status": {
+            "effect": "allow",
+            "reason": null
+          },
+          "report": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得当前业务对象的操作权限"
+            }
+          }
+        }
+      },
+      "note": "报告 deny 不查 report/errors/count；rows_error 是已有安全批次状态统计，issue_count=null 不是零错误。"
+    },
+    {
+      "id": "report_only_known_batch",
+      "entry_id": "GET /api/import/batches/{batch_id}",
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "schema_version": 1,
+        "authorization_mode": "unified_modules",
+        "catalog_version": "s4-design-catalog-placeholder",
+        "authorization_context": {
+          "schema_version": 1,
+          "catalog_version": "s4-design-catalog-placeholder",
+          "authorization_epoch": 12,
+          "context": {
+            "kind": "object",
+            "object_type": "generic_import_batch",
+            "id": "101",
+            "authorization_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "resources": {
+            "import_purchase": {
+              "grant_version": 3,
+              "decisions": {
+                "read_status": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "NOT_GRANTED",
+                    "message": "未获得当前业务对象的操作权限"
+                  }
+                },
+                "read_report": {
+                  "effect": "allow",
+                  "reason": null
+                }
+              },
+              "field_permissions": [
+                "data_customer",
+                "data_supplier",
+                "data_purchase_cost",
+                "data_profit"
+              ]
+            }
+          }
+        },
+        "batch_id": 101,
+        "source_domain": "purchase",
+        "metadata": null,
+        "report": {
+          "errors_preview": []
+        },
+        "errors": [],
+        "issue_count": 0,
+        "block_access": {
+          "status": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得当前业务对象的操作权限"
+            }
+          },
+          "report": {
+            "effect": "allow",
+            "reason": null
+          }
+        }
+      },
+      "note": "已知 ID 的独立报告能力；无 metadata/list 读取；此例实际无错误。"
+    },
+    {
+      "id": "error_export_only_authorization_view",
+      "entry_id": "GET /api/import/batches/{batch_id}/errors.csv",
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "locator": {
+          "object_type": "generic_import_batch",
+          "object_id": "101"
+        },
+        "authorization_context": {
+          "schema_version": 1,
+          "catalog_version": "s4-design-catalog-placeholder",
+          "authorization_epoch": 12,
+          "context": {
+            "kind": "object",
+            "object_type": "generic_import_batch",
+            "id": "101",
+            "authorization_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "resources": {
+            "import_purchase": {
+              "grant_version": 3,
+              "decisions": {
+                "export_errors": {
+                  "effect": "allow",
+                  "reason": null
+                }
+              },
+              "field_permissions": [
+                "data_customer",
+                "data_supplier",
+                "data_purchase_cost",
+                "data_profit"
+              ]
+            }
+          }
+        }
+      },
+      "note": "正式为现有 CSV；不要求 read_status/read_report，发布仍逐块当前复验。"
+    },
+    {
+      "id": "mixed_job_partial_projection",
+      "entry_id": "GET /api/import/jobs/{job_id}",
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "schema_version": 1,
+        "authorization_mode": "unified_modules",
+        "catalog_version": "s4-design-catalog-placeholder",
+        "authorization_context": {
+          "schema_version": 1,
+          "catalog_version": "s4-design-catalog-placeholder",
+          "authorization_epoch": 12,
+          "context": {
+            "kind": "object",
+            "object_type": "generic_import_job",
+            "id": "42",
+            "authorization_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "resources": {
+            "import_purchase": {
+              "grant_version": 3,
+              "decisions": {
+                "read_status": {
+                  "effect": "allow",
+                  "reason": null
+                }
+              },
+              "field_permissions": []
+            },
+            "import_sales": {
+              "grant_version": 3,
+              "decisions": {
+                "read_status": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "NOT_GRANTED",
+                    "message": "未获得当前业务对象的操作权限"
+                  }
+                }
+              },
+              "field_permissions": []
+            }
+          }
+        },
+        "job": {
+          "job_id": 42,
+          "created_at": "2026-10-23T00:00:00Z",
+          "finished_at": null,
+          "mode": "skip",
+          "partial": true,
+          "restricted": true,
+          "status": null,
+          "total_files": null,
+          "done_files": null,
+          "error_files": null,
+          "note": null,
+          "visible_status": "done",
+          "visible_total_files": 1,
+          "visible_done_files": 1,
+          "visible_error_files": 0,
+          "items": [
+            {
+              "item_id": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "input_index": null,
+              "source_domain": "purchase",
+              "filename": "采购.xlsx",
+              "state": "success",
+              "batch_id": 101,
+              "code": null
+            }
+          ]
+        }
+      },
+      "note": "未返回销售文件名、ordinal、状态和结果；visible done 不是整份 job done。"
+    },
+    {
+      "id": "allowed_empty_job_list",
+      "entry_id": "GET /api/import/jobs",
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "schema_version": 1,
+        "authorization_mode": "unified_modules",
+        "catalog_version": "s4-design-catalog-placeholder",
+        "authorization_context": {
+          "schema_version": 1,
+          "catalog_version": "s4-design-catalog-placeholder",
+          "authorization_epoch": 12,
+          "context": {
+            "kind": "collection",
+            "id": "generic_import_jobs",
+            "authorization_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "resources": {
+            "import_purchase": {
+              "grant_version": 3,
+              "decisions": {
+                "read_status": {
+                  "effect": "allow",
+                  "reason": null
+                }
+              },
+              "field_permissions": []
+            },
+            "import_sales": {
+              "grant_version": 3,
+              "decisions": {
+                "read_status": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "NOT_GRANTED",
+                    "message": "未获得当前业务对象的操作权限"
+                  }
+                }
+              },
+              "field_permissions": []
+            },
+            "import_inventory": {
+              "grant_version": 3,
+              "decisions": {
+                "read_status": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "NOT_GRANTED",
+                    "message": "未获得当前业务对象的操作权限"
+                  }
+                }
+              },
+              "field_permissions": []
+            },
+            "import_maintenance": {
+              "grant_version": 3,
+              "decisions": {
+                "read_status": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "NOT_GRANTED",
+                    "message": "未获得当前业务对象的操作权限"
+                  }
+                }
+              },
+              "field_permissions": []
+            },
+            "import_expense": {
+              "grant_version": 3,
+              "decisions": {
+                "read_status": {
+                  "effect": "deny",
+                  "reason": {
+                    "code": "NOT_GRANTED",
+                    "message": "未获得当前业务对象的操作权限"
+                  }
+                }
+              },
+              "field_permissions": []
+            }
+          }
+        },
+        "items": [],
+        "returned_count": 0,
+        "total": null,
+        "limit": 50,
+        "restricted": true
+      },
+      "note": "采购列表获准但实际为空；不是所有动作 deny；SQL 范围先于 limit。"
+    },
+    {
+      "id": "submit_without_history",
+      "entry_id": "POST /api/import/upload-batch",
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "schema_version": 1,
+        "authorization_mode": "unified_modules",
+        "catalog_version": "s4-design-catalog-placeholder",
+        "authorization_context": {
+          "schema_version": 1,
+          "catalog_version": "s4-design-catalog-placeholder",
+          "authorization_epoch": 12,
+          "context": {
+            "kind": "object",
+            "object_type": "operation_input",
+            "id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "authorization_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "resources": {
+            "import_purchase": {
+              "grant_version": 3,
+              "decisions": {
+                "submit_skip": {
+                  "effect": "allow",
+                  "reason": null
+                }
+              },
+              "field_permissions": []
+            }
+          }
+        },
+        "job_id": 43,
+        "status": "processing",
+        "accepted_files": 1,
+        "committed": true
+      },
+      "note": "提交成功只给自己的命令回执；没有 read_status 决定，不自动 poll。"
+    },
+    {
+      "id": "sync_source_committed_refresh_failed",
+      "entry_id": "POST /api/import/upload",
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "schema_version": 1,
+        "authorization_mode": "unified_modules",
+        "catalog_version": "s4-design-catalog-placeholder",
+        "authorization_context": {
+          "schema_version": 1,
+          "catalog_version": "s4-design-catalog-placeholder",
+          "authorization_epoch": 12,
+          "context": {
+            "kind": "object",
+            "object_type": "operation_input",
+            "id": "1111111111111111111111111111111111111111111111111111111111111111",
+            "authorization_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "resources": {
+            "import_purchase": {
+              "grant_version": 3,
+              "decisions": {
+                "submit_upsert": {
+                  "effect": "allow",
+                  "reason": null
+                }
+              },
+              "field_permissions": []
+            }
+          }
+        },
+        "batch_id": 102,
+        "source_domain": "purchase",
+        "status": "success",
+        "committed": true,
+        "derived_refresh": "failed"
+      },
+      "note": "不回传利润/成本重算统计；源已提交，不能自动重传。"
+    },
+    {
+      "id": "void_preview_without_cost",
+      "entry_id": "POST /api/import/expense-void-preview",
+      "status": 200,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "schema_version": 1,
+        "authorization_mode": "unified_modules",
+        "catalog_version": "s4-design-catalog-placeholder",
+        "authorization_context": {
+          "schema_version": 1,
+          "catalog_version": "s4-design-catalog-placeholder",
+          "authorization_epoch": 12,
+          "context": {
+            "kind": "object",
+            "object_type": "operation_input",
+            "id": "2222222222222222222222222222222222222222222222222222222222222222",
+            "authorization_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "resources": {
+            "import_expense_void": {
+              "grant_version": 3,
+              "decisions": {
+                "preview": {
+                  "effect": "allow",
+                  "reason": null
+                }
+              },
+              "field_permissions": []
+            }
+          }
+        },
+        "fingerprint_version": 2,
+        "previews": [
+          {
+            "filename": "报销.xlsx",
+            "status": "ready",
+            "reason": null,
+            "contract": "XSDD-1",
+            "contracts": [
+              "XSDD-1"
+            ],
+            "rows_incoming": 1,
+            "dropped_no_contract": 0,
+            "blocking_error_types": [],
+            "void": {
+              "rows": 1,
+              "amount": null,
+              "already_void_rows": 0
+            },
+            "void_rows": [
+              {
+                "raw_line_id": "raw-1",
+                "linked_sales_order_no": "XSDD-1",
+                "bxd_no": "BXD-1",
+                "line_no": 1,
+                "expense_date": "2026-10-23",
+                "person": "输入相关经办人",
+                "reason": "业务原因",
+                "data_status": "生效",
+                "amount": null
+              }
+            ],
+            "row_cap": 2000,
+            "preview_token": "opaque-v2-token-example-not-valid-signature",
+            "error": null
+          }
+        ]
+      },
+      "note": "同资源无 K；金额 null，SQL 金额承诺仍参与 v2。原 person/reason 合同保留，不新增 F 门。"
+    },
+    {
+      "id": "unverified_historical_origin",
+      "entry_id": "GET /api/import/batches/{batch_id}",
+      "status": 409,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "detail": {
+          "code": "IMPORT_ORIGIN_UNVERIFIED",
+          "message": "历史来源尚未核验，无法读取该批次",
+          "commit_state": "none"
+        }
+      },
+      "note": "不按当前 username 认领、不泄漏 filename/report；不把 S3 类型硬分入 generic。"
+    },
+    {
+      "id": "stale_formal_input",
+      "entry_id": "POST /api/import/upload-batch",
+      "status": 409,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "detail": {
+          "code": "AUTHZ_CONTEXT_STALE",
+          "message": "文件或权限状态已变化，请重新预检",
+          "committed": false
+        }
+      },
+      "note": "同名文件替换/顺序/mode/token/epoch 变化；零 job，前端零重放。"
+    },
+    {
+      "id": "failed_batch_receipt_preserved",
+      "entry_id": "POST /api/import/upload",
+      "status": 400,
+      "headers": {
+        "Cache-Control": "no-store"
+      },
+      "response": {
+        "detail": {
+          "code": "import_parse_failed",
+          "message": "文件内容无法导入，已记录失败回执",
+          "commit_state": "receipt_only",
+          "batch_id": 103
+        }
+      },
+      "note": "保留原失败批次留痕 HTTP 语义；不宣称数据库零写，也不输出诊断。"
+    }
+  ]
+}

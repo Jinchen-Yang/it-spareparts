@@ -7,7 +7,7 @@ import { allRule, ruleState, type Rule } from "./rules";
 import type { AuthorizationContext, BoundAuthorizationContext } from "./contextTypes";
 
 /** The shell may resolve; query transport still performs view→allow→business before this returns any payload. */
-export function useContextQuery<T>({ entryId, rule, queryKey, query, enabled = true, legacyAllowed = false, onStale, refreshKey, retainLegacyOnRefresh = false }: {
+export function useContextQuery<T>({ entryId, rule, queryKey, query, enabled = true, legacyAllowed = false, onStale, refreshKey, retainLegacyOnRefresh = false, resolvedRule }: {
   entryId: ContextEntryId;
   rule: Rule;
   queryKey: readonly unknown[];
@@ -17,13 +17,14 @@ export function useContextQuery<T>({ entryId, rule, queryKey, query, enabled = t
   onStale?: () => void;
   refreshKey?: unknown;
   retainLegacyOnRefresh?: boolean;
+  resolvedRule?: (entryId: string, context: AuthorizationContext) => Rule;
 }) {
   const authz = useAuthz();
   const combined = allRule(rule, entryRule(entryId));
   const legacy = Object.fromEntries(combined.anyOf.flat().map(need => [need.resource_id, legacyAllowed]));
   const state = authz.status === "ready" ? ruleState(authz.snapshot, combined, legacy) : "deny";
   const inputKey = JSON.stringify([entryId, queryKey]);
-  const transport = useContextTransport(inputKey, legacyAllowed);
+  const transport = useContextTransport(inputKey, legacyAllowed, resolvedRule);
   const result = useCapturedQuery<{ payload: T; context: BoundAuthorizationContext | null }>({
     active: enabled && state !== "deny", onStale, refreshKey,
     retainWhileRefreshing: retainLegacyOnRefresh && combined.anyOf.flat().length > 0 && combined.anyOf.flat().every(need =>

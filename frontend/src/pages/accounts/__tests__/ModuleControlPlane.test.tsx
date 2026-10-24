@@ -159,8 +159,10 @@ it("admin creation previews without password and adds it locally only to exact e
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "确认执行预览" })).toBeEnabled(),
   );
-  expect(screen.getByText("new_admin")).toBeVisible();
-  expect(screen.getByText("管理员")).toBeVisible();
+  await waitFor(() => {
+    expect(screen.getByText("new_admin")).toBeVisible();
+    expect(screen.getByText("管理员")).toBeVisible();
+  });
   expect(
     screen
       .getAllByText("无模块授权")

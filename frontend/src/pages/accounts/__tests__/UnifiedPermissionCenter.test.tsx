@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 import { upgradeS1Fixture } from "../../../test/s2WireFixtures";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
@@ -19,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   getAuthzCatalog: vi.fn(),
   getAccountModules: vi.fn(),
   listCanonicalAccounts: vi.fn(),
+  listAuthorizationTargets: vi.fn(),
   listCanonicalTemplates: vi.fn(),
   snapshot: {} as any,
 }));
@@ -30,6 +32,7 @@ vi.mock("../../../api/authz", async (original) => ({
 vi.mock("../../../api/accounts", async (original) => ({
   ...(await original<typeof import("../../../api/accounts")>()),
   listCanonicalAccounts: mocks.listCanonicalAccounts,
+  listAuthorizationTargets: mocks.listAuthorizationTargets,
   listCanonicalTemplates: mocks.listCanonicalTemplates,
 }));
 vi.mock("../../../authz/AuthzProvider", async (original) => ({
@@ -42,6 +45,7 @@ const template = templateCases.cases[0].response.json;
 const row = {
   ...account.subject,
   authorization_epoch: account.authorization_epoch,
+  authorization_summary_status: "available",
   authorization_summary: {
     template_code: "sales_team",
     template_version: 2,
@@ -59,6 +63,7 @@ beforeEach(() => {
   mocks.getAuthzCatalog.mockResolvedValue(catalog);
   mocks.getAccountModules.mockResolvedValue(account);
   mocks.listCanonicalAccounts.mockResolvedValue({ data: [row] });
+  mocks.listAuthorizationTargets.mockResolvedValue({ data: [row] });
   mocks.listCanonicalTemplates.mockResolvedValue({
     data: [
       {
@@ -73,11 +78,11 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 it("loads the shared catalog and summaries once; target modules load only when opened", async () => {
-  render(<UnifiedPermissionCenter />);
+  render(<MemoryRouter><UnifiedPermissionCenter /></MemoryRouter>);
   expect(await screen.findByText("sales_team v2")).toBeVisible();
   expect(screen.getByText("模板有新版本")).toBeVisible();
   expect(mocks.getAuthzCatalog).toHaveBeenCalledTimes(1);
-  expect(mocks.listCanonicalAccounts).toHaveBeenCalledTimes(1);
+  expect(mocks.listAuthorizationTargets).toHaveBeenCalledTimes(1);
   expect(mocks.listCanonicalTemplates).toHaveBeenCalledTimes(1);
   expect(mocks.getAccountModules).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "权限与范围" }));
@@ -95,7 +100,7 @@ it("profile-only operators do not request admin catalog or template data and see
     value.effect = ["read_accounts", "edit_account_profiles"].includes(cap)
       ? "allow"
       : "deny";
-  render(<UnifiedPermissionCenter />);
+  render(<MemoryRouter><UnifiedPermissionCenter /></MemoryRouter>);
   expect(await screen.findByRole("button", { name: /资\s*料/ })).toBeVisible();
   expect(mocks.listCanonicalAccounts).toHaveBeenCalledTimes(1);
   expect(mocks.getAuthzCatalog).not.toHaveBeenCalled();
@@ -114,12 +119,12 @@ it("profile-only operators do not request admin catalog or template data and see
   expect(screen.queryByLabelText("角色")).not.toBeInTheDocument();
 });
 it("a missing canonical summary fails closed instead of presenting legacy template fields as new sources", async () => {
-  mocks.listCanonicalAccounts.mockResolvedValueOnce({
+  mocks.listAuthorizationTargets.mockResolvedValueOnce({
     data: [
       { ...row, authorization_summary: null, template_code: "legacy_only" },
     ],
   });
-  render(<UnifiedPermissionCenter />);
+  render(<MemoryRouter><UnifiedPermissionCenter /></MemoryRouter>);
   expect(await screen.findByText("操作失败，请重新加载后确认；没有自动重试。")).toBeVisible();
   expect(
     screen.queryByRole("button", { name: "权限与范围" }),

@@ -1,0 +1,707 @@
+{
+  "schema_version": 1,
+  "purpose": "Route closure inventory only; never runtime permission authority",
+  "baseline_commit": "c0396fc08f6d5084358ebf352ffedad717980274",
+  "entries": [
+    {
+      "entry_id": "DELETE /api/replenishment-beta/applications/{application_id}/lines/{line_id}",
+      "module": "app.api.replenishment",
+      "handler": "delete_line",
+      "authority_kind": "retired",
+      "phase": "S3"
+    },
+    {
+      "entry_id": "DELETE /api/substitutes",
+      "module": "app.api.substitutes",
+      "handler": "delete_",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/dashboard/kpi",
+      "module": "app.api.dashboard",
+      "handler": "kpi",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/dashboard/orders/{side}/{order_id}",
+      "module": "app.api.dashboard",
+      "handler": "order_detail",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/dashboard/part-ranking",
+      "module": "app.api.dashboard",
+      "handler": "part_ranking",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/dashboard/pool/{group_id}",
+      "module": "app.api.dashboard",
+      "handler": "pool_detail",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/dashboard/pools",
+      "module": "app.api.dashboard",
+      "handler": "pools",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/dashboard/price-discipline-summary",
+      "module": "app.api.dashboard",
+      "handler": "price_discipline_summary",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/dashboard/purchase-orders",
+      "module": "app.api.dashboard",
+      "handler": "purchase_orders",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/dashboard/sales",
+      "module": "app.api.dashboard",
+      "handler": "sales",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/dashboard/trend",
+      "module": "app.api.dashboard",
+      "handler": "trend",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/data-quality/calibration/purchase-price",
+      "module": "app.api.data_quality_calibration",
+      "handler": "purchase_price_preview",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/data-quality/issues",
+      "module": "app.api.data_quality",
+      "handler": "list_issues",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/data-quality/issues/{issue_id}",
+      "module": "app.api.data_quality",
+      "handler": "get_issue",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/governance/aliases",
+      "module": "app.api.governance",
+      "handler": "aliases",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/governance/candidates",
+      "module": "app.api.governance",
+      "handler": "candidates",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/governance/issues",
+      "module": "app.api.governance",
+      "handler": "issues",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/governance/merges",
+      "module": "app.api.governance",
+      "handler": "list_merges",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/governance/metrics",
+      "module": "app.api.governance",
+      "handler": "metrics",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/governance/parts",
+      "module": "app.api.governance",
+      "handler": "parts",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/governance/summary",
+      "module": "app.api.governance",
+      "handler": "summary",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/inventory",
+      "module": "app.api.inventory",
+      "handler": "list_",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/inventory/dynamic",
+      "module": "app.api.inventory",
+      "handler": "list_dynamic",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/inventory/warehouses",
+      "module": "app.api.inventory",
+      "handler": "warehouse_options",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/parts/categories",
+      "module": "app.api.parts",
+      "handler": "part_categories",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/parts/master/batch-preview",
+      "module": "app.api.parts",
+      "handler": "master_batch_preview",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/parts/master/categories",
+      "module": "app.api.parts",
+      "handler": "master_categories",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/parts/master/check",
+      "module": "app.api.parts",
+      "handler": "master_check_duplicates",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/parts/master/search",
+      "module": "app.api.parts",
+      "handler": "master_search",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/parts/master/suggest",
+      "module": "app.api.parts",
+      "handler": "master_suggest",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/parts/master/{part_id}/edit-history",
+      "module": "app.api.parts",
+      "handler": "master_edit_history",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/parts/master/{part_id}/edit-state",
+      "module": "app.api.parts",
+      "handler": "master_edit_state",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/parts/overview",
+      "module": "app.api.parts",
+      "handler": "overview",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/parts/purchases",
+      "module": "app.api.parts",
+      "handler": "purchases",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/parts/sales",
+      "module": "app.api.parts",
+      "handler": "sales",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/parts/search",
+      "module": "app.api.parts",
+      "handler": "search",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/parts/{part_id}/pool-reference",
+      "module": "app.api.parts",
+      "handler": "pool_reference",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/pool-analysis/orders/{side}/{order_id}",
+      "module": "app.api.pool_analysis",
+      "handler": "get_order_detail",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/pool-analysis/pools",
+      "module": "app.api.pool_analysis",
+      "handler": "list_pools",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/pool-analysis/pools/{group_id}",
+      "module": "app.api.pool_analysis",
+      "handler": "get_pool_detail",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/pool-analysis/pools/{group_id}/price-map",
+      "module": "app.api.pool_analysis",
+      "handler": "get_pool_price_map",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/pools",
+      "module": "app.api.pools",
+      "handler": "list_pools",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/pools/{group_id}",
+      "module": "app.api.pools",
+      "handler": "get_pool",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/profit",
+      "module": "app.api.profit",
+      "handler": "aggregate",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/profit/export",
+      "module": "app.api.profit",
+      "handler": "export",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/purchases/analysis",
+      "module": "app.api.purchases",
+      "handler": "analysis",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/purchases/analysis/part",
+      "module": "app.api.purchases",
+      "handler": "analysis_part",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/purchases/analytics/options",
+      "module": "app.api.purchases",
+      "handler": "analytics_options",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/purchases/analytics/orders",
+      "module": "app.api.purchases",
+      "handler": "analytics_orders",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/purchases/analytics/orders/{order_id}",
+      "module": "app.api.purchases",
+      "handler": "analytics_order_detail",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/purchases/analytics/summary",
+      "module": "app.api.purchases",
+      "handler": "analytics_summary",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/purchases/cancellation-stats",
+      "module": "app.api.purchases",
+      "handler": "cancellation_stats",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/purchases/recent",
+      "module": "app.api.purchases",
+      "handler": "recent",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/applications/{application_id}/evidence",
+      "module": "app.api.replenishment",
+      "handler": "application_evidence",
+      "authority_kind": "retired",
+      "phase": "S3"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/applications/{application_id}/exports/manual-review.xlsx",
+      "module": "app.api.replenishment",
+      "handler": "export_manual_review",
+      "authority_kind": "retired",
+      "phase": "S3"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/applications/{application_id}/exports/purchase-list.xlsx",
+      "module": "app.api.replenishment",
+      "handler": "export_purchase_list",
+      "authority_kind": "retired",
+      "phase": "S3"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/applications/{application_id}/exports/wbdd-subset.xlsx",
+      "module": "app.api.replenishment",
+      "handler": "export_wbdd_subset",
+      "authority_kind": "retired",
+      "phase": "S3"
+    },
+    {
+      "entry_id": "GET /api/sales/analytics/amount-histogram",
+      "module": "app.api.sales_analytics",
+      "handler": "amount_histogram",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/sales/analytics/groups",
+      "module": "app.api.sales_analytics",
+      "handler": "groups",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/sales/analytics/options",
+      "module": "app.api.sales_analytics",
+      "handler": "business_type_options",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/sales/analytics/orders",
+      "module": "app.api.sales_analytics",
+      "handler": "orders",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/sales/analytics/orders/export",
+      "module": "app.api.sales_analytics",
+      "handler": "orders_export",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/sales/analytics/orders/{order_id}",
+      "module": "app.api.sales_analytics",
+      "handler": "order_detail",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/sales/analytics/summary",
+      "module": "app.api.sales_analytics",
+      "handler": "summary",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/sales/analytics/trend",
+      "module": "app.api.sales_analytics",
+      "handler": "trend",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/substitutes",
+      "module": "app.api.substitutes",
+      "handler": "list_",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "GET /api/system-settings",
+      "module": "app.api.system_settings",
+      "handler": "get_system_settings",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "PATCH /api/parts/master",
+      "module": "app.api.parts",
+      "handler": "master_edit_part",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "PATCH /api/pools/{group_id}",
+      "module": "app.api.pools",
+      "handler": "patch_pool",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "PATCH /api/pools/{group_id}/members",
+      "module": "app.api.pools",
+      "handler": "patch_members",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "PATCH /api/replenishment-beta/applications/{application_id}",
+      "module": "app.api.replenishment",
+      "handler": "patch_application",
+      "authority_kind": "retired",
+      "phase": "S3"
+    },
+    {
+      "entry_id": "PATCH /api/replenishment-beta/applications/{application_id}/lines/{line_id}",
+      "module": "app.api.replenishment",
+      "handler": "patch_line",
+      "authority_kind": "retired",
+      "phase": "S3"
+    },
+    {
+      "entry_id": "POST /api/dashboard/pool/rebuild",
+      "module": "app.api.dashboard",
+      "handler": "pool_rebuild",
+      "authority_kind": "retired",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/data-quality/issues/{issue_id}/decision",
+      "module": "app.api.data_quality",
+      "handler": "decide_issue",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/data-quality/issues/{issue_id}/reopen",
+      "module": "app.api.data_quality",
+      "handler": "reopen_issue",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/governance/aliases/{alias_id}/review",
+      "module": "app.api.governance",
+      "handler": "review_alias",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/governance/candidates/{candidate_id}/review",
+      "module": "app.api.governance",
+      "handler": "review_candidate",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/governance/classify-backfill",
+      "module": "app.api.governance",
+      "handler": "classify_backfill",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/governance/issues/{issue_id}/resolve",
+      "module": "app.api.governance",
+      "handler": "resolve_issue",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/governance/parts/confirm-batch",
+      "module": "app.api.governance",
+      "handler": "confirm_batch",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/governance/parts/merge",
+      "module": "app.api.governance",
+      "handler": "merge_parts",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/governance/parts/rename",
+      "module": "app.api.governance",
+      "handler": "rename_part",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/governance/parts/unmerge",
+      "module": "app.api.governance",
+      "handler": "unmerge_parts",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/governance/refresh",
+      "module": "app.api.governance",
+      "handler": "refresh",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/parts/master",
+      "module": "app.api.parts",
+      "handler": "master_create",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/parts/master/batch-apply",
+      "module": "app.api.parts",
+      "handler": "master_batch_apply",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/parts/pool-references",
+      "module": "app.api.parts",
+      "handler": "pool_references",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/pools",
+      "module": "app.api.pools",
+      "handler": "create_pool",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/pools/{group_id}/archive",
+      "module": "app.api.pools",
+      "handler": "archive_pool",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/pools/{group_id}/restore",
+      "module": "app.api.pools",
+      "handler": "restore_pool",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/profit/recompute",
+      "module": "app.api.profit",
+      "handler": "recompute",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "POST /api/replenishment-beta/applications/{application_id}/lines",
+      "module": "app.api.replenishment",
+      "handler": "add_line",
+      "authority_kind": "retired",
+      "phase": "S3"
+    },
+    {
+      "entry_id": "POST /api/replenishment-beta/applications/{application_id}/review-results",
+      "module": "app.api.replenishment",
+      "handler": "review_result",
+      "authority_kind": "retired",
+      "phase": "S3"
+    },
+    {
+      "entry_id": "POST /api/replenishment-beta/applications/{application_id}/revision",
+      "module": "app.api.replenishment",
+      "handler": "create_revision",
+      "authority_kind": "retired",
+      "phase": "S3"
+    },
+    {
+      "entry_id": "POST /api/replenishment-beta/applications/{application_id}/submit",
+      "module": "app.api.replenishment",
+      "handler": "submit_application",
+      "authority_kind": "retired",
+      "phase": "S3"
+    },
+    {
+      "entry_id": "POST /api/substitutes",
+      "module": "app.api.substitutes",
+      "handler": "create",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "PUT /api/governance/exclude",
+      "module": "app.api.governance",
+      "handler": "exclude",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "PUT /api/inventory/{inv_id}",
+      "module": "app.api.inventory",
+      "handler": "update",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "PUT /api/pools/{group_id}/price-policy",
+      "module": "app.api.pools",
+      "handler": "put_price_policy",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    },
+    {
+      "entry_id": "PUT /api/system-settings",
+      "module": "app.api.system_settings",
+      "handler": "update_system_settings",
+      "authority_kind": "ordinary_resource",
+      "phase": "S2"
+    }
+  ]
+}

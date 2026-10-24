@@ -470,3 +470,22 @@ AUTHORIZATION_VIEWS = {
     'PUT /api/replenishment-beta/cart-drafts/{project_id}': {'method': 'PUT', 'path': '/api/replenishment-beta/cart-drafts/{project_id}', 'view': 'authorization', 'registry_sections': ['child_command_authorization_view_resolvers'], 'only_entry_actions': True, 'no_business_payload': True},
 }
 
+
+# One public registry for every domain. Platform entries have no project fallback.
+from app.authz import platform_context_registry as _platform
+if set(ENTRY_CONTRACTS).intersection(_platform.ENTRY_CONTRACTS) or set(AUTHORIZATION_VIEWS).intersection(_platform.AUTHORIZATION_VIEWS):
+    raise ValueError("Duplicate authorization entry registration")
+CLOSED_KINDS = (*CLOSED_KINDS, *_platform.CLOSED_KINDS)
+COLLECTION_REFS = (*COLLECTION_REFS, *_platform.COLLECTION_REFS)
+ENTRY_CONTRACTS.update(_platform.ENTRY_CONTRACTS)
+AUTHORIZATION_VIEWS.update(_platform.AUTHORIZATION_VIEWS)
+
+# Generic import contracts share the same immutable registry and core dispatcher.
+from app.authz import import_context_registry as _imports
+if set(ENTRY_CONTRACTS).intersection(_imports.ENTRY_CONTRACTS):
+    raise ValueError('Import entry registry overlap')
+CLOSED_KINDS = tuple(CLOSED_KINDS) + _imports.CLOSED_KINDS
+COLLECTION_REFS = tuple(COLLECTION_REFS) + _imports.COLLECTION_REFS
+ENTRY_CONTRACTS.update(_imports.ENTRY_CONTRACTS)
+AUTHORIZATION_VIEWS.update(_imports.AUTHORIZATION_VIEWS)
+del _imports

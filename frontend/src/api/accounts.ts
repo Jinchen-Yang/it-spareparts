@@ -4,6 +4,7 @@
 // - 「仅保存模板」不动账号；「保存并同步」= PUT 模板后再 sync（dry_run 预览 → 指纹执行）；
 // - 批量与同步都是全成或全败：400 带逐账号原因，409 = 预览后被人改过需重新预览。
 import { api } from "../api";
+import { safeVersion, validateEnvelope, type AuthzEnvelope, type AuthorizationSubject } from "./authz";
 
 export type Perms = Record<string, boolean>;
 
@@ -249,13 +250,38 @@ export function explainApiError(e: unknown, fallback: string): string {
 }
 
 /** Additive S1 list summaries; transport remains an array. No per-account read loop. */
-export interface CanonicalAccount extends Account {
-  id: number; authorization_epoch: number;
-  authorization_summary: { template_code: string | null; template_version: number | null; template_current_version: number | null; override_resources: string[] };
+export interface CanonicalAccount extends AuthorizationSubject {
+  authorization_epoch: number;
+  authorization_summary_status: "available" | "invalid";
+  authorization_summary: { template_code: string | null; template_version: number | null; template_current_version: number | null; override_resources: string[] } | null;
 }
-export interface CanonicalTemplate extends TemplateInfo {
+export interface CanonicalTemplate extends Pick<TemplateInfo, "code" | "name" | "description" | "base_role" | "is_system" | "is_active" | "version" | "locked"> {
   schema_version: 1; authorization_mode: "legacy_compat" | "unified_modules"; catalog_version: string;
   authorization_summary: { configured_resources: string[]; canonical_usage_count: number };
 }
 export const listCanonicalAccounts = (token: string, signal?: AbortSignal) => api.get<CanonicalAccount[]>("/accounts", {headers:{Authorization:`Bearer ${token}`},signal});
 export const listCanonicalTemplates = (token: string, signal?: AbortSignal) => api.get<CanonicalTemplate[]>("/role-templates", {headers:{Authorization:`Bearer ${token}`},signal});
+export async function listAuthorizationTargets(token: string, signal?: AbortSignal) {
+  const response = await api.get<AuthzEnvelope & { items: CanonicalAccount[] }>("/authz/accounts", {headers:{Authorization:`Bearer ${token}`},signal});
+  validateEnvelope(response.data);
+  return { ...response, data: response.data.items };
+}
+export function validateCanonicalAccounts(value: unknown): CanonicalAccount[] {
+  if (!Array.isArray(value)) throw new Error("账号摘要协议无效");
+  const fields = ["id", "username", "display_name", "role", "salesperson_name", "is_active", "authorization_epoch", "authorization_summary_status", "authorization_summary"];
+  const nullableText = (v: unknown) => v === null || typeof v === "string";
+  for (const row of value) {
+    if (!row || Object.keys(row).length !== fields.length || Object.keys(row).some(k => !fields.includes(k)) ||
+        !safeVersion(row.id) || row.id === 0 || !safeVersion(row.authorization_epoch) || typeof row.username !== "string" || !row.username ||
+        !nullableText(row.display_name) || !nullableText(row.salesperson_name) || typeof row.role !== "string" || typeof row.is_active !== "boolean") throw new Error("账号摘要协议无效");
+    const summary = row.authorization_summary;
+    if (row.authorization_summary_status === "invalid") { if (summary !== null) throw new Error("账号摘要协议无效"); continue; }
+    if (row.authorization_summary_status !== "available" || !summary ||
+        Object.keys(summary).length !== 4 || Object.keys(summary).some(k => !["template_code", "template_version", "template_current_version", "override_resources"].includes(k)) ||
+        !nullableText(summary.template_code) || ![summary.template_version, summary.template_current_version].every(v => v === null || safeVersion(v)) ||
+        !Array.isArray(summary.override_resources) || summary.override_resources.some((v: unknown) => typeof v !== "string") ||
+        new Set(summary.override_resources).size !== summary.override_resources.length) throw new Error("账号摘要协议无效");
+  }
+  if (new Set(value.map(row => row.id)).size !== value.length || new Set(value.map(row => row.username)).size !== value.length) throw new Error("账号摘要协议无效");
+  return value;
+}

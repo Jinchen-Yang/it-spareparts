@@ -1,24 +1,14 @@
-"""账号与权限中心 v2（建号 / 改密 / 停用 / 权限 / 批量 / 活动）。
+"""Account control and independently granted directory/profile/activity data.
 
-权限语义：账号有效权限 = 模板快照(template_perms) ⊕ 稀疏覆盖(perm_overrides)；
-admin 常规权限恒全开，两个生产 Beta 页面按账号白名单。改密/停用/改权限递增
-token_version → 旧 token 立即失效。
+Canonical mode keeps account lifecycle and authorization changes behind the
+named administrator boundary. Directory reads, activity reads and display-name
+edits each use their own resource/action; administrator status grants none of
+those ordinary data permissions. Security changes require a versioned preview
+and revoke the affected session on commit. Passwords never enter audit DTOs.
 
-准入从 require_admin 放宽为权限键（admin 恒通过，行为对 admin 零变化）：
-- 读（列表/_meta/活动）→ page_accounts
-- 写（建号/改权/改密/停用/批量）→ action_account_manage
-
-防锁死与防提权（_guard_* 系列，四条写路径共用）：
-1. 内置 admin 账号：除改密外不可修改，不参与批量/模板。
-2. admin 角色账号：仅 admin 操作者可动；批量一律拒绝。
-3. 最后有效管理员（active 且 role=admin）不可停用/降级。
-4. 操作者不可对自己：停用 / 降出 admin / 撤销账号管理两键。
-5. 高风险键（page_accounts/action_account_manage）与 admin 升降：仅 admin 操作者。
-
-批量：单事务全成或全败；先全量校验（任一非法整体 400 并逐账号给原因）；
-dry_run 预览 + 指纹（执行时重算比对，不一致 409 防"预览后有人动过"）。
-v2 写路径同时把完整有效权限图双写进旧列 permissions——downgrade 后旧代码
-effective(role, 完整图) 逐键等于该图，回滚零漂移（设计 §1.6）。
+The old role/template implementation remains only for resources that have never
+cut over. Persistent cutover markers prevent reverting to legacy permission
+booleans when configuration is withdrawn. Canonical responses use closed DTOs.
 """
 import hashlib
 import json
@@ -32,7 +22,9 @@ from sqlalchemy.orm import Session
 from app import permissions
 from app.api.authz_route import AuthorizationRoute
 from app.auth import current_identity, hash_password
-from app.authz import management, principal, runtime
+from app.authz import control_access, management, principal, runtime
+from app.authz.context import read_snapshot
+from app.authz.errors import authz_error
 from app.db import get_db
 from app.models.system import SysAccessLog, SysAuditLog, SysRoleTemplate, SysUser
 from app.security import UserContext, get_current_user_context, require_action, require_page
@@ -288,7 +280,12 @@ def _template_or_400(db: Session, code: str, ident: dict) -> SysRoleTemplate:
 
 # ---------- 元信息 ----------
 @router.get("/_meta")
-def meta(db: Session = Depends(get_db), _: None = Depends(_read_gate)) -> dict:
+def meta(db: Session = Depends(get_db),
+         ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity)) -> dict:
+    if runtime.canonical_management_required(db):
+        management.actor(db, ident)
+        raise authz_error(410, 'AUTHZ_LEGACY_ENDPOINT_RETIRED', '旧权限矩阵已退役，请使用规范授权目录')
+    _read_gate(ident, db)
     """权限项 + 业务语言元数据 + 依赖图 + 分组 + 模板清单，供前端渲染权限矩阵。"""
     tpls = db.execute(select(SysRoleTemplate).order_by(SysRoleTemplate.id)).scalars().all()
     usage = dict(db.execute(
@@ -330,7 +327,13 @@ def meta(db: Session = Depends(get_db), _: None = Depends(_read_gate)) -> dict:
 
 
 @router.get("")
-def list_accounts(db: Session = Depends(get_db), _: None = Depends(_read_gate)) -> list[dict]:
+def list_accounts(db: Session = Depends(get_db),
+                  ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity)) -> list[dict]:
+    if runtime.canonical_management_required(db):
+        with read_snapshot(lambda: Session(db.get_bind())) as (reader, proof):
+            control_access.require_account_action(reader, ident, 'account_directory', 'read', read_proof=proof)
+            return control_access.account_rows(reader)
+    _read_gate(ident, db)
     tpls = _template_map(db)
     users = db.execute(
         select(SysUser).where(SysUser.deleted_at.is_(None)).order_by(SysUser.id)
@@ -704,7 +707,12 @@ def bulk_update(body: dict = Body(...), db: Session = Depends(get_db),
 # ---------- 活动 ----------
 @router.get("/{username}/activity")
 def activity(username: str, limit: int = 50, db: Session = Depends(get_db),
-             _: None = Depends(_read_gate)) -> dict:
+             ident: principal.VerifiedIdentity = Depends(principal.current_verified_identity)) -> dict:
+    if runtime.canonical_management_required(db):
+        with read_snapshot(lambda: Session(db.get_bind())) as (reader, proof):
+            control_access.require_account_action(reader, ident, 'account_directory', 'read_activity', read_proof=proof)
+            return control_access.activity_rows(reader, username, limit)
+    _read_gate(ident, db)
     u = _get(db, username)
     n = min(max(limit, 1), 200)
     rows = db.execute(
