@@ -1,0 +1,129 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_migration",
+    "rules": [
+      {
+        "name": "explicit-approve",
+        "actions": [
+          "approve"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"approve\" in P.attr.grants.maintenance_migration.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_migration.field_permissions && \"data_profit\" in P.attr.grants.maintenance_migration.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_migration.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_migration\", \"scope\": P.attr.grants.maintenance_migration.scope, \"version\": P.attr.grants.maintenance_migration.version, \"field_permissions\": P.attr.grants.maintenance_migration.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-preview",
+        "actions": [
+          "preview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"preview\" in P.attr.grants.maintenance_migration.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_migration.field_permissions && \"data_profit\" in P.attr.grants.maintenance_migration.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_migration.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_migration\", \"scope\": P.attr.grants.maintenance_migration.scope, \"version\": P.attr.grants.maintenance_migration.version, \"field_permissions\": P.attr.grants.maintenance_migration.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.maintenance_migration.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_migration.field_permissions && \"data_profit\" in P.attr.grants.maintenance_migration.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_migration.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_migration\", \"scope\": P.attr.grants.maintenance_migration.scope, \"version\": P.attr.grants.maintenance_migration.version, \"field_permissions\": P.attr.grants.maintenance_migration.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-manifest",
+        "actions": [
+          "read_manifest"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_manifest\" in P.attr.grants.maintenance_migration.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_migration.field_permissions && \"data_profit\" in P.attr.grants.maintenance_migration.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_migration.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_migration\", \"scope\": P.attr.grants.maintenance_migration.scope, \"version\": P.attr.grants.maintenance_migration.version, \"field_permissions\": P.attr.grants.maintenance_migration.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-project-evidence",
+        "actions": [
+          "read_project_evidence"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_project_evidence\" in P.attr.grants.maintenance_migration.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_migration.field_permissions && \"data_profit\" in P.attr.grants.maintenance_migration.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_migration.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_migration\", \"scope\": P.attr.grants.maintenance_migration.scope, \"version\": P.attr.grants.maintenance_migration.version, \"field_permissions\": P.attr.grants.maintenance_migration.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-reconcile",
+        "actions": [
+          "reconcile"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"reconcile\" in P.attr.grants.maintenance_migration.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_migration.field_permissions && \"data_profit\" in P.attr.grants.maintenance_migration.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_migration.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_migration\", \"scope\": P.attr.grants.maintenance_migration.scope, \"version\": P.attr.grants.maintenance_migration.version, \"field_permissions\": P.attr.grants.maintenance_migration.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

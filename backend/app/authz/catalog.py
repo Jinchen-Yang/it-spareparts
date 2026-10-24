@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from types import MappingProxyType
 from app.authz.business_definitions import BUSINESS_SPECS
+from app.authz.maintenance_definitions import MAINTENANCE_SPECS
 
 SALES_RESOURCE = "sales_analysis"
 SALES_ACTIONS = frozenset(BUSINESS_SPECS[SALES_RESOURCE]["actions"])
@@ -33,6 +34,7 @@ class ResourceDefinition:
     denial_scope: str = "all"
     context_scopes: frozenset[str] = frozenset()
     action_any_dependencies: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    display_actions: frozenset[str] = frozenset()
 
 
 # Closed registry. A legacy page key or an arbitrary DB resource string does
@@ -40,12 +42,14 @@ class ResourceDefinition:
 RESOURCE_DEFINITIONS = MappingProxyType({
     name: ResourceDefinition(
         name, frozenset(spec["actions"]), frozenset(spec["scopes"]), frozenset(spec["fields"]),
-        frozenset({"request.resource.attr.customer_id"}) if name == SALES_RESOURCE else frozenset(),
+        frozenset({"request.resource.attr.customer_id"}) if name == SALES_RESOURCE else frozenset(spec.get('query_attributes', ())),
         action_dependencies=spec["action_dependencies"], field_dependencies=spec["field_dependencies"],
         action_field_dependencies=spec["action_field_dependencies"],
         action_any_dependencies=spec["action_any_dependencies"],
-        denial_scope="assigned_customers" if name == SALES_RESOURCE else "all",
-    ) for name, spec in BUSINESS_SPECS.items()
+        denial_scope=spec.get('denial_scope', "assigned_customers" if name == SALES_RESOURCE else "all"),
+        context_scopes=frozenset(spec.get('context_scopes', ())),
+        display_actions=frozenset(spec.get('display_actions', ())),
+    ) for name, spec in (BUSINESS_SPECS | MAINTENANCE_SPECS).items()
 })
 
 
@@ -91,8 +95,8 @@ def validate_sales_grant(actions: Sequence[str], scope: str, field_permissions: 
 # Planned metadata is deliberately separate from executable definitions. It
 # cannot authorize a request or make a database grant valid.
 _DESCRIPTORS = json.loads(Path(__file__).with_name("catalog_manifest.json").read_text())
-CATALOG_VERSION = "authz-s2-" + hashlib.sha256(json.dumps(
-    {"policy_protocol_version": 2, "descriptors": _DESCRIPTORS, "executable": {key: {
+CATALOG_VERSION = "authz-s3-" + hashlib.sha256(json.dumps(
+    {"policy_protocol_version": 3, "descriptors": _DESCRIPTORS, "executable": {key: {
         "actions": sorted(value.actions), "scopes": sorted(value.scopes),
         "fields": sorted(value.field_permissions), "action_dependencies": value.action_dependencies,
         "action_any_dependencies": value.action_any_dependencies,
@@ -100,6 +104,7 @@ CATALOG_VERSION = "authz-s2-" + hashlib.sha256(json.dumps(
         "denial_scope": value.denial_scope,
         "query_attributes": sorted(value.query_attributes),
         "context_scopes": sorted(value.context_scopes),
+        "display_actions": sorted(value.display_actions),
     } for key, value in RESOURCE_DEFINITIONS.items()}},
     sort_keys=True, separators=(",", ":"), ensure_ascii=False,
 ).encode()).hexdigest()[:24]
@@ -200,8 +205,10 @@ def validate_catalog() -> None:
         action_any = {(a["id"], tuple(a["requires_any_actions"])) for a in item["actions"] if a["requires_any_actions"]}
         field_dependencies = {(f["id"], dep) for f in item["field_permissions"] for dep in f["requires_fields"]}
         context_scopes = {s["id"] for s in item["scopes"] if s["requires_context"]}
+        display_actions = {a['id'] for a in item['actions'] if a['kind'] == 'display'}
         if (definition.name != item["id"] or actions != definition.actions or scopes != definition.scopes
                 or fields != definition.field_permissions or context_scopes != definition.context_scopes
+                or (item['id'] in MAINTENANCE_SPECS and display_actions != definition.display_actions)
                 or item["denial_scope"] != definition.denial_scope or definition.denial_scope not in scopes
                 or action_dependencies != set(definition.action_dependencies)
                 or action_any != set(definition.action_any_dependencies)

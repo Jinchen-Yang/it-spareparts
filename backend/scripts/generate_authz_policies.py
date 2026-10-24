@@ -8,6 +8,16 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'backend'))
 from app.authz.catalog import RESOURCE_DEFINITIONS, SALES_RESOURCE, validate_catalog
 
+SCOPE_EXPRESSIONS = {
+    'all_projects': 'true', 'assigned_projects': '(R.attr.is_manager || R.attr.is_viewer)',
+    'assigned_or_sales_projects': '(R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)',
+    'canonical_sales_projects': 'R.attr.is_sales', 'primary_managed_projects': 'R.attr.is_manager',
+    'primary_managed_active_projects': '(R.attr.is_manager && R.attr.is_active)',
+    'all': 'true', 'all_sources': 'true', 'own_source_sales': 'R.attr.is_source_sales',
+    'all_contracts': 'true', 'own_imports': 'R.attr.is_owner', 'all_imports': 'true',
+    'own_proposals': 'R.attr.is_owner', 'own_applications': 'R.attr.is_owner',
+}
+
 
 def policy(resource, definition):
     grant = f'P.attr.grants.{resource}'
@@ -21,6 +31,10 @@ def policy(resource, definition):
         conditions += [f'{json.dumps(dep)} in {grant}.field_permissions' for owner, dep in definition.action_field_dependencies if owner == action]
         if resource == SALES_RESOURCE:
             conditions.append(f'(R.attr.module_probe || {grant}.scope == "all" || ({grant}.scope == "assigned_customers" && R.attr.customer_id in P.attr.contexts.{resource}.customer_ids))')
+        elif definition.context_scopes:
+            alternatives = [f'({grant}.scope == {json.dumps(scope)} && ({SCOPE_EXPRESSIONS[scope]}))'
+                            for scope in sorted(definition.scopes)]
+            conditions.append('(R.attr.module_probe || (' + ' || '.join(alternatives) + '))')
         else:
             conditions.append(f'{grant}.scope == "all"')
         rules.append({'name': 'explicit-' + action.replace('_', '-'), 'actions': [action],

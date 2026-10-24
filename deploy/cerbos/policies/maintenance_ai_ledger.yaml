@@ -1,0 +1,49 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_ai_ledger",
+    "rules": [
+      {
+        "name": "explicit-accept",
+        "actions": [
+          "accept"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"accept\" in P.attr.grants.maintenance_ai_ledger.actions && \"data_profit\" in P.attr.grants.maintenance_ai_ledger.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_ai_ledger.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_ai_ledger\", \"scope\": P.attr.grants.maintenance_ai_ledger.scope, \"version\": P.attr.grants.maintenance_ai_ledger.version, \"field_permissions\": P.attr.grants.maintenance_ai_ledger.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-propose",
+        "actions": [
+          "propose"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"propose\" in P.attr.grants.maintenance_ai_ledger.actions && \"data_profit\" in P.attr.grants.maintenance_ai_ledger.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_ai_ledger.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_ai_ledger\", \"scope\": P.attr.grants.maintenance_ai_ledger.scope, \"version\": P.attr.grants.maintenance_ai_ledger.version, \"field_permissions\": P.attr.grants.maintenance_ai_ledger.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_contract",
+    "rules": [
+      {
+        "name": "explicit-archive",
+        "actions": [
+          "archive"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"archive\" in P.attr.grants.maintenance_contract.actions && \"data_profit\" in P.attr.grants.maintenance_contract.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_contract.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_contract.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_contract\", \"scope\": P.attr.grants.maintenance_contract.scope, \"version\": P.attr.grants.maintenance_contract.version, \"field_permissions\": P.attr.grants.maintenance_contract.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-create",
+        "actions": [
+          "create"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"create\" in P.attr.grants.maintenance_contract.actions && \"data_profit\" in P.attr.grants.maintenance_contract.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_contract.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_contract.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_contract\", \"scope\": P.attr.grants.maintenance_contract.scope, \"version\": P.attr.grants.maintenance_contract.version, \"field_permissions\": P.attr.grants.maintenance_contract.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.maintenance_contract.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_contract.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_contract.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_contract\", \"scope\": P.attr.grants.maintenance_contract.scope, \"version\": P.attr.grants.maintenance_contract.version, \"field_permissions\": P.attr.grants.maintenance_contract.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-update",
+        "actions": [
+          "update"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"update\" in P.attr.grants.maintenance_contract.actions && \"data_profit\" in P.attr.grants.maintenance_contract.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_contract.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_contract.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_contract\", \"scope\": P.attr.grants.maintenance_contract.scope, \"version\": P.attr.grants.maintenance_contract.version, \"field_permissions\": P.attr.grants.maintenance_contract.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

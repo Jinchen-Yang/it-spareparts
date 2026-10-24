@@ -1,0 +1,49 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_project_backfill",
+    "rules": [
+      {
+        "name": "explicit-apply",
+        "actions": [
+          "apply"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"apply\" in P.attr.grants.maintenance_project_backfill.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_project_backfill.scope == \"all_projects\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_project_backfill\", \"scope\": P.attr.grants.maintenance_project_backfill.scope, \"version\": P.attr.grants.maintenance_project_backfill.version, \"field_permissions\": P.attr.grants.maintenance_project_backfill.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-preview",
+        "actions": [
+          "preview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"preview\" in P.attr.grants.maintenance_project_backfill.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_project_backfill.scope == \"all_projects\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_project_backfill\", \"scope\": P.attr.grants.maintenance_project_backfill.scope, \"version\": P.attr.grants.maintenance_project_backfill.version, \"field_permissions\": P.attr.grants.maintenance_project_backfill.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

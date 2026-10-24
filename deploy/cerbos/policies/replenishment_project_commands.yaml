@@ -1,0 +1,149 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "replenishment_project_commands",
+    "rules": [
+      {
+        "name": "explicit-cart-delete",
+        "actions": [
+          "cart_delete"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"cart_delete\" in P.attr.grants.replenishment_project_commands.actions && \"data_pool_price_governance\" in P.attr.grants.replenishment_project_commands.field_permissions && (R.attr.module_probe || ((P.attr.grants.replenishment_project_commands.scope == \"all_projects\" && (true)) || (P.attr.grants.replenishment_project_commands.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_project_commands\", \"scope\": P.attr.grants.replenishment_project_commands.scope, \"version\": P.attr.grants.replenishment_project_commands.version, \"field_permissions\": P.attr.grants.replenishment_project_commands.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-cart-read",
+        "actions": [
+          "cart_read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"cart_read\" in P.attr.grants.replenishment_project_commands.actions && \"data_pool_price_governance\" in P.attr.grants.replenishment_project_commands.field_permissions && (R.attr.module_probe || ((P.attr.grants.replenishment_project_commands.scope == \"all_projects\" && (true)) || (P.attr.grants.replenishment_project_commands.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_project_commands\", \"scope\": P.attr.grants.replenishment_project_commands.scope, \"version\": P.attr.grants.replenishment_project_commands.version, \"field_permissions\": P.attr.grants.replenishment_project_commands.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-cart-update",
+        "actions": [
+          "cart_update"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"cart_update\" in P.attr.grants.replenishment_project_commands.actions && \"data_pool_price_governance\" in P.attr.grants.replenishment_project_commands.field_permissions && (R.attr.module_probe || ((P.attr.grants.replenishment_project_commands.scope == \"all_projects\" && (true)) || (P.attr.grants.replenishment_project_commands.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_project_commands\", \"scope\": P.attr.grants.replenishment_project_commands.scope, \"version\": P.attr.grants.replenishment_project_commands.version, \"field_permissions\": P.attr.grants.replenishment_project_commands.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-revise",
+        "actions": [
+          "revise"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"revise\" in P.attr.grants.replenishment_project_commands.actions && \"data_pool_price_governance\" in P.attr.grants.replenishment_project_commands.field_permissions && (R.attr.module_probe || ((P.attr.grants.replenishment_project_commands.scope == \"all_projects\" && (true)) || (P.attr.grants.replenishment_project_commands.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_project_commands\", \"scope\": P.attr.grants.replenishment_project_commands.scope, \"version\": P.attr.grants.replenishment_project_commands.version, \"field_permissions\": P.attr.grants.replenishment_project_commands.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-draft",
+        "actions": [
+          "show_draft"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_draft\" in P.attr.grants.replenishment_project_commands.actions && \"cart_read\" in P.attr.grants.replenishment_project_commands.actions && (R.attr.module_probe || ((P.attr.grants.replenishment_project_commands.scope == \"all_projects\" && (true)) || (P.attr.grants.replenishment_project_commands.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_project_commands\", \"scope\": P.attr.grants.replenishment_project_commands.scope, \"version\": P.attr.grants.replenishment_project_commands.version, \"field_permissions\": P.attr.grants.replenishment_project_commands.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-revise",
+        "actions": [
+          "show_revise"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_revise\" in P.attr.grants.replenishment_project_commands.actions && \"revise\" in P.attr.grants.replenishment_project_commands.actions && (R.attr.module_probe || ((P.attr.grants.replenishment_project_commands.scope == \"all_projects\" && (true)) || (P.attr.grants.replenishment_project_commands.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_project_commands\", \"scope\": P.attr.grants.replenishment_project_commands.scope, \"version\": P.attr.grants.replenishment_project_commands.version, \"field_permissions\": P.attr.grants.replenishment_project_commands.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-submit",
+        "actions": [
+          "submit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"submit\" in P.attr.grants.replenishment_project_commands.actions && \"data_pool_price_governance\" in P.attr.grants.replenishment_project_commands.field_permissions && (R.attr.module_probe || ((P.attr.grants.replenishment_project_commands.scope == \"all_projects\" && (true)) || (P.attr.grants.replenishment_project_commands.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_project_commands\", \"scope\": P.attr.grants.replenishment_project_commands.scope, \"version\": P.attr.grants.replenishment_project_commands.version, \"field_permissions\": P.attr.grants.replenishment_project_commands.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

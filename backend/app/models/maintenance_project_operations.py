@@ -819,6 +819,10 @@ class MaintenanceProjectWorkbookOperation(Base):
         TZDateTime, nullable=False, server_default=func.now()
     )
 
+    owner_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sys_user.id", ondelete="RESTRICT", name="fk_maintenance_project_workbook_operation_owner_user_id"), nullable=True
+    )
+
     __table_args__ = (
         CheckConstraint(
             "operation_type IN ('collection_create', 'file_export', 'file_apply')",

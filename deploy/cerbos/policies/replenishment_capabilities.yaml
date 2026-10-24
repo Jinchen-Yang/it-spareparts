@@ -1,0 +1,29 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "replenishment_capabilities",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.replenishment_capabilities.actions && (R.attr.module_probe || ((P.attr.grants.replenishment_capabilities.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_capabilities\", \"scope\": P.attr.grants.replenishment_capabilities.scope, \"version\": P.attr.grants.replenishment_capabilities.version, \"field_permissions\": P.attr.grants.replenishment_capabilities.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

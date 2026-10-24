@@ -176,6 +176,7 @@ class SysImportBatch(Base):
     __tablename__ = "sys_import_batch"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("sys_user.id", ondelete="RESTRICT"), nullable=True)
     filename: Mapped[str] = mapped_column(String(256))
     file_type: Mapped[str] = mapped_column(String(16))  # purchase/sales/inventory/inquiry
     file_hash: Mapped[str] = mapped_column(String(64))

@@ -9,7 +9,7 @@
 """
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, String, UniqueConstraint, func
+from sqlalchemy import ForeignKey, Index, String, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,6 +25,7 @@ class MaintenanceWbddImportReceipt(Base):
         ForeignKey("sys_import_batch.id"), unique=True
     )
     idempotency_key: Mapped[str] = mapped_column(String(128))
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey('sys_user.id', ondelete='RESTRICT'))
     uploaded_by: Mapped[str] = mapped_column(String(64))
     file_hash: Mapped[str] = mapped_column(String(64))
     layout: Mapped[str | None] = mapped_column(String(4))  # "91" / "90" / "name" (D-26)
@@ -32,9 +33,9 @@ class MaintenanceWbddImportReceipt(Base):
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint(
-            "uploaded_by", "idempotency_key",
-            name="uq_maintenance_wbdd_import_idempotency",
-        ),
+        Index("ux_maintenance_wbdd_import_owner_request", "owner_user_id", "idempotency_key",
+              unique=True, postgresql_where=text("owner_user_id IS NOT NULL")),
+        Index("ux_maintenance_wbdd_import_legacy_request", "uploaded_by", "idempotency_key",
+              unique=True, postgresql_where=text("owner_user_id IS NULL")),
         Index("ix_maintenance_wbdd_receipt_hash", "file_hash"),
     )

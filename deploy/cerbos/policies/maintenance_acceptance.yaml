@@ -1,0 +1,269 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_acceptance",
+    "rules": [
+      {
+        "name": "explicit-attachment-delete",
+        "actions": [
+          "attachment_delete"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"attachment_delete\" in P.attr.grants.maintenance_acceptance.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance\", \"scope\": P.attr.grants.maintenance_acceptance.scope, \"version\": P.attr.grants.maintenance_acceptance.version, \"field_permissions\": P.attr.grants.maintenance_acceptance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-attachment-download",
+        "actions": [
+          "attachment_download"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"attachment_download\" in P.attr.grants.maintenance_acceptance.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance\", \"scope\": P.attr.grants.maintenance_acceptance.scope, \"version\": P.attr.grants.maintenance_acceptance.version, \"field_permissions\": P.attr.grants.maintenance_acceptance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-attachment-upload",
+        "actions": [
+          "attachment_upload"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"attachment_upload\" in P.attr.grants.maintenance_acceptance.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance\", \"scope\": P.attr.grants.maintenance_acceptance.scope, \"version\": P.attr.grants.maintenance_acceptance.version, \"field_permissions\": P.attr.grants.maintenance_acceptance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-checklist-apply",
+        "actions": [
+          "checklist_apply"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"checklist_apply\" in P.attr.grants.maintenance_acceptance.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance\", \"scope\": P.attr.grants.maintenance_acceptance.scope, \"version\": P.attr.grants.maintenance_acceptance.version, \"field_permissions\": P.attr.grants.maintenance_acceptance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-checklist-preview",
+        "actions": [
+          "checklist_preview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"checklist_preview\" in P.attr.grants.maintenance_acceptance.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance\", \"scope\": P.attr.grants.maintenance_acceptance.scope, \"version\": P.attr.grants.maintenance_acceptance.version, \"field_permissions\": P.attr.grants.maintenance_acceptance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-checklist",
+        "actions": [
+          "read_checklist"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_checklist\" in P.attr.grants.maintenance_acceptance.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance\", \"scope\": P.attr.grants.maintenance_acceptance.scope, \"version\": P.attr.grants.maintenance_acceptance.version, \"field_permissions\": P.attr.grants.maintenance_acceptance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-deliverable",
+        "actions": [
+          "read_deliverable"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_deliverable\" in P.attr.grants.maintenance_acceptance.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance\", \"scope\": P.attr.grants.maintenance_acceptance.scope, \"version\": P.attr.grants.maintenance_acceptance.version, \"field_permissions\": P.attr.grants.maintenance_acceptance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-attachments",
+        "actions": [
+          "show_attachments"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_attachments\" in P.attr.grants.maintenance_acceptance.actions && \"read_deliverable\" in P.attr.grants.maintenance_acceptance.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance\", \"scope\": P.attr.grants.maintenance_acceptance.scope, \"version\": P.attr.grants.maintenance_acceptance.version, \"field_permissions\": P.attr.grants.maintenance_acceptance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-checklist",
+        "actions": [
+          "show_checklist"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_checklist\" in P.attr.grants.maintenance_acceptance.actions && \"read_checklist\" in P.attr.grants.maintenance_acceptance.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance\", \"scope\": P.attr.grants.maintenance_acceptance.scope, \"version\": P.attr.grants.maintenance_acceptance.version, \"field_permissions\": P.attr.grants.maintenance_acceptance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-checklist-import",
+        "actions": [
+          "show_checklist_import"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_checklist_import\" in P.attr.grants.maintenance_acceptance.actions && (\"checklist_apply\" in P.attr.grants.maintenance_acceptance.actions || \"checklist_preview\" in P.attr.grants.maintenance_acceptance.actions) && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance\", \"scope\": P.attr.grants.maintenance_acceptance.scope, \"version\": P.attr.grants.maintenance_acceptance.version, \"field_permissions\": P.attr.grants.maintenance_acceptance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-report",
+        "actions": [
+          "show_report"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_report\" in P.attr.grants.maintenance_acceptance.actions && \"read_deliverable\" in P.attr.grants.maintenance_acceptance.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance\", \"scope\": P.attr.grants.maintenance_acceptance.scope, \"version\": P.attr.grants.maintenance_acceptance.version, \"field_permissions\": P.attr.grants.maintenance_acceptance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-submit",
+        "actions": [
+          "submit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"submit\" in P.attr.grants.maintenance_acceptance.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance\", \"scope\": P.attr.grants.maintenance_acceptance.scope, \"version\": P.attr.grants.maintenance_acceptance.version, \"field_permissions\": P.attr.grants.maintenance_acceptance.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-template-download",
+        "actions": [
+          "template_download"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"template_download\" in P.attr.grants.maintenance_acceptance.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance\", \"scope\": P.attr.grants.maintenance_acceptance.scope, \"version\": P.attr.grants.maintenance_acceptance.version, \"field_permissions\": P.attr.grants.maintenance_acceptance.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

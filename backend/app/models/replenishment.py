@@ -19,6 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -34,6 +35,7 @@ class ReplenishmentApplication(Base):
 
     application_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     application_no: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey('sys_user.id', ondelete='RESTRICT'))
     owner_username: Mapped[str] = mapped_column(
         ForeignKey("sys_user.username"), nullable=False
     )
@@ -100,11 +102,13 @@ class ReplenishmentApplication(Base):
         ),
         Index(
             "ux_replenishment_application_owner_request",
-            "owner_username",
+            "owner_user_id",
             "client_request_id",
             unique=True,
-            postgresql_where=client_request_id.is_not(None),
+            postgresql_where=text("owner_user_id IS NOT NULL AND client_request_id IS NOT NULL"),
         ),
+        Index("ux_replenishment_application_legacy_request", "owner_username", "client_request_id",
+              unique=True, postgresql_where=text("owner_user_id IS NULL AND client_request_id IS NOT NULL")),
         Index(
             "ix_replenishment_application_project_updated",
             "project_id",
@@ -131,6 +135,7 @@ class ReplenishmentApplicationVersion(Base):
 
     __tablename__ = "replenishment_application_version"
 
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey('sys_user.id', ondelete='RESTRICT'))
     version_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     application_id: Mapped[str] = mapped_column(
         ForeignKey("replenishment_application.application_id"), nullable=False

@@ -1,0 +1,49 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "replenishment_catalog",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.replenishment_catalog.actions && \"data_pool_price_governance\" in P.attr.grants.replenishment_catalog.field_permissions && (R.attr.module_probe || ((P.attr.grants.replenishment_catalog.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_catalog\", \"scope\": P.attr.grants.replenishment_catalog.scope, \"version\": P.attr.grants.replenishment_catalog.version, \"field_permissions\": P.attr.grants.replenishment_catalog.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-candidate-catalog",
+        "actions": [
+          "show_candidate_catalog"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_candidate_catalog\" in P.attr.grants.replenishment_catalog.actions && \"read\" in P.attr.grants.replenishment_catalog.actions && (R.attr.module_probe || ((P.attr.grants.replenishment_catalog.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_catalog\", \"scope\": P.attr.grants.replenishment_catalog.scope, \"version\": P.attr.grants.replenishment_catalog.version, \"field_permissions\": P.attr.grants.replenishment_catalog.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

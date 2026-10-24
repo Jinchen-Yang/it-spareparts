@@ -1,0 +1,69 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_warehouse",
+    "rules": [
+      {
+        "name": "explicit-read-ambiguities",
+        "actions": [
+          "read_ambiguities"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_ambiguities\" in P.attr.grants.maintenance_warehouse.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_warehouse.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_warehouse.scope == \"primary_managed_projects\" && (R.attr.is_manager))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_warehouse\", \"scope\": P.attr.grants.maintenance_warehouse.scope, \"version\": P.attr.grants.maintenance_warehouse.version, \"field_permissions\": P.attr.grants.maintenance_warehouse.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-documents",
+        "actions": [
+          "read_documents"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_documents\" in P.attr.grants.maintenance_warehouse.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_warehouse.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_warehouse.scope == \"primary_managed_projects\" && (R.attr.is_manager))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_warehouse\", \"scope\": P.attr.grants.maintenance_warehouse.scope, \"version\": P.attr.grants.maintenance_warehouse.version, \"field_permissions\": P.attr.grants.maintenance_warehouse.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-resolve-ambiguity",
+        "actions": [
+          "resolve_ambiguity"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"resolve_ambiguity\" in P.attr.grants.maintenance_warehouse.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_warehouse.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_warehouse.scope == \"primary_managed_projects\" && (R.attr.is_manager))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_warehouse\", \"scope\": P.attr.grants.maintenance_warehouse.scope, \"version\": P.attr.grants.maintenance_warehouse.version, \"field_permissions\": P.attr.grants.maintenance_warehouse.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

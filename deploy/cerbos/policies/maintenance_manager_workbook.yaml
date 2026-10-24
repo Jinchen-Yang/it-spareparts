@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_manager_workbook",
+    "rules": [
+      {
+        "name": "explicit-apply",
+        "actions": [
+          "apply"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"apply\" in P.attr.grants.maintenance_manager_workbook.actions && \"data_profit\" in P.attr.grants.maintenance_manager_workbook.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_manager_workbook.scope == \"primary_managed_active_projects\" && ((R.attr.is_manager && R.attr.is_active)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_manager_workbook\", \"scope\": P.attr.grants.maintenance_manager_workbook.scope, \"version\": P.attr.grants.maintenance_manager_workbook.version, \"field_permissions\": P.attr.grants.maintenance_manager_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-download",
+        "actions": [
+          "download"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"download\" in P.attr.grants.maintenance_manager_workbook.actions && \"data_profit\" in P.attr.grants.maintenance_manager_workbook.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_manager_workbook.scope == \"primary_managed_active_projects\" && ((R.attr.is_manager && R.attr.is_active)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_manager_workbook\", \"scope\": P.attr.grants.maintenance_manager_workbook.scope, \"version\": P.attr.grants.maintenance_manager_workbook.version, \"field_permissions\": P.attr.grants.maintenance_manager_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-job-read",
+        "actions": [
+          "job_read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"job_read\" in P.attr.grants.maintenance_manager_workbook.actions && \"data_profit\" in P.attr.grants.maintenance_manager_workbook.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_manager_workbook.scope == \"primary_managed_active_projects\" && ((R.attr.is_manager && R.attr.is_active)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_manager_workbook\", \"scope\": P.attr.grants.maintenance_manager_workbook.scope, \"version\": P.attr.grants.maintenance_manager_workbook.version, \"field_permissions\": P.attr.grants.maintenance_manager_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-validate",
+        "actions": [
+          "validate"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"validate\" in P.attr.grants.maintenance_manager_workbook.actions && \"data_profit\" in P.attr.grants.maintenance_manager_workbook.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_manager_workbook.scope == \"primary_managed_active_projects\" && ((R.attr.is_manager && R.attr.is_active)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_manager_workbook\", \"scope\": P.attr.grants.maintenance_manager_workbook.scope, \"version\": P.attr.grants.maintenance_manager_workbook.version, \"field_permissions\": P.attr.grants.maintenance_manager_workbook.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

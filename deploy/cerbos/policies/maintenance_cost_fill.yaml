@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_cost_fill",
+    "rules": [
+      {
+        "name": "explicit-backfill",
+        "actions": [
+          "backfill"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"backfill\" in P.attr.grants.maintenance_cost_fill.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_cost_fill.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_cost_fill.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_cost_fill\", \"scope\": P.attr.grants.maintenance_cost_fill.scope, \"version\": P.attr.grants.maintenance_cost_fill.version, \"field_permissions\": P.attr.grants.maintenance_cost_fill.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-fill",
+        "actions": [
+          "fill"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"fill\" in P.attr.grants.maintenance_cost_fill.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_cost_fill.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_cost_fill.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_cost_fill.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_cost_fill\", \"scope\": P.attr.grants.maintenance_cost_fill.scope, \"version\": P.attr.grants.maintenance_cost_fill.version, \"field_permissions\": P.attr.grants.maintenance_cost_fill.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-gaps",
+        "actions": [
+          "read_gaps"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_gaps\" in P.attr.grants.maintenance_cost_fill.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_cost_fill.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_cost_fill.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_cost_fill.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_cost_fill\", \"scope\": P.attr.grants.maintenance_cost_fill.scope, \"version\": P.attr.grants.maintenance_cost_fill.version, \"field_permissions\": P.attr.grants.maintenance_cost_fill.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-recompute",
+        "actions": [
+          "recompute"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"recompute\" in P.attr.grants.maintenance_cost_fill.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_cost_fill.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_cost_fill.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_cost_fill.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_cost_fill\", \"scope\": P.attr.grants.maintenance_cost_fill.scope, \"version\": P.attr.grants.maintenance_cost_fill.version, \"field_permissions\": P.attr.grants.maintenance_cost_fill.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

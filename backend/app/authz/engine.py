@@ -4,6 +4,7 @@ No DB access, token interpretation, implicit roles, or network-error fallback.
 """
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+import hashlib
 import logging
 from types import MappingProxyType
 
@@ -16,6 +17,7 @@ from app.authz.catalog import SALES_RESOURCE, get_resource_definition, validate_
 from app.config import get_settings
 
 _log = logging.getLogger(__name__)
+MAX_CHECK_RESOURCES = 50
 
 
 class AuthorizationDenied(Exception):
@@ -123,26 +125,78 @@ def _module_id(resource: str) -> str:
 def _check_batch(client, principal, grants, requested) -> dict[str, Decision]:
     if set(grants) != set(requested):
         raise AuthorizationDenied("授权与请求资源不匹配")
-    resources = ResourceList()
+    items = {}
     for resource, grant in grants.items():
-        actions = requested[resource]
+        items[resource] = (resource, requested[resource], {'module_probe': True}, _module_id(resource))
+    return _check_items(client, principal, grants, items)
+
+
+def _check_items(client, principal, grants, items) -> dict[str, Decision]:
+    """Validate every bounded response before returning any part of the batch."""
+    for resource, actions, attributes, wire_id in items.values():
         if (not actions or len(actions) != len(set(actions))
-                or not set(actions) <= get_resource_definition(resource).actions):
+                or resource not in grants or not set(actions) <= get_resource_definition(resource).actions):
             raise AuthorizationDenied("未注册的资源动作")
-        resources.add(Resource(id=_module_id(resource), kind=resource, attr={"module_probe": True}), set(actions))
-    response = client.check_resources(principal, resources)
-    response.raise_if_failed()
-    results = response.results
-    expected = {_module_id(resource): resource for resource in grants}
-    if (not isinstance(results, list) or len(results) != len(expected)
-            or len({result.resource.id for result in results}) != len(expected)
-            or {result.resource.id for result in results} != set(expected)):
-        raise AuthorizationUnavailable("授权批量响应缺失、重复或包含额外资源")
+    if len({v[3] for v in items.values()}) != len(items):
+        raise AuthorizationDenied('授权对象标识重复')
     decisions = {}
-    for result in results:
-        resource = expected[result.resource.id]
-        decisions[resource] = _decision(result, grants[resource], requested[resource])
+    keys = list(items)
+    for start in range(0, len(keys), MAX_CHECK_RESOURCES):
+        resources = ResourceList()
+        expected = {}
+        for key in keys[start:start + MAX_CHECK_RESOURCES]:
+            resource, actions, attributes, wire_id = items[key]
+            resources.add(Resource(id=wire_id, kind=resource, attr=attributes), set(actions))
+            expected[wire_id] = key
+        response = client.check_resources(principal, resources)
+        response.raise_if_failed()
+        results = response.results
+        if (not isinstance(results, list) or len(results) != len(expected)
+                or len({result.resource.id for result in results}) != len(expected)
+                or {result.resource.id for result in results} != set(expected)):
+            raise AuthorizationUnavailable("授权批量响应缺失、重复或包含额外资源")
+        for result in results:
+            key = expected[result.resource.id]
+            resource, actions, _, _ = items[key]
+            decisions[key] = _decision(result, grants[resource], actions)
     return decisions
+
+
+@dataclass(frozen=True)
+class ObjectCheck:
+    key: str
+    resource: str
+    actions: tuple[str, ...]
+    attributes: Mapping
+
+    def __post_init__(self):
+        definition = get_resource_definition(self.resource)
+        expected = {name.removeprefix('request.resource.attr.') for name in definition.query_attributes}
+        if (type(self.key) is not str or not self.key or set(self.attributes) != expected
+                or any(type(v) is not bool for v in self.attributes.values())):
+            raise ValueError('对象授权关系与资源词表不匹配')
+        object.__setattr__(self, 'attributes', MappingProxyType(dict(self.attributes)))
+        object.__setattr__(self, 'actions', tuple(self.actions))
+
+
+def check_objects(user_id: int, grants: Mapping[str, Grant], checks: Sequence[ObjectCheck]) -> dict[str, Decision]:
+    """Evaluate each actual object independently; never OR relation attributes."""
+    if not checks:
+        return {}
+    if any(type(check) is not ObjectCheck for check in checks) or len({c.key for c in checks}) != len(checks):
+        raise AuthorizationDenied('对象批次无效或重复')
+    if {c.resource for c in checks} != set(grants):
+        raise AuthorizationDenied('对象与授权必须逐资源配对')
+    try:
+        principal = _make_batch_principal(user_id, grants, {r: {} for r in grants})
+        items = {c.key: (c.resource, c.actions, {'module_probe': False, **c.attributes},
+                        'object-' + hashlib.sha256(c.key.encode()).hexdigest()) for c in checks}
+        with _client() as client:
+            return _check_items(client, principal, grants, items)
+    except (AuthorizationDenied, AuthorizationUnavailable):
+        raise
+    except Exception as exc:
+        raise _unavailable(exc) from exc
 
 
 def _decision(result, grant: Grant, actions: Sequence[str]) -> Decision:
@@ -177,7 +231,7 @@ def _decision(result, grant: Grant, actions: Sequence[str]) -> Decision:
 def check_resources(user_id: int, grants: Mapping[str, Grant],
                     principal_attributes: Mapping[str, Mapping],
                     actions: Mapping[str, Sequence[str]]) -> dict[str, Decision]:
-    """One connection and one CheckResources call for an entire snapshot."""
+    """One connection and bounded CheckResources calls for an entire snapshot."""
     if not grants:
         if principal_attributes or actions:
             raise AuthorizationDenied("空授权请求不能携带额外资源")
@@ -238,6 +292,44 @@ def plan_access(user_id: int, grant: Grant, principal_attributes: Mapping,
             predicate=query.whereclause if query.whereclause is not None else true(),
             field_permissions=decision.field_permissions,
         )
+    except (AuthorizationDenied, AuthorizationUnavailable):
+        raise
+    except Exception as exc:
+        raise _unavailable(exc) from exc
+
+
+def plan_accesses(user_id: int, grants: Mapping[str, Grant], requests: Mapping[str, tuple[str, str, QueryBindings]]) -> dict[str, Plan]:
+    """One live grant set/connection; batch admission, then each necessary plan.
+
+    Missing actions are ordinary denials. Any unusable plan aborts all results.
+    The caller applies every returned predicate before aggregation/pagination.
+    """
+    if not requests:
+        return {}
+    if {resource for resource, _, _ in requests.values()} != set(grants):
+        raise AuthorizationDenied('集合计划与授权资源不匹配')
+    actions = {resource: set() for resource in grants}
+    for resource, action, binding in requests.values():
+        if binding.resource != resource or action not in get_resource_definition(resource).actions:
+            raise AuthorizationDenied('集合计划缺少已登记查询绑定')
+        actions[resource].add(action)
+    try:
+        principal = _make_batch_principal(user_id, grants, {resource: {} for resource in grants})
+        result = {}
+        with _client() as client:
+            decisions = _check_batch(client, principal, grants, {r: tuple(sorted(a)) for r, a in actions.items()})
+            for key, (resource, action, binding) in requests.items():
+                decision = decisions[resource]
+                if action not in decision.allowed_actions:
+                    continue
+                plan = client.plan_resources(action, principal, ResourceDesc(kind=resource, attr={'module_probe': False}))
+                plan.raise_if_failed()
+                planned_actions = [plan.action] if isinstance(plan.action, str) else plan.action
+                if plan.validation_errors or plan.resource_kind != resource or planned_actions != [action]:
+                    raise AuthorizationUnavailable('授权查询计划无效')
+                query = get_query(plan, binding.table, binding.attributes, operator_override_fns=binding.operator_overrides)
+                result[key] = Plan(query.whereclause if query.whereclause is not None else true(), decision.field_permissions)
+        return result
     except (AuthorizationDenied, AuthorizationUnavailable):
         raise
     except Exception as exc:

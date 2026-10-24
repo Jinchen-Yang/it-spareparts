@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_global_workbook",
+    "rules": [
+      {
+        "name": "explicit-apply",
+        "actions": [
+          "apply"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"apply\" in P.attr.grants.maintenance_global_workbook.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_global_workbook.field_permissions && \"data_profit\" in P.attr.grants.maintenance_global_workbook.field_permissions && \"data_customer\" in P.attr.grants.maintenance_global_workbook.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_global_workbook.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_global_workbook.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_global_workbook.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_global_workbook\", \"scope\": P.attr.grants.maintenance_global_workbook.scope, \"version\": P.attr.grants.maintenance_global_workbook.version, \"field_permissions\": P.attr.grants.maintenance_global_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-download",
+        "actions": [
+          "download"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"download\" in P.attr.grants.maintenance_global_workbook.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_global_workbook.field_permissions && \"data_profit\" in P.attr.grants.maintenance_global_workbook.field_permissions && \"data_customer\" in P.attr.grants.maintenance_global_workbook.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_global_workbook.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_global_workbook.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_global_workbook.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_global_workbook\", \"scope\": P.attr.grants.maintenance_global_workbook.scope, \"version\": P.attr.grants.maintenance_global_workbook.version, \"field_permissions\": P.attr.grants.maintenance_global_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-roundtrip",
+        "actions": [
+          "show_roundtrip"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_roundtrip\" in P.attr.grants.maintenance_global_workbook.actions && (\"apply\" in P.attr.grants.maintenance_global_workbook.actions || \"download\" in P.attr.grants.maintenance_global_workbook.actions || \"validate\" in P.attr.grants.maintenance_global_workbook.actions) && (R.attr.module_probe || ((P.attr.grants.maintenance_global_workbook.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_global_workbook.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_global_workbook.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_global_workbook\", \"scope\": P.attr.grants.maintenance_global_workbook.scope, \"version\": P.attr.grants.maintenance_global_workbook.version, \"field_permissions\": P.attr.grants.maintenance_global_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-validate",
+        "actions": [
+          "validate"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"validate\" in P.attr.grants.maintenance_global_workbook.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_global_workbook.field_permissions && \"data_profit\" in P.attr.grants.maintenance_global_workbook.field_permissions && \"data_customer\" in P.attr.grants.maintenance_global_workbook.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_global_workbook.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_global_workbook.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_global_workbook.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_global_workbook\", \"scope\": P.attr.grants.maintenance_global_workbook.scope, \"version\": P.attr.grants.maintenance_global_workbook.version, \"field_permissions\": P.attr.grants.maintenance_global_workbook.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

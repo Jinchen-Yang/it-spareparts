@@ -1,0 +1,149 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_expense",
+    "rules": [
+      {
+        "name": "explicit-backfill",
+        "actions": [
+          "backfill"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"backfill\" in P.attr.grants.maintenance_expense.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_expense.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_expense.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_expense\", \"scope\": P.attr.grants.maintenance_expense.scope, \"version\": P.attr.grants.maintenance_expense.version, \"field_permissions\": P.attr.grants.maintenance_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-create",
+        "actions": [
+          "create"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"create\" in P.attr.grants.maintenance_expense.actions && \"data_profit\" in P.attr.grants.maintenance_expense.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_expense.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_expense.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_expense\", \"scope\": P.attr.grants.maintenance_expense.scope, \"version\": P.attr.grants.maintenance_expense.version, \"field_permissions\": P.attr.grants.maintenance_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-mark-readiness",
+        "actions": [
+          "mark_readiness"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"mark_readiness\" in P.attr.grants.maintenance_expense.actions && \"data_profit\" in P.attr.grants.maintenance_expense.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_expense.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_expense.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_expense\", \"scope\": P.attr.grants.maintenance_expense.scope, \"version\": P.attr.grants.maintenance_expense.version, \"field_permissions\": P.attr.grants.maintenance_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-rows",
+        "actions": [
+          "read_rows"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_rows\" in P.attr.grants.maintenance_expense.actions && \"data_profit\" in P.attr.grants.maintenance_expense.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_expense.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_expense.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_expense\", \"scope\": P.attr.grants.maintenance_expense.scope, \"version\": P.attr.grants.maintenance_expense.version, \"field_permissions\": P.attr.grants.maintenance_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-workspace",
+        "actions": [
+          "read_workspace"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_workspace\" in P.attr.grants.maintenance_expense.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_expense.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_expense.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_expense\", \"scope\": P.attr.grants.maintenance_expense.scope, \"version\": P.attr.grants.maintenance_expense.version, \"field_permissions\": P.attr.grants.maintenance_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-records",
+        "actions": [
+          "show_records"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_records\" in P.attr.grants.maintenance_expense.actions && \"read_rows\" in P.attr.grants.maintenance_expense.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_expense.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_expense.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_expense\", \"scope\": P.attr.grants.maintenance_expense.scope, \"version\": P.attr.grants.maintenance_expense.version, \"field_permissions\": P.attr.grants.maintenance_expense.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-update-status",
+        "actions": [
+          "update_status"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"update_status\" in P.attr.grants.maintenance_expense.actions && \"data_profit\" in P.attr.grants.maintenance_expense.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_expense.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_expense.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_expense\", \"scope\": P.attr.grants.maintenance_expense.scope, \"version\": P.attr.grants.maintenance_expense.version, \"field_permissions\": P.attr.grants.maintenance_expense.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

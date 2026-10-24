@@ -1,0 +1,209 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_analysis",
+    "rules": [
+      {
+        "name": "explicit-read-explorer",
+        "actions": [
+          "read_explorer"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_explorer\" in P.attr.grants.maintenance_analysis.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_analysis.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_analysis.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_analysis\", \"scope\": P.attr.grants.maintenance_analysis.scope, \"version\": P.attr.grants.maintenance_analysis.version, \"field_permissions\": P.attr.grants.maintenance_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-filter-options",
+        "actions": [
+          "read_filter_options"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_filter_options\" in P.attr.grants.maintenance_analysis.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_analysis.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_analysis.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_analysis\", \"scope\": P.attr.grants.maintenance_analysis.scope, \"version\": P.attr.grants.maintenance_analysis.version, \"field_permissions\": P.attr.grants.maintenance_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-pn-ranking",
+        "actions": [
+          "read_pn_ranking"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_pn_ranking\" in P.attr.grants.maintenance_analysis.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_analysis.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_analysis.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_analysis\", \"scope\": P.attr.grants.maintenance_analysis.scope, \"version\": P.attr.grants.maintenance_analysis.version, \"field_permissions\": P.attr.grants.maintenance_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-spend-trend",
+        "actions": [
+          "read_spend_trend"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_spend_trend\" in P.attr.grants.maintenance_analysis.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_analysis.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_analysis.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_analysis\", \"scope\": P.attr.grants.maintenance_analysis.scope, \"version\": P.attr.grants.maintenance_analysis.version, \"field_permissions\": P.attr.grants.maintenance_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-filters",
+        "actions": [
+          "show_filters"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_filters\" in P.attr.grants.maintenance_analysis.actions && \"read_filter_options\" in P.attr.grants.maintenance_analysis.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_analysis.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_analysis.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_analysis\", \"scope\": P.attr.grants.maintenance_analysis.scope, \"version\": P.attr.grants.maintenance_analysis.version, \"field_permissions\": P.attr.grants.maintenance_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-pn-compact",
+        "actions": [
+          "show_pn_compact"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_pn_compact\" in P.attr.grants.maintenance_analysis.actions && \"read_explorer\" in P.attr.grants.maintenance_analysis.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_analysis.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_analysis.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_analysis\", \"scope\": P.attr.grants.maintenance_analysis.scope, \"version\": P.attr.grants.maintenance_analysis.version, \"field_permissions\": P.attr.grants.maintenance_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-pn-detail",
+        "actions": [
+          "show_pn_detail"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_pn_detail\" in P.attr.grants.maintenance_analysis.actions && \"read_pn_ranking\" in P.attr.grants.maintenance_analysis.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_analysis.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_analysis.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_analysis\", \"scope\": P.attr.grants.maintenance_analysis.scope, \"version\": P.attr.grants.maintenance_analysis.version, \"field_permissions\": P.attr.grants.maintenance_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-project-focus",
+        "actions": [
+          "show_project_focus"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_project_focus\" in P.attr.grants.maintenance_analysis.actions && \"read_explorer\" in P.attr.grants.maintenance_analysis.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_analysis.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_analysis.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_analysis\", \"scope\": P.attr.grants.maintenance_analysis.scope, \"version\": P.attr.grants.maintenance_analysis.version, \"field_permissions\": P.attr.grants.maintenance_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-rankings",
+        "actions": [
+          "show_rankings"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_rankings\" in P.attr.grants.maintenance_analysis.actions && \"read_explorer\" in P.attr.grants.maintenance_analysis.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_analysis.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_analysis.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_analysis\", \"scope\": P.attr.grants.maintenance_analysis.scope, \"version\": P.attr.grants.maintenance_analysis.version, \"field_permissions\": P.attr.grants.maintenance_analysis.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-spend",
+        "actions": [
+          "show_spend"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_spend\" in P.attr.grants.maintenance_analysis.actions && \"read_spend_trend\" in P.attr.grants.maintenance_analysis.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_analysis.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_analysis.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_analysis\", \"scope\": P.attr.grants.maintenance_analysis.scope, \"version\": P.attr.grants.maintenance_analysis.version, \"field_permissions\": P.attr.grants.maintenance_analysis.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,389 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_issue",
+    "rules": [
+      {
+        "name": "explicit-confirm",
+        "actions": [
+          "confirm"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"confirm\" in P.attr.grants.maintenance_issue.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_issue.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-correct-header",
+        "actions": [
+          "correct_header"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"correct_header\" in P.attr.grants.maintenance_issue.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_issue.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-correct-line",
+        "actions": [
+          "correct_line"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"correct_line\" in P.attr.grants.maintenance_issue.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_issue.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-create",
+        "actions": [
+          "create"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"create\" in P.attr.grants.maintenance_issue.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_issue.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-create-manual",
+        "actions": [
+          "create_manual"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"create_manual\" in P.attr.grants.maintenance_issue.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_issue.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-preview",
+        "actions": [
+          "preview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"preview\" in P.attr.grants.maintenance_issue.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_issue.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-preview-manual",
+        "actions": [
+          "preview_manual"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"preview_manual\" in P.attr.grants.maintenance_issue.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_issue.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-candidates",
+        "actions": [
+          "read_candidates"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_candidates\" in P.attr.grants.maintenance_issue.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-demand-candidates",
+        "actions": [
+          "read_demand_candidates"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_demand_candidates\" in P.attr.grants.maintenance_issue.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-search",
+        "actions": [
+          "read_search"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_search\" in P.attr.grants.maintenance_issue.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_issue.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-workspace",
+        "actions": [
+          "read_workspace"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_workspace\" in P.attr.grants.maintenance_issue.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-correction",
+        "actions": [
+          "show_correction"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_correction\" in P.attr.grants.maintenance_issue.actions && (\"correct_header\" in P.attr.grants.maintenance_issue.actions || \"correct_line\" in P.attr.grants.maintenance_issue.actions) && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-facts",
+        "actions": [
+          "show_facts"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_facts\" in P.attr.grants.maintenance_issue.actions && \"read_search\" in P.attr.grants.maintenance_issue.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-manual",
+        "actions": [
+          "show_manual"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_manual\" in P.attr.grants.maintenance_issue.actions && \"read_demand_candidates\" in P.attr.grants.maintenance_issue.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-workflow",
+        "actions": [
+          "show_workflow"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_workflow\" in P.attr.grants.maintenance_issue.actions && \"read_candidates\" in P.attr.grants.maintenance_issue.actions && \"read_search\" in P.attr.grants.maintenance_issue.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-update",
+        "actions": [
+          "update"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"update\" in P.attr.grants.maintenance_issue.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_issue.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-update-manual",
+        "actions": [
+          "update_manual"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"update_manual\" in P.attr.grants.maintenance_issue.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_issue.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-update-status",
+        "actions": [
+          "update_status"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"update_status\" in P.attr.grants.maintenance_issue.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_issue.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-void",
+        "actions": [
+          "void"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"void\" in P.attr.grants.maintenance_issue.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_issue.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_issue.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_issue.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_issue\", \"scope\": P.attr.grants.maintenance_issue.scope, \"version\": P.attr.grants.maintenance_issue.version, \"field_permissions\": P.attr.grants.maintenance_issue.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

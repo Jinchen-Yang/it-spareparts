@@ -41,6 +41,9 @@ class MaintenanceMigrationRun(Base):
     manifest_hash: Mapped[str | None] = mapped_column(String(64))
     manifest_key_id: Mapped[str | None] = mapped_column(String(64))
     created_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('sys_user.id', ondelete='RESTRICT'))
+    reconciled_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('sys_user.id', ondelete='RESTRICT'))
+    approved_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('sys_user.id', ondelete='RESTRICT'))
     reconciled_by: Mapped[str | None] = mapped_column(String(64))
     reconciled_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     approved_by: Mapped[str | None] = mapped_column(String(64))
@@ -86,13 +89,24 @@ class MaintenanceMigrationRun(Base):
             name="ck_maintenance_migration_run_state_evidence",
         ),
         CheckConstraint(
-            "reconciled_by IS NULL OR reconciled_by <> created_by",
+            "(created_by_user_id IS NULL AND (reconciled_by IS NULL OR reconciled_by <> created_by)) OR "
+            "(created_by_user_id IS NOT NULL AND (reconciled_by_user_id IS NULL OR reconciled_by_user_id <> created_by_user_id))",
             name="ck_maintenance_migration_run_independent_reconciliation",
         ),
         CheckConstraint(
-            "approved_by IS NULL OR "
-            "(approved_by <> created_by AND approved_by <> reconciled_by)",
+            "(created_by_user_id IS NULL AND (approved_by IS NULL OR "
+            "(approved_by <> created_by AND approved_by <> reconciled_by))) OR "
+            "(created_by_user_id IS NOT NULL AND (approved_by_user_id IS NULL OR "
+            "(approved_by_user_id <> created_by_user_id AND approved_by_user_id <> reconciled_by_user_id)))",
             name="ck_maintenance_migration_run_independent_approval",
+        ),
+        CheckConstraint(
+            "(created_by_user_id IS NULL AND reconciled_by_user_id IS NULL AND approved_by_user_id IS NULL) OR "
+            "(created_by_user_id IS NOT NULL AND "
+            "((status = 'previewed' AND reconciled_by_user_id IS NULL AND approved_by_user_id IS NULL) OR "
+            "(status = 'reconciled' AND reconciled_by_user_id IS NOT NULL AND approved_by_user_id IS NULL) OR "
+            "(status = 'approved' AND reconciled_by_user_id IS NOT NULL AND approved_by_user_id IS NOT NULL)))",
+            name='ck_maintenance_migration_run_stable_actors',
         ),
         Index("ix_maintenance_migration_run_status_time", "status", "created_at"),
     )

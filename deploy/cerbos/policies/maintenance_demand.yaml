@@ -1,0 +1,349 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_demand",
+    "rules": [
+      {
+        "name": "explicit-clear-override",
+        "actions": [
+          "clear_override"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"clear_override\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-create-line",
+        "actions": [
+          "create_line"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"create_line\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-edit-line",
+        "actions": [
+          "edit_line"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"edit_line\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-delete-intent",
+        "actions": [
+          "read_delete_intent"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_delete_intent\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-manual-protection",
+        "actions": [
+          "read_manual_protection"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_manual_protection\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-restore",
+        "actions": [
+          "restore"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"restore\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-batch-edit",
+        "actions": [
+          "show_batch_edit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_batch_edit\" in P.attr.grants.maintenance_demand.actions && \"edit_line\" in P.attr.grants.maintenance_demand.actions && \"read\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-clear-override",
+        "actions": [
+          "show_clear_override"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_clear_override\" in P.attr.grants.maintenance_demand.actions && \"clear_override\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-create",
+        "actions": [
+          "show_create"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_create\" in P.attr.grants.maintenance_demand.actions && \"create_line\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-create-project",
+        "actions": [
+          "show_create_project"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_create_project\" in P.attr.grants.maintenance_demand.actions && \"create_line\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-lifecycle",
+        "actions": [
+          "show_lifecycle"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_lifecycle\" in P.attr.grants.maintenance_demand.actions && (\"restore\" in P.attr.grants.maintenance_demand.actions || \"void\" in P.attr.grants.maintenance_demand.actions) && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-lines",
+        "actions": [
+          "show_lines"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_lines\" in P.attr.grants.maintenance_demand.actions && \"read\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-list",
+        "actions": [
+          "show_list"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_list\" in P.attr.grants.maintenance_demand.actions && \"read\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-return-summary",
+        "actions": [
+          "show_return_summary"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_return_summary\" in P.attr.grants.maintenance_demand.actions && \"read\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-void",
+        "actions": [
+          "void"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"void\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-void-plan",
+        "actions": [
+          "void_plan"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"void_plan\" in P.attr.grants.maintenance_demand.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_demand.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_demand.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_demand.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_demand\", \"scope\": P.attr.grants.maintenance_demand.scope, \"version\": P.attr.grants.maintenance_demand.version, \"field_permissions\": P.attr.grants.maintenance_demand.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

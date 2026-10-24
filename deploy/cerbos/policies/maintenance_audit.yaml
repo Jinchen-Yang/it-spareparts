@@ -1,0 +1,29 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_audit",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.maintenance_audit.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_audit.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_audit\", \"scope\": P.attr.grants.maintenance_audit.scope, \"version\": P.attr.grants.maintenance_audit.version, \"field_permissions\": P.attr.grants.maintenance_audit.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

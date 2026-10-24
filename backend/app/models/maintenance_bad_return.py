@@ -256,6 +256,9 @@ class MaintenanceBadReturnCommand(Base):
     __tablename__ = "maintenance_bad_return_command"
 
     command_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("sys_user.id", ondelete="RESTRICT"), nullable=True
+    )
     idempotency_key: Mapped[str] = mapped_column(
         String(128), nullable=False, unique=True
     )

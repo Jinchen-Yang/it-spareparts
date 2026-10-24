@@ -1,0 +1,149 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_cost",
+    "rules": [
+      {
+        "name": "explicit-export-lines",
+        "actions": [
+          "export_lines"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"export_lines\" in P.attr.grants.maintenance_cost.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_cost.scope == \"all_sources\" && (true)) || (P.attr.grants.maintenance_cost.scope == \"own_source_sales\" && (R.attr.is_source_sales))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_cost\", \"scope\": P.attr.grants.maintenance_cost.scope, \"version\": P.attr.grants.maintenance_cost.version, \"field_permissions\": P.attr.grants.maintenance_cost.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-export-orders",
+        "actions": [
+          "export_orders"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"export_orders\" in P.attr.grants.maintenance_cost.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_cost.scope == \"all_sources\" && (true)) || (P.attr.grants.maintenance_cost.scope == \"own_source_sales\" && (R.attr.is_source_sales))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_cost\", \"scope\": P.attr.grants.maintenance_cost.scope, \"version\": P.attr.grants.maintenance_cost.version, \"field_permissions\": P.attr.grants.maintenance_cost.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-export-summary",
+        "actions": [
+          "export_summary"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"export_summary\" in P.attr.grants.maintenance_cost.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_cost.scope == \"all_sources\" && (true)) || (P.attr.grants.maintenance_cost.scope == \"own_source_sales\" && (R.attr.is_source_sales))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_cost\", \"scope\": P.attr.grants.maintenance_cost.scope, \"version\": P.attr.grants.maintenance_cost.version, \"field_permissions\": P.attr.grants.maintenance_cost.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-export-workbook",
+        "actions": [
+          "export_workbook"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"export_workbook\" in P.attr.grants.maintenance_cost.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_cost.field_permissions && \"data_profit\" in P.attr.grants.maintenance_cost.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_cost.scope == \"all_sources\" && (true)) || (P.attr.grants.maintenance_cost.scope == \"own_source_sales\" && (R.attr.is_source_sales))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_cost\", \"scope\": P.attr.grants.maintenance_cost.scope, \"version\": P.attr.grants.maintenance_cost.version, \"field_permissions\": P.attr.grants.maintenance_cost.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-lines",
+        "actions": [
+          "read_lines"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_lines\" in P.attr.grants.maintenance_cost.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_cost.scope == \"all_sources\" && (true)) || (P.attr.grants.maintenance_cost.scope == \"own_source_sales\" && (R.attr.is_source_sales))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_cost\", \"scope\": P.attr.grants.maintenance_cost.scope, \"version\": P.attr.grants.maintenance_cost.version, \"field_permissions\": P.attr.grants.maintenance_cost.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-projects",
+        "actions": [
+          "read_projects"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_projects\" in P.attr.grants.maintenance_cost.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_cost.scope == \"all_sources\" && (true)) || (P.attr.grants.maintenance_cost.scope == \"own_source_sales\" && (R.attr.is_source_sales))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_cost\", \"scope\": P.attr.grants.maintenance_cost.scope, \"version\": P.attr.grants.maintenance_cost.version, \"field_permissions\": P.attr.grants.maintenance_cost.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-recompute",
+        "actions": [
+          "recompute"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"recompute\" in P.attr.grants.maintenance_cost.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_cost.scope == \"all_sources\" && (true)) || (P.attr.grants.maintenance_cost.scope == \"own_source_sales\" && (R.attr.is_source_sales))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_cost\", \"scope\": P.attr.grants.maintenance_cost.scope, \"version\": P.attr.grants.maintenance_cost.version, \"field_permissions\": P.attr.grants.maintenance_cost.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

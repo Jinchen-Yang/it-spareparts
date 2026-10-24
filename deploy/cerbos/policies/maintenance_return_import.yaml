@@ -1,0 +1,169 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_return_import",
+    "rules": [
+      {
+        "name": "explicit-apply",
+        "actions": [
+          "apply"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"apply\" in P.attr.grants.maintenance_return_import.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_import.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_import.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_return_import.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_import\", \"scope\": P.attr.grants.maintenance_return_import.scope, \"version\": P.attr.grants.maintenance_return_import.version, \"field_permissions\": P.attr.grants.maintenance_return_import.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-cancel",
+        "actions": [
+          "cancel"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"cancel\" in P.attr.grants.maintenance_return_import.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_import.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_import.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_return_import.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_import\", \"scope\": P.attr.grants.maintenance_return_import.scope, \"version\": P.attr.grants.maintenance_return_import.version, \"field_permissions\": P.attr.grants.maintenance_return_import.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-job-read",
+        "actions": [
+          "job_read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"job_read\" in P.attr.grants.maintenance_return_import.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_import.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_import.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_return_import.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_import\", \"scope\": P.attr.grants.maintenance_return_import.scope, \"version\": P.attr.grants.maintenance_return_import.version, \"field_permissions\": P.attr.grants.maintenance_return_import.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-raw-download",
+        "actions": [
+          "raw_download"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"raw_download\" in P.attr.grants.maintenance_return_import.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_import.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_import.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_return_import.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_import\", \"scope\": P.attr.grants.maintenance_return_import.scope, \"version\": P.attr.grants.maintenance_return_import.version, \"field_permissions\": P.attr.grants.maintenance_return_import.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-retry",
+        "actions": [
+          "retry"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"retry\" in P.attr.grants.maintenance_return_import.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_import.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_import.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_return_import.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_import\", \"scope\": P.attr.grants.maintenance_return_import.scope, \"version\": P.attr.grants.maintenance_return_import.version, \"field_permissions\": P.attr.grants.maintenance_return_import.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-import",
+        "actions": [
+          "show_import"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_import\" in P.attr.grants.maintenance_return_import.actions && (\"job_read\" in P.attr.grants.maintenance_return_import.actions || \"submit\" in P.attr.grants.maintenance_return_import.actions) && (R.attr.module_probe || ((P.attr.grants.maintenance_return_import.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_import.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_return_import.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_import\", \"scope\": P.attr.grants.maintenance_return_import.scope, \"version\": P.attr.grants.maintenance_return_import.version, \"field_permissions\": P.attr.grants.maintenance_return_import.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-raw-download",
+        "actions": [
+          "show_raw_download"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_raw_download\" in P.attr.grants.maintenance_return_import.actions && \"raw_download\" in P.attr.grants.maintenance_return_import.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_import.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_import.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_return_import.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_import\", \"scope\": P.attr.grants.maintenance_return_import.scope, \"version\": P.attr.grants.maintenance_return_import.version, \"field_permissions\": P.attr.grants.maintenance_return_import.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-submit",
+        "actions": [
+          "submit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"submit\" in P.attr.grants.maintenance_return_import.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_import.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_import.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_return_import.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_import\", \"scope\": P.attr.grants.maintenance_return_import.scope, \"version\": P.attr.grants.maintenance_return_import.version, \"field_permissions\": P.attr.grants.maintenance_return_import.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

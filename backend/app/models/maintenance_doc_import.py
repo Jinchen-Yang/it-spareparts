@@ -42,6 +42,7 @@ class MaintenanceDocImportBatch(Base):
     file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey('sys_user.id', ondelete='RESTRICT'))
     uploaded_by: Mapped[str] = mapped_column(String(64), nullable=False)
     uploaded_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
@@ -78,11 +79,10 @@ class MaintenanceDocImportBatch(Base):
             "(status = 'applied') = (applied_at IS NOT NULL AND applied_by IS NOT NULL)",
             name="ck_maintenance_doc_import_applied",
         ),
-        UniqueConstraint(
-            "uploaded_by",
-            "idempotency_key",
-            name="uq_maintenance_doc_import_idempotency",
-        ),
+        Index("ux_maintenance_doc_import_owner_request", "owner_user_id", "idempotency_key",
+              unique=True, postgresql_where=text("owner_user_id IS NOT NULL")),
+        Index("ux_maintenance_doc_import_legacy_request", "uploaded_by", "idempotency_key",
+              unique=True, postgresql_where=text("owner_user_id IS NULL")),
         Index("ix_maintenance_doc_import_hash", "file_hash"),
         Index("ix_maintenance_doc_import_type_uploaded", "doc_type", "uploaded_at"),
     )
@@ -174,6 +174,9 @@ class MaintenanceRkdReturnLine(Base):
     __tablename__ = "maintenance_rkd_return_line"
 
     rkd_line_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("sys_user.id", ondelete="RESTRICT"), nullable=True
+    )
     batch_id: Mapped[str | None] = mapped_column(
         ForeignKey("maintenance_doc_import_batch.batch_id")
     )

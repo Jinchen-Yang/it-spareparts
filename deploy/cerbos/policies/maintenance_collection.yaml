@@ -1,0 +1,169 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_collection",
+    "rules": [
+      {
+        "name": "explicit-create",
+        "actions": [
+          "create"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"create\" in P.attr.grants.maintenance_collection.actions && \"data_profit\" in P.attr.grants.maintenance_collection.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_collection.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_collection.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_collection\", \"scope\": P.attr.grants.maintenance_collection.scope, \"version\": P.attr.grants.maintenance_collection.version, \"field_permissions\": P.attr.grants.maintenance_collection.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-plan",
+        "actions": [
+          "read_plan"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_plan\" in P.attr.grants.maintenance_collection.actions && \"data_profit\" in P.attr.grants.maintenance_collection.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_collection.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_collection.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_collection\", \"scope\": P.attr.grants.maintenance_collection.scope, \"version\": P.attr.grants.maintenance_collection.version, \"field_permissions\": P.attr.grants.maintenance_collection.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-snapshots",
+        "actions": [
+          "read_snapshots"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_snapshots\" in P.attr.grants.maintenance_collection.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_collection.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_collection.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_collection\", \"scope\": P.attr.grants.maintenance_collection.scope, \"version\": P.attr.grants.maintenance_collection.version, \"field_permissions\": P.attr.grants.maintenance_collection.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-restore-plan",
+        "actions": [
+          "restore_plan"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"restore_plan\" in P.attr.grants.maintenance_collection.actions && \"data_profit\" in P.attr.grants.maintenance_collection.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_collection.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_collection.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_collection\", \"scope\": P.attr.grants.maintenance_collection.scope, \"version\": P.attr.grants.maintenance_collection.version, \"field_permissions\": P.attr.grants.maintenance_collection.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-actuals",
+        "actions": [
+          "show_actuals"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_actuals\" in P.attr.grants.maintenance_collection.actions && \"read_snapshots\" in P.attr.grants.maintenance_collection.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_collection.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_collection.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_collection\", \"scope\": P.attr.grants.maintenance_collection.scope, \"version\": P.attr.grants.maintenance_collection.version, \"field_permissions\": P.attr.grants.maintenance_collection.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-manage-actuals",
+        "actions": [
+          "show_manage_actuals"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_manage_actuals\" in P.attr.grants.maintenance_collection.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_collection.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_collection.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_collection\", \"scope\": P.attr.grants.maintenance_collection.scope, \"version\": P.attr.grants.maintenance_collection.version, \"field_permissions\": P.attr.grants.maintenance_collection.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-plans",
+        "actions": [
+          "show_plans"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_plans\" in P.attr.grants.maintenance_collection.actions && \"read_plan\" in P.attr.grants.maintenance_collection.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_collection.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_collection.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_collection\", \"scope\": P.attr.grants.maintenance_collection.scope, \"version\": P.attr.grants.maintenance_collection.version, \"field_permissions\": P.attr.grants.maintenance_collection.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-update",
+        "actions": [
+          "update"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"update\" in P.attr.grants.maintenance_collection.actions && \"data_profit\" in P.attr.grants.maintenance_collection.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_collection.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_collection.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_collection\", \"scope\": P.attr.grants.maintenance_collection.scope, \"version\": P.attr.grants.maintenance_collection.version, \"field_permissions\": P.attr.grants.maintenance_collection.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

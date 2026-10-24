@@ -13,6 +13,7 @@ from sqlalchemy import (
     CheckConstraint,
     ForeignKey,
     Index,
+    Integer,
     String,
     func,
 )
@@ -43,6 +44,9 @@ class MaintenanceAiMappingProposal(Base):
         String(16), nullable=False, default="pending", server_default="'pending'"
     )
     created_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("sys_user.id", ondelete="RESTRICT"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
     )

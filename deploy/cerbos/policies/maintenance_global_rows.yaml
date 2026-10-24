@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_global_rows",
+    "rules": [
+      {
+        "name": "explicit-export",
+        "actions": [
+          "export"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"export\" in P.attr.grants.maintenance_global_rows.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_global_rows.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_global_rows.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_global_rows.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_global_rows\", \"scope\": P.attr.grants.maintenance_global_rows.scope, \"version\": P.attr.grants.maintenance_global_rows.version, \"field_permissions\": P.attr.grants.maintenance_global_rows.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.maintenance_global_rows.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_global_rows.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_global_rows.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_global_rows.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_global_rows\", \"scope\": P.attr.grants.maintenance_global_rows.scope, \"version\": P.attr.grants.maintenance_global_rows.version, \"field_permissions\": P.attr.grants.maintenance_global_rows.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-fields",
+        "actions": [
+          "read_fields"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_fields\" in P.attr.grants.maintenance_global_rows.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_global_rows.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_global_rows.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_global_rows.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_global_rows\", \"scope\": P.attr.grants.maintenance_global_rows.scope, \"version\": P.attr.grants.maintenance_global_rows.version, \"field_permissions\": P.attr.grants.maintenance_global_rows.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-global-rows",
+        "actions": [
+          "show_global_rows"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_global_rows\" in P.attr.grants.maintenance_global_rows.actions && \"read\" in P.attr.grants.maintenance_global_rows.actions && \"read_fields\" in P.attr.grants.maintenance_global_rows.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_global_rows.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_global_rows.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_global_rows.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_global_rows\", \"scope\": P.attr.grants.maintenance_global_rows.scope, \"version\": P.attr.grants.maintenance_global_rows.version, \"field_permissions\": P.attr.grants.maintenance_global_rows.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

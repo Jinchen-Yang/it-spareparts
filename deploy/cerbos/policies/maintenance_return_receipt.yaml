@@ -1,0 +1,249 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_return_receipt",
+    "rules": [
+      {
+        "name": "explicit-create",
+        "actions": [
+          "create"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"create\" in P.attr.grants.maintenance_return_receipt.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_receipt.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_receipt.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_receipt\", \"scope\": P.attr.grants.maintenance_return_receipt.scope, \"version\": P.attr.grants.maintenance_return_receipt.version, \"field_permissions\": P.attr.grants.maintenance_return_receipt.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-audit",
+        "actions": [
+          "read_audit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_audit\" in P.attr.grants.maintenance_return_receipt.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_receipt.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_receipt.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_receipt\", \"scope\": P.attr.grants.maintenance_return_receipt.scope, \"version\": P.attr.grants.maintenance_return_receipt.version, \"field_permissions\": P.attr.grants.maintenance_return_receipt.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-demands",
+        "actions": [
+          "read_demands"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_demands\" in P.attr.grants.maintenance_return_receipt.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_receipt.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_receipt.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_receipt\", \"scope\": P.attr.grants.maintenance_return_receipt.scope, \"version\": P.attr.grants.maintenance_return_receipt.version, \"field_permissions\": P.attr.grants.maintenance_return_receipt.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-receipts",
+        "actions": [
+          "read_receipts"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_receipts\" in P.attr.grants.maintenance_return_receipt.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_receipt.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_receipt.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_receipt\", \"scope\": P.attr.grants.maintenance_return_receipt.scope, \"version\": P.attr.grants.maintenance_return_receipt.version, \"field_permissions\": P.attr.grants.maintenance_return_receipt.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-summary",
+        "actions": [
+          "read_summary"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_summary\" in P.attr.grants.maintenance_return_receipt.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_receipt.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_receipt.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_receipt\", \"scope\": P.attr.grants.maintenance_return_receipt.scope, \"version\": P.attr.grants.maintenance_return_receipt.version, \"field_permissions\": P.attr.grants.maintenance_return_receipt.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-audit-history",
+        "actions": [
+          "show_audit_history"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_audit_history\" in P.attr.grants.maintenance_return_receipt.actions && \"read_audit\" in P.attr.grants.maintenance_return_receipt.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_receipt.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_receipt.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_receipt\", \"scope\": P.attr.grants.maintenance_return_receipt.scope, \"version\": P.attr.grants.maintenance_return_receipt.version, \"field_permissions\": P.attr.grants.maintenance_return_receipt.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-batch-create",
+        "actions": [
+          "show_batch_create"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_batch_create\" in P.attr.grants.maintenance_return_receipt.actions && \"create\" in P.attr.grants.maintenance_return_receipt.actions && \"read_demands\" in P.attr.grants.maintenance_return_receipt.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_receipt.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_receipt.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_receipt\", \"scope\": P.attr.grants.maintenance_return_receipt.scope, \"version\": P.attr.grants.maintenance_return_receipt.version, \"field_permissions\": P.attr.grants.maintenance_return_receipt.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-batch-maintain",
+        "actions": [
+          "show_batch_maintain"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_batch_maintain\" in P.attr.grants.maintenance_return_receipt.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_receipt.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_receipt.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_receipt\", \"scope\": P.attr.grants.maintenance_return_receipt.scope, \"version\": P.attr.grants.maintenance_return_receipt.version, \"field_permissions\": P.attr.grants.maintenance_return_receipt.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-ledger",
+        "actions": [
+          "show_ledger"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_ledger\" in P.attr.grants.maintenance_return_receipt.actions && \"read_receipts\" in P.attr.grants.maintenance_return_receipt.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_receipt.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_receipt.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_receipt\", \"scope\": P.attr.grants.maintenance_return_receipt.scope, \"version\": P.attr.grants.maintenance_return_receipt.version, \"field_permissions\": P.attr.grants.maintenance_return_receipt.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-summary",
+        "actions": [
+          "show_summary"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_summary\" in P.attr.grants.maintenance_return_receipt.actions && \"read_summary\" in P.attr.grants.maintenance_return_receipt.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_receipt.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_receipt.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_receipt\", \"scope\": P.attr.grants.maintenance_return_receipt.scope, \"version\": P.attr.grants.maintenance_return_receipt.version, \"field_permissions\": P.attr.grants.maintenance_return_receipt.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-update",
+        "actions": [
+          "update"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"update\" in P.attr.grants.maintenance_return_receipt.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_receipt.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_receipt.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_receipt\", \"scope\": P.attr.grants.maintenance_return_receipt.scope, \"version\": P.attr.grants.maintenance_return_receipt.version, \"field_permissions\": P.attr.grants.maintenance_return_receipt.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-void",
+        "actions": [
+          "void"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"void\" in P.attr.grants.maintenance_return_receipt.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_receipt.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_receipt.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_receipt\", \"scope\": P.attr.grants.maintenance_return_receipt.scope, \"version\": P.attr.grants.maintenance_return_receipt.version, \"field_permissions\": P.attr.grants.maintenance_return_receipt.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

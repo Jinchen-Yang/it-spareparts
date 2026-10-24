@@ -248,6 +248,7 @@ class MaintenanceDemandDeleteIntent(Base):
     """一次 WBDD 整单逻辑删除的不可变复核快照与状态机。"""
 
     __tablename__ = "maintenance_demand_delete_intent"
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("sys_user.id", ondelete="RESTRICT"), nullable=True)
 
     intent_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     idempotency_key: Mapped[str] = mapped_column(String(128), unique=True)
@@ -621,6 +622,7 @@ class MaintenanceRoundtripOperation(Base):
     __tablename__ = "maintenance_roundtrip_operation"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("sys_user.id", ondelete="RESTRICT"), nullable=True)
     export_id: Mapped[str] = mapped_column(String(36), nullable=False)
     sheet_code: Mapped[str] = mapped_column(String(32), nullable=False)
     client_row_id: Mapped[str] = mapped_column(String(36), nullable=False)
