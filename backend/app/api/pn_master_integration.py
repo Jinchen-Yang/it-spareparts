@@ -18,6 +18,7 @@ import json
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Annotated
 from urllib.parse import unquote
 
@@ -504,14 +505,28 @@ def list_changes(
     _actor: Actor,
     db: DbSession,
     after: Annotated[str | None, Query(max_length=512)] = None,
+    since: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> dict:
+    if after is not None and since is not None:
+        raise HTTPException(400, "after 与 since 互斥，只能传一个")
     statement = (
         select(DimPart)
         .order_by(DimPart.updated_at.asc(), DimPart.id.asc())
         .limit(limit + 1)
     )
-    if after is not None:
+    if since is not None:
+        try:
+            since_at = datetime.fromisoformat(since)
+        except ValueError:
+            raise HTTPException(
+                400, "since 必须是带时区的 ISO 8601 时间"
+            ) from None
+        if since_at.tzinfo is None or since_at.utcoffset() is None:
+            raise HTTPException(400, "since 必须带时区")
+        # 含边界：updated_at >= since；后续页由 next_cursor 转 after 续读。
+        statement = statement.where(DimPart.updated_at >= since_at)
+    elif after is not None:
         cursor_at, cursor_id = _decode_list_cursor(after)
         statement = statement.where(
             tuple_(DimPart.updated_at, DimPart.id) > tuple_(cursor_at, cursor_id)

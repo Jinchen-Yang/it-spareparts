@@ -312,6 +312,65 @@ def test_changes_keyset_pages_include_merged_tombstone(client, db):
     assert tomb["merged_into_id"] == parts[0].id
 
 
+def test_changes_since_includes_boundary_and_continues_with_after(client, db):
+    since = datetime(2026, 10, 24, 8, 0, 0, tzinfo=timezone.utc)
+    before = DimPart(pn_std="SINCE-BEFORE", updated_at=since - timedelta(seconds=1))
+    boundary = DimPart(pn_std="SINCE-BOUNDARY", updated_at=since)
+    following = [
+        DimPart(pn_std=f"SINCE-{index}", updated_at=since + timedelta(seconds=index))
+        for index in range(1, 5)
+    ]
+    db.add(before)
+    db.add(boundary)
+    db.add_all(following)
+    db.commit()
+
+    seen: list[dict] = []
+    cursor = None
+    pages = 0
+    while True:
+        params = {"since": since.isoformat(), "limit": 2}
+        if cursor is not None:
+            params = {"after": cursor, "limit": 2}
+        response = client.get(f"{BASE}/changes", params=params)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        pages += 1
+        assert pages < 20, "分页未收敛"
+        assert body["next_cursor"]
+        seen.extend(body["items"])
+        if not body["has_more"]:
+            break
+        cursor = body["next_cursor"]
+
+    ids = [item["part_id"] for item in seen]
+    assert ids == [boundary.id] + [part.id for part in following]
+    assert boundary.id in ids, "updated_at 恰好等于 since 的行必须包含"
+    assert before.id not in ids
+    assert len(ids) == len(set(ids)) == 5
+
+
+def test_changes_rejects_after_and_since_together(client, db):
+    response = client.get(
+        f"{BASE}/changes",
+        params={"after": "whatever", "since": "2026-10-24T08:00:00+00:00"},
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not-a-time",
+        "2026-10-24T08:00:00",          # 无时区
+        "2026-10-24",                   # 仅日期
+    ],
+)
+def test_changes_rejects_invalid_or_naive_since(client, db, value):
+    response = client.get(f"{BASE}/changes", params={"since": value})
+    assert response.status_code == 400
+
+
 # ---------------------------------------------------------------- 写接口
 
 
