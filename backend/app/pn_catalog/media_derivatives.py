@@ -45,6 +45,10 @@ def derivative_data(item):
 def assert_visible(db, entry):
     if entry.status != "gallery":
         raise CatalogError("media.deleted", "图片当前不可访问")
+    _assert_not_suppressed(db, entry)
+
+
+def _assert_not_suppressed(db, entry):
     if entry.origin_part_id:
         member = db.get(GalleryMember, entry.origin_part_id)
         if member is None:
@@ -59,6 +63,20 @@ def assert_visible(db, entry):
         )
         if hidden:
             raise CatalogError("media.deleted", "图片当前已隐藏")
+
+
+def assert_previewable(db, entry, *, context, authorize):
+    """Only the two read ports may preview explicitly authorized candidates.
+
+    The caller holds the identity and entry read locks. Derivation, job access
+    and worker publication keep the stricter gallery-only assert_visible check.
+    """
+    access(db, context, authorize, "gallery.read", entry.origin_part_id)
+    if entry.status == "candidate":
+        access(db, context, authorize, "gallery.candidate.read", entry.origin_part_id)
+        _assert_not_suppressed(db, entry)
+    else:
+        assert_visible(db, entry)
 
 
 def create_derivative(db, asset_id, command, *, context, authorize):
@@ -182,7 +200,7 @@ def entry_links(db, entry_id, *, context, authorize, signer):
     access(db, context, authorize, "gallery.read", entry.origin_part_id)
     read_identity(db, [entry.origin_part_id])
     entry = load(db, GalleryEntry, entry_id, lock=True, shared=True)
-    assert_visible(db, entry)
+    assert_previewable(db, entry, context=context, authorize=authorize)
     asset = load(db, Asset, entry.asset_id)
     derivatives = list(
         db.scalars(
@@ -208,12 +226,11 @@ def entry_links(db, entry_id, *, context, authorize, signer):
 
 def get_entry(db, entry_id, *, context, authorize):
     """Read one visible immutable-origin entry, including its current independent revision."""
-    from .media_gallery import entry_data
     from .media_common import read_response
+    from .media_gallery import entry_data
     entry = load(db, GalleryEntry, entry_id, code="media.entry_not_found")
     access(db, context, authorize, "gallery.read", entry.origin_part_id)
     read_identity(db, [entry.origin_part_id])
     entry = load(db, GalleryEntry, entry_id, lock=True, shared=True)
-    access(db, context, authorize, "gallery.read", entry.origin_part_id)
-    assert_visible(db, entry)
+    assert_previewable(db, entry, context=context, authorize=authorize)
     return read_response(context, entry_data(db, entry))

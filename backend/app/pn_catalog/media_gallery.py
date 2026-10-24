@@ -77,6 +77,7 @@ def entry_selection(group, *, status="gallery", purpose=None, origins=None):
         query = query.outerjoin(
             ordering, cast(GalleryEntry.id, String) == ordering.c.entry_id
         )
+    if status in ("gallery", "candidate"):
         query = query.where(
             ~select(GallerySuppression.id)
             .where(
@@ -86,6 +87,7 @@ def entry_selection(group, *, status="gallery", purpose=None, origins=None):
             )
             .exists()
         )
+    if status == "gallery":
         query = query.add_columns(
             func.row_number()
             .over(
