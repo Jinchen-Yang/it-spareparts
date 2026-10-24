@@ -1,10 +1,6 @@
 """Stable maintenance-project operating facts through their public API."""
 
 import uuid
-from concurrent.futures import (
-    ThreadPoolExecutor,
-    TimeoutError as FutureTimeoutError,
-)
 import hashlib
 import json
 from datetime import UTC, date, datetime
@@ -13,7 +9,7 @@ from decimal import Decimal
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
 
 from app import auth
 from app.auth import hash_password
@@ -4973,25 +4969,33 @@ def test_workbook_read_transaction_does_not_block_followup_workspace_read(db):
     )
     assert snapshot is not None
 
-    timed_out = False
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(
-            client.get,
-            path,
-            params={"as_of": "2026-08-10"},
-        )
-        try:
-            response = future.result(timeout=1)
-        except FutureTimeoutError:
-            timed_out = True
-            # Always release the old implementation's lock so a red test fails
-            # promptly instead of hanging the whole suite.
-            db.rollback()
-            response = future.result(timeout=2)
-        finally:
-            db.rollback()
+    snapshot_transaction = db.get_transaction()
+    snapshot_pid = db.scalar(text("SELECT pg_backend_pid()"))
+    engine = db.get_bind()
 
-    assert not timed_out, "只读工作簿事务持有了项目行锁，阻塞了后续只读请求"
+    def bound_lock_wait(connection):
+        # Bound actual PostgreSQL lock waits, not total HTTP scheduling/query time.
+        connection.exec_driver_sql("SET LOCAL lock_timeout = '500ms'")
+
+    event.listen(engine, "begin", bound_lock_wait)
+    try:
+        with engine.connect() as probe:
+            assert probe.scalar(text("SELECT pg_backend_pid()")) != snapshot_pid
+            # A competing UPDATE must succeed while the snapshot remains open.
+            # NOWAIT catches the historical retained row lock without a stopwatch.
+            assert probe.execute(
+                select(MaintenanceProject.project_id)
+                .where(MaintenanceProject.project_id == project.project_id)
+                .with_for_update(nowait=True)
+            ).scalar_one() == project.project_id
+            probe.rollback()
+        response = client.get(path, params={"as_of": "2026-08-10"})
+        assert db.get_transaction() is snapshot_transaction
+        assert snapshot_transaction is not None and snapshot_transaction.is_active
+    finally:
+        event.remove(engine, "begin", bound_lock_wait)
+        db.rollback()
+
     assert response.status_code == 200, response.text
 
 
