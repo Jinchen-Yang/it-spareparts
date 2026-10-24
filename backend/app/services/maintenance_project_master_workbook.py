@@ -1371,18 +1371,15 @@ def apply(
             legacy_context=LegacySiteIssueEditContext("v1", snapshots),
         )
     if plan.inner is not None:
-        inner_result = ec.apply(
+        inner_result = ec.apply_in_transaction(
             db,
             plan.inner,
             operated_by=operated_by,
             import_batch_id=import_batch_id,
-            commit=False,
             workbook_state=workbook_state,
-            bump_revision=False,
-            track_change=True,
         )
         operating_fact_changed = (
-            bool(inner_result.pop("_operating_fact_changed", False))
+            inner_result.operating_fact_changed
             or operating_fact_changed
         )
     if workbook_state is not None and operating_fact_changed:
@@ -7308,18 +7305,15 @@ def _apply_project_master_v2(
         _consumption_cost.resolve_lines(db, lines=list(pricing_entries.values()))
     receipt_voided_rows: list[dict] = []
     if plan.expense_updates or receipt_ops:
-        inner_result = ec.apply(
+        inner_result = ec.apply_in_transaction(
             db,
             ec.WorkbookPlan(plan.project_id, plan.expense_updates, receipt_ops),
             operated_by=operated_by,
             import_batch_id=import_batch_id,
-            commit=False,
             workbook_state=workbook_state,
-            bump_revision=False,
-            track_change=True,
         )
         operating_fact_changed = (
-            bool(inner_result.pop("_operating_fact_changed", False))
+            inner_result.operating_fact_changed
             or operating_fact_changed
         )
         # D-02 作废优先（05）：共享写路径跳过的已作废月份并入本表的行级回执，
@@ -7327,7 +7321,7 @@ def _apply_project_master_v2(
         # 落在作废月上的新行当 UPDATE 送来，不带回执用户以为改成了。
         receipt_voided_rows = [
             {**item, "sheet": V2_SHEET_RECEIPTS}
-            for item in inner_result.get("voided_rows", ())
+            for item in inner_result.receipt.get("voided_rows", ())
         ]
     # 04 作废（显式 VOID + 缺行=作废）：软删标记，读侧从此不导出（#264 契约）。
     for raw_line_id in plan.expense_voids:

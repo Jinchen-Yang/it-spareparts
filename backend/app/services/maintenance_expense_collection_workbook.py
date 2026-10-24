@@ -1128,11 +1128,79 @@ def _voided_row_receipt(
     }
 
 
+@dataclass(frozen=True)
+class WorkbookApplyResult:
+    """Facts applied in the caller's transaction; the receipt stays public-only."""
+
+    receipt: dict
+    operating_fact_changed: bool
+
+
+def apply_in_transaction(
+    db: Session, plan: WorkbookPlan, *, operated_by: str,
+    import_batch_id: str, workbook_state: MaintenanceProjectWorkbookState,
+) -> WorkbookApplyResult:
+    """Join a master-workbook transaction with its already locked project state.
+
+    The caller owns revision, receipt persistence, commit and failure rollback.
+    This function never commits, rolls back or introduces a savepoint.
+    """
+    if workbook_state is None:
+        raise WorkbookError("invalid_plan", "嵌套工作簿缺少已锁定的项目并发状态")
+    result, _state = _apply_facts(
+        db, plan, operated_by=operated_by, import_batch_id=import_batch_id,
+        workbook_state=workbook_state,
+    )
+    return result
+
+
+def apply_and_commit(
+    db: Session, plan: WorkbookPlan, *, operated_by: str, import_batch_id: str,
+) -> dict:
+    """Apply a standalone upload, bump once on change and commit.
+
+    As before, the HTTP/session owner rolls back if applying or committing fails.
+    """
+    from app.services import maintenance_project_operations as operations
+
+    result, state = _apply_facts(
+        db, plan, operated_by=operated_by, import_batch_id=import_batch_id,
+    )
+    if result.operating_fact_changed:
+        operations.bump_locked_workbook_revision(db, state=state)
+    db.commit()
+    return result.receipt
+
+
 def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
           import_batch_id: str, commit: bool = True,
           workbook_state: MaintenanceProjectWorkbookState | None = None,
           bump_revision: bool = True,
           track_change: bool = False) -> dict:
+    """Compatibility adapter. New callers choose an explicit transaction API.
+
+    Preserve every legacy flag combination without duplicating fact application.
+    """
+    from app.services import maintenance_project_operations as operations
+
+    result, state = _apply_facts(
+        db, plan, operated_by=operated_by, import_batch_id=import_batch_id,
+        workbook_state=workbook_state,
+    )
+    if bump_revision and result.operating_fact_changed:
+        operations.bump_locked_workbook_revision(db, state=state)
+    if commit:
+        db.commit()
+    if track_change:
+        return {**result.receipt, "_operating_fact_changed": result.operating_fact_changed}
+    return result.receipt
+
+
+def _apply_facts(
+    db: Session, plan: WorkbookPlan, *, operated_by: str,
+    import_batch_id: str,
+    workbook_state: MaintenanceProjectWorkbookState | None = None,
+) -> tuple[WorkbookApplyResult, MaintenanceProjectWorkbookState]:
     """整份事务应用。上传即覆盖——同合同同月份的 CREATE 覆盖既有累计额。
 
     例外只有 D-02 唯一保留的拒绝：**作废优先**。命中已作废月份的 CREATE/UPDATE
@@ -1376,12 +1444,6 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
     # 单调性只看整份计划写完后的终态（新增月份一并纳入）；逐行守卫会误拒合法的
     # 整体抬高、又放过新增月份的倒退。违规即整本不落。
     _validate_collection_end_state(db, touched)
-    if bump_revision and operating_fact_changed:
-        operations.bump_locked_workbook_revision(db, state=workbook_state)
-    if commit:
-        db.commit()
-    result = {"applied_by": operated_by, "import_batch_id": import_batch_id,
-              **plan.summary, "voided_rows": voided_rows}
-    if track_change:
-        result["_operating_fact_changed"] = operating_fact_changed
-    return result
+    receipt = {"applied_by": operated_by, "import_batch_id": import_batch_id,
+               **plan.summary, "voided_rows": voided_rows}
+    return WorkbookApplyResult(receipt, operating_fact_changed), workbook_state

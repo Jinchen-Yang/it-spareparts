@@ -172,7 +172,7 @@ async def apply_workbook(
     plan = _plan(db, project_id, data)
     batch_id = str(uuid.uuid4())
     try:
-        result = wbk.apply(db, plan, operated_by=_operator(ident),
+        result = wbk.apply_and_commit(db, plan, operated_by=_operator(ident),
                            import_batch_id=batch_id)
     except wbk.WorkbookError as exc:
         db.rollback()
