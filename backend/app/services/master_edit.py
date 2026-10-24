@@ -36,11 +36,12 @@ class MasterEditConflict(MasterEditError):
         self.detail = {"code": code, "message": message, "conflicts": conflicts}
 
 
-def _edit_state(db: Session, part: DimPart) -> dict:
-    specs = db.execute(select(
-        ProductSpec.spec_key, ProductSpec.spec_value, ProductSpec.spec_unit,
-        ProductSpec.numeric_value, ProductSpec.source
-    ).where(ProductSpec.part_id == part.id).order_by(ProductSpec.spec_key)).all()
+def _edit_state(db: Session, part: DimPart, specs=None) -> dict:
+    if specs is None:
+        specs = db.execute(select(
+            ProductSpec.spec_key, ProductSpec.spec_value, ProductSpec.spec_unit,
+            ProductSpec.numeric_value, ProductSpec.source
+        ).where(ProductSpec.part_id == part.id).order_by(ProductSpec.spec_key)).all()
     return {
         "version_mode": "field_snapshot",  # M2 前的现值基线，不能作为单调版本或发布水位。
         # 对外集成用的不透明乐观并发版本（updated_at ISO）；与 version_mode 无关。
@@ -62,6 +63,34 @@ def get_part_edit_state(db: Session, part_id: int) -> dict | None:
         reader.execute(text("SET TRANSACTION READ ONLY"))
         part = reader.scalar(select(DimPart).where(DimPart.id == part_id))
         return _edit_state(reader, part) if part is not None else None
+
+
+def get_parts_edit_states(db: Session, part_ids: list[int]) -> dict[int, dict]:
+    """批量只读快照：同一 REPEATABLE READ 事务内取多个 part 的 edit_state。
+
+    供 shop 首次全量同步的批量读取使用；不存在的 id 不产生条目，由调用方列入 missing。
+    """
+    ids = sorted({int(part_id) for part_id in part_ids})
+    if not ids:
+        return {}
+    with Session(bind=db.get_bind()) as reader:
+        reader.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        reader.execute(text("SET TRANSACTION READ ONLY"))
+        parts = reader.scalars(select(DimPart).where(DimPart.id.in_(ids))).all()
+        rows = reader.execute(
+            select(ProductSpec.part_id, ProductSpec.spec_key, ProductSpec.spec_value,
+                   ProductSpec.spec_unit, ProductSpec.numeric_value, ProductSpec.source)
+            .where(ProductSpec.part_id.in_(ids))
+            .order_by(ProductSpec.part_id, ProductSpec.spec_key)
+        ).all()
+        specs_by_part: dict[int, list[tuple]] = {}
+        for part_id, key, value, unit, number, source in rows:
+            specs_by_part.setdefault(part_id, []).append(
+                (key, value, unit, number, source))
+        return {
+            part.id: _edit_state(reader, part, specs_by_part.get(part.id, []))
+            for part in parts
+        }
 
 
 def _audit_state(db: Session, part: DimPart) -> dict:

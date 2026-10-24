@@ -153,6 +153,8 @@ class IntegrationRequestLog(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     request_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    # method + path + 规范化请求体 JSON 的 SHA-256；同一幂等键换了内容必须拒绝。
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     actor_system: Mapped[str] = mapped_column(String(32), nullable=False)
     actor_user: Mapped[str] = mapped_column(String(64), nullable=False)
     method: Mapped[str] = mapped_column(String(8), nullable=False)

@@ -3,8 +3,6 @@
 持有 page_governance 的实名用户可查看并处理治理队列；所有输出继续服从 data_* 字段
 权限，写操作按 token 中的具体用户名留审计。该页面权限本身标记为高风险，由管理员显式授予。
 """
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -22,7 +20,14 @@ from app.security import (
     is_field_hidden,
     require_page,
 )
-from app.services import governance, master_data, match_candidates, merge, part_rename
+from app.services import (
+    governance,
+    master_data,
+    master_recompute,
+    match_candidates,
+    merge,
+    part_rename,
+)
 from app.services import inventory as inventory_svc
 from app.services import maintenance_cost as maintenance_svc
 from app.services import profit as profit_svc
@@ -32,9 +37,6 @@ router = APIRouter(
     tags=["governance"],
     dependencies=[Depends(current_role), Depends(require_page("page_governance"))],
 )
-_log = logging.getLogger("governance")
-_RECOMPUTE_FAILED = "治理操作已完成，但后置重算失败，请联系管理员处理"
-
 _KINDS = ("nonstd", "needs_review", "excluded")
 
 
@@ -217,14 +219,12 @@ def merge_parts(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     if body.recompute:
         # 合并已提交；重算各自管理事务。失败不回滚合并，提示手动重算。
-        try:
-            result["recompute"] = profit_svc.recompute(db)
-            result["inventory_costs"] = inventory_svc.backfill_costs(db)
-            result["maintenance_costs"] = maintenance_svc.recompute(db)
-        except Exception:  # noqa: BLE001
-            _log.exception("post-merge recompute failed")
-            db.rollback()
-            result["recompute_failed"] = _RECOMPUTE_FAILED
+        master_recompute.recompute_after_master_write(
+            db, result, operation="merge",
+            profit_service=profit_svc,
+            inventory_service=inventory_svc,
+            maintenance_service=maintenance_svc,
+        )
     return _visible(result, ctx)
 
 
@@ -296,14 +296,12 @@ def unmerge_parts(
     except merge.MergeError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     if body.recompute:
-        try:
-            result["recompute"] = profit_svc.recompute(db)
-            result["inventory_costs"] = inventory_svc.backfill_costs(db)
-            result["maintenance_costs"] = maintenance_svc.recompute(db)
-        except Exception:  # noqa: BLE001
-            _log.exception("post-unmerge recompute failed")
-            db.rollback()
-            result["recompute_failed"] = _RECOMPUTE_FAILED
+        master_recompute.recompute_after_master_write(
+            db, result, operation="unmerge",
+            profit_service=profit_svc,
+            inventory_service=inventory_svc,
+            maintenance_service=maintenance_svc,
+        )
     return _visible(result, ctx)
 
 

@@ -2,7 +2,8 @@
 
 设计口径（.task/方案.md 第 4 节）：
 - manufacturer/summary 是采购可人工维护的基础资料，与 description/brand 同级；
-- integration_request_log 以 request_id 唯一锚定幂等回执，response_json 原样保存首次响应；
+- integration_request_log 以 request_id 唯一锚定幂等回执，request_fingerprint 绑定
+  method+path+规范化请求体，response_json 原样保存首次响应；
 - part_alias.source / dim_part.master_source 在当前 schema 没有 CHECK 约束（已核对
   pg_constraint），故无需放宽，只登记 shop 值；
 - sys_audit_log.operated_by 原为 varchar(64)，而对外审计口径是 ``shop:<用户名>``
@@ -35,6 +36,7 @@ def upgrade() -> None:
         "integration_request_log",
         sa.Column("id", sa.BigInteger(), primary_key=True),
         sa.Column("request_id", sa.String(36), nullable=False),
+        sa.Column("request_fingerprint", sa.String(64), nullable=False),
         sa.Column("actor_system", sa.String(32), nullable=False),
         sa.Column("actor_user", sa.String(64), nullable=False),
         sa.Column("method", sa.String(8), nullable=False),

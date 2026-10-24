@@ -11,9 +11,12 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import hmac
+import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Annotated
 from urllib.parse import unquote
@@ -32,7 +35,14 @@ from app.db import get_db
 from app.models.dimensions import DimPart, PartAlias
 from app.models.master_data import IntegrationRequestLog, ProductSpec
 from app.models.system import SysAuditLog
-from app.services import master_edit, merge, part_rename, part_resolver, spec_extract
+from app.services import (
+    master_edit,
+    master_recompute,
+    merge,
+    part_rename,
+    part_resolver,
+    spec_extract,
+)
 from app.services.resale_pn_lookup import canonical_part, find_pn_candidates
 
 router = APIRouter(prefix="/integrations/pn-master", tags=["pn-master-integration"])
@@ -112,7 +122,25 @@ def _replay_response(row: IntegrationRequestLog) -> JSONResponse:
     )
 
 
-def _replay(db: Session, actor: IntegrationActor) -> JSONResponse | None:
+def _request_fingerprint(request: Request, body: BaseModel | None) -> str:
+    """method + path + 规范化请求体 JSON 的 SHA-256。
+
+    ``exclude_unset=True`` 保留 PATCH 的“省略字段”与“显式 null”差异；sort_keys +
+    紧凑分隔符保证同一内容的键顺序/空白变化不影响指纹。
+    """
+    payload = (
+        body.model_dump(mode="json", exclude_unset=True) if body is not None else {}
+    )
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    material = f"{request.method}\n{request.url.path}\n{canonical}"
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _replay(
+    db: Session, actor: IntegrationActor, fingerprint: str
+) -> JSONResponse | None:
     if actor.request_id is None:
         return None
     row = db.scalar(
@@ -120,7 +148,17 @@ def _replay(db: Session, actor: IntegrationActor) -> JSONResponse | None:
             IntegrationRequestLog.request_id == actor.request_id
         )
     )
-    return _replay_response(row) if row is not None else None
+    if row is None:
+        return None
+    if row.request_fingerprint != fingerprint:
+        raise HTTPException(
+            422,
+            detail={
+                "code": "request_id_reused",
+                "message": "X-Request-Id 已用于不同的请求内容，请使用新的幂等键",
+            },
+        )
+    return _replay_response(row)
 
 
 def _commit_with_receipt(
@@ -128,21 +166,28 @@ def _commit_with_receipt(
     actor: IntegrationActor,
     request: Request,
     payload: dict,
+    fingerprint: str,
     *,
     status_code: int = 200,
+    post_commit: Callable[[dict], None] | None = None,
 ) -> JSONResponse:
-    """业务写入 + 幂等回执同一事务提交；并发同键撞唯一约束时回放胜者。"""
+    """业务写入 + 幂等回执同一事务提交；并发同键撞唯一约束时回放胜者。
+
+    ``post_commit`` 只在本次真正提交后执行（用于合并后的自管事务重算）；重放不执行。
+    回执保存提交前的响应体，故重放只回放已存内容，不会带上后置重算结果。
+    """
     body = jsonable_encoder(payload)
     assert actor.request_id is not None
     db.add(
         IntegrationRequestLog(
             request_id=actor.request_id,
+            request_fingerprint=fingerprint,
             actor_system=actor.system,
             actor_user=actor.user,
             method=request.method,
             path=request.url.path[:255],
             status_code=status_code,
-            response_json=body,
+            response_json=copy.deepcopy(body),
         )
     )
     try:
@@ -161,7 +206,19 @@ def _commit_with_receipt(
         )
         if row is None:
             raise
+        if row.request_fingerprint != fingerprint:
+            raise HTTPException(
+                422,
+                detail={
+                    "code": "request_id_reused",
+                    "message": "X-Request-Id 已用于不同的请求内容，请使用新的幂等键",
+                },
+            ) from None
         return _replay_response(row)
+    if post_commit is not None:
+        post_commit(body)
+        # 重算结果可能含 Decimal/date，JSONResponse 不走 FastAPI 的 jsonable_encoder。
+        body = jsonable_encoder(body)
     return JSONResponse(status_code=status_code, content=body, headers=_NO_STORE)
 
 
@@ -266,6 +323,7 @@ class SpecValue(BaseModel):
 class PartCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     pn_std: str = Field(min_length=1, max_length=128)
+    force: bool = False
     description: str | None = None
     brand: str | None = None
     manufacturer: str | None = None
@@ -292,7 +350,13 @@ class PartPatchRequest(BaseModel):
 
 class SpecsReplaceRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    baseline_version: str = Field(min_length=1, max_length=64)
     specs: dict[str, SpecValue | None]
+
+
+class BatchGetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    part_ids: list[Annotated[int, Field(gt=0)]] = Field(min_length=1, max_length=200)
 
 
 class MergeRequest(BaseModel):
@@ -329,14 +393,8 @@ class AliasCreateRequest(BaseModel):
 # ---------------------------------------------------------------- 读接口
 
 
-@router.get("/parts/{part_id}")
-def get_part(part_id: int, _actor: Actor, db: DbSession) -> dict:
-    state = master_edit.get_part_edit_state(db, part_id)
-    if state is None:
-        raise HTTPException(404, "型号不存在")
-    aliases = db.scalars(
-        select(PartAlias).where(PartAlias.part_id == part_id).order_by(PartAlias.id)
-    ).all()
+def _part_detail_payload(state: dict, aliases: list[PartAlias],
+                         master_source: str | None) -> dict:
     identity = state["identity"]
     return {
         "part_id": state["part_id"],
@@ -347,9 +405,55 @@ def get_part(part_id: int, _actor: Actor, db: DbSession) -> dict:
         "fields": state["fields"],
         "specs": state["specs"],
         "aliases": [_alias_item(a) for a in aliases],
-        "master_source": db.scalar(
-            select(DimPart.master_source).where(DimPart.id == part_id)
-        ),
+        "master_source": master_source,
+    }
+
+
+@router.get("/parts/{part_id}")
+def get_part(part_id: int, _actor: Actor, db: DbSession) -> dict:
+    state = master_edit.get_part_edit_state(db, part_id)
+    if state is None:
+        raise HTTPException(404, "型号不存在")
+    aliases = db.scalars(
+        select(PartAlias).where(PartAlias.part_id == part_id).order_by(PartAlias.id)
+    ).all()
+    master_source = db.scalar(
+        select(DimPart.master_source).where(DimPart.id == part_id)
+    )
+    return _part_detail_payload(state, list(aliases), master_source)
+
+
+@router.post("/parts/batch-get")
+def batch_get_parts(body: BatchGetRequest, _actor: Actor, db: DbSession) -> dict:
+    """批量读取，返回与 GET /parts/{id} 相同的单项结构；不存在的 id 单列 missing。"""
+    ids = list(dict.fromkeys(body.part_ids))
+    states = master_edit.get_parts_edit_states(db, ids)
+    aliases_by_part: dict[int, list[PartAlias]] = {}
+    master_sources: dict[int, str | None] = {}
+    found_ids = [part_id for part_id in ids if part_id in states]
+    if found_ids:
+        for alias in db.scalars(
+            select(PartAlias)
+            .where(PartAlias.part_id.in_(found_ids))
+            .order_by(PartAlias.part_id, PartAlias.id)
+        ):
+            aliases_by_part.setdefault(alias.part_id, []).append(alias)
+        master_sources = dict(
+            db.execute(
+                select(DimPart.id, DimPart.master_source)
+                .where(DimPart.id.in_(found_ids))
+            ).all()
+        )
+    return {
+        "items": [
+            _part_detail_payload(
+                states[part_id],
+                aliases_by_part.get(part_id, []),
+                master_sources.get(part_id),
+            )
+            for part_id in found_ids
+        ],
+        "missing": [part_id for part_id in ids if part_id not in states],
     }
 
 
@@ -452,7 +556,8 @@ def list_changes(
 def create_part(
     body: PartCreateRequest, request: Request, actor: WriteActor, db: DbSession
 ) -> JSONResponse:
-    replay = _replay(db, actor)
+    fingerprint = _request_fingerprint(request, body)
+    replay = _replay(db, actor, fingerprint)
     if replay is not None:
         return replay
 
@@ -471,12 +576,15 @@ def create_part(
             },
         )
 
-    fields = body.model_dump(exclude={"pn_std", "specs"}, exclude_unset=True)
+    fields = body.model_dump(
+        exclude={"pn_std", "specs", "force"}, exclude_unset=True
+    )
     try:
         result = master_edit.create_part_in_transaction(
             db,
             pn_std=body.pn_std,
             operated_by=actor.operated_by,
+            force=body.force,
             spec_updates=_spec_payload(body.specs),
             master_source="shop",
             **fields,
@@ -485,14 +593,14 @@ def create_part(
         raise HTTPException(400, str(exc)) from exc
 
     if not result.get("created"):
-        payload = {
-            "created": False,
-            "part_id": None,
-            "pn_std": pn,
-            "near_duplicates": result.get("near_duplicates", []),
-            "message": result.get("message"),
-        }
-        return _commit_with_receipt(db, actor, request, payload)
+        raise HTTPException(
+            409,
+            detail={
+                "code": "near_duplicate",
+                "message": result.get("message", "存在近似型号"),
+                "near_duplicates": result.get("near_duplicates", []),
+            },
+        )
 
     db.flush()
     version = _version_by_id(db, result["id"])
@@ -506,7 +614,7 @@ def create_part(
         "audit_id": result.get("audit_id"),
         "edit_state": edit_state,
     }
-    return _commit_with_receipt(db, actor, request, payload)
+    return _commit_with_receipt(db, actor, request, payload, fingerprint)
 
 
 @router.patch("/parts/{part_id}")
@@ -517,7 +625,8 @@ def patch_part(
     actor: WriteActor,
     db: DbSession,
 ) -> JSONResponse:
-    replay = _replay(db, actor)
+    fingerprint = _request_fingerprint(request, body)
+    replay = _replay(db, actor, fingerprint)
     if replay is not None:
         return replay
 
@@ -563,7 +672,7 @@ def patch_part(
         "audit_id": result["audit_id"],
         "edit_state": {**result.get("edit_state", {}), "version": version},
     }
-    return _commit_with_receipt(db, actor, request, payload)
+    return _commit_with_receipt(db, actor, request, payload, fingerprint)
 
 
 @router.put("/parts/{part_id}/specs")
@@ -574,13 +683,24 @@ def replace_specs(
     actor: WriteActor,
     db: DbSession,
 ) -> JSONResponse:
-    replay = _replay(db, actor)
+    fingerprint = _request_fingerprint(request, body)
+    replay = _replay(db, actor, fingerprint)
     if replay is not None:
         return replay
 
     part = master_edit.lock_part(db, part_id=part_id)
     if part is None:
         raise HTTPException(404, "型号不存在")
+    current_version = _part_version(part)
+    if body.baseline_version != current_version:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "version_conflict",
+                "message": "baseline_version 与当前版本不一致，请重新读取型号",
+                "current_version": current_version,
+            },
+        )
     if part.status != "active":
         raise HTTPException(400, f"型号 {part.pn_std} 已合并入他档，请对目标型号操作")
 
@@ -624,14 +744,15 @@ def replace_specs(
         "specs": _specs_snapshot(db, part_id),
         "audit_id": audit_id,
     }
-    return _commit_with_receipt(db, actor, request, payload)
+    return _commit_with_receipt(db, actor, request, payload, fingerprint)
 
 
 @router.post("/parts/merge")
 def merge_parts(
     body: MergeRequest, request: Request, actor: WriteActor, db: DbSession
 ) -> JSONResponse:
-    replay = _replay(db, actor)
+    fingerprint = _request_fingerprint(request, body)
+    replay = _replay(db, actor, fingerprint)
     if replay is not None:
         return replay
 
@@ -672,14 +793,20 @@ def merge_parts(
         "source_version": _version_by_id(db, source.id),
         "target_version": _version_by_id(db, target.id),
     }
-    return _commit_with_receipt(db, actor, request, payload)
+    return _commit_with_receipt(
+        db, actor, request, payload, fingerprint,
+        post_commit=lambda committed: master_recompute.recompute_after_master_write(
+            db, committed, operation="merge"
+        ),
+    )
 
 
 @router.post("/parts/unmerge")
 def unmerge_parts(
     body: UnmergeRequest, request: Request, actor: WriteActor, db: DbSession
 ) -> JSONResponse:
-    replay = _replay(db, actor)
+    fingerprint = _request_fingerprint(request, body)
+    replay = _replay(db, actor, fingerprint)
     if replay is not None:
         return replay
     try:
@@ -697,7 +824,12 @@ def unmerge_parts(
         **result,
         "source_version": _version_by_id(db, source_id) if source_id else None,
     }
-    return _commit_with_receipt(db, actor, request, payload)
+    return _commit_with_receipt(
+        db, actor, request, payload, fingerprint,
+        post_commit=lambda committed: master_recompute.recompute_after_master_write(
+            db, committed, operation="unmerge"
+        ),
+    )
 
 
 @router.post("/parts/{part_id}/rename")
@@ -708,7 +840,8 @@ def rename_part(
     actor: WriteActor,
     db: DbSession,
 ) -> JSONResponse:
-    replay = _replay(db, actor)
+    fingerprint = _request_fingerprint(request, body)
+    replay = _replay(db, actor, fingerprint)
     if replay is not None:
         return replay
     try:
@@ -728,14 +861,15 @@ def rename_part(
         **result,
         "version": _version_by_id(db, part_id),
     }
-    return _commit_with_receipt(db, actor, request, payload)
+    return _commit_with_receipt(db, actor, request, payload, fingerprint)
 
 
 @router.post("/aliases")
 def create_alias(
     body: AliasCreateRequest, request: Request, actor: WriteActor, db: DbSession
 ) -> JSONResponse:
-    replay = _replay(db, actor)
+    fingerprint = _request_fingerprint(request, body)
+    replay = _replay(db, actor, fingerprint)
     if replay is not None:
         return replay
 
@@ -802,14 +936,15 @@ def create_alias(
     )
     db.flush()
     payload = {**_alias_item(alias), "part_version": _version_by_id(db, part.id)}
-    return _commit_with_receipt(db, actor, request, payload)
+    return _commit_with_receipt(db, actor, request, payload, fingerprint)
 
 
 @router.delete("/aliases/{alias_id}")
 def disable_alias(
     alias_id: int, request: Request, actor: WriteActor, db: DbSession
 ) -> JSONResponse:
-    replay = _replay(db, actor)
+    fingerprint = _request_fingerprint(request, None)
+    replay = _replay(db, actor, fingerprint)
     if replay is not None:
         return replay
 
@@ -843,4 +978,4 @@ def disable_alias(
             _version_by_id(db, alias.part_id) if alias.part_id is not None else None
         ),
     }
-    return _commit_with_receipt(db, actor, request, payload)
+    return _commit_with_receipt(db, actor, request, payload, fingerprint)
