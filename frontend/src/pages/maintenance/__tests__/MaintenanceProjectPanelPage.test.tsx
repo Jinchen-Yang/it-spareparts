@@ -605,10 +605,21 @@ describe("项目面板", () => {
 
   it("项目详情读取失败可原地重试，恢复后清除错误", async () => {
     getMaintenanceProject.mockRejectedValueOnce(new Error("network failed"));
+    let resolveSummary!: (value: unknown) => void;
+    getBoardProject.mockImplementationOnce(() => new Promise(resolve => { resolveSummary = resolve; }));
     renderPanel();
     const alert = await screen.findByRole("alert");
-    fireEvent.click(within(alert).getByRole("button", { name: /重\s*试/ }));
+    const retry = within(alert).getByRole("button", { name: /重\s*试/ });
+    // 基础信息已报错时经营汇总仍可在途；loading 按钮不会接受此时的点击。
+    expect(retry).toHaveClass("ant-btn-loading");
+    fireEvent.click(retry);
+    expect(getMaintenanceProject).toHaveBeenCalledTimes(1);
+    await act(async () => resolveSummary({ data: projectRow }));
     expect(await screen.findByRole("heading", { name: "合成项目A" })).toBeInTheDocument();
+    // 标题也可能来自首次汇总，不代表基础信息已重试。等待按钮真正退出 loading。
+    expect(alert).toBeVisible();
+    await waitFor(() => expect(retry).not.toHaveClass("ant-btn-loading"));
+    fireEvent.click(retry);
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
     expect(getMaintenanceProject).toHaveBeenCalledTimes(2);
   });
