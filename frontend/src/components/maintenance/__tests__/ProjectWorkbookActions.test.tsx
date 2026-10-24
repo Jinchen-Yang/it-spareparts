@@ -1,3 +1,4 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -31,6 +32,7 @@ import ProjectWorkbookActions from "../ProjectWorkbookActions";
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  prepareLegacyPageFixture();
   localStorage.setItem("role", "admin");
   downloadMaintenanceProjectWorkbook.mockResolvedValue({ data: new Blob(["xlsx"]) });
   downloadMaintenanceWorkbookValidationErrors.mockResolvedValue({
@@ -74,6 +76,7 @@ afterEach(async () => {
     vi.mocked(URL.createObjectURL).mock.calls.length,
   ), { timeout: 2000 });
   localStorage.clear();
+  prepareLegacyPageFixture();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -90,7 +93,7 @@ describe("ProjectWorkbookActions", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "下载完整四表" }));
-    await waitFor(() => expect(downloadMaintenanceProjectWorkbook).toHaveBeenCalledWith("project-1"));
+    await waitFor(() => expect(downloadMaintenanceProjectWorkbook).toHaveBeenCalledWith("project-1", expect.objectContaining({ request: expect.any(Function) })));
 
     const file = new File(["xlsx"], "维保更新.xlsx", {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -109,6 +112,7 @@ describe("ProjectWorkbookActions", () => {
     await waitFor(() => expect(applyMaintenanceProjectWorkbook).toHaveBeenCalledWith(
       "project-1",
       { validation_token: "token-1", data_version: "version-3" },
+      expect.objectContaining({ request: expect.any(Function) }),
     ));
     expect(await screen.findByText("已应用 2 行更新")).toBeInTheDocument();
     expect(onApplied).toHaveBeenCalledOnce();
@@ -146,7 +150,7 @@ describe("ProjectWorkbookActions", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "下载错误明细表" }));
     await waitFor(() => expect(downloadMaintenanceWorkbookValidationErrors).toHaveBeenCalledWith(
-      "token-bad",
+      "token-bad", expect.objectContaining({ request: expect.any(Function) }),
     ));
     expect(URL.createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
   });
@@ -221,3 +225,8 @@ describe("ProjectWorkbookActions", () => {
     expect(screen.queryByRole("button", { name: "上传月度更新" })).toBeNull();
   });
 });
+
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

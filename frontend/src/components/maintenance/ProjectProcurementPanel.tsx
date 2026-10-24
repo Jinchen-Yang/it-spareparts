@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import { useContextQuery } from "../../authz/contextQuery";
+import { useModuleAccess } from "../../authz/access";
+import { surfaceRule } from "../../authz/rules";
 import { Alert, Button, Card, Empty, Table, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 
@@ -8,7 +11,6 @@ import {
   type ProcurementLine,
 } from "../../api/maintenanceProjectProcurement";
 import { TERM } from "./maintenanceLanguage";
-import { useLatestRead } from "../../pages/maintenance/panel/panelUtils";
 
 const { Text } = Typography;
 
@@ -104,48 +106,25 @@ export default function ProjectProcurementPanel({
   /** 向所在 tab 登记「按当前范围重读」（resolve false＝这次读回没完成）；卸载时登记 null。 */
   registerRefresh?: (refresh: (() => Promise<boolean>) | null) => void;
 }) {
-  const [orders, setOrders] = useState<ProcurementOrder[]>([]);
-  const [total, setTotal] = useState(0);
-  // 页码与所属范围绑在一起：范围（项目 / 选中需求单）一换，页码自然回到 1，
-  // 不需要额外 effect 去“重置”，也就不会多打一次旧范围的请求。
   const scope = `${projectId}|${sourceOrderId ?? ""}`;
   const [paging, setPaging] = useState({ scope, page: 1 });
   const page = paging.scope === scope ? paging.page : 1;
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
-  const read = useLatestRead();
-
-  const load = useCallback(() => read(async (isCurrent) => {
-    setLoading(true);
-    setError(false);
-    try {
-      const { data } = await getProjectProcurement(projectId, {
-        page,
-        page_size: PAGE_SIZE,
-        source_order_id: sourceOrderId ?? undefined,
-      });
-      if (!isCurrent()) return false;
-      setOrders(data.purchases ?? []);
-      setTotal(data.total ?? data.purchases?.length ?? 0);
-      return true;
-    } catch {
-      if (isCurrent()) {
-        // 失败段自己清旧快照（屏障约定），告警替代表格
-        setOrders([]);
-        setTotal(0);
-        setError(true);
-      }
-      return false;
-    } finally {
-      if (isCurrent()) setLoading(false);
-    }
-  }), [projectId, sourceOrderId, page, read]);
-
-  useEffect(() => { void load(); }, [load]);
+  const query = useContextQuery({
+    entryId: "GET /api/maintenance/projects/stable/{project_id}/purchases",
+    rule: surfaceRule("maintenance_project_purchase.procurement"),
+    queryKey: [projectId, sourceOrderId, page], legacyAllowed: true,
+    query: async capture => (await getProjectProcurement(projectId, {
+      page, page_size: PAGE_SIZE, source_order_id: sourceOrderId ?? undefined,
+    }, capture)).data,
+  });
+  const amounts = useModuleAccess("maintenance_project_purchase", query.context).field("data_purchase_cost", true);
+  const orders = query.data?.purchases ?? [], total = query.data?.total ?? 0;
+  const loading = query.loading, error = query.error, load = query.retry;
   useEffect(() => {
-    registerRefresh?.(load);
+    registerRefresh?.(query.entryState === "deny" ? null : load);
     return () => { registerRefresh?.(null); };
-  }, [load, registerRefresh]);
+  }, [load, query.entryState, registerRefresh]);
+  if (query.entryState === "deny") return null;
 
   return (
     <Card size="small" title="采购订单与维保需求">
@@ -188,7 +167,7 @@ export default function ProjectProcurementPanel({
               <Table
                 rowKey={(_, i) => `${order.purchase_order_no}-line-${i}`}
                 size="small"
-                columns={lineColumns}
+                columns={lineColumns.filter(column => amounts || ("dataIndex" in column && column.dataIndex !== "unit_price"))}
                 dataSource={order.lines}
                 pagination={false}
               />

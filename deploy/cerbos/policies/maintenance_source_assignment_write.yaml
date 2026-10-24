@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_source_assignment_write",
+    "rules": [
+      {
+        "name": "explicit-assign",
+        "actions": [
+          "assign"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"assign\" in P.attr.grants.maintenance_source_assignment_write.actions && \"data_profit\" in P.attr.grants.maintenance_source_assignment_write.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_source_assignment_write.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_source_assignment_write\", \"scope\": P.attr.grants.maintenance_source_assignment_write.scope, \"version\": P.attr.grants.maintenance_source_assignment_write.version, \"field_permissions\": P.attr.grants.maintenance_source_assignment_write.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-auto-assign",
+        "actions": [
+          "auto_assign"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"auto_assign\" in P.attr.grants.maintenance_source_assignment_write.actions && \"data_profit\" in P.attr.grants.maintenance_source_assignment_write.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_source_assignment_write.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_source_assignment_write\", \"scope\": P.attr.grants.maintenance_source_assignment_write.scope, \"version\": P.attr.grants.maintenance_source_assignment_write.version, \"field_permissions\": P.attr.grants.maintenance_source_assignment_write.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-manage-sources",
+        "actions": [
+          "show_manage_sources"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_manage_sources\" in P.attr.grants.maintenance_source_assignment_write.actions && (\"assign\" in P.attr.grants.maintenance_source_assignment_write.actions || \"auto_assign\" in P.attr.grants.maintenance_source_assignment_write.actions || \"unassign\" in P.attr.grants.maintenance_source_assignment_write.actions) && (R.attr.module_probe || ((P.attr.grants.maintenance_source_assignment_write.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_source_assignment_write\", \"scope\": P.attr.grants.maintenance_source_assignment_write.scope, \"version\": P.attr.grants.maintenance_source_assignment_write.version, \"field_permissions\": P.attr.grants.maintenance_source_assignment_write.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-unassign",
+        "actions": [
+          "unassign"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"unassign\" in P.attr.grants.maintenance_source_assignment_write.actions && \"data_profit\" in P.attr.grants.maintenance_source_assignment_write.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_source_assignment_write.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_source_assignment_write\", \"scope\": P.attr.grants.maintenance_source_assignment_write.scope, \"version\": P.attr.grants.maintenance_source_assignment_write.version, \"field_permissions\": P.attr.grants.maintenance_source_assignment_write.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

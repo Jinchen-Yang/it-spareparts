@@ -1,3 +1,5 @@
+import { legacyAuthorizationState } from "../../../test/legacyAuthorization";
+import { prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -353,6 +355,14 @@ describe("维保主页（项目卡墙）", () => {
       await screen.findByRole("button", { name: /下载全项目备件行级表/ }));
     await waitFor(() => expect(downloadSparePartLines).toHaveBeenCalledWith({
       range: "this_month",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 });
+
+// Existing behavior fixtures explicitly run before the canonical module cutover.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(),
+  useAuthz: () => legacyAuthorizationState(),
+}));
+
+beforeEach(() => prepareLegacyPageFixture());

@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import Response, APIRouter, Depends, HTTPException, Path, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +23,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.maintenance_bad_returns import _real_operator
 from app.api.maintenance_project_scope import enforce_maintenance_project_access
 from app.auth import current_identity, verify_token_db
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_return_authorization as canonical
 from app.db import SessionLocal, get_db
 from app.maintenance_boss import require_maintenance_boss
 from app.models.system import SysAuditLog, SysUser
@@ -79,6 +81,8 @@ class ReceiptAuditRoute(APIRoute):
             try:
                 return await handler(request)
             except Exception as exc:
+                if request.query_params.get("view") == "authorization":
+                    raise
                 code = (422 if isinstance(exc, RequestValidationError) else
                         exc.status_code if isinstance(exc, StarletteHTTPException) else 500)
                 try:
@@ -102,6 +106,7 @@ router = APIRouter(
 
 
 class ReceiptCreate(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     pn: str = Field(min_length=1, max_length=128)
@@ -118,6 +123,7 @@ class ReceiptCreate(BaseModel):
 
 
 class ReceiptUpdate(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     version: int = Field(ge=1, strict=True)
@@ -136,6 +142,7 @@ class ReceiptUpdate(BaseModel):
 
 
 class ReceiptVoid(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     version: int = Field(ge=1, strict=True)
@@ -186,9 +193,22 @@ def receipt_demand_candidates(
     part_id: int | None = Query(default=None, ge=1),
     receipt_id: str | None = Query(default=None, max_length=36),
     db: Session = Depends(get_db),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_receipt", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_receipt")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'GET /api/maintenance/projects/stable/{project_id}/return-receipt-demands', {'project_id': project_id, 'page': page, 'page_size': page_size, 'q': q, 'part_id': part_id, 'receipt_id': receipt_id},
+                view=request.query_params.get("view"), precondition=request.query_params.get("authorization_precondition"))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     try:
         # 容量过滤仅限返还录入；领用候选保持原查询口径。
@@ -207,9 +227,22 @@ def receipt_demand_candidates(
 def receipt_summary(
     project_id: str = Path(min_length=1),
     db: Session = Depends(get_db),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_receipt", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_receipt")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'GET /api/maintenance/projects/stable/{project_id}/return-receipt-summary', {'project_id': project_id},
+                view=request.query_params.get("view"), precondition=request.query_params.get("authorization_precondition"))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     try:
         payload = receipts.receipt_summary(db, project_id=project_id)
@@ -241,9 +274,22 @@ def search_receipts(
     category_minor: str | None = Query(default=None, max_length=128),
     category_state: str | None = Query(default=None, pattern="^(unclassified|unlinked)$"),
     db: Session = Depends(get_db),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_receipt", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_receipt")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'GET /api/maintenance/projects/stable/{project_id}/return-receipts', {'project_id': project_id, 'page': page, 'page_size': page_size, 'line_status': line_status, 'q': q, 'source_order_id': source_order_id, 'source': source, 'unassigned': unassigned, 'category_major': category_major, 'category_minor': category_minor, 'category_state': category_state},
+                view=request.query_params.get("view"), precondition=request.query_params.get("authorization_precondition"))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     try:
         payload = receipts.search_receipts(
@@ -283,10 +329,23 @@ def create_receipt(
     project_id: str = Path(min_length=1),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_receipt", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_return_receipt", require_action("action_maintenance_bad_return_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_receipt")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/projects/stable/{project_id}/return-receipts', {**body.model_dump(exclude={"authorization_precondition"}), **{'project_id': project_id}},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     receipts.lock_receipt_context(db)
     receipts.lock_receipt_projects(db, {project_id})
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
@@ -337,10 +396,23 @@ def update_receipt(
     receipt_id: str = Path(min_length=1),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_receipt", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_return_receipt", require_action("action_maintenance_bad_return_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_receipt")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'PATCH /api/maintenance/return-receipts/{receipt_id}', {**body.model_dump(exclude={"authorization_precondition"}, exclude_unset=True), **{'receipt_id': receipt_id}},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     project_id = _receipt_project(db, receipt_id, target_project_id=body.project_id)
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     if body.project_id and body.project_id != project_id:
@@ -349,7 +421,7 @@ def update_receipt(
         )
     operator = _real_operator(db, ident)
     updates = body.model_dump(
-        exclude={"version", "reason"}, exclude_unset=True
+        exclude={"authorization_precondition", "version", "reason"}, exclude_unset=True
     )
     try:
         payload = receipts.update_receipt(
@@ -383,10 +455,23 @@ def void_receipt(
     receipt_id: str = Path(min_length=1),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_receipt", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_return_receipt", require_action("action_maintenance_bad_return_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_receipt")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/return-receipts/{receipt_id}/void', {**body.model_dump(exclude={"authorization_precondition"}), **{'receipt_id': receipt_id}},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     project_id = _receipt_project(db, receipt_id)
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     operator = _real_operator(db, ident)
@@ -419,9 +504,22 @@ def void_receipt(
 def receipt_audit(
     receipt_id: str = Path(min_length=1),
     db: Session = Depends(get_db),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_receipt", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_receipt")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'GET /api/maintenance/return-receipts/{receipt_id}/audit', {'receipt_id': receipt_id},
+                view=request.query_params.get("view"), precondition=request.query_params.get("authorization_precondition"))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     project_id = _receipt_project(db, receipt_id)
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     try:

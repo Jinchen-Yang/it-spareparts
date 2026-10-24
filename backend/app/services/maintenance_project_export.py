@@ -17,7 +17,7 @@ from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.services.excel_text_safety import ILLEGAL_EXCEL_CHARS
 from app.models.maintenance_project import MaintenanceProject
@@ -296,7 +296,10 @@ def _merge_master_facts(db: Session, rows: list[dict]) -> None:
     projects = {
         project.project_id: project
         for project in db.scalars(
-            select(MaintenanceProject).where(
+            select(MaintenanceProject).options(load_only(*(
+                getattr(MaintenanceProject,key) for key in ('project_id','business_type','cmo_name',
+                'project_manager_id','no_return_default','project_note','is_active','version','created_at','updated_at')
+            ), raiseload=True)).where(
                 MaintenanceProject.project_id.in_(project_ids)
             )
         )
@@ -392,6 +395,7 @@ def build_project_export(
     sort: str,
     business_type: str = "all",
     allowed_project_ids: set[str] | None,
+    strict_projection: bool = False,
 ) -> tuple[bytes, int]:
     fields = resolve_fields(field_keys, user_ctx)
     result = board.projects(
@@ -405,6 +409,7 @@ def build_project_export(
         card_status_filter=card_status,
         business_type=business_type,
         allowed_project_ids=allowed_project_ids,
+        **({"strict_projection": True} if strict_projection else {}),
     )
     if result["total"] > MAX_EXPORT_ROWS:
         raise ProjectExportTooLarge(

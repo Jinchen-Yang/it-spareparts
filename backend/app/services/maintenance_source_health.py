@@ -46,7 +46,7 @@ SOURCE_LABELS = {
 
 def _envelope(readiness: str, *, as_of: date | None = None,
               batch_id: str | int | None = None, uploaded_at=None,
-              unlinked_rows: int = 0, label: str = "") -> dict:
+              unlinked_rows: int | None = 0, label: str = "") -> dict:
     """统一信封：not_imported 时不带任何计数值（铁律 5）。"""
     out: dict = {"readiness": readiness, "label": label}
     if readiness == "not_imported":
@@ -185,3 +185,33 @@ def source_health(db: Session) -> dict:
         },
         "stale_days": STALE_DAYS,
     }
+
+
+def fact_availability(db: Session) -> dict:
+    """Minimum source availability for a scoped business fact projection.
+
+    Source-health counters and batch contents belong to the independent health
+    resource. A business view only needs to distinguish no source from an
+    imported source whose global completeness it cannot establish. Imported
+    sources therefore stay conservatively partial, with no unlinked count.
+    """
+    result = {}
+    wbdd_date = db.scalar(select(FMaintenanceOrder.order_date)
+        .order_by(FMaintenanceOrder.order_date.desc().nullslast()).limit(1))
+    if wbdd_date is None:
+        exists = db.scalar(select(FMaintenanceOrder.id).limit(1)) is not None
+    else:
+        exists = True
+    result['wbdd'] = _envelope('partial' if exists else 'not_imported',
+        as_of=wbdd_date, unlinked_rows=None, label=SOURCE_LABELS['wbdd'])
+    for key, model in [('ckd', MaintenanceCkdImportBatch),
+                       ('return_order', MaintenanceDocImportBatch),
+                       ('rkd_inbound', MaintenanceDocImportBatch)]:
+        statement = select(model.applied_at).where(model.status == 'applied')
+        if key != 'ckd':
+            statement = statement.where(model.doc_type == key)
+        row = db.execute(statement.order_by(model.applied_at.desc().nullslast()).limit(1)).first()
+        applied = row[0] if row else None
+        result[key] = _envelope('partial' if row else 'not_imported',
+            as_of=applied.date() if applied else None, unlinked_rows=None, label=SOURCE_LABELS[key])
+    return result

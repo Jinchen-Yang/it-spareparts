@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
 import type {
   BoardProjectLifecycle,
@@ -289,13 +290,13 @@ export interface MaintenanceBatchDownloadResult {
   filename: string;
 }
 
-export const getMaintenanceBatchTransferOptions = () =>
-  api.get<MaintenanceBatchTransferOptions>(`${MAINTENANCE_BATCH_TRANSFER_BASE}/options`);
+export const getMaintenanceBatchTransferOptions = ( capture?: ContextRequestTransport) =>
+  domainApi(capture).get<MaintenanceBatchTransferOptions>(`${MAINTENANCE_BATCH_TRANSFER_BASE}/options`);
 
-export const previewMaintenanceBatchTransfer = (files: File[]) => {
+export const previewMaintenanceBatchTransfer = (files: File[], capture?: ContextRequestTransport) => {
   const body = new FormData();
   files.forEach((file) => body.append("files", file));
-  return api.post<MaintenanceBatchPreviewResponse>(
+  return domainApi(capture).post<MaintenanceBatchPreviewResponse>(
     `${MAINTENANCE_BATCH_TRANSFER_BASE}/preview`,
     body,
   );
@@ -305,8 +306,8 @@ export const previewMaintenanceBatchTransfer = (files: File[]) => {
  * apply 只消费冻结预览的 token、hash、CAS version 与被选中的 row keys。
  * 后端必须重新校验 token/CAS，不得信任或重解析客户端 mapping/canonical values。
  */
-export const applyMaintenanceBatchTransfer = (body: MaintenanceBatchApplyRequest) =>
-  api.post<MaintenanceBatchApplyResponse>(
+export const applyMaintenanceBatchTransfer = (body: MaintenanceBatchApplyRequest, capture?: ContextRequestTransport) =>
+  domainApi(capture).post<MaintenanceBatchApplyResponse>(
     `${MAINTENANCE_BATCH_TRANSFER_BASE}/apply`,
     body,
   );
@@ -362,9 +363,9 @@ export function normalizeMaintenanceReceiptRuling(
  * 只作废并重建台账行，不改快照；调用方须随后重新预览以看到覆盖行。
  */
 export const ruleMaintenanceReceiptConflict = async (
-  body: MaintenanceBatchReceiptRulingRequest,
+  body: MaintenanceBatchReceiptRulingRequest, capture?: ContextRequestTransport
 ): Promise<MaintenanceBatchReceiptRulingResponse> => {
-  const { data } = await api.post<unknown>(`${MAINTENANCE_BATCH_TRANSFER_BASE}/receipt-rulings`, body);
+  const { data } = await domainApi(capture).post<unknown>(`${MAINTENANCE_BATCH_TRANSFER_BASE}/receipt-rulings`, body);
   const ruling = normalizeMaintenanceReceiptRuling(data);
   if (!ruling) throw new Error("裁决回执格式无法识别，请重新预览核对台账后再试");
   return ruling;
@@ -386,9 +387,9 @@ function filenameFromDisposition(disposition: unknown): string {
 
 /** 下载当前筛选命中的全部项目，而不是浏览器里已经滚动加载的卡片。 */
 export const downloadMaintenanceBatchTransfer = async (
-  body: MaintenanceBatchDownloadInput,
+  body: MaintenanceBatchDownloadInput, capture?: ContextRequestTransport
 ): Promise<MaintenanceBatchDownloadResult> => {
-  const response = await api.post<Blob>(
+  const response = await domainApi(capture).post<Blob>(
     `${MAINTENANCE_BATCH_TRANSFER_BASE}/download`,
     body,
     { responseType: "blob" },

@@ -39,9 +39,9 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.business_time import business_today
 from app.config import get_settings
@@ -263,7 +263,7 @@ def _load_batch(db: Session, batch_id: str) -> MaintenanceCollectionPlanImportBa
     batch = db.scalar(
         select(MaintenanceCollectionPlanImportBatch).where(
             MaintenanceCollectionPlanImportBatch.batch_id == batch_id
-        )
+        ).execution_options(populate_existing=True)
     )
     if batch is None:
         raise CollectionPlanImportNotFound("资源不存在或不可见")
@@ -299,6 +299,11 @@ def _issue_payload(issue: dict) -> dict:
 
 # ---------- preview ----------
 
+def lock_collection_plan_bindings(db):
+    """One closed binding writer family: stabilize absent and existing mappings."""
+    db.execute(text("select pg_advisory_xact_lock(hashtextextended('maintenance_collection_plan_bindings',0))"))
+
+
 def preview_collection_plan_import(
     db: Session,
     *,
@@ -309,12 +314,14 @@ def preview_collection_plan_import(
     operator: str,
     user_ctx: UserContext,
     as_of: date,
+    _authorized_user=None,
+    _created_storage=None,
 ) -> dict:
     """零领域事实写入预览：只创建批次与受控原件证据。"""
     if not idempotency_key or not (8 <= len(idempotency_key) <= 128):
         raise CollectionPlanImportInvalid("Idempotency-Key 必须为 8–128 字符")
     operator = _audit_operator(operator)
-    user = require_import_operator(db, user_ctx=user_ctx)
+    user = _authorized_user if _authorized_user is not None else require_import_operator(db, user_ctx=user_ctx)
     if user.id != owner_user_id:
         raise CollectionPlanImportPermissionError("预览账号与实名账号不一致")
 
@@ -353,6 +360,8 @@ def preview_collection_plan_import(
             owner_user_id=owner_user_id,
             operator=operator,
             contract_error=exc,
+            _canonical=_authorized_user is not None,
+            _created_storage=_created_storage,
         )
 
     plan_payload, data_version = _build_plan_payload(db, parsed, as_of=as_of)
@@ -379,11 +388,13 @@ def preview_collection_plan_import(
         created_by=operator,
         expires_at=datetime.now(UTC) + VALIDATION_TTL,
     )
+    if _created_storage is not None:_created_storage(storage_key)
     try:
         _write_evidence(content, storage_key=storage_key)
         db.add(batch)
         db.flush()
     except IntegrityError:
+        if _authorized_user is not None:raise
         db.rollback()
         _delete_unreferenced_evidence(db, storage_key=storage_key)
         winner = db.scalar(
@@ -421,6 +432,8 @@ def _create_error_batch(
     owner_user_id: int,
     operator: str,
     contract_error: CollectionPlanContractError,
+    _canonical=False,
+    _created_storage=None,
 ) -> dict:
     """合同级失败：仍保存哈希 + 受控原件证据（error 批次），随后抛 422。"""
     issue = {
@@ -449,11 +462,13 @@ def _create_error_batch(
         created_by=operator,
         expires_at=datetime.now(UTC) + VALIDATION_TTL,
     )
+    if _created_storage is not None:_created_storage(storage_key)
     try:
         _write_evidence(content, storage_key=storage_key)
         db.add(batch)
         db.flush()
     except IntegrityError:
+        if _canonical:raise
         db.rollback()
         _delete_unreferenced_evidence(db, storage_key=storage_key)
         winner = db.scalar(
@@ -720,10 +735,12 @@ def search_collection_binding_options(
     page: int,
     page_size: int,
     user_ctx: UserContext,
+    authorization_access=None,
 ) -> dict:
     """受控项目/合同候选搜索：绝不返回全量项目，不做名称自动匹配。"""
-    user = require_import_operator(db, user_ctx=user_ctx)
-    _visible_batch(db, batch_id, user=user, owner_user_id=user.id, allow_other_admin=True)
+    if authorization_access is None:
+        user = require_import_operator(db, user_ctx=user_ctx)
+        _visible_batch(db, batch_id, user=user, owner_user_id=user.id, allow_other_admin=True)
     q = str(q_text or "").strip()
     if len(q) < 2:
         raise CollectionPlanImportInvalid("搜索词去除首尾空白后至少 2 个字符")
@@ -741,6 +758,8 @@ def search_collection_binding_options(
                 MaintenanceProject.display_name.ilike(like),
             ),
         )
+        .options(load_only(MaintenanceProject.project_id,MaintenanceProject.project_code,
+            MaintenanceProject.display_name,MaintenanceProject.version,raiseload=True))
         .order_by(MaintenanceProject.project_code, MaintenanceProject.project_id)
     )
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
@@ -752,6 +771,10 @@ def search_collection_binding_options(
             db.scalars(
                 select(MaintenanceProjectContract)
                 .where(MaintenanceProjectContract.project_id.in_(project_ids))
+                .options(load_only(MaintenanceProjectContract.project_contract_id,
+                    MaintenanceProjectContract.project_id,MaintenanceProjectContract.contract_no,
+                    MaintenanceProjectContract.effective_from,MaintenanceProjectContract.effective_to,
+                    MaintenanceProjectContract.version,raiseload=True))
                 .order_by(
                     MaintenanceProjectContract.project_id,
                     MaintenanceProjectContract.contract_no,
@@ -805,42 +828,8 @@ def _binding_option_contract(
     }
 
 
-# ---------- apply ----------
-
-def apply_collection_plan_import(
-    db: Session,
-    *,
-    batch_id: str,
-    expected_batch_version: int,
-    expected_data_version: str,
-    bindings: list[ApplyBinding],
-    owner_user_id: int,
-    operator: str,
-    user_ctx: UserContext,
-    as_of: date,
-) -> dict:
-    """原子应用：只读冻结 plan_json；整批版本校验通过才写，任一漂移整批 409。"""
-    settings = get_settings()
-    if not settings.maintenance_collection_plan_apply_enabled:
-        raise CollectionPlanImportPermissionError("回款计划应用尚未开放")
-    operator = _audit_operator(operator)
-    user = require_import_operator(db, user_ctx=user_ctx)
-    if user.id != owner_user_id:
-        raise CollectionPlanImportPermissionError("应用账号与实名账号不一致")
-    batch = db.scalar(
-        select(MaintenanceCollectionPlanImportBatch)
-        .where(MaintenanceCollectionPlanImportBatch.batch_id == batch_id)
-        .with_for_update()
-    )
-    if batch is None or batch.owner_user_id != owner_user_id:
-        raise CollectionPlanImportNotFound("资源不存在或不可见")
-    if batch.expires_at < datetime.now(UTC):
-        raise CollectionPlanImportConflict(
-            "预览批次已过期，请重新预览",
-            current_version=batch.version,
-            current_data_version=batch.data_version,
-        )
-
+def effective_apply_bindings(batch, bindings):
+    """Resolve the complete saved plan plus explicit replacements, without writes."""
     plan = batch.plan_json or {"orders": []}
     plan_orders = {order["row_key"]: order for order in plan["orders"]}
     if any(order.get("blocker_codes") for order in plan["orders"]):
@@ -896,26 +885,70 @@ def apply_collection_plan_import(
             )
         )
 
+    return plan_orders, effective_bindings
+
+
+# ---------- apply ----------
+
+def apply_collection_plan_import(
+    db: Session,
+    *,
+    batch_id: str,
+    expected_batch_version: int,
+    expected_data_version: str,
+    bindings: list[ApplyBinding],
+    owner_user_id: int,
+    operator: str,
+    user_ctx: UserContext,
+    as_of: date,
+    _authorization=None,
+) -> dict:
+    """原子应用：只读冻结 plan_json；整批版本校验通过才写，任一漂移整批 409。"""
+    settings = get_settings()
+    if not settings.maintenance_collection_plan_apply_enabled:
+        raise CollectionPlanImportPermissionError("回款计划应用尚未开放")
+    operator = _audit_operator(operator)
+    user = _authorization.principal if _authorization is not None else require_import_operator(db, user_ctx=user_ctx)
+    if user.id != owner_user_id:
+        raise CollectionPlanImportPermissionError("应用账号与实名账号不一致")
+    lock_collection_plan_bindings(db)
+    batch = db.scalar(
+        select(MaintenanceCollectionPlanImportBatch)
+        .where(MaintenanceCollectionPlanImportBatch.batch_id == batch_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
+    if batch is None or batch.owner_user_id != owner_user_id:
+        raise CollectionPlanImportNotFound("资源不存在或不可见")
+    if batch.expires_at < datetime.now(UTC):
+        raise CollectionPlanImportConflict(
+            "预览批次已过期，请重新预览",
+            current_version=batch.version,
+            current_data_version=batch.data_version,
+        )
+
+    plan_orders, effective_bindings = effective_apply_bindings(batch, bindings)
+
     payload_hash = _apply_payload_hash(
         expected_batch_version, expected_data_version, effective_bindings
     )
     if batch.status == "applied":
         if batch.apply_payload_hash == payload_hash:
-            return _replay_apply(batch)
-        raise CollectionPlanImportConflict(
-            "同一批次已用不同参数应用，请重新预览",
+            if _authorization is None:return _replay_apply(batch)
+        else:
+            raise CollectionPlanImportConflict(
+                "同一批次已用不同参数应用，请重新预览",
             current_version=batch.version,
             current_data_version=batch.data_version,
         )
-    if batch.status != "valid":
+    if batch.status not in ({"valid","applied"} if _authorization is not None else {"valid"}):
         raise CollectionPlanImportInvalid("批次当前不可应用，请重新预览")
-    if batch.version != expected_batch_version:
+    if batch.status != 'applied' and batch.version != expected_batch_version:
         raise CollectionPlanImportConflict(
             "批次版本已变化，请刷新后重试",
             current_version=batch.version,
             current_data_version=batch.data_version,
         )
-    if batch.data_version != expected_data_version:
+    if batch.status != 'applied' and batch.data_version != expected_data_version:
         raise CollectionPlanImportConflict(
             "数据版本已变化，请刷新后重试",
             current_version=batch.version,
@@ -950,6 +983,14 @@ def apply_collection_plan_import(
     # held before any domain row is locked or changed.
     project_ids = {binding.project_id for binding in effective_bindings}
     contract_ids = {binding.project_contract_id for binding in effective_bindings}
+    if _authorization is not None:
+        previous = list(db.execute(select(MaintenanceCollectionPlanSourceBinding.project_id,
+            MaintenanceCollectionPlanSourceBinding.project_contract_id).where(
+                MaintenanceCollectionPlanSourceBinding.source_system == _SOURCE_SYSTEM,
+                MaintenanceCollectionPlanSourceBinding.external_order_no.in_(
+                    [b.external_order_no for b in effective_bindings]))))
+        project_ids.update(row.project_id for row in previous)
+        contract_ids.update(row.project_contract_id for row in previous)
     existing_project_ids = set(
         db.scalars(
             select(MaintenanceProject.project_id).where(
@@ -969,7 +1010,7 @@ def apply_collection_plan_import(
             select(MaintenanceProject)
             .where(MaintenanceProject.project_id.in_(project_ids))
             .order_by(MaintenanceProject.project_id)
-            .with_for_update()
+            .with_for_update().execution_options(populate_existing=True)
         )
     }
     contracts = {
@@ -978,7 +1019,7 @@ def apply_collection_plan_import(
             select(MaintenanceProjectContract)
             .where(MaintenanceProjectContract.project_contract_id.in_(contract_ids))
             .order_by(MaintenanceProjectContract.project_contract_id)
-            .with_for_update()
+            .with_for_update().execution_options(populate_existing=True)
         )
     }
     binding_rows = {
@@ -992,7 +1033,7 @@ def apply_collection_plan_import(
                 ),
             )
             .order_by(MaintenanceCollectionPlanSourceBinding.external_order_no)
-            .with_for_update()
+            .with_for_update().execution_options(populate_existing=True)
         )
     }
     milestones = {
@@ -1006,10 +1047,13 @@ def apply_collection_plan_import(
                 MaintenanceCollectionMilestone.project_contract_id,
                 MaintenanceCollectionMilestone.sequence,
             )
-            .with_for_update()
+            .with_for_update().execution_options(populate_existing=True)
         )
     }
 
+    if _authorization is not None:
+        user = _authorization.authorize(db, batch, effective_bindings, project_ids=project_ids, contract_ids=contract_ids)
+        if batch.status == 'applied':return _replay_apply(batch)
     counts = {
         "created": 0,
         "updated": 0,

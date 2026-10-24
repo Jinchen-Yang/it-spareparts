@@ -1,5 +1,6 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
 import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WbddUploadFeedback from "../WbddUploadFeedback";
 
 afterEach(cleanup);
@@ -82,3 +83,10 @@ describe("原件上传聚合回执", () => {
     expect(container).not.toHaveTextContent("[object Object]");
   });
 });
+
+// These existing business behavior fixtures intentionally exercise the legacy runtime.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(),
+  useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

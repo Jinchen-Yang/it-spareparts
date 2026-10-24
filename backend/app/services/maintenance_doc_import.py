@@ -321,18 +321,29 @@ def _head_no(doc_type: str, values: dict[str, str], spec: dict) -> str | None:
 
 
 def store_preview(
-    db: Session, parsed: dict, operated_by: str, *, idempotency_key: str, commit: bool = True
+    db: Session, parsed: dict, operated_by: str, *, idempotency_key: str, commit: bool = True, identity=None,
+    authorization_precondition=None, producer_authorization=None
 ) -> str:
     spec = _SPECS[parsed["doc_type"]]
+    from app.services import maintenance_import_authorization as authorization
+    from app.services import authorization_artifacts as artifacts
+    permit = authorization.prepare_preview(db, kind='document_import_batch', parsed=parsed,
+        identity=identity, idempotency_key=idempotency_key, precondition=authorization_precondition,
+        producer_authorization=producer_authorization, commit=commit)
+    if permit is not None:
+        operated_by = permit.actor.username
     existing = db.execute(
         select(MaintenanceDocImportBatch).where(
-            MaintenanceDocImportBatch.uploaded_by == operated_by,
+            (MaintenanceDocImportBatch.owner_user_id == permit.actor.id if permit else
+             (MaintenanceDocImportBatch.owner_user_id.is_(None) & (MaintenanceDocImportBatch.uploaded_by == operated_by))),
             MaintenanceDocImportBatch.idempotency_key == idempotency_key,
         )
     ).scalar_one_or_none()
     if existing is not None:
         if existing.file_hash != parsed["file_hash"]:
             raise DocBatchError("同一 Idempotency-Key 对应不同文件内容，拒绝重放")
+        if permit is not None:
+            artifacts.load_artifact_binding(db, target=artifacts.ArtifactTarget('document_import_batch', existing.batch_id, 1))
         return existing.batch_id
     batch = MaintenanceDocImportBatch(
         batch_id=str(uuid4()),
@@ -341,6 +352,7 @@ def store_preview(
         filename=parsed["filename"][:255],
         idempotency_key=idempotency_key,
         uploaded_by=operated_by,
+        owner_user_id=permit.actor.id if permit else None,
         head_rows=len(parsed["heads"]),
         line_rows=parsed["line_count"],
         status="pending",
@@ -420,6 +432,7 @@ def store_preview(
         "line_rows": batch.line_rows,
         "issue_rows": issue_rows,
     }
+    authorization.finish_preview(db, permit, batch, idempotency_key)
     if commit:
         db.commit()
     return batch.batch_id
@@ -458,9 +471,10 @@ def _resolve_project_id(db: Session, head: MaintenanceDocHeadRow) -> str | None:
     return None
 
 
-def _fail_batch(db: Session, batch_id: str, failures: list[str]) -> None:
+def _fail_batch(db: Session, batch_id: str, failures: list[str], *, commit=True) -> None:
     """失败关闭：回滚本批全部 canonical 写入并标记 failed。"""
-    db.rollback()
+    if commit:
+        db.rollback()
     batch = db.get(MaintenanceDocImportBatch, batch_id)
     batch.status = "failed"
     batch.report_json = {
@@ -468,7 +482,8 @@ def _fail_batch(db: Session, batch_id: str, failures: list[str]) -> None:
         "rejection_reason": "单据批次存在应用异常，整批零写入",
         "failures": failures[:20],
     }
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def apply_batch(
@@ -477,7 +492,19 @@ def apply_batch(
     operated_by: str,
     *,
     allowed_project_ids: set[str] | None = None,
+    identity=None, commit=True, _authorization=None,
 ) -> dict:
+    from app.authz import runtime
+    from app.services import maintenance_import_authorization as authorization
+    if _authorization is not None:
+        if type(_authorization) is not authorization.ImportApplyAuthorization or commit:
+            raise ValueError('导入只接受实际受控事务许可')
+        if (_authorization.db is not db or _authorization.transaction is not db.get_transaction()
+                or _authorization.context.contexts[0].entry_id != authorization.DOC_APPLY
+                or _authorization.context.contexts[0].ref.id != batch_id):
+            raise ValueError('导入写事务或实际批次不匹配')
+    elif runtime.is_authoritative(db, 'maintenance_document_import'):
+        return authorization.apply_batch(db, identity, kind='document_import_batch', batch_id=batch_id)
     # Both document entry points serialize native/legacy identity checks.
     from app.services.maintenance_return_receipts import lock_receipt_context
     from app.services.maintenance_return_receipt_import import _lock
@@ -506,7 +533,8 @@ def apply_batch(
             "rejected_rows": len(bad_rows),
             "rejection_reason": "单据批次存在关键异常行，整批拒绝应用",
         }
-        db.commit()
+        if commit:
+            db.commit()
         raise DocBatchError(f"单据批次存在 {len(bad_rows)} 行关键异常，整批拒绝应用")
     summary = {
         "doc_type": batch.doc_type,
@@ -596,7 +624,8 @@ def apply_batch(
                     failures.append(f"{head.head_no}: {exc}")
             if failures:
                 # 失败关闭：回滚本批全部流水写入
-                db.rollback()
+                if commit:
+                    db.rollback()
                 batch = db.get(MaintenanceDocImportBatch, batch_id)
                 batch.status = "failed"
                 batch.report_json = {
@@ -604,7 +633,8 @@ def apply_batch(
                     "rejection_reason": "单据批次存在应用异常，整批零写入",
                     "failures": failures[:20],
                 }
-                db.commit()
+                if commit:
+                    db.commit()
                 raise DocBatchError(
                     f"单据批次应用失败 {len(failures)} 行，整批拒绝（已回滚全部写入）"
                 )
@@ -708,7 +738,7 @@ def apply_batch(
                 )
                 summary["applied_lines"] += 1
         if failures:
-            _fail_batch(db, batch_id, failures)
+            _fail_batch(db, batch_id, failures, commit=commit)
             raise DocBatchError(
                 f"单据批次应用失败 {len(failures)} 行，整批拒绝（已回滚全部写入）"
             )
@@ -718,12 +748,14 @@ def apply_batch(
     batch.status = "applied"
     batch.applied_by = operated_by
     batch.applied_at = datetime.now(timezone.utc)
-    db.commit()
+    if commit:
+        db.commit()
     return summary
 
 
 def relink_projects(db: Session, *, allowed_project_ids: set[str] | None = None,
-                    commit: bool = True) -> dict:
+                    commit: bool = True, identity=None, _authorization=None,
+                    _source_authorization=None, source_order_ids=None) -> dict:
     """已应用头行的项目重解析（plan v1.3 M4-3：上传顺序无关）。
 
     背景：RKD/返库先传、WBDD 或人工归属后建时，head.project_id 停在 NULL。
@@ -731,12 +763,40 @@ def relink_projects(db: Session, *, allowed_project_ids: set[str] | None = None,
     幂等（已解析行不动），只补不改：既有非空 project_id 一律不覆盖。
     allowed_project_ids 非空时，只写入落在范围内的解析结果（范围外保持 NULL）。
     """
+    from app.authz import runtime
+    from app.services import maintenance_import_authorization as authorization
+    if _source_authorization is not None:
+        from app.services.maintenance_source_assignment_access import SourceWriteAuthorization, ASSIGN
+        from app.services.maintenance_master_apply_access import MasterWriteAuthorization
+        if type(_source_authorization) is SourceWriteAuthorization:
+            valid = (_source_authorization.entry_id == ASSIGN and _source_authorization.batch is not None
+                     and _source_authorization.transaction is db.get_transaction())
+            expected = {r['source_order_id'] for r in _source_authorization.params['items']}
+        elif type(_source_authorization) is MasterWriteAuthorization:
+            valid = bool(_source_authorization.captured)
+            expected = {r.source_order_id for r in _source_authorization.plan.assignment_changes}
+        else:
+            valid, expected = False, set()
+        if not valid or commit or set(source_order_ids or ()) != expected or not expected:
+            raise ValueError('来源关系修复必须属于实际外层完整命令')
+    elif source_order_ids is not None:
+        raise ValueError('限定来源修复需要实际外层授权')
+    elif _authorization is not None:
+        if (type(_authorization) is not authorization.ImportApplyAuthorization or commit
+                or _authorization.db is not db or _authorization.transaction is not db.get_transaction()
+                or _authorization.context.contexts[0].entry_id != authorization.RELINK):
+            raise ValueError('重关联只接受实际受控事务许可')
+    elif runtime.is_authoritative(db, 'maintenance_document_relink'):
+        return authorization.relink(db, identity)
     heads = db.execute(
         select(MaintenanceDocHeadRow)
         .join(MaintenanceDocImportBatch,
               MaintenanceDocImportBatch.batch_id == MaintenanceDocHeadRow.batch_id)
         .where(MaintenanceDocImportBatch.status == "applied",
-               MaintenanceDocHeadRow.project_id.is_(None))
+               MaintenanceDocHeadRow.project_id.is_(None),
+               (MaintenanceDocHeadRow.wbdd_no.in_(select(FMaintenanceOrder.order_no).where(
+                    FMaintenanceOrder.raw_order_id.in_(source_order_ids)))
+                if _source_authorization is not None else True))
     ).scalars().all()
     relinked = 0
     out_of_scope = 0

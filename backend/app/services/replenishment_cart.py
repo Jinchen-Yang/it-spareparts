@@ -94,13 +94,14 @@ def replace_cart_draft(
     expected_version: int | None,
     request_note: str | None,
     lines: list[dict],
+    authorization=None, commit=True,
 ) -> dict:
     user = _owner(db, username)
     project, _current_ctx = replenishment._authorized_project(
         db,
         project_id=project_id,
         username=username,
-        user_ctx=user_ctx,
+        user_ctx=user_ctx, authorization=authorization,
     )
     if not lines or len(lines) > replenishment.MAX_LINES:
         raise replenishment.ReplenishmentError("购物车明细必须为 1-200 条")
@@ -156,7 +157,8 @@ def replace_cart_draft(
         ))
     db.flush()
     result = _payload(db, draft) or {}
-    db.commit()
+    if commit:
+        db.commit()
     return result
 
 
@@ -167,13 +169,14 @@ def delete_cart_draft(
     user_ctx: UserContext,
     project_id: str,
     expected_version: int | None = None,
+    authorization=None, commit=True,
 ) -> bool:
     user = _owner(db, username)
     replenishment._authorized_project(
         db,
         project_id=project_id,
         username=username,
-        user_ctx=user_ctx,
+        user_ctx=user_ctx, authorization=authorization,
     )
     draft = db.scalar(select(ReplenishmentCartDraft).where(
         ReplenishmentCartDraft.owner_user_id == user.id,
@@ -184,7 +187,8 @@ def delete_cart_draft(
     if expected_version is not None and draft.version != expected_version:
         raise replenishment.ReplenishmentError("草稿已在其他页面更新，请重新加载", code="version_conflict", status_code=409)
     db.delete(draft)
-    db.commit()
+    if commit:
+        db.commit()
     return True
 
 
@@ -196,6 +200,7 @@ def submit_cart_draft_atomic(
     project_id: str,
     expected_version: int,
     client_request_id: str,
+    authorization=None, commit=True,
 ) -> dict:
     user = _owner(db, username)
     retry_key = client_request_id.strip()
@@ -207,7 +212,7 @@ def submit_cart_draft_atomic(
         db,
         project_id=project_id,
         username=username,
-        user_ctx=user_ctx,
+        user_ctx=user_ctx, authorization=authorization,
     )
     draft = db.scalar(select(ReplenishmentCartDraft).where(
         ReplenishmentCartDraft.owner_user_id == user.id,
@@ -216,7 +221,7 @@ def submit_cart_draft_atomic(
     if draft is None:
         existing = db.scalar(
             select(ReplenishmentApplication).where(
-                ReplenishmentApplication.owner_username == username,
+                (ReplenishmentApplication.owner_user_id == authorization.accesses.principal.id) if authorization else (ReplenishmentApplication.owner_username == username),
                 ReplenishmentApplication.client_request_id == retry_key,
             )
         )
@@ -231,10 +236,11 @@ def submit_cart_draft_atomic(
                 db,
                 existing.application_id,
                 username=username,
-                role=current_ctx.role,
+                role=current_ctx.role, authorization_access=authorization,
             )
             result["idempotent"] = True
-            db.commit()
+            if commit:
+                db.commit()
             return result
         raise replenishment.ReplenishmentError("购物车不存在", code="cart_not_found", status_code=404)
     if retry_key != draft.client_request_id:
@@ -253,12 +259,13 @@ def submit_cart_draft_atomic(
     result = replenishment.submit_application_atomic(
         db,
         username=username,
-        user_ctx=user_ctx,
+        user_ctx=user_ctx, authorization=authorization,
         client_request_id=draft.client_request_id,
         project_id=project_id, request_note=draft.request_note,
         lines=[{"part_id": line.part_id, "quantity": line.quantity, "special_note": line.special_note} for line in lines],
         commit=False,
     )
     db.delete(draft)
-    db.commit()
+    if commit:
+        db.commit()
     return result

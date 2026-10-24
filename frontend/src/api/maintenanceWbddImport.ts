@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
 
 export interface WbddAddressReport {
@@ -54,16 +55,16 @@ export interface WbddLatest {
   layout: string | null;
 }
 
-export const uploadWbdd = (file: File, idempotencyKey: string) => {
+export const uploadWbdd = (file: File, idempotencyKey: string, capture?: ContextRequestTransport) => {
   const form = new FormData();
   form.append("file", file);
-  return api.post<WbddImportReport>("/maintenance/wbdd-imports", form, {
+  return domainApi(capture).post<WbddImportReport>("/maintenance/wbdd-imports", form, {
     headers: { "Idempotency-Key": idempotencyKey },
   });
 };
 
-export const getWbddLatest = () =>
-  api.get<WbddLatest>("/maintenance/wbdd-imports/latest");
+export const getWbddLatest = ( capture?: ContextRequestTransport) =>
+  domainApi(capture).get<WbddLatest>("/maintenance/wbdd-imports/latest");
 
 /** D-27: immutable source snapshot + current facts produce reviewable candidates. */
 export interface WbddMissingOrder {
@@ -116,8 +117,8 @@ export interface WbddMissing {
  * 差异清单基于最近上传的不可变原件成员；历史缺少成员时要求重新上传。
  * 执行确认必须回传本次 candidate_digest，不能绕回普通手工作废接口。
  */
-export const getWbddMissing = () =>
-  api.get<WbddMissing>("/maintenance/wbdd-imports/latest/missing");
+export const getWbddMissing = ( capture?: ContextRequestTransport) =>
+  domainApi(capture).get<WbddMissing>("/maintenance/wbdd-imports/latest/missing");
 
 export interface WbddReconcileRequest {
   expected_digest: string;
@@ -135,11 +136,11 @@ export interface WbddReconcileResult {
   replayed?: boolean;
 }
 
-export const reconcileWbdd = (batchId: number, payload: WbddReconcileRequest) =>
-  api.post<WbddReconcileResult>(`/maintenance/wbdd-imports/${batchId}/reconcile`, payload);
+export const reconcileWbdd = (batchId: number, payload: WbddReconcileRequest, capture?: ContextRequestTransport) =>
+  domainApi(capture).post<WbddReconcileResult>(`/maintenance/wbdd-imports/${batchId}/reconcile`, payload);
 
 /** 已应用单据头行的项目重解析（M4-3：先传 RKD 后建归属也能关联）。 */
-export const relinkDocProjects = () =>
-  api.post<{ relinked: number; still_unlinked: number; out_of_scope: number }>(
+export const relinkDocProjects = ( capture?: ContextRequestTransport) =>
+  domainApi(capture).post<{ relinked: number; still_unlinked: number; out_of_scope: number }>(
     "/maintenance/doc-imports/relink-projects",
   );

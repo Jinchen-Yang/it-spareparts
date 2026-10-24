@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 /** 人工登记领用（page_manual）组件：入口可用、预览冻结、幂等键、epoch、锁、
  * 按 PN 的需求单候选与领用地址建议预填。 */
 
@@ -206,7 +207,7 @@ describe("ManualSiteIssueSection", () => {
       expect(api.previewManualSiteIssue).not.toHaveBeenCalled();
     } else {
       await waitFor(() => expect(api.previewManualSiteIssue).toHaveBeenCalledWith(
-        "project-1", expect.objectContaining({ site_location: address }),
+        "project-1", expect.objectContaining({ site_location: address }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
       ));
     }
   });
@@ -405,7 +406,7 @@ describe("ManualSiteIssueSection", () => {
     fireEvent.click(confirmButton);
     await waitFor(() => expect(api.voidSiteIssue).toHaveBeenCalledWith(
       "issue-manual-1",
-      expect.objectContaining({ project_id: "project-1", version: 1 }),
+      expect.objectContaining({ project_id: "project-1", version: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     await waitFor(() => expect(reloadIssues).toHaveBeenCalled());
   });
@@ -452,7 +453,7 @@ describe("ManualSiteIssueSection", () => {
     fireEvent.change(within(dialog).getByLabelText("型号选择"), { target: { value: "1" } });
     await waitFor(() => expect(api.getSiteIssueDemandCandidates).toHaveBeenCalledWith(
       "project-1",
-      expect.objectContaining({ partId: 1 }),
+      expect.objectContaining({ partId: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     fireEvent.mouseDown(within(dialog).getByRole("combobox", { name: "第 1 行关联需求单" }));
     expect(await screen.findByText("WXD-20260901-001（2026-09-01）")).toBeInTheDocument();
@@ -464,7 +465,7 @@ describe("ManualSiteIssueSection", () => {
     });
     await waitFor(() => expect(api.getSiteIssueDemandCandidates).toHaveBeenCalledWith(
       "project-1",
-      expect.objectContaining({ partId: 1, q: "WXD-09" }),
+      expect.objectContaining({ partId: 1, q: "WXD-09" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ), { timeout: 2000 });
   });
 
@@ -517,7 +518,7 @@ describe("ManualSiteIssueSection", () => {
     fireEvent.change(pickers[1], { target: { value: "2" } });
     await waitFor(() => expect(api.getSiteIssueDemandCandidates).toHaveBeenCalledWith(
       "project-1",
-      expect.objectContaining({ partId: 2 }),
+      expect.objectContaining({ partId: 2 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     await pickDemandOption("第 1 行关联需求单", "WXD-20260901-001（2026-09-01）");
     // 第 2 行手输恰好等于候选单号：同样计为该行选定了需求单
@@ -573,3 +574,8 @@ describe("ManualSiteIssueSection", () => {
     expect(within(dialog).getByLabelText("领用地址（现场位置）")).toHaveValue("");
   });
 });
+
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

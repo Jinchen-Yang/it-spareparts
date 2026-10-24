@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
 import type { MaintenanceOrderContact } from "./maintenanceOrderContact";
 import type { DemandReturnSummary, DemandReturnSummaryError } from "./maintenanceReturnRequestSummary";
@@ -160,8 +161,8 @@ export interface BoardProjectRow {
   salesperson: string | null;
   contract_amount_inc_tax: Stat<string | number>;
   /** #51 诚实标注：合同额来自 XSDD 回退层时，共用单（金额跨项目重复）/缺单（被低估）。 */
-  contract_shared: boolean;
-  contract_incomplete: boolean;
+  contract_shared: boolean | null;
+  contract_incomplete: boolean | null;
   known_apply_cost_ex_tax: Stat<string | number>;
   /** 维保备件采购数＝库房发货＋直采直发（#41 业务指定公式）。 */
   procured_qty: Stat<string | number>;
@@ -185,7 +186,7 @@ export interface BoardProjectRow {
    * D-03：本人项目的负责人/销售可传总表。只有按稳定 ID 取单卡时下发，由服务端
    * 与 master-workbook 上传门同一判定算出；前端只消费，不复算挂靠关系。
    */
-  can_edit_master_workbook?: boolean;
+  can_edit_master_workbook?: boolean | null;
 }
 
 export interface BoardProjects {
@@ -318,13 +319,13 @@ export interface BoardLines {
 
 const BASE = "/maintenance/boss-board";
 
-export const getBoardHealth = () => api.get<BoardHealth>(`${BASE}/health`);
+export const getBoardHealth = ( capture?: ContextRequestTransport) => domainApi(capture).get<BoardHealth>(`${BASE}/health`);
 
-export const getBoardSummary = (params?: { from?: string; to?: string }) =>
-  api.get<BoardSummary>(`${BASE}/summary`, { params });
+export const getBoardSummary = (params?: { from?: string; to?: string }, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<BoardSummary>(`${BASE}/summary`, { params });
 
-export const getBoardAttention = (limit = 10) =>
-  api.get<BoardAttention>(`${BASE}/attention`, { params: { limit } });
+export const getBoardAttention = (limit = 10, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<BoardAttention>(`${BASE}/attention`, { params: { limit } });
 
 export const getBoardProjects = (params?: {
   page?: number;
@@ -335,7 +336,7 @@ export const getBoardProjects = (params?: {
   from?: string;
   to?: string;
   business_type?: string;
-}) => api.get<BoardProjects>(`${BASE}/projects`, { params });
+}, capture?: ContextRequestTransport) => domainApi(capture).get<BoardProjects>(`${BASE}/projects`, { params });
 
 export const searchBoardProjects = (body: {
   q: string;
@@ -345,16 +346,16 @@ export const searchBoardProjects = (body: {
   sort?: string;
   card_status?: CardStatus;
   business_type?: string;
-}) => api.post<BoardProjects>(`${BASE}/projects/search`, body);
+}, capture?: ContextRequestTransport) => domainApi(capture).post<BoardProjects>(`${BASE}/projects/search`, body);
 
-export const getBoardProjectExportOptions = () =>
-  api.get<BoardProjectExportOptions>(`${BASE}/projects/export/options`);
+export const getBoardProjectExportOptions = ( capture?: ContextRequestTransport) =>
+  domainApi(capture).get<BoardProjectExportOptions>(`${BASE}/projects/export/options`);
 
 /** 下载当前筛选命中的全部项目（不是只下载当前已经滚动加载的卡片）。 */
 export const downloadBoardProjectsExport = async (
-  body: BoardProjectExportInput,
+  body: BoardProjectExportInput, capture?: ContextRequestTransport
 ): Promise<BoardProjectExportDownload> => {
-  const response = await api.post<Blob>(`${BASE}/projects/export`, body, {
+  const response = await domainApi(capture).post<Blob>(`${BASE}/projects/export`, body, {
     responseType: "blob",
   });
   const disposition = String(response.headers["content-disposition"] ?? "");
@@ -372,19 +373,19 @@ export const downloadBoardProjectsExport = async (
 };
 
 /** 详情页按稳定 ID 取聚合卡，避免名称模糊搜索第 1 页漏掉同名项目。 */
-export const getBoardProject = (projectId: string) =>
-  api.get<BoardProjectRow>(`${BASE}/projects/${encodeURIComponent(projectId)}`);
+export const getBoardProject = (projectId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<BoardProjectRow>(`${BASE}/projects/${encodeURIComponent(projectId)}`);
 
 /** contract_no：服务端按 linked_sales_order_no 归一化相等过滤（去空白/大写/去 XSDD-）。 */
 export const getBoardProjectOrders = (
   projectId: string,
-  params?: { page?: number; page_size?: number; contract_no?: string },
-) => api.get<BoardOrders>(`${BASE}/projects/${encodeURIComponent(projectId)}/orders`, { params });
+  params?: { page?: number; page_size?: number; contract_no?: string }, capture?: ContextRequestTransport
+) => domainApi(capture).get<BoardOrders>(`${BASE}/projects/${encodeURIComponent(projectId)}/orders`, { params });
 
 export const getBoardOrderLines = (
   sourceOrderId: string,
-  params?: { page?: number; page_size?: number },
-) => api.get<BoardLines>(`${BASE}/orders/${encodeURIComponent(sourceOrderId)}/lines`, { params });
+  params?: { page?: number; page_size?: number }, capture?: ContextRequestTransport
+) => domainApi(capture).get<BoardLines>(`${BASE}/orders/${encodeURIComponent(sourceOrderId)}/lines`, { params });
 
 /** 未归属桶的伪项目 ID（后端 §4.5 约定）。 */
 export const UNASSIGNED_BUCKET = "unassigned";

@@ -28,6 +28,12 @@ import {
 } from "../../api/maintenanceBatchTransfer";
 import { saveBlob } from "../../api/maintenanceWorkbooks";
 
+import { withContextSurface, contextSurfaces } from "../../authz/ContextSurface";
+import { useContextTransport } from "../../authz/domainTransport";
+import { useAccess, useModuleAccess, useSurface } from "../../authz/access";
+import { actionRule } from "../../authz/rules";
+import { contextInputKey } from "../../authz/context";
+
 const { Text, Paragraph } = Typography;
 const DEFAULT_MAX_FILES = 20;
 
@@ -498,7 +504,14 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
   const [ruling, setRuling] = useState(false);
   const [rulingError, setRulingError] = useState<string | null>(null);
   const requestGeneration = useRef(0);
-  const canRule = canRuleReceiptConflict();
+  const module = useModuleAccess("maintenance_project_transfer");
+  const previewAccess = useAccess(actionRule("maintenance_project_transfer", "preview"), { legacy: { maintenance_project_transfer: options.can_import } });
+  const applyAccess = useAccess(actionRule("maintenance_project_transfer", "apply"), { legacy: { maintenance_project_transfer: options.can_import } });
+  const rulingAccess = useAccess(actionRule("maintenance_project_transfer", "receipt_ruling"), { legacy: { maintenance_project_transfer: canRuleReceiptConflict() } });
+  const canRule = rulingAccess.entryState !== "deny";
+  const previewTransport = useContextTransport(contextInputKey({ body: files.map(rawFile) }), true);
+  const applyTransport = useContextTransport(contextInputKey({ body: { token: preview?.preview_token, selectedRowKeys } }), true);
+  const rulingTransport = useContextTransport(contextInputKey({ body: { rulingRow, rulingReason } }), true);
 
   const maxFiles = options.max_files || DEFAULT_MAX_FILES;
   const accepted = options.accepted_extensions.length
@@ -550,7 +563,7 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
   };
 
   const runPreview = async () => {
-    if (!files.length || previewing || applying) return;
+    if (!files.length || previewing || applying || previewAccess.entryState === "deny") return;
     const sourceFiles = files.map(rawFile).filter((file): file is File => Boolean(file));
     if (sourceFiles.length !== files.length) {
       setError("部分文件无法读取，请移除后重新选择");
@@ -561,17 +574,17 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     setError(null);
     setResult(null);
     try {
-      const { data } = await previewMaintenanceBatchTransfer(sourceFiles);
-      if (generation !== requestGeneration.current) return;
+      const { data } = await previewMaintenanceBatchTransfer(sourceFiles, previewTransport);
+      if (generation !== requestGeneration.current || !previewTransport.isCurrent()) return;
       setPreview(data);
       // 覆盖既有累计的行默认不勾选，必须由用户逐行确认（D-16）
       setSelectedRowKeys(defaultSelectedKeys(data.rows));
       setFilter("all");
     } catch (reason) {
-      if (generation !== requestGeneration.current) return;
+      if (generation !== requestGeneration.current || !previewTransport.isCurrent()) return;
       setError(await errorMessage(reason, "批量预览失败，请检查文件后重试"));
     } finally {
-      if (generation === requestGeneration.current) setPreviewing(false);
+      if (generation === requestGeneration.current && previewTransport.isCurrent()) setPreviewing(false);
     }
   };
 
@@ -676,7 +689,8 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
         receipt_date: subject.receipt_date,
         actual_amount: subject.actual_amount,
         reason: rulingReasonText,
-      });
+      }, rulingTransport);
+      if (!rulingTransport.isCurrent()) return;
       message.success(
         subject.kind === "voided_upstream"
           ? `已裁决收款单 ${subject.receipt_no}：上游已作废，台账原行按 0 元更正，涉及 ${outcome.affected_months.length} 个月份累计；正在重新预览`
@@ -687,6 +701,7 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
       // 裁决只改台账不改快照：必须重新预览，受影响月份才会以覆盖行呈现
       await runPreview();
     } catch (reason) {
+      if (!rulingTransport.isCurrent()) return;
       const status = errorStatus(reason);
       const detail = await errorMessage(reason, "");
       setRulingError(
@@ -698,12 +713,12 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
             : "裁决失败，请稍后重试"),
       );
     } finally {
-      setRuling(false);
+      if (rulingTransport.isCurrent()) setRuling(false);
     }
   };
 
   const apply = async () => {
-    if (!preview || !safeSelectedKeys.length || applying) return;
+    if (!preview || !safeSelectedKeys.length || applying || applyAccess.entryState === "deny") return;
     const generation = requestGeneration.current;
     setApplying(true);
     setError(null);
@@ -713,7 +728,8 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
         payload_hash: preview.payload_hash,
         data_version: preview.data_version,
         row_keys: safeSelectedKeys.map(String),
-      });
+      }, applyTransport);
+      if (!applyTransport.isCurrent()) return;
       // 用户可能在网络请求期间关闭弹窗；后端一旦成功，主页仍必须刷新，不能因
       // ImportPanel 已卸载而留下旧卡片。弹窗内状态只在本次会话仍有效时更新。
       if (generation === requestGeneration.current) {
@@ -723,7 +739,8 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
       await onApplied();
       message.success(`批量提交完成：成功 ${data.applied} 行`);
     } catch (reason) {
-      if (generation !== requestGeneration.current) return;
+      if (generation !== requestGeneration.current || !applyTransport.isCurrent()) return;
+      setApplying(false);
       if (isTerminalApplyFailure(reason)) {
         // 后端已把批次记为 failed（409 stale_preview / apply_conflict、422 business_rule_violation、
         // 未预期异常 5xx）：预览凭证作废，清掉预览与勾选（保留文件）让用户重新预览，
@@ -739,7 +756,7 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
       // 用户补勾点名的行 / 去掉覆盖行重提 / 换实名账号 / 直接重试都行；与裁决弹窗同一处理。
       setError(await retryableApplyMessage(reason));
     } finally {
-      if (generation === requestGeneration.current) setApplying(false);
+      if (generation === requestGeneration.current && applyTransport.isCurrent()) setApplying(false);
     }
   };
 
@@ -844,7 +861,7 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
     { title: "说明", dataIndex: "message", render: (value) => value || "—" },
   ];
 
-  if (!options.can_import) {
+  if (module.legacy ? !options.can_import : previewAccess.entryState === "deny") {
     return <Alert type="info" showIcon message="当前账号没有批量导入权限" />;
   }
 
@@ -953,7 +970,7 @@ function ImportPanel({ options, onApplied }: ImportPanelProps) {
                   <Button
                     type="primary"
                     loading={applying}
-                    disabled={!preview.can_apply || !safeSelectedKeys.length || previewing || selectionInconsistent}
+                    disabled={applyAccess.entryState === "deny" || (module.legacy && !preview.can_apply) || !safeSelectedKeys.length || previewing || selectionInconsistent}
                     title={selectionInconsistent ? `勾选不一致：${missingDependencies.join("；")}` : undefined}
                     onClick={() => void apply()}
                   >
@@ -1077,6 +1094,9 @@ function DownloadPanel({ options, filters }: DownloadPanelProps) {
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const transport = useContextTransport(JSON.stringify([filters, forms, fields]), true);
+  const module = useModuleAccess("maintenance_project_transfer_export");
+
   const availableFields = useMemo(
     () => options.download_fields.filter((field) => fieldAvailable(field, forms)),
     [forms, options.download_fields],
@@ -1127,17 +1147,19 @@ function DownloadPanel({ options, filters }: DownloadPanelProps) {
         ...filters,
         forms,
         fields,
-      });
+      }, transport);
+      if (!transport.isCurrent()) return;
       saveBlob(result.blob, result.filename);
       message.success("批量文件已开始下载");
     } catch (reason) {
-      setError(await errorMessage(reason, "批量下载失败，请稍后重试"));
+      const detail = await errorMessage(reason, "批量下载失败，请稍后重试");
+      if (transport.isCurrent()) setError(detail);
     } finally {
-      setDownloading(false);
+      if (transport.isCurrent()) setDownloading(false);
     }
   };
 
-  if (!options.can_download) {
+  if (module.legacy && !options.can_download) {
     return <Alert type="info" showIcon message="当前账号没有批量下载权限" />;
   }
 
@@ -1213,7 +1235,7 @@ function DownloadPanel({ options, filters }: DownloadPanelProps) {
   );
 }
 
-export default function MaintenanceBatchTransferButton({
+function MaintenanceBatchTransferButton({
   filters,
   onApplied,
 }: MaintenanceBatchTransferButtonProps) {
@@ -1222,6 +1244,9 @@ export default function MaintenanceBatchTransferButton({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const openGeneration = useRef(0);
+  const importSurface = useSurface("maintenance_project_transfer.batch", { legacy: { maintenance_project_transfer: true } });
+  const exportSurface = useSurface("maintenance_project_transfer_export.download", { legacy: { maintenance_project_transfer_export: true } });
+  const transport = useContextTransport(JSON.stringify([open, filters]), true);
 
   const loadOptions = async () => {
     const generation = ++openGeneration.current;
@@ -1229,22 +1254,22 @@ export default function MaintenanceBatchTransferButton({
     setOptions(null);
     setError(null);
     try {
-      const { data } = await getMaintenanceBatchTransferOptions();
-      if (generation !== openGeneration.current) return;
+      const { data } = await getMaintenanceBatchTransferOptions(transport);
+      if (generation !== openGeneration.current || !transport.isCurrent()) return;
       setOptions(data);
     } catch (reason) {
-      if (generation !== openGeneration.current) return;
+      if (generation !== openGeneration.current || !transport.isCurrent()) return;
       setError(await errorMessage(reason, "无法读取批量导入/下载配置，请稍后重试"));
     } finally {
-      if (generation === openGeneration.current) setLoading(false);
+      if (generation === openGeneration.current && transport.isCurrent()) setLoading(false);
     }
   };
 
   useEffect(() => {
-    if (open) void loadOptions();
+    if (open && exportSurface.entryState !== "deny") void loadOptions();
     else openGeneration.current += 1;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, exportSurface.entryState, transport]);
 
   return (
     <>
@@ -1260,34 +1285,19 @@ export default function MaintenanceBatchTransferButton({
         destroyOnHidden
         styles={{ body: { maxHeight: "78vh", overflowY: "auto" } }}
       >
-        {loading ? (
-          <div style={{ padding: 48, textAlign: "center" }}><Spin /></div>
-        ) : error ? (
-          <Alert
-            type="error"
-            showIcon
-            message={error}
-            action={<Button size="small" onClick={() => void loadOptions()}>重试</Button>}
-          />
-        ) : options ? (
-          <Tabs
-            items={[
-              {
-                key: "import",
-                label: "批量导入",
-                children: <ImportPanel options={options} onApplied={onApplied} />,
-              },
-              {
-                key: "download",
-                label: "批量下载",
-                children: <DownloadPanel options={options} filters={filters} />,
-              },
-            ]}
-          />
-        ) : (
-          <Paragraph type="secondary">暂无可用配置</Paragraph>
-        )}
+        {open && <Tabs items={[
+          ...(importSurface.entryState !== "deny" ? [{ key: "import", label: "批量导入",
+            children: <ImportPanel options={options ?? { max_files: DEFAULT_MAX_FILES, accepted_extensions: [".xlsx"],
+              can_import: true, can_download: false, import_kinds: [], download_forms: [], download_fields: [], default_forms: [], default_fields: [] }}
+              onApplied={onApplied} /> }] : []),
+          ...(exportSurface.entryState !== "deny" ? [{ key: "download", label: "批量下载",
+            children: loading ? <div style={{ padding: 48, textAlign: "center" }}><Spin /></div> : error ?
+              <Alert type="error" showIcon message={error} action={<Button onClick={() => void loadOptions()}>重试</Button>} /> :
+              options ? <DownloadPanel options={options} filters={filters} /> : <Paragraph type="secondary">暂无可用配置</Paragraph> }] : []),
+        ]} />}
       </Modal>
     </>
   );
 }
+
+export default withContextSurface(MaintenanceBatchTransferButton, contextSurfaces("maintenance_project_transfer.batch", "maintenance_project_transfer_export.download"), props => props.filters);

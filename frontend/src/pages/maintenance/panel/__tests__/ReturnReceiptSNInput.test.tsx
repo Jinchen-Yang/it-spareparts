@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../../test/legacyAuthorization";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -145,3 +146,8 @@ describe("ReturnReceiptsSection SN 输入（v1.36 扫描做实）", () => {
     expect(mocks.create).not.toHaveBeenCalled();
   });
 });
+
+vi.mock("../../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

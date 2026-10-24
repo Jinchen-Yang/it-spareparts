@@ -175,9 +175,20 @@ function CollectionBar({
 
 export interface ProjectCardProps {
   row: BoardProjectRow;
+  fieldPermissions?: readonly string[];
 }
 
-export function ProjectCard({ row }: ProjectCardProps) {
+export function ProjectCard({ row: source, fieldPermissions }: ProjectCardProps) {
+  const cost = !fieldPermissions || fieldPermissions.includes("data_purchase_cost");
+  const finance = cost && (!fieldPermissions || fieldPermissions.includes("data_profit"));
+  const restricted = { state: "restricted" as const, value: null, as_of: null };
+  const row = { ...source,
+    ...(!cost ? { known_apply_cost_ex_tax: restricted, known_apply_cost_inc_tax: restricted,
+      requisition_cost_inc_tax: restricted, cost_ratio_pct: restricted, card_status: null } : {}),
+    ...(!finance ? { contract_amount_inc_tax: restricted, collection_preview_inc_tax: restricted,
+      expense_cost_inc_tax: restricted, contract_shared: false, contract_incomplete: false,
+      cost_ratio_pct: restricted, card_status: null } : {}),
+  };
   const isBucket = row.project_id === UNASSIGNED_BUCKET;
   const status = row.card_status ? STATUS_META[row.card_status] : null;
   const displayNames = Array.from(new Set([row.display_name, ...(row.peer_names ?? [])]));

@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import api from "../api";
 
 export interface ReplenishmentCapabilities {
@@ -172,29 +173,29 @@ export interface ReplenishmentCartDraft {
   lines: ReplenishmentCartDraftLine[];
 }
 
-export const getReplenishmentCapabilities = () =>
-  api.get<ReplenishmentCapabilities>("/replenishment-beta/capabilities");
+export const getReplenishmentCapabilities = ( capture?: ContextRequestTransport) =>
+  domainApi(capture).get<ReplenishmentCapabilities>("/replenishment-beta/capabilities");
 
-export const searchReplenishmentCatalog = (q: string, page = 1, pageSize = 20) =>
-  api.get<{ items: CatalogPart[]; total: number; page: number; page_size: number }>(
+export const searchReplenishmentCatalog = (q: string, page = 1, pageSize = 20, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<{ items: CatalogPart[]; total: number; page: number; page_size: number }>(
     "/replenishment-beta/catalog",
     { params: { q: q || undefined, page, page_size: pageSize } },
   );
 
 /** 当前账号按统一维保行级范围可选的活动项目。 */
-export const getReplenishmentProjects = () =>
-  api.get<{ items: ReplenishmentProject[] }>("/replenishment-beta/projects");
+export const getReplenishmentProjects = ( capture?: ContextRequestTransport) =>
+  domainApi(capture).get<{ items: ReplenishmentProject[] }>("/replenishment-beta/projects");
 
-export const listReplenishmentApplications = (page = 1, pageSize = 20) =>
-  api.get<{
+export const listReplenishmentApplications = (page = 1, pageSize = 20, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<{
     items: ApplicationSummary[];
     total: number;
     page: number;
     page_size: number;
   }>("/replenishment-beta/applications", { params: { page, page_size: pageSize } });
 
-export const getReplenishmentApplication = (applicationId: string) =>
-  api.get<ReplenishmentApplication>(`/replenishment-beta/applications/${applicationId}`);
+export const getReplenishmentApplication = (applicationId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<ReplenishmentApplication>(`/replenishment-beta/applications/${applicationId}`);
 
 /**
  * 一次性原子提交（Issue #260）：创建即提交，事务内完成三查并冻结证据。
@@ -205,14 +206,14 @@ export const createReplenishmentApplication = (input: {
   project_id: string;
   request_note?: string | null;
   lines: AtomicLineInput[];
-}) =>
-  api.post<ReplenishmentApplication & { idempotent?: boolean }>(
+}, capture?: ContextRequestTransport) =>
+  domainApi(capture).post<ReplenishmentApplication & { idempotent?: boolean }>(
     "/replenishment-beta/applications",
     input,
   );
 
-export const getReplenishmentCartDraft = (projectId: string) =>
-  api.get<{ draft: ReplenishmentCartDraft | null }>(
+export const getReplenishmentCartDraft = (projectId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<{ draft: ReplenishmentCartDraft | null }>(
     `/replenishment-beta/cart-drafts/${encodeURIComponent(projectId)}`,
   );
 
@@ -220,13 +221,13 @@ export const replaceReplenishmentCartDraft = (projectId: string, input: {
   expected_version?: number | null;
   request_note?: string | null;
   lines: AtomicLineInput[];
-}) => api.put<{ draft: ReplenishmentCartDraft }>(
+}, capture?: ContextRequestTransport) => domainApi(capture).put<{ draft: ReplenishmentCartDraft }>(
   `/replenishment-beta/cart-drafts/${encodeURIComponent(projectId)}`,
   input,
 );
 
-export const deleteReplenishmentCartDraft = (projectId: string, expectedVersion?: number) =>
-  api.delete<{ deleted: boolean }>(
+export const deleteReplenishmentCartDraft = (projectId: string, expectedVersion?: number, capture?: ContextRequestTransport) =>
+  domainApi(capture).delete<{ deleted: boolean }>(
     `/replenishment-beta/cart-drafts/${encodeURIComponent(projectId)}`,
     { params: expectedVersion ? { expected_version: expectedVersion } : undefined },
   );
@@ -234,9 +235,9 @@ export const deleteReplenishmentCartDraft = (projectId: string, expectedVersion?
 export const submitReplenishmentCartDraft = (
   projectId: string,
   expectedVersion: number,
-  clientRequestId: string,
+  clientRequestId: string, capture?: ContextRequestTransport
 ) =>
-  api.post<ReplenishmentApplication & { idempotent?: boolean }>(
+  domainApi(capture).post<ReplenishmentApplication & { idempotent?: boolean }>(
     `/replenishment-beta/cart-drafts/${encodeURIComponent(projectId)}/submit`,
     { expected_version: expectedVersion, client_request_id: clientRequestId },
   );
@@ -254,14 +255,14 @@ export const applyReplenishmentRevision = (applicationId: string, input: {
     quantity?: number;
     special_note?: string | null;
   }>;
-}) => api.post<ReplenishmentApplication & { idempotent?: boolean }>(
+}, capture?: ContextRequestTransport) => domainApi(capture).post<ReplenishmentApplication & { idempotent?: boolean }>(
   `/replenishment-beta/applications/${encodeURIComponent(applicationId)}/revisions`,
   input,
 );
 
 /** 导出系统三查复核包 Excel（submitted/approved/needs_revision 均可，#11）。 */
-export const downloadSystemScreeningWorkbook = (applicationId: string) =>
-  api.get<Blob>(
+export const downloadSystemScreeningWorkbook = (applicationId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<Blob>(
     `/replenishment-beta/applications/${encodeURIComponent(applicationId)}/exports/system-screening.xlsx`,
     { responseType: "blob" },
   );

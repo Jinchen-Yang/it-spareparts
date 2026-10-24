@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useContextQuery } from "../../authz/contextQuery";
+import { surfaceRule } from "../../authz/rules";
 import { fetchMaintenanceExplorer, type ExplorerDimension, type ExplorerMetric, type MaintenanceExplorerParams, type MaintenanceExplorerResponse } from "../../api/maintenanceAnalytics";
 
 export const EXPLORER_METRICS: Record<ExplorerMetric, { label: string; unit: string; note: string }> = {
@@ -82,22 +83,12 @@ export function explorerErrorMessage(error: unknown): string {
 }
 
 /** 请求切换即隐藏上一范围的数据；abort + 代次守卫同时覆盖网络与解包竞态。 */
-export function useMaintenanceExplorer(params: MaintenanceExplorerParams, refreshKey = 0) {
-  const key = JSON.stringify(params);
-  const [retry, setRetry] = useState(0);
-  const sequence = useRef(0);
-  const [state, setState] = useState<{ key: string; data: MaintenanceExplorerResponse | null; error: string | null; loading: boolean }>({ key: "", data: null, error: null, loading: true });
-  useEffect(() => {
-    const request = ++sequence.current;
-    const controller = new AbortController();
-    setState(previous => ({ key, data: previous.key === key ? previous.data : null, error: null, loading: true }));
-    fetchMaintenanceExplorer(JSON.parse(key) as MaintenanceExplorerParams, controller.signal).then(data => {
-      if (request === sequence.current && !controller.signal.aborted) setState({ key, data, error: null, loading: false });
-    }).catch(error => {
-      if (request === sequence.current && !controller.signal.aborted) setState({ key, data: null, error: explorerErrorMessage(error), loading: false });
-    });
-    return () => { controller.abort(); sequence.current += 1; };
-  }, [key, refreshKey, retry]);
-  const reload = useCallback(() => { setRetry(value => value + 1); return true; }, []);
-  return { ...(state.key === key ? state : { key, data: null, error: null, loading: true }), reload };
+export function useMaintenanceExplorer(params: MaintenanceExplorerParams, refreshKey = 0, surfaceId = "maintenance_analysis.rankings") {
+  const result = useContextQuery({
+    entryId: "GET /api/maintenance/analytics/explorer", rule: surfaceRule(surfaceId),
+    queryKey: [params], refreshKey, retainLegacyOnRefresh: true, legacyAllowed: true,
+    query: capture => fetchMaintenanceExplorer(params, capture.signal, capture),
+  });
+  return { data: result.data, context: result.context, loading: result.loading,
+    error: result.error ? explorerErrorMessage(result.error) : null, reload: () => { result.retry(); return true; } };
 }

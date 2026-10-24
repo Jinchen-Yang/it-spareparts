@@ -14,6 +14,11 @@ import {
 import { readError } from "./panelUtils";
 import MaintenanceAcceptancePanel from "../../../components/maintenance/MaintenanceAcceptancePanel";
 import { saveBlob } from "../../../api/maintenanceWorkbooks";
+import { useContextAdmission } from "../../../authz/access";
+import { actionRule, anyRule } from "../../../authz/rules";
+import { useContextTransport } from "../../../authz/domainTransport";
+import { withContextSurface, contextSurfaces } from "../../../authz/ContextSurface";
+import { authorizationErrorText } from "../../../authz/requestLifecycle";
 
 const { Text } = Typography;
 
@@ -52,9 +57,9 @@ const itemColumns: ColumnsType<{
  * 上半区「验收需求清单」——两列 Excel 导入（预览确认 → 整表替换，历史留档）；
  * 下半区复活既有验收交付面板（附件上传 + 提交即生效免审批，原孤儿组件）。
  */
-export function AcceptanceTab({
+function AcceptanceTabContent({
   projectId,
-  canImport,
+  canImport: legacyImport,
   onChanged,
 }: {
   projectId: string;
@@ -69,46 +74,62 @@ export function AcceptanceTab({
   const [issues, setIssues] = useState<string[]>([]);
   const [uploadInputVersion, setUploadInputVersion] = useState(0);
   const generation = useRef(0);
+  const admission = useContextAdmission();
+  const transport = useContextTransport(projectId, true);
+  const canChecklist = admission.surface("maintenance_acceptance.checklist", true) !== "deny";
+  const canImportSurface = admission.surface("maintenance_acceptance.checklist_import", legacyImport) !== "deny";
+  const allowed = (action: string, legacy: boolean) => admission.state(actionRule("maintenance_acceptance", action), legacy) !== "deny";
+  const canPreview = canImportSurface && allowed("checklist_preview", legacyImport);
+  const canApply = canImportSurface && allowed("checklist_apply", legacyImport);
+  const canTemplate = allowed("template_download", true);
+  const inFlight = useRef(false);
+  const dialog = useRef<{ destroy(): void; settle(): void } | null>(null);
+  useEffect(() => () => { dialog.current?.destroy(); dialog.current?.settle(); dialog.current = null; }, []);
 
   const load = async () => {
+    if (!canChecklist) { setData(null); setLoading(false); return true; }
     const seq = ++generation.current;
+    setData(null);
     setLoading(true);
     setFeedback(null);
     setIssues([]);
     try {
-      const resp = await getMaintenanceAcceptanceChecklist(projectId);
-      if (seq === generation.current) setData(resp.data);
-      return seq === generation.current;
+      const resp = await getMaintenanceAcceptanceChecklist(projectId, transport);
+      if (seq === generation.current && transport.isCurrent()) setData(resp.data);
+      return seq === generation.current && transport.isCurrent();
     } catch (err) {
-      if (seq === generation.current) {
+      if (seq === generation.current && transport.isCurrent()) {
         setData(null);
-        setFeedback({ type: "error", text: readError(err, "验收清单加载失败") });
+        setFeedback({ type: "error", text: authorizationErrorText(err, readError(err, "验收清单加载失败")) });
       }
       return false;
     } finally {
-      if (seq === generation.current) setLoading(false);
+      if (seq === generation.current && transport.isCurrent()) setLoading(false);
     }
   };
 
   useEffect(() => {
     void load();
+    return () => { generation.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [projectId, transport, canChecklist]);
 
   const downloadTemplate = async () => {
+    if (!canTemplate || !transport.isCurrent()) return;
     setFeedback(null);
     setIssues([]);
     try {
-      const resp = await downloadAcceptanceChecklistTemplate(projectId);
-      saveBlob(resp.data, "验收需求清单模板.xlsx");
+      const resp = await downloadAcceptanceChecklistTemplate(projectId, transport);
+      if (transport.isCurrent()) saveBlob(resp.data, "验收需求清单模板.xlsx");
     } catch (err) {
-      setFeedback({ type: "error", text: readError(err, "模板下载失败") });
+      if (transport.isCurrent()) setFeedback({ type: "error", text: authorizationErrorText(err, readError(err, "模板下载失败")) });
     }
   };
 
   const confirmApply = (preview: MaintenanceAcceptanceChecklistPreview) =>
     new Promise<void>((resolve) => {
-      Modal.confirm({
+      if (!canApply || !transport.isCurrent()) { resolve(); return; }
+      const modal = Modal.confirm({
       title: "应用验收清单",
       width: 560,
       content: (
@@ -131,20 +152,24 @@ export function AcceptanceTab({
       ),
       okText: "替换生效",
       cancelText: "取消",
-      onCancel: () => resolve(),
+      onCancel: () => { dialog.current = null; resolve(); },
       onOk: async () => {
+        if (!canApply || !transport.isCurrent()) { resolve(); return; }
         setImporting(true);
         let committed = false;
         try {
-          await applyMaintenanceAcceptanceChecklist(preview.batch_id);
+          await applyMaintenanceAcceptanceChecklist(preview.batch_id, transport);
+          if (!transport.isCurrent()) { resolve(); return; }
           committed = true;
           const localReady = await load();
+          if (!transport.isCurrent()) { resolve(); return; }
           let parentReady = true;
           try {
             parentReady = onChanged ? (await onChanged()) !== false : true;
           } catch {
             parentReady = false;
           }
+          if (!transport.isCurrent()) { resolve(); return; }
           if (localReady && parentReady) {
             message.success(`验收清单已生效并刷新（${preview.item_rows} 条）`);
           } else {
@@ -152,21 +177,26 @@ export function AcceptanceTab({
           }
           resolve();
         } catch (err) {
+          if (!transport.isCurrent()) { resolve(); return; }
           if (committed) {
             setFeedback({ type: "warning", text: "验收清单已生效，但页面刷新失败；旧数据已失效，请重试。" });
             resolve();
             return;
           }
-          setFeedback({ type: "error", text: readError(err, "应用失败，系统未写入") });
+          setFeedback({ type: "error", text: authorizationErrorText(err, readError(err, "应用失败，系统未写入")) });
           resolve();
         } finally {
-          setImporting(false);
+          dialog.current = null;
+          if (transport.isCurrent()) setImporting(false);
         }
       },
       });
+      dialog.current = { destroy: modal.destroy, settle: resolve };
     });
 
   const beforeUpload = async (file: File) => {
+    if (!canPreview || inFlight.current || !transport.isCurrent()) return false;
+    inFlight.current = true;
     setImporting(true);
     setFeedback(null);
     setIssues([]);
@@ -174,17 +204,22 @@ export function AcceptanceTab({
       const resp = await previewMaintenanceAcceptanceChecklist(projectId, {
         file,
         idempotencyKey: idempotencyKey(),
-      });
+      }, transport);
+      if (!transport.isCurrent()) return false;
       const preview = resp.data;
       if (preview.issue_rows > 0) {
         setFeedback({ type: "error", text: `清单有 ${preview.issue_rows} 个问题行，未导入` });
         setIssues(preview.issues);
-      } else {
+      } else if (canApply) {
         await confirmApply(preview);
+      } else {
+        setFeedback({ type: "warning", text: `预览完成（${preview.item_rows} 条）；当前账号没有应用清单的权限。` });
       }
     } catch (err) {
-      setFeedback({ type: "error", text: readError(err, "清单解析失败") });
+      if (transport.isCurrent()) setFeedback({ type: "error", text: authorizationErrorText(err, readError(err, "清单解析失败")) });
     } finally {
+      inFlight.current = false;
+      if (!transport.isCurrent()) return false;
       setImporting(false);
       // 浏览器不会为同一个 file input 连续触发同文件的 change；预检失败或
       // 用户取消确认后重建 Upload，避免“再点同一文件没有反应”。
@@ -199,19 +234,19 @@ export function AcceptanceTab({
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       {feedback ? <Alert type={feedback.type} showIcon message={feedback.text}
         description={issues.length ? <ul style={{ paddingLeft: 18, margin: 0 }}>{issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul> : undefined} /> : null}
-      <Card
+      {(canChecklist || canPreview || canTemplate) && <Card
         size="small"
         title="验收需求清单"
         extra={
           <Space>
-            <Button
+            {canTemplate && <Button
               size="small"
               icon={<DownloadOutlined />}
               onClick={downloadTemplate}
             >
               下载模板
-            </Button>
-            {canImport ? (
+            </Button>}
+            {canPreview ? (
               <Upload
                 key={`acceptance-checklist-upload-${uploadInputVersion}`}
                 accept=".xlsx"
@@ -239,7 +274,7 @@ export function AcceptanceTab({
         <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
           清单仅作验收需求记录，与下方验收报告提交状态无关。
         </Text>
-        {current ? (
+        {canChecklist && (current ? (
           <>
             <Space size={16} wrap style={{ marginBottom: 12 }}>
               <Text type="secondary">
@@ -261,14 +296,14 @@ export function AcceptanceTab({
           <Text type="secondary">
             {loading ? "清单加载中…" : "尚未导入验收清单——下载模板、填好「验收需求 / 是否完成」两列后导入。"}
           </Text>
-        )}
-        {data && data.history.length > 1 ? (
+        ))}
+        {canChecklist && data && data.history.length > 1 ? (
           <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 8 }}>
             历史版本 {data.history.length - 1} 个（最早{" "}
             {data.history[data.history.length - 1].applied_at ?? "—"}），如需回滚请重新导入对应文件。
           </Text>
         ) : null}
-      </Card>
+      </Card>}
 
       {/* 验收交付（附件+提交即生效）2026-08-24 起随维保页面开放：
           销售/项目经理/维保负责人都能查看，按钮层再按提交权限收敛。 */}
@@ -277,4 +312,9 @@ export function AcceptanceTab({
   );
 }
 
+export const AcceptanceTab = withContextSurface(AcceptanceTabContent,
+  anyRule(contextSurfaces("maintenance_acceptance.checklist", "maintenance_acceptance.checklist_import",
+    "maintenance_acceptance.report", "maintenance_acceptance.attachments"),
+    actionRule("maintenance_acceptance", "template_download"), actionRule("maintenance_acceptance", "attachment_upload")),
+  props => props.projectId);
 export default AcceptanceTab;

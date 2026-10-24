@@ -1,3 +1,8 @@
+import { useContextAdmission } from "../../authz/access";
+import { actionRule, anyRule } from "../../authz/rules";
+import { useContextTransport } from "../../authz/domainTransport";
+import { withContextSurface } from "../../authz/ContextSurface";
+import { authorizationErrorText } from "../../authz/requestLifecycle";
 import { useEffect, useRef, useState } from "react";
 import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
 import { Alert, Button, Descriptions, Space, Spin, Tag } from "antd";
@@ -22,7 +27,7 @@ function safeFilenamePart(value: string): string {
   return value.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").trim() || "维保项目";
 }
 
-export default function ProjectWorkbookActions({
+function ProjectWorkbookActionsContent({
   projectId,
   projectCode,
   onApplied,
@@ -34,6 +39,13 @@ export default function ProjectWorkbookActions({
   const [{ canApplyRoundtrip, canDownloadRoundtrip }] = useState(
     readMaintenanceCapabilities,
   );
+  const admission = useContextAdmission();
+  const allow = (action: string, legacy: boolean) => admission.state(actionRule("maintenance_project_roundtrip", action), legacy) !== "deny";
+  const canDownload = allow("download_v2", canDownloadRoundtrip);
+  const canValidate = allow("validate_v2", canApplyRoundtrip);
+  const canApply = allow("apply_v2", canApplyRoundtrip);
+  const canErrors = allow("error_download_v2", canApplyRoundtrip);
+  const transport = useContextTransport(projectId, true);
   const inputRef = useRef<HTMLInputElement>(null);
   const validationGeneration = useRef(0);
   const downloadInFlight = useRef(false);
@@ -52,15 +64,17 @@ export default function ProjectWorkbookActions({
   useEffect(() => () => { validationGeneration.current += 1; }, []);
 
   const download = async () => {
-    if (downloadInFlight.current) return;
+    if (!canDownload || !transport.isCurrent() || downloadInFlight.current) return;
     downloadInFlight.current = true;
     setDownloading(true);
     setStatus(null);
     try {
-      const { data } = await downloadMaintenanceProjectWorkbook(projectId);
+      const { data } = await downloadMaintenanceProjectWorkbook(projectId, transport);
+      if (!transport.isCurrent()) return;
       saveBlob(data, `${safeFilenamePart(projectCode)}_维保项目全量四表.xlsx`);
-    } catch {
-      setStatus({ type: "error", message: "完整四表下载失败，请重试" });
+    } catch (err) {
+      if (!transport.isCurrent()) return;
+      setStatus({ type: "error", message: authorizationErrorText(err, "完整四表下载失败，请重试") });
     } finally {
       downloadInFlight.current = false;
       setDownloading(false);
@@ -68,20 +82,20 @@ export default function ProjectWorkbookActions({
   };
 
   const chooseFile = async (file: File | undefined) => {
-    if (!file) return;
+    if (!file || !canValidate || !transport.isCurrent() || applyInFlight.current || errorDetailsDownloadInFlight.current) return;
     const request = ++validationGeneration.current;
     setValidating(true);
     setValidation(null);
     setStatus(null);
     try {
-      const { data } = await validateMaintenanceProjectWorkbook(projectId, file);
-      if (request === validationGeneration.current) setValidation(data);
+      const { data } = await validateMaintenanceProjectWorkbook(projectId, file, transport);
+      if (request === validationGeneration.current && transport.isCurrent()) setValidation(data);
     } catch {
-      if (request === validationGeneration.current) {
+      if (request === validationGeneration.current && transport.isCurrent()) {
         setStatus({ type: "error", message: "文件校验失败，系统尚未写入任何数据" });
       }
     } finally {
-      if (request === validationGeneration.current) {
+      if (request === validationGeneration.current && transport.isCurrent()) {
         setValidating(false);
         if (inputRef.current) inputRef.current.value = "";
       }
@@ -89,17 +103,19 @@ export default function ProjectWorkbookActions({
   };
 
   const downloadValidationErrors = async () => {
-    if (!validation?.errors.length || errorDetailsDownloadInFlight.current) return;
+    if (!canErrors || !transport.isCurrent() || !validation?.errors.length || errorDetailsDownloadInFlight.current) return;
     errorDetailsDownloadInFlight.current = true;
     setDownloadingErrorDetails(true);
     setStatus(null);
     try {
       const { data } = await downloadMaintenanceWorkbookValidationErrors(
-        validation.validation_token,
+        validation.validation_token, transport,
       );
+      if (!transport.isCurrent()) return;
       saveBlob(data, `${safeFilenamePart(projectCode)}_维保工作簿错误明细.xlsx`);
-    } catch {
-      setStatus({ type: "error", message: "错误明细表下载失败，请重试" });
+    } catch (err) {
+      if (!transport.isCurrent()) return;
+      setStatus({ type: "error", message: authorizationErrorText(err, "错误明细表下载失败，请重试") });
     } finally {
       errorDetailsDownloadInFlight.current = false;
       setDownloadingErrorDetails(false);
@@ -107,7 +123,7 @@ export default function ProjectWorkbookActions({
   };
 
   const apply = async () => {
-    if (!validation?.can_apply || applyInFlight.current) return;
+    if (!canApply || !transport.isCurrent() || !validation?.can_apply || applyInFlight.current) return;
     applyInFlight.current = true;
     setApplying(true);
     setStatus(null);
@@ -115,7 +131,8 @@ export default function ProjectWorkbookActions({
       const { data } = await applyMaintenanceProjectWorkbook(projectId, {
         validation_token: validation.validation_token,
         data_version: validation.data_version,
-      });
+      }, transport);
+      if (!transport.isCurrent()) return;
       setValidation(null);
       setStatus({
         type: "success",
@@ -124,10 +141,11 @@ export default function ProjectWorkbookActions({
           : `已应用 ${data.changed_rows.toLocaleString("zh-CN")} 行更新`,
       });
       await onApplied?.();
-    } catch {
+    } catch (err) {
+      if (!transport.isCurrent()) return;
       setStatus({
         type: "error",
-        message: "应用失败，可能已有更新写入；请重新下载后再上传",
+        message: authorizationErrorText(err, "应用失败，可能已有更新写入；请重新下载后再上传"),
       });
     } finally {
       applyInFlight.current = false;
@@ -142,7 +160,7 @@ export default function ProjectWorkbookActions({
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       <Space wrap>
-        {canDownloadRoundtrip && (
+        {canDownload && (
           <Button
             aria-label="下载完整四表"
             icon={<DownloadOutlined />}
@@ -152,13 +170,13 @@ export default function ProjectWorkbookActions({
             下载完整四表
           </Button>
         )}
-        {canApplyRoundtrip && (
+        {canValidate && (
           <>
             <Button
               aria-label="上传月度更新"
               icon={<UploadOutlined />}
               onClick={() => inputRef.current?.click()}
-              disabled={validating || applying}
+              disabled={validating || applying || downloadingErrorDetails}
             >
               上传月度更新
             </Button>
@@ -204,7 +222,7 @@ export default function ProjectWorkbookActions({
               {validation.errors.map((error) => (
                 <Alert key={error} type="error" showIcon message={error} />
               ))}
-              {validation.errors.length > 0 && (
+              {canErrors && validation.errors.length > 0 && (
                 <Button
                   aria-label="下载错误明细表"
                   icon={<DownloadOutlined />}
@@ -214,7 +232,7 @@ export default function ProjectWorkbookActions({
                   下载错误明细表
                 </Button>
               )}
-              {canApplyRoundtrip && validation.can_apply && (
+              {canApply && validation.can_apply && (
                 <Button type="primary" loading={applying} onClick={() => void apply()}>
                   {changeEntries.length === 0
                     ? "确认本月已更新（无新增回款）"
@@ -228,3 +246,7 @@ export default function ProjectWorkbookActions({
     </Space>
   );
 }
+
+export default withContextSurface(ProjectWorkbookActionsContent, anyRule(
+  ...["download_v2", "validate_v2", "apply_v2", "error_download_v2"].map(action => actionRule("maintenance_project_roundtrip", action)),
+), props => props.projectId);

@@ -45,7 +45,7 @@
   "pages/maintenance/maintenanceMigration.css": 8,
   "pages/maintenance/maintenancePnCompact.css": 19,
   "pages/maintenance/maintenanceRankingsExplorer.css": 28,
-  "pages/maintenance/panel/PartsOrdersTab.tsx": 2,
+  "pages/maintenance/panel/PartsOrdersTab.tsx": 1,
   "pages/maintenance/panel/ReturnReceiptsSection.tsx": 1,
   "pages/maintenance/panel/__tests__/PartsOrdersTab.test.tsx": 1,
   "pages/purchases/PurchaseAnalysisPage.tsx": 6,

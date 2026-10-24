@@ -32,6 +32,8 @@ from app.services.maintenance_warehouse_adapters import (
 )
 from app.services.query_filters import active_beta_maintenance_orders
 
+_LEGACY_SCOPE = object()
+
 
 class MaintenanceWarehouseError(ValueError):
     pass
@@ -515,6 +517,8 @@ def apply_import(
     reason: str,
     operated_by: str,
     hmac_key: bytes,
+    owner_user_id: int | None = None,
+    authorization_receipt=None,
 ) -> dict:
     """Atomically materialize immutable facts; caller owns commit/rollback."""
 
@@ -977,6 +981,7 @@ def apply_import(
         result_json=result,
         reason=reason,
         applied_by=operated_by,
+        owner_user_id=owner_user_id,
     )
     audit = MaintenanceWarehouseAuditEvent(
         event_id=_uuid(f"maintenance-warehouse-audit:import:{import_id}"),
@@ -1013,6 +1018,8 @@ def apply_import(
     )
     result = {**result, "delivery_sources": delivery_sources}
     audit.after_json = result
+    if authorization_receipt is not None:
+        audit.after_json = {**result, 'authorization_contract': authorization_receipt(db, batch)}
     db.add(audit)
     db.flush([audit])
     return {
@@ -1115,10 +1122,12 @@ def _audit_evidence(event: MaintenanceWarehouseAuditEvent) -> dict:
 
 def search_documents(
     db: Session, *, q: str | None, document_type: str | None,
-    page: int, page_size: int, user_ctx: UserContext,
+    page: int, page_size: int, user_ctx: UserContext | None,
+    authorization_condition=_LEGACY_SCOPE,
 ) -> dict:
     filters = []
-    scope = _document_scope_condition(db, user_ctx)
+    scope = (_document_scope_condition(db, user_ctx)
+             if authorization_condition is _LEGACY_SCOPE else authorization_condition)
     if scope is not None:
         filters.append(scope)
     if q:
@@ -1285,10 +1294,12 @@ def search_documents(
 def search_ambiguities(
     db: Session, *, q: str | None, status: str | None,
     ambiguity_type: str | None, page: int, page_size: int,
-    user_ctx: UserContext,
+    user_ctx: UserContext | None,
+    authorization_condition=_LEGACY_SCOPE,
 ) -> dict:
     filters = []
-    scope = _document_scope_condition(db, user_ctx)
+    scope = (_document_scope_condition(db, user_ctx)
+             if authorization_condition is _LEGACY_SCOPE else authorization_condition)
     if scope is not None:
         filters.extend([
             MaintenanceWarehouseAmbiguity.document_id.is_not(None),
@@ -1846,7 +1857,8 @@ def resolve_ambiguity(
     link_kind: str | None = None,
     target_type: str | None = None,
     target_id: str | None = None,
-    user_ctx: UserContext,
+    user_ctx: UserContext | None,
+    authorization_condition=_LEGACY_SCOPE,
 ) -> dict:
     reason = (reason or "").strip()
     if not reason or len(reason) > 1000:
@@ -1856,7 +1868,8 @@ def resolve_ambiguity(
     operated_by = (operated_by or "").strip()
     if not operated_by or len(operated_by) > 64:
         raise MaintenanceWarehouseError("实名操作人无效")
-    scope = _document_scope_condition(db, user_ctx)
+    scope = (_document_scope_condition(db, user_ctx)
+             if authorization_condition is _LEGACY_SCOPE else authorization_condition)
     statement = select(MaintenanceWarehouseAmbiguity).where(
         MaintenanceWarehouseAmbiguity.ambiguity_id == ambiguity_id
     )

@@ -1,0 +1,29 @@
+{
+  "status": "passed_static_design_checks_only",
+  "resources": 73,
+  "business_actions": 232,
+  "data_actions": 128,
+  "mutation_actions": 104,
+  "human_entries": 228,
+  "retired_kept": 11,
+  "source_sha256_files": 48,
+  "closed_entry_action_references": 277,
+  "persisted_legacy_input_vectors": 612,
+  "resource_vector_evaluations": 44676,
+  "frontend_surfaces": 106,
+  "workspace_blocks": 6,
+  "closed_collection_refs": 38,
+  "exact_collection_purposes": 79,
+  "base_authorization_resolvers": 13,
+  "input_authorization_resolvers": 23,
+  "object_types": 33,
+  "spec_sha256": "23e5d4d144b8ed567e17e0e76dca1bb583bcff047019646db38c22e0bb7d1497",
+  "frontend_sha256": "786bac7927900cfcabfb2f3eb671f890e067f017acbd53a302c6b3917ee3fb6f",
+  "not_proven": [
+    "S3 SQL/PDP adapter",
+    "PG migrations",
+    "concurrent lock behavior",
+    "complete old/new endpoint behavior",
+    "artifact lifecycle"
+  ]
+}

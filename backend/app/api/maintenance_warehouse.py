@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -26,6 +26,8 @@ from app.security import (
     require_action,
     require_page,
 )
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_warehouse_authorization as canonical
 from app.services import maintenance_warehouse
 from app.services.maintenance_warehouse_adapters import WarehouseWorkbookError
 
@@ -38,6 +40,7 @@ _READ_CHUNK = 1024 * 1024
 
 class DocumentSearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     q: str | None = None
     document_type: str | None = None
@@ -47,6 +50,7 @@ class DocumentSearchRequest(BaseModel):
 
 class AmbiguitySearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     q: str | None = None
     status: str | None = None
@@ -57,6 +61,7 @@ class AmbiguitySearchRequest(BaseModel):
 
 class AmbiguityResolveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     version: int = Field(ge=1)
     reason: str = Field(min_length=1)
@@ -68,6 +73,7 @@ class AmbiguityResolveRequest(BaseModel):
 
 class WarehouseIntegrationReconcileRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     reason: str = Field(min_length=1, max_length=1000)
 
@@ -96,7 +102,7 @@ def _no_store(response: Response) -> None:
     response.headers["X-Content-Type-Options"] = "nosniff"
 
 
-async def _multipart(request: Request, *, apply: bool) -> tuple[bytes, str, dict[str, str]]:
+async def _multipart(request: Request, *, apply: bool, canonical_mode: bool = False) -> tuple[bytes, str, dict[str, str]]:
     content_type = request.headers.get("content-type", "")
     if content_type.partition(";")[0].strip().lower() != "multipart/form-data":
         raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "只接受 multipart/form-data")
@@ -129,7 +135,7 @@ async def _multipart(request: Request, *, apply: bool) -> tuple[bytes, str, dict
         try:
             form = await limited_request.form(
                 max_files=1,
-                max_fields=2 if apply else 0,
+                max_fields=(2 if apply else 0) + int(canonical_mode),
                 # 16KB 会误伤正常体积的 Excel 文件 part（#267 修复 4）。
                 # 总量已有 content-length + limited_receive 双重 413 限制。
                 max_part_size=limit + _MULTIPART_OVERHEAD,
@@ -138,6 +144,8 @@ async def _multipart(request: Request, *, apply: bool) -> tuple[bytes, str, dict
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "multipart 请求格式无效") from exc
         items = form.multi_items()
         expected_keys = {"file", "preview_token", "reason"} if apply else {"file"}
+        if canonical_mode and any(key == 'authorization_precondition' for key, _ in items):
+            expected_keys.add('authorization_precondition')
         if len(items) != len(expected_keys) or {key for key, _value in items} != expected_keys:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -188,8 +196,11 @@ def _service_http_error(exc: Exception) -> HTTPException:
 async def preview_warehouse_import(
     request: Request,
     response: Response,
+    db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_warehouse_import", "page_maintenance")),
+    identity=Depends(auth_transport.identity_for("maintenance_warehouse_import")),
+    view: str | None = Query(None),
 ) -> dict:
     _no_store(response)
     if not _PARSE_LOCK.acquire(blocking=False):
@@ -199,8 +210,13 @@ async def preview_warehouse_import(
             headers={"Retry-After": "5"},
         )
     try:
-        content, filename, _fields = await _multipart(request, apply=False)
+        content, filename, _fields = await _multipart(request, apply=False, canonical_mode=identity is not None)
         try:
+            if identity is not None:
+                return await anyio.to_thread.run_sync(lambda: canonical.read(db, identity,
+                    entry_id=canonical.PREVIEW, params={}, view=view,
+                    precondition=_fields.get('authorization_precondition'), content=content,
+                    filename=filename, hmac_key=get_settings().secret_key.encode('utf-8')))
             return await anyio.to_thread.run_sync(
                 lambda: maintenance_warehouse.preview_import(
                     content,
@@ -252,17 +268,19 @@ async def apply_warehouse_import(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_warehouse_manage")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_warehouse_import", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_warehouse_import", require_action("action_maintenance_warehouse_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_warehouse_import")),
+    view: str | None = Query(None),
 ) -> dict:
     _no_store(response)
-    if ctx.role not in FULL_SCOPE_ROLES:
+    if identity is None and ctx.role not in FULL_SCOPE_ROLES:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "仓库文件应用仅限全项目范围实名账号",
         )
-    operated_by = _real_operator(db, ident)
+    operated_by = _real_operator(db, ident) if identity is None else None
     if not _PARSE_LOCK.acquire(blocking=False):
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
@@ -270,12 +288,17 @@ async def apply_warehouse_import(
             headers={"Retry-After": "5"},
         )
     try:
-        content, filename, fields = await _multipart(request, apply=True)
+        content, filename, fields = await _multipart(request, apply=True, canonical_mode=identity is not None)
         preview_token = fields.get("preview_token", "")
         reason = fields.get("reason", "")
         if len(preview_token) != 43 or not reason.strip() or len(reason) > 1000:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "预览签名或导入理由无效")
         try:
+            if identity is not None:
+                return await anyio.to_thread.run_sync(lambda: canonical.command(db, identity,
+                    entry_id=canonical.APPLY, params={'import_id': import_id, 'preview_token': preview_token, 'reason': reason},
+                    view=view, precondition=fields.get('authorization_precondition'), content=content,
+                    filename=filename, hmac_key=get_settings().secret_key.encode('utf-8')))
             return await anyio.to_thread.run_sync(
                 lambda: _apply_worker(
                     content, filename, import_id, preview_token, reason, operated_by
@@ -296,8 +319,10 @@ def search_warehouse_documents(
     response: Response,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_warehouse", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_warehouse")),
+    view: str | None = Query(None),
 ) -> dict:
     _no_store(response)
     if body.q is not None and len(body.q) > 128:
@@ -306,6 +331,10 @@ def search_warehouse_documents(
         "shipment", "return", "receipt",
     }:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "仓库单据类型无效")
+    if identity is not None:
+        return canonical.read(db, identity, entry_id=canonical.DOCUMENTS,
+            params=body.model_dump(exclude={'authorization_precondition'}), view=view,
+            precondition=body.authorization_precondition)
     record_access_log(ctx, "maintenance_warehouse_document_search", "maintenance_warehouse", {
         "searched": bool(body.q and body.q.strip()),
         "page": body.page,
@@ -330,8 +359,10 @@ def search_warehouse_ambiguities(
     response: Response,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_warehouse", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_warehouse")),
+    view: str | None = Query(None),
 ) -> dict:
     _no_store(response)
     if body.q is not None and len(body.q) > 128:
@@ -346,6 +377,10 @@ def search_warehouse_ambiguities(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "仓库歧义类型无效")
     if body.status is not None and body.status not in {"open", "resolved"}:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "仓库歧义状态无效")
+    if identity is not None:
+        return canonical.read(db, identity, entry_id=canonical.AMBIGUITIES,
+            params=body.model_dump(exclude={'authorization_precondition'}), view=view,
+            precondition=body.authorization_precondition)
     record_access_log(ctx, "maintenance_warehouse_ambiguity_search", "maintenance_warehouse", {
         "searched": bool(body.q and body.q.strip()),
         "page": body.page,
@@ -374,11 +409,20 @@ def resolve_warehouse_ambiguity(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_warehouse_manage")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_warehouse", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_warehouse", require_action("action_maintenance_warehouse_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_warehouse")),
+    view: str | None = Query(None),
 ) -> dict:
     _no_store(response)
+    if identity is not None:
+        try:
+            return canonical.command(db, identity, entry_id=canonical.RESOLVE,
+                params={'ambiguity_id': ambiguity_id, **body.model_dump(exclude={'authorization_precondition'})},
+                view=view, precondition=body.authorization_precondition)
+        except maintenance_warehouse.MaintenanceWarehouseError as exc:
+            raise _service_http_error(exc) from exc
     operated_by = _real_operator(db, ident)
     if len(body.reason) > 1000 or (body.target_id is not None and len(body.target_id) > 128):
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "裁决内容无效")
@@ -414,13 +458,18 @@ def reconcile_warehouse_integrations(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_warehouse_manage")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_warehouse_import", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_warehouse_import", require_action("action_maintenance_warehouse_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_warehouse_import")),
+    view: str | None = Query(None),
 ) -> dict:
     """Repair only exact #201 assignment edges and their derived candidates."""
 
     _no_store(response)
+    if identity is not None:
+        return canonical.command(db, identity, entry_id=canonical.RECONCILE,
+            params={'reason': body.reason}, view=view, precondition=body.authorization_precondition)
     if ctx.role not in FULL_SCOPE_ROLES:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,

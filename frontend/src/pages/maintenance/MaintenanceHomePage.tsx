@@ -41,6 +41,14 @@ import {
 } from "../../api/maintenanceBossBoard";
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
+import { useAccess, useModuleAccess, useSurface } from "../../authz/access";
+import { useContextTransport } from "../../authz/domainTransport";
+import { actionRule, routeRule } from "../../authz/rules";
+import { AuthorizationCancelled } from "../../authz/requestLifecycle";
+import { contextSurfaces } from "../../authz/ContextSurface";
+import { ContextChanged } from "../../authz/contextProtocol";
+import { contextRefKey } from "../../authz/contextTypes";
+import type { AuthorizationContext } from "../../authz/contextTypes";
 
 const GlobalMaintenanceRowWorkbench = lazy(() => import("../../components/maintenance/GlobalMaintenanceRowWorkbench"));
 
@@ -105,13 +113,21 @@ function readSortParam(spec: string | null, canViewCost: boolean): ProjectSort {
  */
 export function MaintenanceHomePage() {
   const permissions = readPermissionMap();
-  const canUpload = !!permissions.action_maintenance_expense_collection_upload;
-  const canViewCost = localStorage.getItem("role") === "admin"
-    || permissions.data_purchase_cost === true;
+  const cardsAccess = useModuleAccess("maintenance_project_cards");
+  const cardsSurface = useSurface("maintenance_project_cards.cards", { legacy: { maintenance_project_cards: true } });
+  const workbookSurface = useSurface("maintenance_global_workbook.roundtrip", { legacy: { maintenance_global_workbook: true } });
+  const rowSurface = useAccess(contextSurfaces("maintenance_global_rows.global_rows", "maintenance_managed_rows.global_rows"), { legacy: { maintenance_global_rows: true, maintenance_managed_rows: true } });
+  const demandEntry = useAccess(routeRule("/maintenance/demands"), { legacy: { maintenance_demand: true, maintenance_wbdd_snapshot: true, maintenance_wbdd_reconciliation: true } });
+  const uploadAccess = useAccess(actionRule("maintenance_global_workbook", "validate", "apply"), {
+    legacy: { maintenance_global_workbook: !!permissions.action_maintenance_expense_collection_upload },
+  });
+  const canUpload = uploadAccess.entryState !== "deny";
+  const canViewCost = cardsAccess.field("data_purchase_cost", localStorage.getItem("role") === "admin"
+    || permissions.data_purchase_cost === true);
   // 回款已完成桶由合同额+回款推得，属于合同财务数据：无 data_profit 的账号
   // 不展示该页签（后端同样 422 拒绝），也不做期限桶排除。
-  const canViewContract = localStorage.getItem("role") === "admin"
-    || permissions.data_profit === true;
+  const canViewContract = cardsAccess.field("data_profit", localStorage.getItem("role") === "admin"
+    || permissions.data_profit === true);
   const [searchParams, setSearchParams] = useSearchParams();
   const lifecycle = readLifecycle(searchParams.get("lifecycle"), canViewContract);
   // 业务类型（2026-09-08 客户需求；2026-09-16 新增拆改配服务）：与期限状态**叠加**的独立一维。
@@ -122,7 +138,7 @@ export function MaintenanceHomePage() {
     () => readBusinessTypes(businessTypeSpec),
     [businessTypeSpec],
   );
-  const [hiddenByBusinessType, setHiddenByBusinessType] = useState(0);
+  const [storedHiddenByBusinessType, setHiddenByBusinessType] = useState(0);
   const status = readStatus(searchParams.get("status"));
   const sort = readSortParam(searchParams.get("sort"), canViewCost);
   // 关键词是已提交的 URL 参数：输入框只存本地草稿，回车/搜索按钮才提交（与分析页同范式）。
@@ -159,7 +175,20 @@ export function MaintenanceHomePage() {
       // 浏览器禁用存储时仍允许折叠，只是不跨访问记忆。
     }
   };
-  const [rows, setRows] = useState<BoardProjectRow[]>([]);
+  const [rangePreset, setRangePreset] = useState<RangePreset>("this_month");
+  const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
+  const ownerKey = JSON.stringify([cardsAccess.token, cardsAccess.generation, cardsAccess.snapshot?.version,
+    lifecycle, status, sort, keyword, businessTypes]);
+  const transport = useContextTransport(ownerKey, true);
+  const workbookTransport = useContextTransport(JSON.stringify([cardsAccess.token, cardsAccess.generation, cardsAccess.snapshot?.version, rangePreset, customRange]), true);
+  const downloadAccess = useAccess(actionRule("maintenance_global_workbook", "download"), { legacy: { maintenance_global_workbook: true } });
+  const [rowsOwner, setRowsOwner] = useState("");
+  const [storedRows, setRows] = useState<BoardProjectRow[]>([]);
+  const [rowContext, setRowContext] = useState<AuthorizationContext | null>(null);
+  const pageContext = useRef<{ owner: string; context: AuthorizationContext } | null>(null);
+  const currentRows = rowsOwner === ownerKey && cardsSurface.entryState !== "deny";
+  const rows = currentRows ? storedRows : [];
+  const hiddenByBusinessType = currentRows ? storedHiddenByBusinessType : 0;
   const [page, setPage] = useState(1);
   const [done, setDone] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -168,8 +197,6 @@ export function MaintenanceHomePage() {
     page: number;
     replace: boolean;
   } | null>(null);
-  const [rangePreset, setRangePreset] = useState<RangePreset>("this_month");
-  const [customRange, setCustomRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [rowWorkbenchOpen, setRowWorkbenchOpen] = useState(false);
   const sentinel = useRef<HTMLDivElement | null>(null);
   // 并发保护：筛选一变就作废在途请求的结果，避免旧响应盖掉新筛选
@@ -177,6 +204,7 @@ export function MaintenanceHomePage() {
 
   const load = useCallback(
     async (nextPage: number, replace: boolean) => {
+      if (cardsSurface.entryState === "deny") return false;
       const seq = ++requestSeq.current;
       setLoading(true);
       setError(null);
@@ -190,11 +218,17 @@ export function MaintenanceHomePage() {
           business_type: boardBusinessTypeParam(businessTypes),
         };
         const resp = keyword.trim()
-          ? await searchBoardProjects({ q: keyword.trim(), ...params })
-          : await getBoardProjects(params);
+          ? await searchBoardProjects({ q: keyword.trim(), ...params }, transport)
+          : await getBoardProjects(params, transport);
         const body = resp.data;
-        if (seq !== requestSeq.current) return false;      // 已被更新的筛选取代
+        if (seq !== requestSeq.current || !transport.isCurrent()) return false;
+        const nextContext = body.authorization_context;
+        if (!replace && nextContext && pageContext.current?.owner === ownerKey &&
+            contextRefKey(pageContext.current.context.context) !== contextRefKey(nextContext.context)) throw new ContextChanged();
+        pageContext.current = nextContext ? { owner: ownerKey, context: nextContext } : null;
         setRows((prev) => (replace ? body.rows : [...prev, ...body.rows]));
+        setRowsOwner(ownerKey);
+        setRowContext((body as typeof body & { authorization_context?: AuthorizationContext }).authorization_context ?? null);
         setHiddenByBusinessType(body.business_type_hidden ?? 0);
         setPage(nextPage);
         // card_status 在后端按候选页计算后过滤：某页可以 0 命中、下一页仍有命中。
@@ -202,8 +236,9 @@ export function MaintenanceHomePage() {
         setDone(nextPage * body.page_size >= body.total);
         return true;
       } catch (err) {
-        if (seq !== requestSeq.current) return false;
-        if (replace) setRows([]);
+        if (seq !== requestSeq.current || err instanceof AuthorizationCancelled || !transport.isCurrent()) return false;
+        const statusCode = (err as { response?: { status?: number } }).response?.status;
+        if (replace || [401, 403, 409, 503].includes(statusCode ?? 0)) { setRows([]); setRowsOwner(""); setRowContext(null); }
         // 续页失败保留已有卡片；重试仍请求失败页，不跳页或重加第一页。
         setError({ message: readError(err), page: nextPage, replace });
         setDone(true);
@@ -212,7 +247,7 @@ export function MaintenanceHomePage() {
         if (seq === requestSeq.current) setLoading(false);
       }
     },
-    [lifecycle, status, keyword, sort, businessTypes],
+    [lifecycle, status, keyword, sort, businessTypes, cardsSurface.entryState, transport, ownerKey],
   );
   // 上传流程跨越“预检 → 人工确认”，期间筛选可能已变化。旧 onApply 闭包只
   // 通过这个 ref 调用当前 render 的 load，避免旧筛选主动成为最新请求。
@@ -225,13 +260,13 @@ export function MaintenanceHomePage() {
 
   useEffect(() => {
     const node = sentinel.current;
-    if (!node || done) return undefined;
+    if (cardsSurface.entryState === "deny" || !node || done) return undefined;
     const observer = new IntersectionObserver((entries) => {
       if (entries[0]?.isIntersecting && !loading) void load(page + 1, false);
     });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [done, loading, page, load]);
+  }, [done, loading, page, load, cardsSurface.entryState]);
 
   const rangeParams = () => {
     if (rangePreset !== "custom") return { range: rangePreset };
@@ -249,9 +284,9 @@ export function MaintenanceHomePage() {
         subtitle="超预算的项目会变黄、变红；点卡片进项目看明细"
         extra={
           <Space size={8} align="start" wrap>
-            <Link to="/maintenance/demands">
+            {demandEntry.entryState !== "deny" && <Link to="/maintenance/demands">
               <Button>需求单与同步</Button>
-            </Link>
+            </Link>}
             <MaintenanceBatchTransferButton
               filters={{
                 lifecycle,
@@ -287,23 +322,25 @@ export function MaintenanceHomePage() {
                 }
               />
             ) : null}
-            <WorkbookRoundTrip
+            {workbookSurface.entryState !== "deny" && <WorkbookRoundTrip
               title="全项目备件行级表"
               filename={`spare-part-lines-${rangePreset}.xlsx`}
               canUpload={canUpload}
+              canDownload={downloadAccess.entryState !== "deny"}
+              capture={workbookTransport}
               hint="下载 → 改价/补价 → 上传覆盖＝真实源"
-              onDownload={async () => downloadSparePartLines(rangeParams())}
-              onValidate={validateSparePartLines}
-              onApply={applySparePartLines}
+              onDownload={async () => downloadSparePartLines(rangeParams(), workbookTransport)}
+              onValidate={file => validateSparePartLines(file, workbookTransport)}
+              onApply={file => applySparePartLines(file, workbookTransport)}
               onAfterApply={() => latestLoad.current(1, true)}
-            />
-            <Button aria-expanded={rowWorkbenchOpen} aria-controls="maintenance-global-row-workbench"
+            />}
+            {rowSurface.entryState !== "deny" && <Button aria-expanded={rowWorkbenchOpen} aria-controls="maintenance-global-row-workbench"
               onClick={() => setRowWorkbenchOpen((opened) => !opened)}>
               {rowWorkbenchOpen ? "收起备件行筛选" : "筛选备件行"}
-            </Button>
+            </Button>}
           </Space>
         } />
-      {rowWorkbenchOpen ? <div id="maintenance-global-row-workbench">
+      {rowWorkbenchOpen && rowSurface.entryState !== "deny" ? <div id="maintenance-global-row-workbench">
         {rangePreset === "custom" && !customRange
           ? <Alert type="info" showIcon message="请选择自定义日期区间后查询备件行。" />
           : <Suspense fallback={<Spin tip="正在加载备件行级表"><div style={{ height: 80 }} /></Spin>}>
@@ -313,7 +350,7 @@ export function MaintenanceHomePage() {
 
 
       {/* 期限常驻；折叠只改变控件可见性，不改变筛选与导出参数。 */}
-      <Card size="small">
+      {cardsSurface.entryState !== "deny" && <Card size="small">
         <Row justify="space-between" align="middle" gutter={[12, 12]}>
           <Col style={{ minWidth: 0, maxWidth: "100%", overflowX: "auto" }}>
           <Segmented
@@ -439,7 +476,7 @@ export function MaintenanceHomePage() {
             >关键词：{keyword.trim()}</Tag> : null}
           </Space>
         ) : null}
-      </Card>
+      </Card>}
 
       {hiddenByBusinessType > 0 ? (
         <Alert
@@ -474,12 +511,12 @@ export function MaintenanceHomePage() {
           // 一行 5 张（#37）：24 栅格取 xl=5 ≈ 每行 4.8 张，故用 flex 固定五等分
           <Col key={row.project_id} xs={24} sm={12} md={8} lg={6} xl={5}
                style={{ flex: "0 0 20%", maxWidth: "20%" }}>
-            <ProjectCard row={row} />
+            <ProjectCard row={row} fieldPermissions={cardsAccess.legacy ? undefined : rowContext?.resources.maintenance_project_cards?.field_permissions ?? []} />
           </Col>
         ))}
       </Row>
 
-      {!rows.length && !loading && !error ? (
+      {cardsSurface.entryState !== "deny" && !rows.length && !loading && !error ? (
         <Empty
           description={
             businessTypes.length > 0

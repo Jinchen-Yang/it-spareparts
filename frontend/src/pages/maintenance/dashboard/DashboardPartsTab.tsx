@@ -1,3 +1,6 @@
+import { useContextQuery } from "../../../authz/contextQuery";
+import { surfaceRule } from "../../../authz/rules";
+import { useContextAdmission, useModuleAccess } from "../../../authz/access";
 /** T3 PN 排名与估价：数量榜人人可见；估价列/参考价只对金额权账号请求与渲染。
  *
  * 有金额权 → /valuation（R34 政策 + 总卡 + 行级估价与三域参考）；
@@ -135,58 +138,29 @@ function DomainValuesCell({ row }: { row: PartRow }) {
 }
 
 export default function DashboardPartsTab({
-  params, amountsVisible, sorts, sort, page, pageSize, refreshKey,
+  params, amountsVisible: amountsEligible, sorts, sort, page, pageSize, refreshKey,
   onSortChange, onPageChange, maxExportRows, ownerToken, onSessionMismatch, onReceiptsDrill,
 }: DashboardTabProps & {
   /** M-AC09：行内「返件明细」→ 壳层 Drawer（原筛选 ∩ 该 PN，DL-022）。 */
   onReceiptsDrill?: (drill: ReceiptsDrill) => void;
 }) {
-  const [valuation, setValuation] = useState<ValuationResponse | null>(null);
-  const [qtyData, setQtyData] = useState<PagedRows<PartRow> | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const seqRef = useRef(0);
+  const admission = useContextAdmission();
+  const useValuation = amountsEligible && admission.surface("maintenance_dashboard.valuation", true) !== "deny";
+  const valueQuery = useContextQuery({ entryId: "GET /api/maintenance/analytics/maintenance-dashboard/valuation",
+    rule: surfaceRule("maintenance_dashboard.valuation"), queryKey: [params, sort, page, pageSize, refreshKey], legacyAllowed: true,
+    enabled: useValuation, onStale: onSessionMismatch,
+    query: capture => fetchDashboardValuation({ ...params, sort, page, page_size: pageSize }, capture) });
+  const partQuery = useContextQuery({ entryId: "GET /api/maintenance/analytics/maintenance-dashboard/parts",
+    rule: surfaceRule("maintenance_dashboard.parts"), queryKey: [params, sort, page, pageSize, refreshKey], legacyAllowed: true,
+    enabled: !useValuation, onStale: onSessionMismatch,
+    query: capture => fetchDashboardParts({ ...params, sort, page, page_size: pageSize }, capture) });
+  const valuation = valueQuery.data, qtyData = partQuery.data;
+  const loading = valueQuery.loading || partQuery.loading;
+  const error = valueQuery.error || partQuery.error ? apiErrorMessage(valueQuery.error || partQuery.error) : null;
+  const load = () => { valueQuery.retry(); partQuery.retry(); };
 
-  const load = useCallback(async () => {
-    // 请求前绑定组件所属会话（B-F03/04）：失配即上报壳层停用，不发旧会话请求。
-    if (!sessionUnchanged(ownerToken)) {
-      onSessionMismatch();
-      return;
-    }
-    const seq = seqRef.current + 1;
-    seqRef.current = seq;
-    const token = sessionToken();
-    setLoading(true);
-    setError(null);
-    try {
-      // 金额权决定数据源：/valuation 自带政策与估价；/parts 只有数量。
-      const resp = amountsVisible
-        ? await fetchDashboardValuation({ ...params, sort, page, page_size: pageSize })
-        : await fetchDashboardParts({ ...params, sort, page, page_size: pageSize });
-      if (seqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      if (amountsVisible) {
-        setValuation(resp as ValuationResponse);
-        setQtyData(null);
-      } else {
-        setQtyData(resp as PagedRows<PartRow>);
-        setValuation(null);
-      }
-    } catch (err) {
-      if (seqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      setValuation(null);
-      setQtyData(null);
-      setError(apiErrorMessage(err));
-    } finally {
-      if (seqRef.current === seq && sessionUnchanged(token)) setLoading(false);
-    }
-  }, [params, amountsVisible, sort, page, pageSize, ownerToken, onSessionMismatch]);
-
-  useEffect(() => {
-    void load();
-    return () => { seqRef.current += 1; };
-  }, [load, refreshKey]);
+  const fieldAccess = useModuleAccess("maintenance_dashboard", valueQuery.context);
+  const amountsVisible = amountsEligible && fieldAccess.field("data_profit", amountsEligible);
 
   const onTableChange: TableProps<PartRow>["onChange"] = (pg) => {
     if (pg.pageSize && pg.pageSize !== pageSize) onPageChange(1, pg.pageSize);

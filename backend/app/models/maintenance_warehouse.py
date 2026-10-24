@@ -27,6 +27,7 @@ from app.models._types import Qty, TZDateTime
 class MaintenanceWarehouseImportBatch(Base):
     __tablename__ = "maintenance_warehouse_import_batch"
 
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey('sys_user.id', ondelete='RESTRICT'))
     import_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     source_file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     source_filename: Mapped[str] = mapped_column(String(256), nullable=False)

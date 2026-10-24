@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Modal } from "antd";
@@ -101,7 +102,7 @@ describe("project manager assignment salesperson sync", () => {
         expected_assignment_version: 3,
         sync_salesperson: true,
         reason: "负责人交接",
-      },
+      }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
   });
 
@@ -115,7 +116,13 @@ describe("project manager assignment salesperson sync", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "确认改派" }));
     await waitFor(() => expect(assignMaintenanceProjectManager).toHaveBeenCalledWith(
       "project-salesperson-sync",
-      expect.objectContaining({ sync_salesperson: false }),
+      expect.objectContaining({ sync_salesperson: false }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
   });
 });
+
+// Preserve old page contracts under an explicit legacy resource snapshot.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

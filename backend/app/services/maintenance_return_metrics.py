@@ -69,6 +69,7 @@ def _facts(
     date_to: date | None,
     source_order_ids: Collection[str] | None,
     demand_part_scope: Collection[tuple[str, str, int]] | None,
+    authorized_project_query=None,
 ) -> list[_Fact]:
     if date_from is not None and date_to is not None and date_from > date_to:
         raise ValueError("date_from must not be after date_to")
@@ -88,6 +89,9 @@ def _facts(
     if project_ids is not None:
         issue_filters.append(MaintenanceSiteIssue.project_id.in_(project_ids))
         receipt_filters.append(MaintenanceRkdReturnLine.project_id.in_(project_ids))
+    if authorized_project_query is not None:
+        issue_filters.append(MaintenanceSiteIssue.project_id.in_(authorized_project_query))
+        receipt_filters.append(MaintenanceRkdReturnLine.project_id.in_(authorized_project_query))
     if source_order_ids is not None:
         issue_filters.append(MaintenanceSiteIssueLine.source_order_id.in_(source_order_ids))
         receipt_filters.append(MaintenanceRkdReturnLine.source_order_id.in_(source_order_ids))
@@ -221,6 +225,7 @@ def pn_totals(
     date_to: date | None = None,
     source_order_ids: Collection[str] | None = None,
     demand_part_scope: Collection[tuple[str, str, int]] | None = None,
+    authorized_project_query=None,
 ) -> list[PnTotals]:
     """Return union of actual-issue/receipt PNs, independent of demand presence.
 
@@ -232,6 +237,7 @@ def pn_totals(
     facts = _facts(
         db, project_ids=project_ids, date_from=date_from, date_to=date_to,
         source_order_ids=source_order_ids, demand_part_scope=demand_part_scope,
+        authorized_project_query=authorized_project_query,
     )
     if not facts:
         return []

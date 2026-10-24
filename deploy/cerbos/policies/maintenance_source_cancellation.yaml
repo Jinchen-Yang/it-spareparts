@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_source_cancellation",
+    "rules": [
+      {
+        "name": "explicit-confirm",
+        "actions": [
+          "confirm"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"confirm\" in P.attr.grants.maintenance_source_cancellation.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_source_cancellation.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_source_cancellation.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_source_cancellation\", \"scope\": P.attr.grants.maintenance_source_cancellation.scope, \"version\": P.attr.grants.maintenance_source_cancellation.version, \"field_permissions\": P.attr.grants.maintenance_source_cancellation.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.maintenance_source_cancellation.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_source_cancellation.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_source_cancellation.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_source_cancellation\", \"scope\": P.attr.grants.maintenance_source_cancellation.scope, \"version\": P.attr.grants.maintenance_source_cancellation.version, \"field_permissions\": P.attr.grants.maintenance_source_cancellation.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-confirmation",
+        "actions": [
+          "read_confirmation"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_confirmation\" in P.attr.grants.maintenance_source_cancellation.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_source_cancellation.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_source_cancellation.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_source_cancellation\", \"scope\": P.attr.grants.maintenance_source_cancellation.scope, \"version\": P.attr.grants.maintenance_source_cancellation.version, \"field_permissions\": P.attr.grants.maintenance_source_cancellation.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-cascade",
+        "actions": [
+          "show_cascade"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_cascade\" in P.attr.grants.maintenance_source_cancellation.actions && \"read\" in P.attr.grants.maintenance_source_cancellation.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_source_cancellation.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_source_cancellation.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_source_cancellation\", \"scope\": P.attr.grants.maintenance_source_cancellation.scope, \"version\": P.attr.grants.maintenance_source_cancellation.version, \"field_permissions\": P.attr.grants.maintenance_source_cancellation.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

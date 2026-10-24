@@ -7,6 +7,10 @@ import {
   retryReturnReceiptImport, uploadReturnReceiptImport, downloadReturnReceiptOriginal,
 } from "../../../api/maintenanceReturnReceiptImports";
 import { raw, readError } from "./panelUtils";
+import { useContextAdmission } from "../../../authz/access";
+import { actionRule } from "../../../authz/rules";
+import { useContextTransport, withTransportSignal } from "../../../authz/domainTransport";
+import { withContextSurface, contextSurfaces } from "../../../authz/ContextSurface";
 import { saveBlob } from "../../../api/maintenanceWorkbooks";
 
 const ACTIONS: Record<ReturnImportAction, string> = {
@@ -50,7 +54,7 @@ function comparisonValue(row: ReturnImportRow, field: string, side: "before" | "
 }
 
 /** 专用后台解析任务；原件重试、业务更正和重新预览分别保留明确入口。 */
-export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Promise<void | boolean> }) {
+function ReturnReceiptImport({ onApplied }: { onApplied: () => Promise<void | boolean> }) {
   const { message } = App.useApp();
   const [open, setOpen] = useState(false);
   const [job, setJob] = useState<ReturnImportJob | null>(null);
@@ -64,6 +68,16 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
   const [reason, setReason] = useState("");
   const [page, setPage] = useState(1);
   const [action, setAction] = useState<ReturnImportAction | null>(null);
+  const admission = useContextAdmission();
+  const can = (action: string) => admission.state(actionRule("maintenance_return_import", action), true) !== "deny";
+  const canRaw = admission.surface("maintenance_return_import.raw_download", true) !== "deny";
+  const uploadCapture = useContextTransport(JSON.stringify([open]), true);
+  const jobCapture = useContextTransport(JSON.stringify([open, job?.batch_id]), true);
+  const applyCapture = useContextTransport(JSON.stringify([open, job?.batch_id, job?.plan_hash, job?.preview_token, confirmed, duplicatesConfirmed, reason]), true);
+  const readAbort = useRef<AbortController | null>(null);
+  const [jobPage, setJobPage] = useState(1);
+  useEffect(() => { if (!open) readAbort.current?.abort(); }, [open]);
+  useEffect(() => () => readAbort.current?.abort(), []);
   const inputRef = useRef<HTMLInputElement>(null);
   const attempt = useRef<{ file: File; key: string } | null>(null);
   const generation = useRef(0);
@@ -75,20 +89,23 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
   useEffect(() => () => { generation.current += 1; downloadGeneration.current += 1; }, []);
 
   const refresh = async (id: string, targetPage = page) => {
-    if (operationLock.current) return;
+    if (!can("job_read") || !jobCapture.isCurrent() || operationLock.current) return;
+    readAbort.current?.abort(); readAbort.current = new AbortController();
+    const readCapture = withTransportSignal(jobCapture, readAbort.current.signal);
     const seq = ++generation.current;
     try {
-      const response = await getReturnReceiptImport(id, targetPage);
-      if (seq !== generation.current) return;
-      setJob(response.data);
+      const response = await getReturnReceiptImport(id, targetPage, readCapture);
+      if (!readCapture.isCurrent() || seq !== generation.current) return;
+      if (response.data.plan_hash !== job?.plan_hash) { setConfirmed(false); setDuplicatesConfirmed(false); setReason(""); }
+      setJob(response.data); setJobPage(targetPage);
       setError(null);
     } catch (err) {
-      if (seq === generation.current) setError(readError(err, "读取导入进度失败；可重试查询，不必重新上传"));
+      if (readCapture.isCurrent() && seq === generation.current) setError(readError(err, "读取导入进度失败；可重试查询，不必重新上传"));
     }
   };
 
   useEffect(() => {
-    if (!open || busy || !job || !["queued", "processing"].includes(job.status) || error) return;
+    if (!can("job_read") || !open || busy || !job || !["queued", "processing"].includes(job.status) || error) return;
     const timer = window.setTimeout(() => { void refresh(job.batch_id, 1); }, 1500);
     return () => window.clearTimeout(timer);
     // Each poll result schedules one successor; a failed read exposes a manual retry.
@@ -96,24 +113,24 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
   }, [open, job, error, busy]);
 
   const upload = async () => {
-    if (!attempt.current || operationLock.current) return;
+    if (!can("submit") || !uploadCapture.isCurrent() || !attempt.current || operationLock.current) return;
     operationLock.current = true;
     const seq = ++generation.current;
     setBusy(true); setError(null); setRefreshWarning(null); setDownloadError(null); setConfirmed(false); setDuplicatesConfirmed(false); setReason(""); setPage(1); setAction(null);
     try {
-      const response = await uploadReturnReceiptImport(attempt.current.file, attempt.current.key);
-      if (seq !== generation.current) return;
-      setJob(response.data);
+      const response = await uploadReturnReceiptImport(attempt.current.file, attempt.current.key, uploadCapture);
+      if (!uploadCapture.isCurrent() || seq !== generation.current) return;
+      setJob(response.data); setJobPage(1);
       // An idempotent replay may return a ready job without its preview payload.
-      if (response.data.status === "ready" && !response.data.summary) {
-        const detail = await getReturnReceiptImport(response.data.batch_id, 1);
-        if (seq === generation.current) setJob(detail.data);
+      if (can("job_read") && response.data.status === "ready" && !response.data.summary) {
+        const detail = await getReturnReceiptImport(response.data.batch_id, 1, uploadCapture);
+        if (uploadCapture.isCurrent() && seq === generation.current) setJob(detail.data);
       }
     } catch (err) {
-      if (seq === generation.current) setError(readError(err, "上传失败；重试上传会使用同一个登记键"));
+      if (uploadCapture.isCurrent() && seq === generation.current) setError(readError(err, "上传失败；重试上传会使用同一个登记键"));
     } finally {
       operationLock.current = false;
-      if (seq === generation.current) setBusy(false);
+      if (uploadCapture.isCurrent() && seq === generation.current) setBusy(false);
     }
   };
 
@@ -121,7 +138,7 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
     let refreshed = false;
     try { refreshed = (await onApplied()) !== false; }
     catch { /* 写入已确认成功；读回异常不能把导入误报成失败。 */ }
-    if (seq !== generation.current) return;
+    if (!jobCapture.isCurrent() || seq !== generation.current) return;
     if (refreshed) {
       setRefreshWarning(null);
       message.success(recovered ? "已确认导入成功，台账已刷新" : "入库返件已写入台账");
@@ -132,64 +149,67 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
   };
 
   const command = async (kind: "cancel" | "retry" | "apply") => {
-    if (!job || operationLock.current) return;
+    if (!can(kind) || !job || operationLock.current) return;
+    const commandCapture = kind === "apply" ? applyCapture : jobCapture;
+    if (!commandCapture.isCurrent()) return;
     operationLock.current = true;
     const seq = ++generation.current;
     setBusy(true); setError(null); setRefreshWarning(null);
     try {
       let response;
-      if (kind === "cancel") response = await cancelReturnReceiptImport(job.batch_id);
+      if (kind === "cancel") response = await cancelReturnReceiptImport(job.batch_id, commandCapture);
       else if (kind === "retry") {
         // A lost retry response can still start a new preview; approvals must
         // be cleared before the request, never carried into that next plan.
         setConfirmed(false); setDuplicatesConfirmed(false); setReason(""); setPage(1);
-        response = await retryReturnReceiptImport(job.batch_id);
+        response = await retryReturnReceiptImport(job.batch_id, commandCapture);
       } else {
         if (!job.plan_hash || !job.preview_token) throw new Error("预览凭证缺失，请重新预览");
         response = await applyReturnReceiptImport(job.batch_id, {
           plan_hash: job.plan_hash, preview_token: job.preview_token,
           confirm_changes: confirmed, confirm_possible_duplicates: duplicatesConfirmed, ...(reason.trim() ? { reason: reason.trim() } : {}),
-        });
+        }, commandCapture);
       }
-      if (seq !== generation.current) return;
+      if (!commandCapture.isCurrent() || seq !== generation.current) return;
       setJob(response.data);
       if (kind === "apply") {
         await refreshApplied(seq, false);
       }
     } catch (err) {
-      if (seq !== generation.current) return;
+      if (!commandCapture.isCurrent() || seq !== generation.current) return;
       const detail = readError(err, "操作失败，请查询任务状态后重试");
       // A lost response may still have committed. Always query before offering another apply.
       try {
-        const response = await getReturnReceiptImport(job.batch_id, page);
-        if (seq !== generation.current) return;
+        if (!can("job_read")) { setError(detail); return; }
+        const response = await getReturnReceiptImport(job.batch_id, page, commandCapture);
+        if (!commandCapture.isCurrent() || seq !== generation.current) return;
         setJob(response.data);
         if (response.data.status === "applied") {
           await refreshApplied(seq, true);
         } else setError(detail);
       } catch {
-        if (seq === generation.current) setError(detail);
+        if (commandCapture.isCurrent() && seq === generation.current) setError(detail);
       }
     } finally {
       operationLock.current = false;
-      if (seq === generation.current) setBusy(false);
+      if (commandCapture.isCurrent() && seq === generation.current) setBusy(false);
     }
   };
 
   const downloadOriginal = async () => {
-    if (!job || downloadLock.current) return;
+    if (!canRaw || !jobCapture.isCurrent() || !job || downloadLock.current) return;
     downloadLock.current = true;
     const seq = downloadGeneration.current;
     setDownloading(true);
     setDownloadError(null);
     try {
-      const response = await downloadReturnReceiptOriginal(job.batch_id);
-      if (seq === downloadGeneration.current) saveBlob(response.data, job.filename ?? attempt.current?.file.name ?? "维保返件入库原件.xlsx");
+      const response = await downloadReturnReceiptOriginal(job.batch_id, jobCapture);
+      if (jobCapture.isCurrent() && seq === downloadGeneration.current) saveBlob(response.data, job.filename ?? attempt.current?.file.name ?? "维保返件入库原件.xlsx");
     } catch (err) {
-      if (seq === downloadGeneration.current) setDownloadError(readError(err, "原件下载失败，请稍后重试"));
+      if (jobCapture.isCurrent() && seq === downloadGeneration.current) setDownloadError(readError(err, "原件下载失败，请稍后重试"));
     } finally {
       downloadLock.current = false;
-      if (seq === downloadGeneration.current) setDownloading(false);
+      if (jobCapture.isCurrent() && seq === downloadGeneration.current) setDownloading(false);
     }
   };
 
@@ -198,7 +218,7 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
   const duplicatesCount = job?.possible_duplicates_count ?? 0;
   const running = job?.status === "queued" || job?.status === "processing";
   const active = running || job?.status === "ready";
-  const rows = job?.rows ?? [];
+  const rows = jobPage === page ? job?.rows ?? [] : [];
   return <>
     <Button size="small" onClick={() => setOpen(true)}>导入入库单</Button>
     <Modal open={open} title="导入维保入库返件" width={1040} footer={null}
@@ -206,23 +226,23 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
       maskClosable={!busy} closable={!busy}>
       <Space direction="vertical" style={{ width: "100%" }} size={12}>
         <Typography.Text type="secondary">使用维保部门入库单导出。拆旧返件、旧库退返按项目归属计入；整机附属明细仅展示，小数数量保留原值并待审。</Typography.Text>
-        <input ref={inputRef} type="file" accept=".xlsx" aria-label="选择入库单 Excel" hidden disabled={busy || active}
+        <input ref={inputRef} type="file" accept=".xlsx" aria-label="选择入库单 Excel" hidden disabled={!can("submit") || busy || active}
           onChange={(event) => {
             const file = event.target.files?.[0]; event.target.value = "";
-            if (!file || operationLock.current) return;
+            if (!can("submit") || !file || operationLock.current) return;
             attempt.current = { file, key: newKey() }; setJob(null); void upload();
           }} />
         <Space wrap>
-          <Button disabled={busy || active} onClick={() => inputRef.current?.click()}>选择入库单 Excel</Button>
-          {!job && error && attempt.current ? <Button loading={busy} onClick={() => { void upload(); }}>重试上传</Button> : null}
+          {can("submit") && <Button disabled={busy || active} onClick={() => inputRef.current?.click()}>选择入库单 Excel</Button>}
+          {can("submit") && !job && error && attempt.current ? <Button loading={busy} onClick={() => { void upload(); }}>重试上传</Button> : null}
           {job ? <><Tag>{STATES[job.status]}</Tag><span>{job.filename ?? attempt.current?.file.name}</span></> : null}
-          {job ? <Button loading={downloading} onClick={() => { void downloadOriginal(); }}>下载归档原件</Button> : null}
-          {active ? <Button danger disabled={busy} onClick={() => { void command("cancel"); }}>取消本次导入</Button> : null}
-          {job && ["failed", "cancelled", "ready"].includes(job.status) ? <Button loading={busy} onClick={() => { void command("retry"); }}>重新预览原件</Button> : null}
+          {canRaw && job ? <Button loading={downloading} onClick={() => { void downloadOriginal(); }}>下载归档原件</Button> : null}
+          {can("cancel") && active ? <Button danger disabled={busy} onClick={() => { void command("cancel"); }}>取消本次导入</Button> : null}
+          {can("retry") && job && ["failed", "cancelled", "ready"].includes(job.status) ? <Button loading={busy} onClick={() => { void command("retry"); }}>重新预览原件</Button> : null}
         </Space>
         {running ? <Alert type="info" showIcon message="后台正在校验完整原件与项目归属，可稍后查看进度。关闭窗口后任务继续。" /> : null}
         {error || job?.error ? <Alert type="error" showIcon message={error ?? job?.error?.message}
-          action={job ? <Button disabled={busy} onClick={() => { void refresh(job.batch_id); }}>重新查询状态</Button> : undefined} /> : null}
+          action={can("job_read") && job ? <Button disabled={busy} onClick={() => { void refresh(job.batch_id); }}>重新查询状态</Button> : undefined} /> : null}
         {refreshWarning ? <Alert type="warning" showIcon message={refreshWarning} /> : null}
         {downloadError ? <Alert type="error" showIcon message={downloadError} /> : null}
         {job?.excluded_reasons && Object.keys(job.excluded_reasons).length ? <Alert type="info" showIcon message="不纳入返还的源单据" description={Object.entries(job.excluded_reasons).map(([category, count]) => `${category} ${count} 单`).join("；")} /> : null}
@@ -270,12 +290,12 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
               { title: "说明", dataIndex: "reason", width: 230 },
             ]} />
           <Space wrap>
-            <Button disabled={busy || page <= 1} onClick={() => { if (operationLock.current) return; setPage(page - 1); if (job) void refresh(job.batch_id, page - 1); }}>上一页</Button>
+            <Button disabled={!can("job_read") || busy || page <= 1} onClick={() => { if (operationLock.current) return; setPage(page - 1); if (job) void refresh(job.batch_id, page - 1); }}>上一页</Button>
             <span>第 {page} 页 · 全部 {job?.rows_total ?? Object.values(counts).reduce((sum, count) => sum + count, 0) - counts.blocking_errors} 行（每页 100 行，分类筛选仅作用于本页）</span>
-            <Button disabled={busy || page * 100 >= (job?.rows_total ?? 0)} onClick={() => { if (operationLock.current) return; setPage(page + 1); if (job) void refresh(job.batch_id, page + 1); }}>下一页</Button>
+            <Button disabled={!can("job_read") || busy || page * 100 >= (job?.rows_total ?? 0)} onClick={() => { if (operationLock.current) return; setPage(page + 1); if (job) void refresh(job.batch_id, page + 1); }}>下一页</Button>
           </Space>
         </> : null}
-        {job?.status === "ready" ? <>
+        {can("apply") && job?.status === "ready" ? <>
           {duplicatesCount > 0 ? <>
             <Alert type="warning" showIcon message={`本批 ${duplicatesCount} 条拟新增记录与现有手工登记相似，请展开对应行核对。`} description="确认后将另行新增这些收货记录，现有手工登记保留。可取消本次导入后处理重复来源。" />
             <Checkbox checked={duplicatesConfirmed} disabled={busy} onChange={(event) => setDuplicatesConfirmed(event.target.checked)}>已核对全部疑似手工重复，确认仍另行新增收货记录</Checkbox>
@@ -292,3 +312,5 @@ export default function ReturnReceiptImport({ onApplied }: { onApplied: () => Pr
     </Modal>
   </>;
 }
+
+export default withContextSurface(ReturnReceiptImport, contextSurfaces("maintenance_return_import.import", "maintenance_return_import.raw_download"));

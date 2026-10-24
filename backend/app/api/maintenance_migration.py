@@ -3,11 +3,15 @@
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_migration_authorization as authorization
+from app.services import maintenance_authorization as foundation
+from app.authz import runtime
 from app.auth import current_identity
 from app.config import get_settings
 from app.db import get_db
@@ -98,6 +102,7 @@ class ProjectCutoverInput(BaseModel):
 
 class MigrationPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     idempotency_key: str = Field(min_length=1, max_length=96)
     reason: str = Field(min_length=1, max_length=1000)
@@ -116,6 +121,7 @@ class MigrationPreviewRequest(BaseModel):
 
 class MigrationSearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     statuses: list[str] = Field(default_factory=list, max_length=3)
     page: int = Field(default=1, ge=1)
@@ -124,6 +130,7 @@ class MigrationSearchRequest(BaseModel):
 
 class MigrationCommandRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     expected_version: int = Field(ge=1)
     operation_key: str = Field(min_length=1, max_length=110)
@@ -200,6 +207,8 @@ def _migration_operator(
     db: Session = Depends(get_db), ident: dict = Depends(current_identity)
 ) -> str:
     operator = _real_operator(db, ident)
+    if runtime.is_authoritative(db, "maintenance_migration"):
+        return operator
     permissions = ident.get("perms")
     required = (
         "page_maintenance",
@@ -235,10 +244,22 @@ def _raise_service_error(exc: Exception) -> None:
 
 @router.post("/preview", status_code=status.HTTP_201_CREATED)
 def create_preview(
+    request: Request,
+    response: Response,
     body: MigrationPreviewRequest,
     db: Session = Depends(get_db),
     operator: str = Depends(_migration_operator),
+    identity=Depends(auth_transport.identity_for("maintenance_migration")),
+    view: str | None = Query(None),
 ) -> dict:
+    response.headers['Cache-Control'] = 'no-store'
+    if view not in (None, 'authorization'):
+        raise HTTPException(422, '未知的授权视图')
+    if identity is not None:
+        params = authorization.preview_params(_project_payloads(body), body.reason)
+        precondition = foundation.decode_precondition(body.authorization_precondition)
+        if view == 'authorization':
+            return authorization.preflight(db, identity, authorization.PREVIEW, params, view=True)
     try:
         result = runs.create_preview_run(
             db,
@@ -246,6 +267,8 @@ def create_preview(
             projects=_project_payloads(body),
             reason=body.reason,
             operated_by=operator,
+            identity=identity,
+            authorization_precondition=precondition if identity is not None else None,
             warehouse_loader=load_project_inventory_movements,
             legacy_loader=load_project_legacy_truth,
         )
@@ -258,11 +281,27 @@ def create_preview(
 
 @router.post("/search")
 def search_migration_runs(
+    request: Request,
+    response: Response,
     body: MigrationSearchRequest,
     db: Session = Depends(get_db),
     _operator: str = Depends(_migration_operator),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_migration")),
+    view: str | None = Query(None),
 ) -> dict:
+    response.headers['Cache-Control'] = 'no-store'
+    if view not in (None, 'authorization'):
+        raise HTTPException(422, '未知的授权视图')
+    if identity is not None:
+        params = {"statuses": body.statuses, "page": body.page, "page_size": body.page_size}
+        precondition = foundation.decode_precondition(body.authorization_precondition)
+        try:
+            return authorization.read(db, identity, authorization.SEARCH, params,
+                view=view == 'authorization', precondition=precondition,
+                verification_keys=get_settings().maintenance_manifest_verification_keys() if authorization.SEARCH == authorization.MANIFEST else None)
+        except Exception as exc:
+            _raise_service_error(exc)
     try:
         result = runs.search_runs(
             db,
@@ -283,11 +322,28 @@ def search_migration_runs(
 
 @router.get("/{run_id}")
 def get_migration_run(
+    request: Request,
+    response: Response,
     run_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     _operator: str = Depends(_migration_operator),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_migration")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
+    response.headers['Cache-Control'] = 'no-store'
+    if view not in (None, 'authorization'):
+        raise HTTPException(422, '未知的授权视图')
+    if identity is not None:
+        params = {"run_id": run_id}
+        precondition = foundation.decode_precondition(authorization_precondition)
+        try:
+            return authorization.read(db, identity, authorization.READ, params,
+                view=view == 'authorization', precondition=precondition,
+                verification_keys=get_settings().maintenance_manifest_verification_keys() if authorization.READ == authorization.MANIFEST else None)
+        except Exception as exc:
+            _raise_service_error(exc)
     try:
         result = runs.get_run_detail(db, run_id=run_id)
         record_access_log(
@@ -300,6 +356,8 @@ def get_migration_run(
 
 @router.get("/{run_id}/projects/{project_id}/evidence")
 def get_migration_project_evidence(
+    request: Request,
+    response: Response,
     run_id: str = Path(..., min_length=1, max_length=36),
     project_id: str = Path(..., min_length=1, max_length=36),
     section: str = Query(..., min_length=1, max_length=64),
@@ -308,7 +366,22 @@ def get_migration_project_evidence(
     db: Session = Depends(get_db),
     _operator: str = Depends(_migration_operator),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_migration")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
+    response.headers['Cache-Control'] = 'no-store'
+    if view not in (None, 'authorization'):
+        raise HTTPException(422, '未知的授权视图')
+    if identity is not None:
+        params = {"run_id": run_id, "project_id": project_id, "section": section, "page": page, "page_size": page_size}
+        precondition = foundation.decode_precondition(authorization_precondition)
+        try:
+            return authorization.read(db, identity, authorization.EVIDENCE, params,
+                view=view == 'authorization', precondition=precondition,
+                verification_keys=get_settings().maintenance_manifest_verification_keys() if authorization.EVIDENCE == authorization.MANIFEST else None)
+        except Exception as exc:
+            _raise_service_error(exc)
     try:
         result = runs.get_project_evidence(
             db,
@@ -337,11 +410,28 @@ def get_migration_project_evidence(
 
 @router.get("/{run_id}/manifest")
 def get_migration_manifest(
+    request: Request,
+    response: Response,
     run_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     _operator: str = Depends(_migration_operator),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_migration")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
+    response.headers['Cache-Control'] = 'no-store'
+    if view not in (None, 'authorization'):
+        raise HTTPException(422, '未知的授权视图')
+    if identity is not None:
+        params = {"run_id": run_id}
+        precondition = foundation.decode_precondition(authorization_precondition)
+        try:
+            return authorization.read(db, identity, authorization.MANIFEST, params,
+                view=view == 'authorization', precondition=precondition,
+                verification_keys=get_settings().maintenance_manifest_verification_keys() if authorization.MANIFEST == authorization.MANIFEST else None)
+        except Exception as exc:
+            _raise_service_error(exc)
     try:
         result = runs.get_signed_manifest(
             db,
@@ -360,11 +450,23 @@ def get_migration_manifest(
 
 @router.post("/{run_id}/reconcile")
 def reconcile_migration_run(
+    request: Request,
+    response: Response,
     body: MigrationReconcileRequest,
     run_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     operator: str = Depends(_migration_operator),
+    identity=Depends(auth_transport.identity_for("maintenance_migration")),
+    view: str | None = Query(None),
 ) -> dict:
+    response.headers['Cache-Control'] = 'no-store'
+    if view not in (None, 'authorization'):
+        raise HTTPException(422, '未知的授权视图')
+    if identity is not None:
+        params = {"run_id": run_id}
+        precondition = foundation.decode_precondition(body.authorization_precondition)
+        if view == 'authorization':
+            return authorization.preflight(db, identity, authorization.RECONCILE, params, view=True)
     try:
         result = runs.reconcile_run(
             db,
@@ -373,6 +475,8 @@ def reconcile_migration_run(
             operation_key=body.operation_key,
             reason=body.reason,
             operated_by=operator,
+            identity=identity,
+            authorization_precondition=precondition if identity is not None else None,
             project_signoffs=[
                 signoff.model_dump(mode="json") for signoff in body.project_signoffs
             ],
@@ -388,11 +492,23 @@ def reconcile_migration_run(
 
 @router.post("/{run_id}/approve")
 def approve_migration_run(
+    request: Request,
+    response: Response,
     body: MigrationApproveRequest,
     run_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     operator: str = Depends(_migration_operator),
+    identity=Depends(auth_transport.identity_for("maintenance_migration")),
+    view: str | None = Query(None),
 ) -> dict:
+    response.headers['Cache-Control'] = 'no-store'
+    if view not in (None, 'authorization'):
+        raise HTTPException(422, '未知的授权视图')
+    if identity is not None:
+        params = {"run_id": run_id}
+        precondition = foundation.decode_precondition(body.authorization_precondition)
+        if view == 'authorization':
+            return authorization.preflight(db, identity, authorization.APPROVE, params, view=True)
     try:
         signing_key_id, signing_key = (
             get_settings().maintenance_manifest_signing_material()
@@ -405,6 +521,8 @@ def approve_migration_run(
             operation_key=body.operation_key,
             reason=body.reason,
             operated_by=operator,
+            identity=identity,
+            authorization_precondition=precondition if identity is not None else None,
             signing_key=signing_key,
             signing_key_id=signing_key_id,
             warehouse_loader=load_project_inventory_movements,

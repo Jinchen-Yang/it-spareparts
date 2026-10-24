@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
 
 export type ReturnImportAction = "create" | "unchanged" | "change" | "pending" | "excluded" | "invalid";
@@ -37,20 +38,20 @@ export interface ReturnImportJob {
 }
 const base = "/maintenance/doc-imports/return-receipts/jobs";
 const jobPath = (id: string) => `${base}/${encodeURIComponent(id)}`;
-export const uploadReturnReceiptImport = (file: File, idempotencyKey: string) => {
+export const uploadReturnReceiptImport = (file: File, idempotencyKey: string, capture?: ContextRequestTransport) => {
   const data = new FormData();
   data.append("file", file);
-  return api.post<ReturnImportJob>(base, data, {
+  return domainApi(capture).post<ReturnImportJob>(base, data, {
     headers: { "Idempotency-Key": idempotencyKey }, timeout: 120_000,
   });
 };
-export const getReturnReceiptImport = (id: string, page = 1) =>
-  api.get<ReturnImportJob>(jobPath(id), { params: { offset: (page - 1) * 100, limit: 100 } });
-export const cancelReturnReceiptImport = (id: string) => api.post<ReturnImportJob>(`${jobPath(id)}/cancel`);
-export const retryReturnReceiptImport = (id: string) => api.post<ReturnImportJob>(`${jobPath(id)}/retry`);
+export const getReturnReceiptImport = (id: string, page = 1, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<ReturnImportJob>(jobPath(id), { params: { offset: (page - 1) * 100, limit: 100 } });
+export const cancelReturnReceiptImport = (id: string, capture?: ContextRequestTransport) => domainApi(capture).post<ReturnImportJob>(`${jobPath(id)}/cancel`);
+export const retryReturnReceiptImport = (id: string, capture?: ContextRequestTransport) => domainApi(capture).post<ReturnImportJob>(`${jobPath(id)}/retry`);
 export const applyReturnReceiptImport = (id: string, input: {
   plan_hash: string; preview_token: string; confirm_changes: boolean; confirm_possible_duplicates?: boolean; reason?: string;
-}) => api.post<ReturnImportJob>(`${jobPath(id)}/apply`, input, { timeout: 120_000 });
+}, capture?: ContextRequestTransport) => domainApi(capture).post<ReturnImportJob>(`${jobPath(id)}/apply`, input, { timeout: 120_000 });
 
-export const downloadReturnReceiptOriginal = (id: string) =>
-  api.get<Blob>(`${jobPath(id)}/original`, { responseType: "blob", timeout: 120_000 });
+export const downloadReturnReceiptOriginal = (id: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<Blob>(`${jobPath(id)}/original`, { responseType: "blob", timeout: 120_000 });

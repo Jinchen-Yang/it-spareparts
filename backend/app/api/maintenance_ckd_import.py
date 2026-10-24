@@ -1,6 +1,7 @@
+from typing import Literal
 """氚云发货单导入 API（C1a/F1）：preview → apply → 批次状态。"""
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response, status
+from fastapi import Body, Query, APIRouter, Depends, HTTPException, Path, Request, Response, status
 from starlette.datastructures import UploadFile
 from sqlalchemy.orm import Session
 
@@ -16,6 +17,11 @@ from app.security import (
 )
 from app.services import import_safety
 from app.services import maintenance_ckd_import as ckd
+
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_import_authorization as canonical
+from app.services import maintenance_authorization as foundation
+from app.services.maintenance_workflow_authorization import multipart_precondition
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 MAX_PREVIEW_BYTES = ckd.MAX_PREVIEW_BYTES
@@ -45,11 +51,14 @@ def _preflight(request: Request) -> None:
 async def preview_ckd_import(
     request: Request,
     response: Response,
+    identity=Depends(auth_transport.identity_for('maintenance_shipment_import')),
+    view: Literal['authorization'] | None = Query(None),
+    authorization_precondition: str | None = Query(None),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_purchase_cost")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_shipment_import", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_shipment_import", require_action(_ACTION_KEY, require_data="data_purchase_cost"))),
     _preflight: None = Depends(_preflight),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
@@ -60,6 +69,7 @@ async def preview_ckd_import(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {"code": "invalid_request", "message": f"multipart 表单解析失败：{type(exc).__name__}"},
         )
+    parsed_precondition=multipart_precondition(authorization_precondition,form.get("authorization_precondition")) if identity is not None else None
     file = form.get("file")
     if not isinstance(file, UploadFile):
         raise HTTPException(
@@ -96,8 +106,14 @@ async def preview_ckd_import(
         parsed = await import_safety.parse_in_threadpool(
             ckd.parse_ckd_workbook, data, filename
         )
+        if identity is not None and view == 'authorization':
+            with foundation.read_context_snapshot(lambda: Session(db.get_bind()), identity,
+                    entry_id=canonical.CKD_PREVIEW,
+                    params={'input_sha256': parsed['file_hash'], 'doc_type': parsed.get('doc_type', 'ckd_shipment')}) as (_, _, context, accesses):
+                return canonical.service.context_resolution(accesses, context.contexts[0].ref)
         batch_id = ckd.store_preview(
-            db, parsed, _real_operator(ident), idempotency_key=idempotency_key
+            db, parsed, _real_operator(ident), idempotency_key=idempotency_key, identity=identity,
+            authorization_precondition=parsed_precondition
         )
     except ckd.CkdParseError as exc:
         raise HTTPException(
@@ -121,13 +137,26 @@ async def preview_ckd_import(
 @router.post("/ckd-imports/{batch_id}/apply")
 def apply_ckd_import(
     batch_id: str = Path(..., min_length=36, max_length=36),
+    response: Response = None,
+    identity=Depends(auth_transport.identity_for('maintenance_shipment_import', 'maintenance_shipment_import_targets')),
+    view: Literal['authorization'] | None = Query(None),
+    command: dict | None = Body(None),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_purchase_cost")),
+    _page: None = Depends(auth_transport.legacy_page(("maintenance_shipment_import", "maintenance_shipment_import_targets"), "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(("maintenance_shipment_import", "maintenance_shipment_import_targets"), require_action(_ACTION_KEY, require_data="data_purchase_cost"))),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control'] = 'no-store'
+        if command is not None and set(command) - {'authorization_precondition'}:
+            raise canonical.authz_error(422, 'AUTHZ_INVALID_REQUEST', '导入应用仅接受授权前置条件')
+        try:
+            return canonical.apply_batch(db, identity, kind='shipment_import_batch', batch_id=batch_id,
+                authorization_view=view == 'authorization', precondition=(command or {}).get('authorization_precondition'))
+        except ckd.CkdBatchError as exc:
+            raise HTTPException(409, {'code': 'batch_conflict', 'message': str(exc)}, headers={'Cache-Control': 'no-store'}) from exc
     operator = _real_operator(ident)
     batch = db.get(MaintenanceCkdImportBatch, batch_id)
     if batch is not None and batch.uploaded_by != operator and ctx.role not in ("admin", "boss"):
@@ -160,14 +189,21 @@ def apply_ckd_import(
 def get_ckd_import(
     batch_id: str = Path(..., min_length=36, max_length=36),
     response: Response = None,
+    identity=Depends(auth_transport.identity_for('maintenance_shipment_import')),
+    view: Literal['authorization'] | None = Query(None),
+    authorization_precondition: str | None = Query(None),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_purchase_cost")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_shipment_import", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_shipment_import", require_action(_ACTION_KEY, require_data="data_purchase_cost"))),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    if identity is not None:
+        return canonical.read_batch(db, identity, kind='shipment_import_batch', batch_id=batch_id,
+            authorization_view=view == 'authorization',
+            precondition=foundation.decode_precondition(authorization_precondition))
     operator = _real_operator(ident)
     batch = db.get(MaintenanceCkdImportBatch, batch_id)
     if batch is None:

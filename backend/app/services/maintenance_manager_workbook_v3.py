@@ -853,6 +853,7 @@ def validate_manager_workbook(
     *,
     snapshot: Mapping[str, Any],
     hmac_key: bytes,
+    stable_owner_only: bool = False,
 ) -> ManagerWorkbookValidation:
     """Validate the whole workbook and return an atomic, server-owned plan."""
 
@@ -921,7 +922,7 @@ def validate_manager_workbook(
             owner_user_id = int(owner.get("user_id"))
         except (TypeError, ValueError) as exc:
             raise ManagerWorkbookV3Error("当前项目经理账号无稳定 ID") from exc
-        if metadata["owner_user_id"] != str(owner_user_id) or metadata["owner_username"] != str(owner.get("username") or ""):
+        if metadata["owner_user_id"] != str(owner_user_id) or (not stable_owner_only and metadata["owner_username"] != str(owner.get("username") or "")):
             raise ManagerWorkbookV3Error("工作簿不属于当前账号", status_code=403, issues=(WorkbookIssue("owner_mismatch", "工作簿不属于当前账号"),))
         if metadata["report_month"] != report_month.strftime("%Y-%m"):
             raise ManagerWorkbookV3Error("工作簿报告月份与当前任务不一致", status_code=409)

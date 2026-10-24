@@ -1,3 +1,6 @@
+import { useModuleAccess } from "../../../authz/access";
+import { useContextQuery } from "../../../authz/contextQuery";
+import { surfaceRule } from "../../../authz/rules";
 /** M-AC09 返件明细下钻 Drawer（R33 已有 GET /receipts 的轻量页面入口）。
  *
  * 从总览/项目/PN 汇总点击进入：参数由调用方按「原筛选 ∩ 点击维度」求交后
@@ -43,7 +46,7 @@ export interface ReceiptsDrill {
 }
 
 export default function ReceiptsDrillDrawer({
-  drill, onClose, amountsVisible, maxExportRows, ownerToken, onSessionMismatch,
+  drill, onClose, amountsVisible: amountsEligible, maxExportRows, ownerToken, onSessionMismatch,
 }: {
   drill: ReceiptsDrill | null;
   onClose: () => void;
@@ -54,54 +57,17 @@ export default function ReceiptsDrillDrawer({
   onSessionMismatch: () => void;
 }) {
   const [page, setPage] = useState(1);
-  const [rows, setRows] = useState<ReceiptLineRow[] | null>(null);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const seqRef = useRef(0);
+  const query = useContextQuery({ entryId: "GET /api/maintenance/analytics/maintenance-dashboard/receipts",
+    rule: surfaceRule("maintenance_dashboard.receipt_drill"), queryKey: [drill, page], legacyAllowed: true,
+    enabled: !!drill, onStale: onSessionMismatch,
+    query: capture => fetchDashboardReceipts({ ...drill!.params, sort: "occurred_desc", page, page_size: PAGE_SIZE }, capture) });
+  const rows = query.data?.rows ?? null, total = query.data?.pagination.total ?? 0;
+  const loading = query.loading, error = query.error ? apiErrorMessage(query.error) : null;
+  const load = query.retry;
+  useEffect(() => { setPage(1); }, [drill]);
 
-  // 每次打开回到第一页（关闭后状态随 drill=null 清空）。
-  useEffect(() => {
-    setPage(1);
-    setRows(null);
-    setError(null);
-  }, [drill]);
-
-  const load = useCallback(async () => {
-    if (!drill) return;
-    // 下钻请求发出前绑定组件所属会话（B-F04）：旧会话组件不发新请求。
-    if (!sessionUnchanged(ownerToken)) {
-      onSessionMismatch();
-      return;
-    }
-    const seq = seqRef.current + 1;
-    seqRef.current = seq;
-    const token = sessionToken();
-    setLoading(true);
-    setError(null);
-    try {
-      const resp = await fetchDashboardReceipts({
-        ...drill.params, sort: "occurred_desc", page, page_size: PAGE_SIZE,
-      });
-      if (seqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      setRows(resp.rows ?? []);
-      setTotal(resp.pagination.total);
-    } catch (err) {
-      if (seqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      setRows(null);
-      setTotal(0);
-      setError(apiErrorMessage(err));
-    } finally {
-      if (seqRef.current === seq && sessionUnchanged(token)) setLoading(false);
-    }
-  }, [drill, page, ownerToken, onSessionMismatch]);
-
-  useEffect(() => {
-    if (drill) void load();
-    return () => { seqRef.current += 1; };
-  }, [drill, load]);
+  const fieldAccess = useModuleAccess("maintenance_dashboard", query.context);
+  const amountsVisible = amountsEligible && fieldAccess.field("data_profit", amountsEligible);
 
   const onTableChange: TableProps<ReceiptLineRow>["onChange"] = (pg) => {
     if (pg.current) setPage(pg.current);

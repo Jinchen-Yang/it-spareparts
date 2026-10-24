@@ -1,3 +1,7 @@
+import { withContextSurface } from "../../../authz/ContextSurface";
+import { useContextAdmission } from "../../../authz/access";
+import { useContextTransport, withTransportSignal } from "../../../authz/domainTransport";
+import { actionRule, surfaceRule } from "../../../authz/rules";
 import { useEffect, useRef, useState } from "react";
 import { App, Alert, AutoComplete, Button, Descriptions, Divider, Drawer, Form, Input, Select, Space, Typography } from "antd";
 import {
@@ -73,7 +77,7 @@ function editable(issue: SiteIssueDocument, line: SiteIssueLine) {
 }
 
 /** 行与单头是独立命令。每次实际提交冻结载荷，任何恢复都不自动接受新版本。 */
-export default function SiteIssueEditDrawer({ issue, line, open, onClose, onChanged, onPendingChange }: {
+function SiteIssueEditDrawer({ issue, line, open, onClose, onChanged, onPendingChange }: {
   issue: SiteIssueDocument;
   line: SiteIssueLine;
   open: boolean;
@@ -98,9 +102,14 @@ export default function SiteIssueEditDrawer({ issue, line, open, onClose, onChan
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [refreshFailed, setRefreshFailed] = useState(false);
   const [demandOptions, setDemandOptions] = useState<{ value: string }[]>([]);
+  const admission = useContextAdmission();
+  const can = (action: string) => admission.state(actionRule("maintenance_issue", action), true) !== "deny";
+  const readCapture = useContextTransport(JSON.stringify([issue.project_id, issue.issue_id, line.issue_line_id, open]), true);
+  const commandCapture = useContextTransport(JSON.stringify([issue.issue_id, line.issue_line_id, open, baseline.issue.version, baseline.line.version, draft, header, lineReason, headerReason]), true);
+  const candidateCapture = useContextTransport(JSON.stringify([issue.project_id, open, draft.part_id, draft.demand_order_no]), true);
   const changes = lineChanges(draft, baseline.line);
   const headChanges = headerChanges(header, baseline.issue);
-  const canEditHeader = baseline.issue.lines.every((item) => !item.delivery_line_id)
+  const canEditHeader = can("correct_header") && baseline.issue.lines.every((item) => !item.delivery_line_id)
     && (baseline.issue.total_line_count ?? baseline.issue.lines.length) === baseline.issue.lines.length;
   const frozen = busy || !loaded || status !== "ready";
   const hasChanges = Object.keys(changes).length > 0;
@@ -109,7 +118,7 @@ export default function SiteIssueEditDrawer({ issue, line, open, onClose, onChan
     !/^\d+(\.\d{1,3})?$/.test(changes.quantity) || Number(changes.quantity) <= 0 || Number(changes.quantity) >= 1e12
   );
   const sessionCurrent = () => {
-    if (localStorage.getItem("token") === token.current) return true;
+    if (readCapture.isCurrent() && localStorage.getItem("token") === token.current) return true;
     setError("登录会话已变化，请重新进入项目后核对"); setStatus("unavailable");
     return false;
   };
@@ -124,7 +133,7 @@ export default function SiteIssueEditDrawer({ issue, line, open, onClose, onChan
     setBusy(true);
     const run = generation.current;
     try {
-      const { data } = await searchSiteIssues({ project_id: issue.project_id, issue_id: issue.issue_id });
+      const { data } = await searchSiteIssues({ project_id: issue.project_id, issue_id: issue.issue_id }, readCapture);
       if (generation.current !== run || !sessionCurrent()) return;
       const freshIssue = data.rows.find((row) => row.issue_id === issue.issue_id);
       const freshLine = freshIssue?.lines.find((row) => row.issue_line_id === line.issue_line_id);
@@ -138,32 +147,36 @@ export default function SiteIssueEditDrawer({ issue, line, open, onClose, onChan
       setStatus("ready"); setError(""); setLoaded(true);
       if (preserve) message.info("已读取最新事实并保留草稿，请核对后再次确认保存");
     } catch (error) {
-      if (generation.current === run) setError(readError(error, "重新读取失败，草稿已保留"));
+      if (readCapture.isCurrent() && generation.current === run) setError(readError(error, "重新读取失败，草稿已保留"));
     } finally {
-      if (generation.current === run) { busyRef.current = false; setBusy(false); }
+      if (readCapture.isCurrent() && generation.current === run) { busyRef.current = false; setBusy(false); }
     }
   };
   // 以稳定 ID 读取整单，不能用当前品类筛选后的行集合判断单头可编辑性。
   useEffect(() => { void reload(false); }, []); // target 改变由父组件 key 建立新编辑会话。
   useEffect(() => {
+    if (!open || !can("read_demand_candidates")) { setDemandOptions([]); return; }
     let current = true;
+    setDemandOptions([]);
+    const abort = new AbortController();
+    const captured = withTransportSignal(candidateCapture, abort.signal);
     const timer = setTimeout(() => {
-      getSiteIssueDemandCandidates(issue.project_id, { partId: draft.part_id, q: draft.demand_order_no, pageSize: 50 })
-        .then(({ data }) => { if (current) setDemandOptions(data.rows.map((item) => ({ value: item.order_no }))); })
-        .catch(() => { if (current) setDemandOptions([]); });
+      getSiteIssueDemandCandidates(issue.project_id, { partId: draft.part_id, q: draft.demand_order_no, pageSize: 50 }, captured)
+        .then(({ data }) => { if (current && captured.isCurrent()) setDemandOptions(data.rows.map((item) => ({ value: item.order_no }))); })
+        .catch(() => { if (current && captured.isCurrent()) setDemandOptions([]); });
     }, 300);
-    return () => { current = false; clearTimeout(timer); };
-  }, [issue.project_id, draft.part_id, draft.demand_order_no]);
+    return () => { current = false; abort.abort(); clearTimeout(timer); };
+  }, [issue.project_id, draft.part_id, draft.demand_order_no, open, candidateCapture]);
 
   const send = async (command: Attempt, recheck = false) => {
-    if (busyRef.current || !sessionCurrent()) return;
+    if (busyRef.current || !sessionCurrent() || !commandCapture.isCurrent() || !can(command.kind === "line" ? "correct_line" : "correct_header")) return;
     busyRef.current = true;
     setBusy(true); setError("");
     const run = generation.current;
     try {
       const { data } = command.kind === "line"
-        ? await correctSiteIssueLine(issue.issue_id, line.issue_line_id, command.payload)
-        : await correctSiteIssueHeader(issue.issue_id, command.payload);
+        ? await correctSiteIssueLine(issue.issue_id, line.issue_line_id, command.payload, commandCapture)
+        : await correctSiteIssueHeader(issue.issue_id, command.payload, commandCapture);
       if (generation.current !== run || !sessionCurrent()) return;
       setReceipt(data); setStatus("success"); setAttempt(null);
       // 已获成功回执的字段不再是待提交草稿。仍不升 CAS 基线；下一命令须显式重读。
@@ -173,9 +186,9 @@ export default function SiteIssueEditDrawer({ issue, line, open, onClose, onChan
         : { ...current, issue: { ...current.issue, ...command.payload.changes } });
       let refreshed = false;
       try { refreshed = await onChanged(); } catch { /* 成功回执保留，刷新失败不能重发写命令。 */ }
-      if (generation.current === run) setRefreshFailed(!refreshed);
+      if (readCapture.isCurrent() && generation.current === run) setRefreshFailed(!refreshed);
     } catch (error) {
-      if (generation.current !== run) return;
+      if (!readCapture.isCurrent() || generation.current !== run) return;
       const code = (error as { response?: { status?: number } })?.response?.status;
       const detail = readError(error, "请求未完成");
       if (recheck || !code || code >= 500) {
@@ -187,11 +200,11 @@ export default function SiteIssueEditDrawer({ issue, line, open, onClose, onChan
         setStatus("ready"); setError(detail);
       }
     } finally {
-      if (generation.current === run) { busyRef.current = false; setBusy(false); }
+      if (readCapture.isCurrent() && generation.current === run) { busyRef.current = false; setBusy(false); }
     }
   };
   const submit = (kind: "line" | "header") => {
-    if (frozen || busyRef.current || !sessionCurrent()) return;
+    if (!can(kind === "line" ? "correct_line" : "correct_header") || frozen || busyRef.current || !sessionCurrent()) return;
     const reason = kind === "line" ? lineReason : headerReason;
     if (!reasonValid(reason) || (kind === "line" ? (!hasChanges || quantityError) : (!hasHeadChanges || !canEditHeader))) return;
     const command: Attempt = kind === "line" ? {
@@ -262,7 +275,7 @@ export default function SiteIssueEditDrawer({ issue, line, open, onClose, onChan
         <Typography.Paragraph type="secondary">数量、PN 或需求关联变更按现有规则重新取价；换 PN 会清除旧人工价格证据。成本在重读后显示。</Typography.Paragraph>
         {textField("行更正原因", lineReason, setLineReason, true)}
         {Array.from(lineReason.trim()).length > 1000 ? <Typography.Paragraph type="danger">更正原因最多 1000 个字符</Typography.Paragraph> : null}
-        <Button type="primary" disabled={frozen || !hasChanges || !reasonValid(lineReason) || quantityError}
+        <Button type="primary" disabled={!can("correct_line") || frozen || !hasChanges || !reasonValid(lineReason) || quantityError}
           onClick={() => submit("line")}>保存行修改</Button>
         <Divider />
         <Typography.Title level={5}>整单单头</Typography.Title>
@@ -284,3 +297,5 @@ export default function SiteIssueEditDrawer({ issue, line, open, onClose, onChan
     </Space>
   </Drawer>;
 }
+
+export default withContextSurface(SiteIssueEditDrawer, surfaceRule("maintenance_issue.correction"), props => [props.issue.project_id, props.issue.issue_id, props.line.issue_line_id]);

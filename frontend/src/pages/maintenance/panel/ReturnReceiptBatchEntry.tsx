@@ -1,3 +1,8 @@
+import { contextInputKey } from "../../../authz/context";
+import { withContextSurface } from "../../../authz/ContextSurface";
+import { useContextAdmission } from "../../../authz/access";
+import { useContextTransport, withTransportSignal } from "../../../authz/domainTransport";
+import { surfaceRule, actionRule } from "../../../authz/rules";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { App, Alert, Button, Input, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -182,7 +187,7 @@ interface SubmitSession {
  * 部分失败语义：每行独立成败；失败/未知行单独重试（直接复用保存的 key+冻结 payload 走幂等
  * 重放），成功行锁定不可再提交。关闭只隐藏不清结果：重开可继续同批重试，「新批次」显式清空。
  */
-export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
+function ReturnReceiptBatchEntry({ projectId, onDone }: {
   projectId: string;
   onDone: () => Promise<void>;
 }) {
@@ -197,16 +202,27 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
   const [demandLoading, setDemandLoading] = useState(false);
   const [demandError, setDemandError] = useState<string | null>(null);
   const demandSeq = useRef(0);
+  const capture = useContextTransport(projectId, true);
+  const commandCapture = useContextTransport(JSON.stringify([projectId, open, text, wbddNo]), true);
+  const demandAbort = useRef<AbortController | null>(null);
+  useEffect(() => { if (!open) demandAbort.current?.abort(); }, [open]);
+  useEffect(() => () => demandAbort.current?.abort(), []);
   const loadDemands = async () => {
     const seq = ++demandSeq.current;
+    demandAbort.current?.abort(); demandAbort.current = new AbortController();
+    const requestCapture = withTransportSignal(capture, demandAbort.current.signal);
     setDemandLoading(true);
     setDemandError(null);
     try {
       const candidates: ReturnReceiptDemandCandidate[] = [];
       let loaded = 0;
+      let previousContext: string | undefined;
       for (let page = 1; ; page += 1) {
-        const response = await getReturnReceiptDemands(projectId, { page, page_size: 100 });
-        if (seq !== demandSeq.current) return;
+        const response = await getReturnReceiptDemands(projectId, { page, page_size: 100 }, requestCapture);
+        if (!requestCapture.isCurrent() || seq !== demandSeq.current) return;
+        const nextContext = contextInputKey({ body: response.data.authorization_context });
+        if (previousContext !== undefined && previousContext !== nextContext) throw new Error("项目权限范围已变化，请重新加载");
+        previousContext = nextContext;
         const next = response.data.rows ?? [];
         loaded += next.length;
         candidates.push(...next.filter(availableReceiptDemand));
@@ -215,12 +231,12 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
       }
       setDemands(candidates);
     } catch (error) {
-      if (seq === demandSeq.current) {
+      if (requestCapture.isCurrent() && seq === demandSeq.current) {
         setDemands([]);
         setDemandError(readError(error, "需求单候选加载失败，请重试"));
       }
     } finally {
-      if (seq === demandSeq.current) setDemandLoading(false);
+      if (requestCapture.isCurrent() && seq === demandSeq.current) setDemandLoading(false);
     }
   };
   /** 当前有效提交会话；projectId 切换 / unmount / close / 新批次将其置 null */
@@ -328,7 +344,7 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
 
     const mySession: SubmitSession = { projectId };
     sessionRef.current = mySession;
-    const isCurrent = () => sessionRef.current === mySession;
+    const isCurrent = () => commandCapture.isCurrent() && sessionRef.current === mySession;
     busyRef.current = true;
     setResults([...ordered]);
     setPhase("results");
@@ -347,7 +363,7 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
           qty: row.fingerprint.qty,
           serial_numbers: row.fingerprint.serials.length ? row.fingerprint.serials : null,
           idempotency_key: row.idempotencyKey,
-        });
+        }, commandCapture);
         if (!isCurrent()) return;
         const idx = rows.findIndex((r) => r.idempotencyKey === row.idempotencyKey);
         rows[idx] = {
@@ -559,3 +575,5 @@ export default function ReturnReceiptBatchEntry({ projectId, onDone }: {
     </>
   );
 }
+
+export default withContextSurface(ReturnReceiptBatchEntry, surfaceRule("maintenance_return_receipt.batch_create"), props => props.projectId);

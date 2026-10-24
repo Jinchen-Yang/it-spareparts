@@ -1,4 +1,6 @@
 """Project-scoped source cancellation review and explicit human commands."""
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,25 +25,50 @@ from app.security import (
 )
 from app.services import maintenance_source_cancel_cascade as service
 
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_source_cancellation_access as canonical
+from app.services import maintenance_authorization as foundation
+
 router = APIRouter(
     prefix="/maintenance/projects/{project_id}/source-cancellations", tags=["maintenance"],
     dependencies=[Depends(require_maintenance_boss), Depends(current_role),
-                  Depends(require_page("page_maintenance")), Depends(require_maintenance_project_access)],
+                  Depends(auth_transport.legacy_page("maintenance_source_cancellation", "page_maintenance")),
+                  Depends(auth_transport.legacy_project_scope("maintenance_source_cancellation"))],
 )
 
 
 @router.get("")
 def list_impacts(project_id: str, response: Response,
                  page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
-                 db: Session = Depends(get_db)):
+                 db: Session = Depends(get_db),
+                 verified=Depends(auth_transport.identity_for('maintenance_source_cancellation')),
+                 view: Literal['authorization'] | None = Query(None),
+                 authorization_precondition: str | None = Query(None)):
     response.headers["Cache-Control"] = "no-store"
+    if verified is not None:
+        try:
+            return canonical.read(db,verified,entry_id=canonical.LIST,params={'project_id':project_id,'page':page,'page_size':page_size},
+                authorization_view=view=='authorization',precondition=foundation.decode_precondition(authorization_precondition))
+        except service.CancellationConflict as exc:
+            raise HTTPException(409,{'code':'source_cancellation_changed','message':str(exc)},headers={'Cache-Control':'no-store'}) from exc
+
     return service.list_candidates(db, project_id=project_id, page=page, page_size=page_size)
 
 
 @router.get("/{batch_id}/{source_order_id}")
 def detail(project_id: str, batch_id: int, source_order_id: str, response: Response,
-           db: Session = Depends(get_db)):
+           db: Session = Depends(get_db),
+           verified=Depends(auth_transport.identity_for('maintenance_source_cancellation')),
+           view: Literal['authorization'] | None = Query(None),
+           authorization_precondition: str | None = Query(None)):
     response.headers["Cache-Control"] = "no-store"
+    if verified is not None:
+        try:
+            return canonical.read(db,verified,entry_id=canonical.DETAIL,params={'project_id':project_id,'batch_id':batch_id,'source_order_id':source_order_id},
+                authorization_view=view=='authorization',precondition=foundation.decode_precondition(authorization_precondition))
+        except service.CancellationConflict as exc:
+            raise HTTPException(409,{'code':'source_cancellation_changed','message':str(exc)},headers={'Cache-Control':'no-store'}) from exc
+
     try:
         return service.candidate_detail(db, project_id=project_id, batch_id=batch_id,
                                         source_order_id=source_order_id)
@@ -57,6 +84,7 @@ class ConfirmCancellationRequest(BaseModel):
     expected_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     reason: str = Field(min_length=1)
     idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+    authorization_precondition: dict | None = None
 
 
 @router.get("/{batch_id}/{source_order_id}/confirmation-status")
@@ -66,8 +94,18 @@ def confirmation_status(project_id: str, batch_id: int, source_order_id: str,
                             min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"),
                         db: Session = Depends(get_db),
                         identity: dict = Depends(current_identity),
-                        _action: None = Depends(require_action("action_maintenance_demand_delete"))):
+                        _action: None = Depends(auth_transport.legacy_gate('maintenance_source_cancellation', require_action("action_maintenance_demand_delete"))),
+                        verified=Depends(auth_transport.identity_for('maintenance_source_cancellation')),
+                        view: Literal['authorization'] | None = Query(None),
+                        authorization_precondition: str | None = Query(None)):
     response.headers["Cache-Control"] = "no-store"
+    if verified is not None:
+        try:
+            return canonical.read(db,verified,entry_id=canonical.STATUS,params={'project_id':project_id,'batch_id':batch_id,'source_order_id':source_order_id,'idempotency_key':idempotency_key},
+                authorization_view=view=='authorization',precondition=foundation.decode_precondition(authorization_precondition))
+        except service.CancellationConflict as exc:
+            raise HTTPException(409,{'code':'source_cancellation_changed','message':str(exc)},headers={'Cache-Control':'no-store'}) from exc
+
     operator = _real_operator(db, identity)
     try:
         return service.confirmation_status(
@@ -83,8 +121,20 @@ def confirm(project_id: str, batch_id: int, source_order_id: str,
             body: ConfirmCancellationRequest, response: Response,
             db: Session = Depends(get_db), identity: dict = Depends(current_identity),
             creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
-            _action: None = Depends(require_action("action_maintenance_demand_delete"))):
+            _action: None = Depends(auth_transport.legacy_gate('maintenance_source_cancellation', require_action("action_maintenance_demand_delete"))),
+            verified=Depends(auth_transport.identity_for('maintenance_source_cancellation')),
+            view: Literal['authorization'] | None = Query(None)):
     response.headers["Cache-Control"] = "no-store"
+    if verified is not None:
+        try:
+            return canonical.confirm(db,verified,params={'project_id':project_id,'batch_id':batch_id,
+                'source_order_id':source_order_id,**body.model_dump(exclude={'authorization_precondition'})},
+                authorization_view=view=='authorization',precondition=body.authorization_precondition)
+        except service.CancellationConflict as exc:
+            raise HTTPException(409,{'code':'source_cancellation_changed','message':str(exc)},headers={'Cache-Control':'no-store'}) from exc
+        except ValueError as exc:
+            raise HTTPException(422,str(exc),headers={'Cache-Control':'no-store'}) from exc
+
     operator = _real_operator(db, identity)
     audit_ctx = None
 

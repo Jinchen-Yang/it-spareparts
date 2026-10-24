@@ -1,3 +1,4 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -187,7 +188,7 @@ describe("需求单与数据同步页", () => {
     expect(within(dialog).getByText("差额 3")).toBeInTheDocument();
     expect(within(dialog).queryByText(/收齐|未收齐|已返|未返|无需核对/)).not.toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: /批量修改/ })).not.toBeInTheDocument();
-    expect(listDemandLines).toHaveBeenCalledWith("RAW-9");
+    expect(listDemandLines).toHaveBeenCalledWith("RAW-9", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
   it("需求管理权限控制单条、批量新增与明细编辑入口", async () => {
     render(<MaintenanceDemandsPage />);
@@ -383,7 +384,7 @@ describe("需求单与数据同步页", () => {
     await waitFor(() =>
       expect(restoreMaintenanceDemand).toHaveBeenCalledWith(
         "RAW-9",
-        "误作废，氚云侧单仍然有效",
+        "误作废，氚云侧单仍然有效", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }),
       ));
     await waitFor(() => expect(searchMaintenanceDemands).toHaveBeenCalledTimes(2));
   });
@@ -664,3 +665,10 @@ describe("需求单与数据同步页", () => {
     expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
   });
 });
+
+// These existing business behavior fixtures intentionally exercise the legacy runtime.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(),
+  useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

@@ -208,6 +208,7 @@ def update_project(
     updates: dict,
     reason: str,
     operated_by: str,
+    _prelocked=None,
 ) -> dict | None:
     allowed = {key: value for key, value in updates.items() if key in {
         "display_name", "salesperson", "project_manager_id", "period_from",
@@ -240,8 +241,9 @@ def update_project(
         )
         # 新名称 identity 必须在 state/project 之前锁，避免与 auto-create
         # 形成 name→state / state→name 反序。
-        project_names.lock_display_name_identities(db, [allowed["display_name"]])
-    project, state = _lock_project_for_master_write(db, project_id=project_id)
+        if _prelocked is None:
+            project_names.lock_display_name_identities(db, [allowed["display_name"]])
+    project, state = _prelocked if _prelocked is not None else _lock_project_for_master_write(db, project_id=project_id)
     if project is None or state is None:
         return None
     if not project.is_active:
@@ -338,8 +340,9 @@ def set_project_active(
     active: bool,
     reason: str,
     operated_by: str,
+    _prelocked=None,
 ) -> dict | None:
-    project, state = _lock_project_for_master_write(db, project_id=project_id)
+    project, state = _prelocked if _prelocked is not None else _lock_project_for_master_write(db, project_id=project_id)
     if project is None or state is None:
         return None
     if project.version != version:

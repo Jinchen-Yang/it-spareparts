@@ -8,7 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.services.excel_text_safety import has_illegal_excel_chars
-from app.api.maintenance_project_scope import require_maintenance_project_access
+from app.api.maintenance_project_scope import require_maintenance_project_access, identity_for, legacy_page, legacy_gate, legacy_project_scope
+from app.authz import runtime
+from app.services import maintenance_project_access as protected_projects
+from app.services import maintenance_project_backfill_access as protected_backfill
 from app.auth import current_identity, current_role
 from app.business_time import business_today
 from app.db import get_db
@@ -44,6 +47,8 @@ class StableProjectCreate(BaseModel):
 class StableProjectPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    authorization_precondition: dict | None = None
+
     version: int = Field(ge=1)
     display_name: str | None = Field(default=None, max_length=256)
     salesperson: str | None = Field(default=None, max_length=64)
@@ -77,12 +82,16 @@ class StableProjectPatch(BaseModel):
 class StableProjectLifecycle(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    authorization_precondition: dict | None = None
+
     version: int = Field(ge=1)
     reason: str = Field(min_length=1, max_length=1000)
 
 
 class StableProjectDirectorySearch(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    authorization_precondition: dict | None = None
 
     q: str
     page: int = Field(default=1, ge=1)
@@ -119,11 +128,15 @@ def create_stable_project(
     body: StableProjectCreate,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_project", "page_maintenance")),
+    typed_identity=Depends(identity_for("maintenance_project")),
     _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_profit")
+        legacy_gate("maintenance_project",require_action("action_maintenance_project_manage", require_data="data_profit"))
     ),
 ) -> dict:
+    if runtime.is_authoritative(db,"maintenance_project"):
+        from app.authz.errors import authz_error
+        raise authz_error(409,"MAINTENANCE_MANUAL_PROJECT_CREATION_DISABLED", "项目由销售订单导入建立，不能手工创建")
     operated_by = _real_operator(db, ident)
     try:
         payload = catalog.create_project(
@@ -154,16 +167,27 @@ def patch_stable_project(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    typed_identity=Depends(identity_for("maintenance_project")),
+    view: str | None = Query(None),
+    _page: None = Depends(legacy_page("maintenance_project", "page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_profit")
+        legacy_gate("maintenance_project", require_action("action_maintenance_project_manage", require_data="data_profit"))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(legacy_project_scope("maintenance_project")),
 ) -> dict:
+    if runtime.is_authoritative(db, "maintenance_project"):
+        try:
+            return protected_projects.change_project(db, typed_identity, project_id, action="update",
+                command=body.model_dump(exclude_unset=True, exclude={"authorization_precondition"}),
+                view=view, precondition=body.authorization_precondition)
+        except catalog.MaintenanceProjectCatalogConflict as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+        except (catalog.MaintenanceProjectCatalogError, assignments.MaintenanceProjectAssignmentError) as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     operated_by = _real_operator(db, ident)
     updates = body.model_dump(
         exclude_unset=True,
-        exclude={"version", "reason", "visible_usernames"},
+        exclude={"version", "reason", "visible_usernames", "authorization_precondition"},
     )
     try:
         payload = None
@@ -298,12 +322,23 @@ def archive_stable_project(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    typed_identity=Depends(identity_for("maintenance_project")),
+    view: str | None = Query(None),
+    _page: None = Depends(legacy_page("maintenance_project", "page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_profit")
+        legacy_gate("maintenance_project", require_action("action_maintenance_project_manage", require_data="data_profit"))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(legacy_project_scope("maintenance_project")),
 ) -> dict:
+    if runtime.is_authoritative(db, "maintenance_project"):
+        try:
+            return protected_projects.change_project(db, typed_identity, project_id, action="archive",
+                command=body.model_dump(exclude_unset=True, exclude={"authorization_precondition"}),
+                view=view, precondition=body.authorization_precondition)
+        except catalog.MaintenanceProjectCatalogConflict as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+        except (catalog.MaintenanceProjectCatalogError, assignments.MaintenanceProjectAssignmentError) as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     return _set_project_active(
         project_id=project_id,
         body=body,
@@ -319,12 +354,23 @@ def restore_stable_project(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    typed_identity=Depends(identity_for("maintenance_project")),
+    view: str | None = Query(None),
+    _page: None = Depends(legacy_page("maintenance_project", "page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_profit")
+        legacy_gate("maintenance_project", require_action("action_maintenance_project_manage", require_data="data_profit"))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(legacy_project_scope("maintenance_project")),
 ) -> dict:
+    if runtime.is_authoritative(db, "maintenance_project"):
+        try:
+            return protected_projects.change_project(db, typed_identity, project_id, action="restore",
+                command=body.model_dump(exclude_unset=True, exclude={"authorization_precondition"}),
+                view=view, precondition=body.authorization_precondition)
+        except catalog.MaintenanceProjectCatalogConflict as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+        except (catalog.MaintenanceProjectCatalogError, assignments.MaintenanceProjectAssignmentError) as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     return _set_project_active(
         project_id=project_id,
         body=body,
@@ -375,14 +421,21 @@ def stable_project_directory(
     as_of: date | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_project_directory", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_project_directory")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     if q is not None:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "项目搜索请使用安全搜索接口",
         )
+    if runtime.is_authoritative(db, "maintenance_project_directory"):
+        return protected_projects.read_directory(db, typed_identity, legacy_context=ctx,
+            page=page, page_size=page_size, include_inactive=include_inactive, as_of=as_of,
+            view=view, precondition=authorization_precondition)
     return _stable_project_directory_response(
         q=None,
         page=page,
@@ -399,8 +452,10 @@ def search_stable_project_directory(
     body: StableProjectDirectorySearch,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_project_directory", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_project_directory")),
+    view: str | None = Query(None),
 ) -> dict:
     q = body.q.strip()
     if not q or len(q) > 128:
@@ -408,6 +463,10 @@ def search_stable_project_directory(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "项目搜索条件无效",
         )
+    if runtime.is_authoritative(db, "maintenance_project_directory"):
+        return protected_projects.read_directory(db, typed_identity, legacy_context=ctx, q=q,
+            page=body.page, page_size=body.page_size, include_inactive=body.include_inactive, as_of=body.as_of,
+            view=view, precondition=body.authorization_precondition)
     return _stable_project_directory_response(
         q=q,
         page=body.page,
@@ -426,11 +485,18 @@ def stable_project_overview(
     as_of: date | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _scope: None = Depends(require_maintenance_project_access),
+    _page: None = Depends(legacy_page("maintenance_project", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_project")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db, "maintenance_project"):
+        return protected_projects.read_overview(db, typed_identity, project_id, legacy_context=ctx,
+            as_of=as_of, view=view, precondition=authorization_precondition)
+    from app.api.maintenance_project_scope import enforce_maintenance_project_access
+    enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     effective_as_of = as_of or business_today()
     record_access_log(
         ctx,
@@ -460,6 +526,7 @@ def stable_project_overview(
 
 class BusinessTypeBackfillApply(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     reason: str = Field(min_length=1, max_length=1000)
 
@@ -468,11 +535,18 @@ class BusinessTypeBackfillApply(BaseModel):
 def preview_business_type_backfill(
     response: Response,
     db: Session = Depends(get_db),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_project_backfill","page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_profit")
+        legacy_gate("maintenance_project_backfill",require_action("action_maintenance_project_manage", require_data="data_profit"))
     ),
+    typed_identity=Depends(identity_for("maintenance_project_backfill")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_project_backfill"):
+        return protected_backfill.preview(db,typed_identity,view=view,precondition=authorization_precondition)
+
     """这一轮回填会填哪些、哪些冲突、哪些推不出来。只读，不写库。
 
     生产 648 个项目里 647 个业务类型为空，卡墙的业务类型筛选因此一个也筛不出来。
@@ -488,11 +562,18 @@ def apply_business_type_backfill(
     body: BusinessTypeBackfillApply,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_project_backfill","page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_profit")
+        legacy_gate("maintenance_project_backfill",require_action("action_maintenance_project_manage", require_data="data_profit"))
     ),
+    typed_identity=Depends(identity_for("maintenance_project_backfill")),
+    view: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_project_backfill"):
+        return protected_backfill.apply(db,typed_identity,reason=body.reason,view=view,precondition=body.authorization_precondition)
+
     """按预览结果回填；冲突与推不出来的一个字都不动。
 
     实名门禁与手工建档 / 补录同一条：这是批量改经营口径，必须落到具体的人。

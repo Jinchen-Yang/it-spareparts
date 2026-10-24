@@ -92,10 +92,11 @@ def test_admin_can_create_project_and_read_it_back(db):
     )
     assert read_back.status_code == 200, read_back.text
     assert read_back.headers["cache-control"] == "no-store"
-    # GET 载荷带可见账号回显键（2026-08-25 项目级可见账号多选）与 D-03 总表编辑权标志
-    # （2026-09-06：稳定详情随卡片一起下发 can_edit_master_workbook，管理员恒为 True）
+    # Legacy GET 保留可见账号与 D-03 总表编辑标志，并返回实际负责人关系。
+    # 旧 project_manager_id 字符串不代表存在 primary_manager 关联。
     assert read_back.json()["project"] == {
         **project, "visible_usernames": [], "can_edit_master_workbook": True,
+        "manager_assignment": None,
     }
     audit = db.scalar(select(MaintenanceProjectAuditLog))
     assert audit is not None
@@ -149,6 +150,7 @@ def test_project_patch_is_explicit_versioned_and_stale_safe(db):
     ).json()["project"]
     assert read_back == {
         **changed.json(), "visible_usernames": [], "can_edit_master_workbook": True,
+        "manager_assignment": None,
     }
     audits = list(
         db.scalars(

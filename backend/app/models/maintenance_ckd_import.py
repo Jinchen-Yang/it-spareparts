@@ -21,6 +21,7 @@ from sqlalchemy import (UniqueConstraint,
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -38,6 +39,7 @@ class MaintenanceCkdImportBatch(Base):
     file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey('sys_user.id', ondelete='RESTRICT'))
     uploaded_by: Mapped[str] = mapped_column(String(64), nullable=False)
     uploaded_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
@@ -70,11 +72,10 @@ class MaintenanceCkdImportBatch(Base):
             "(status = 'applied') = (applied_at IS NOT NULL AND applied_by IS NOT NULL)",
             name="ck_maintenance_ckd_import_applied",
         ),
-        UniqueConstraint(
-            "uploaded_by",
-            "idempotency_key",
-            name="uq_maintenance_ckd_import_idempotency",
-        ),
+        Index("ux_maintenance_ckd_import_owner_request", "owner_user_id", "idempotency_key",
+              unique=True, postgresql_where=text("owner_user_id IS NOT NULL")),
+        Index("ux_maintenance_ckd_import_legacy_request", "uploaded_by", "idempotency_key",
+              unique=True, postgresql_where=text("owner_user_id IS NULL")),
         Index("ix_maintenance_ckd_import_hash", "file_hash"),
         Index("ix_maintenance_ckd_import_uploaded", "uploaded_at"),
     )

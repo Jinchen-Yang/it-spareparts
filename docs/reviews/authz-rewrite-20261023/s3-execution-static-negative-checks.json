@@ -1,0 +1,19 @@
+{
+  "status": "passed_static_validator_negative_checks_only",
+  "rejected": [
+    "source_hash_drift",
+    "unknown_entry_action",
+    "unbound_extra_action",
+    "contextless_all_scope",
+    "undeclared_field_dependency",
+    "bulk_discovery_as_authority",
+    "vacuous_empty_target_admission",
+    "unregistered_input_purpose",
+    "unbounded_selector",
+    "paged_whole_target_selector",
+    "warehouse_flattened_branches",
+    "collection_plan_lost_targets"
+  ],
+  "count": 12,
+  "runtime_evidence": false
+}

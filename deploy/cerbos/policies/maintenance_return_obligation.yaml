@@ -1,0 +1,149 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_return_obligation",
+    "rules": [
+      {
+        "name": "explicit-create",
+        "actions": [
+          "create"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"create\" in P.attr.grants.maintenance_return_obligation.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_obligation.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_obligation.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_obligation\", \"scope\": P.attr.grants.maintenance_return_obligation.scope, \"version\": P.attr.grants.maintenance_return_obligation.version, \"field_permissions\": P.attr.grants.maintenance_return_obligation.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-mark-in-transit",
+        "actions": [
+          "mark_in_transit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"mark_in_transit\" in P.attr.grants.maintenance_return_obligation.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_obligation.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_obligation.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_obligation\", \"scope\": P.attr.grants.maintenance_return_obligation.scope, \"version\": P.attr.grants.maintenance_return_obligation.version, \"field_permissions\": P.attr.grants.maintenance_return_obligation.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.maintenance_return_obligation.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_obligation.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_obligation.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_obligation\", \"scope\": P.attr.grants.maintenance_return_obligation.scope, \"version\": P.attr.grants.maintenance_return_obligation.version, \"field_permissions\": P.attr.grants.maintenance_return_obligation.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-resolve-category",
+        "actions": [
+          "resolve_category"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"resolve_category\" in P.attr.grants.maintenance_return_obligation.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_obligation.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_obligation.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_obligation\", \"scope\": P.attr.grants.maintenance_return_obligation.scope, \"version\": P.attr.grants.maintenance_return_obligation.version, \"field_permissions\": P.attr.grants.maintenance_return_obligation.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-submit",
+        "actions": [
+          "submit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"submit\" in P.attr.grants.maintenance_return_obligation.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_obligation.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_obligation.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_obligation\", \"scope\": P.attr.grants.maintenance_return_obligation.scope, \"version\": P.attr.grants.maintenance_return_obligation.version, \"field_permissions\": P.attr.grants.maintenance_return_obligation.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-void",
+        "actions": [
+          "void"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"void\" in P.attr.grants.maintenance_return_obligation.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_obligation.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_obligation.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_obligation\", \"scope\": P.attr.grants.maintenance_return_obligation.scope, \"version\": P.attr.grants.maintenance_return_obligation.version, \"field_permissions\": P.attr.grants.maintenance_return_obligation.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-warehouse-confirm",
+        "actions": [
+          "warehouse_confirm"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"warehouse_confirm\" in P.attr.grants.maintenance_return_obligation.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_obligation.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_return_obligation.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_obligation\", \"scope\": P.attr.grants.maintenance_return_obligation.scope, \"version\": P.attr.grants.maintenance_return_obligation.version, \"field_permissions\": P.attr.grants.maintenance_return_obligation.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

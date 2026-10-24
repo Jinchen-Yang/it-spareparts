@@ -90,10 +90,11 @@ def precheck_wbdd_file(file_path: str) -> str:
 
 
 def find_receipt(db: Session, *, uploaded_by: str,
-                 idempotency_key: str) -> MaintenanceWbddImportReceipt | None:
+                 idempotency_key: str, owner_user_id: int | None = None) -> MaintenanceWbddImportReceipt | None:
     return db.execute(
         select(MaintenanceWbddImportReceipt).where(
-            MaintenanceWbddImportReceipt.uploaded_by == uploaded_by,
+            (MaintenanceWbddImportReceipt.owner_user_id == owner_user_id if owner_user_id is not None else
+             (MaintenanceWbddImportReceipt.owner_user_id.is_(None) & (MaintenanceWbddImportReceipt.uploaded_by == uploaded_by))),
             MaintenanceWbddImportReceipt.idempotency_key == idempotency_key,
         )
     ).scalar_one_or_none()
@@ -128,7 +129,7 @@ def latest_missing(db: Session, *, allowed_project_ids: set[str] | None = None) 
 
 
 def import_wbdd(db: Session, *, file_path: str, original_name: str,
-                operator: str, idempotency_key: str) -> tuple[dict, bool]:
+                operator: str, idempotency_key: str, _authorization=None) -> tuple[dict, bool]:
     """执行导入并返回 (报告, replayed)。调用方负责 HTTP 错误映射与临时文件清理。
 
     提交语义（2026-08-26 单事务化）：导入批次/事实、快照差异、回执与成本重算
@@ -137,15 +138,26 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
     upsert 幂等，客户端整体重试安全。重算失败的回滚在本函数内完成，调用方
     拿到异常时会话已是干净的。
     """
+    if _authorization is not None:
+        from app.services.maintenance_wbdd_authorization import WbddUploadAuthorization
+        if (type(_authorization) is not WbddUploadAuthorization or _authorization.db is not db
+                or _authorization.transaction is not db.get_transaction()
+                or _authorization.params['input_sha256'] != pipeline.sha256_file(file_path)):
+            raise ValueError('WBDD 上传缺少同事务实际输入授权')
+    owner_id = _authorization.principal.id if _authorization is not None else None
+    lock_operator = f'authz-user:{owner_id}' if owner_id is not None else operator
     # 幂等判定必须位于同键事务锁内；否则两个并发请求都可先看到 none，后者
     # 最终只会撞 unique/500，而不是稳定 replay 首个结果。
     db.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(
-        _import_lock_identity(operator, idempotency_key), 0,
+        _import_lock_identity(lock_operator, idempotency_key), 0,
     ))))
-    existing = find_receipt(db, uploaded_by=operator, idempotency_key=idempotency_key)
+    existing = find_receipt(db, uploaded_by=operator, idempotency_key=idempotency_key, owner_user_id=owner_id)
     if existing is not None:
         if existing.file_hash != pipeline.sha256_file(file_path):
             raise WbddImportError("idempotency_file_mismatch", "同一上传请求不能更换文件，请重新选择文件上传")
+        if _authorization is not None:
+            _authorization.finish(db, existing, replayed=True)
+            return public_report(dict(existing.report_json or {})), True
         report = dict(existing.report_json or {})
         if report.get("recompute") is None:
             # 只可能命中单事务化之前两半提交留下的历史回执（事实已提交、重算缺失）。
@@ -170,6 +182,8 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
         mode="upsert",
         auto_assign_maintenance_projects=True,
     )
+    if _authorization is not None:
+        batch.owner_user_id = owner_id
     report_counts = dict(batch.report_json or {})
 
     # The raw source identities were captured before business validation by the
@@ -194,6 +208,7 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
         batch_id=batch.id,
         idempotency_key=idempotency_key,
         uploaded_by=operator,
+        owner_user_id=owner_id,
         file_hash=batch.file_hash,
         layout=layout,
         # 与函数返回的可变 report 隔离。否则下方追加 recompute 会先原地改掉
@@ -215,7 +230,11 @@ def import_wbdd(db: Session, *, file_path: str, original_name: str,
     report["recompute"] = recompute_stats
     # 赋独立新对象，使 JSONB 变化可被 ORM 稳定检测并写入 receipt。
     receipt.report_json = dict(report)
-    db.commit()
+    if _authorization is not None:
+        db.flush()
+        _authorization.finish(db, receipt, replayed=False)
+    else:
+        db.commit()
     return public_report(report), False
 
 

@@ -1,0 +1,109 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_project_roundtrip",
+    "rules": [
+      {
+        "name": "explicit-apply-v2",
+        "actions": [
+          "apply_v2"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"apply_v2\" in P.attr.grants.maintenance_project_roundtrip.actions && \"data_customer\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && \"data_purchase_cost\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && \"data_profit\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_project_roundtrip.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_project_roundtrip.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_project_roundtrip\", \"scope\": P.attr.grants.maintenance_project_roundtrip.scope, \"version\": P.attr.grants.maintenance_project_roundtrip.version, \"field_permissions\": P.attr.grants.maintenance_project_roundtrip.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-download-v2",
+        "actions": [
+          "download_v2"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"download_v2\" in P.attr.grants.maintenance_project_roundtrip.actions && \"data_customer\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && \"data_purchase_cost\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && \"data_profit\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_project_roundtrip.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_project_roundtrip.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_project_roundtrip\", \"scope\": P.attr.grants.maintenance_project_roundtrip.scope, \"version\": P.attr.grants.maintenance_project_roundtrip.version, \"field_permissions\": P.attr.grants.maintenance_project_roundtrip.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-download-v3",
+        "actions": [
+          "download_v3"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"download_v3\" in P.attr.grants.maintenance_project_roundtrip.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && \"data_profit\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_project_roundtrip.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_project_roundtrip.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_project_roundtrip\", \"scope\": P.attr.grants.maintenance_project_roundtrip.scope, \"version\": P.attr.grants.maintenance_project_roundtrip.version, \"field_permissions\": P.attr.grants.maintenance_project_roundtrip.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-error-download-v2",
+        "actions": [
+          "error_download_v2"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"error_download_v2\" in P.attr.grants.maintenance_project_roundtrip.actions && \"data_customer\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && \"data_purchase_cost\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && \"data_profit\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_project_roundtrip.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_project_roundtrip.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_project_roundtrip\", \"scope\": P.attr.grants.maintenance_project_roundtrip.scope, \"version\": P.attr.grants.maintenance_project_roundtrip.version, \"field_permissions\": P.attr.grants.maintenance_project_roundtrip.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-validate-v2",
+        "actions": [
+          "validate_v2"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"validate_v2\" in P.attr.grants.maintenance_project_roundtrip.actions && \"data_customer\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && \"data_purchase_cost\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && \"data_profit\" in P.attr.grants.maintenance_project_roundtrip.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_project_roundtrip.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_project_roundtrip.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_project_roundtrip\", \"scope\": P.attr.grants.maintenance_project_roundtrip.scope, \"version\": P.attr.grants.maintenance_project_roundtrip.version, \"field_permissions\": P.attr.grants.maintenance_project_roundtrip.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

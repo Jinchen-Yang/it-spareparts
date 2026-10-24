@@ -1,0 +1,189 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_managed_workbook",
+    "rules": [
+      {
+        "name": "explicit-apply",
+        "actions": [
+          "apply"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"apply\" in P.attr.grants.maintenance_managed_workbook.actions && \"data_customer\" in P.attr.grants.maintenance_managed_workbook.field_permissions && \"data_purchase_cost\" in P.attr.grants.maintenance_managed_workbook.field_permissions && \"data_profit\" in P.attr.grants.maintenance_managed_workbook.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_managed_workbook.scope == \"primary_managed_projects\" && (R.attr.is_manager))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_managed_workbook\", \"scope\": P.attr.grants.maintenance_managed_workbook.scope, \"version\": P.attr.grants.maintenance_managed_workbook.version, \"field_permissions\": P.attr.grants.maintenance_managed_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-download",
+        "actions": [
+          "download"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"download\" in P.attr.grants.maintenance_managed_workbook.actions && \"data_customer\" in P.attr.grants.maintenance_managed_workbook.field_permissions && \"data_purchase_cost\" in P.attr.grants.maintenance_managed_workbook.field_permissions && \"data_profit\" in P.attr.grants.maintenance_managed_workbook.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_managed_workbook.scope == \"primary_managed_projects\" && (R.attr.is_manager))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_managed_workbook\", \"scope\": P.attr.grants.maintenance_managed_workbook.scope, \"version\": P.attr.grants.maintenance_managed_workbook.version, \"field_permissions\": P.attr.grants.maintenance_managed_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-collection-roundtrip",
+        "actions": [
+          "show_collection_roundtrip"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_collection_roundtrip\" in P.attr.grants.maintenance_managed_workbook.actions && (\"apply\" in P.attr.grants.maintenance_managed_workbook.actions || \"download\" in P.attr.grants.maintenance_managed_workbook.actions || \"validate\" in P.attr.grants.maintenance_managed_workbook.actions) && (R.attr.module_probe || ((P.attr.grants.maintenance_managed_workbook.scope == \"primary_managed_projects\" && (R.attr.is_manager))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_managed_workbook\", \"scope\": P.attr.grants.maintenance_managed_workbook.scope, \"version\": P.attr.grants.maintenance_managed_workbook.version, \"field_permissions\": P.attr.grants.maintenance_managed_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-expense-roundtrip",
+        "actions": [
+          "show_expense_roundtrip"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_expense_roundtrip\" in P.attr.grants.maintenance_managed_workbook.actions && (\"apply\" in P.attr.grants.maintenance_managed_workbook.actions || \"download\" in P.attr.grants.maintenance_managed_workbook.actions || \"validate\" in P.attr.grants.maintenance_managed_workbook.actions) && (R.attr.module_probe || ((P.attr.grants.maintenance_managed_workbook.scope == \"primary_managed_projects\" && (R.attr.is_manager))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_managed_workbook\", \"scope\": P.attr.grants.maintenance_managed_workbook.scope, \"version\": P.attr.grants.maintenance_managed_workbook.version, \"field_permissions\": P.attr.grants.maintenance_managed_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-parts-roundtrip",
+        "actions": [
+          "show_parts_roundtrip"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_parts_roundtrip\" in P.attr.grants.maintenance_managed_workbook.actions && (\"apply\" in P.attr.grants.maintenance_managed_workbook.actions || \"download\" in P.attr.grants.maintenance_managed_workbook.actions || \"validate\" in P.attr.grants.maintenance_managed_workbook.actions) && (R.attr.module_probe || ((P.attr.grants.maintenance_managed_workbook.scope == \"primary_managed_projects\" && (R.attr.is_manager))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_managed_workbook\", \"scope\": P.attr.grants.maintenance_managed_workbook.scope, \"version\": P.attr.grants.maintenance_managed_workbook.version, \"field_permissions\": P.attr.grants.maintenance_managed_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-project-master",
+        "actions": [
+          "show_project_master"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_project_master\" in P.attr.grants.maintenance_managed_workbook.actions && (\"apply\" in P.attr.grants.maintenance_managed_workbook.actions || \"download\" in P.attr.grants.maintenance_managed_workbook.actions || \"validate\" in P.attr.grants.maintenance_managed_workbook.actions) && (R.attr.module_probe || ((P.attr.grants.maintenance_managed_workbook.scope == \"primary_managed_projects\" && (R.attr.is_manager))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_managed_workbook\", \"scope\": P.attr.grants.maintenance_managed_workbook.scope, \"version\": P.attr.grants.maintenance_managed_workbook.version, \"field_permissions\": P.attr.grants.maintenance_managed_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-site-roundtrip",
+        "actions": [
+          "show_site_roundtrip"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_site_roundtrip\" in P.attr.grants.maintenance_managed_workbook.actions && (\"apply\" in P.attr.grants.maintenance_managed_workbook.actions || \"download\" in P.attr.grants.maintenance_managed_workbook.actions || \"validate\" in P.attr.grants.maintenance_managed_workbook.actions) && (R.attr.module_probe || ((P.attr.grants.maintenance_managed_workbook.scope == \"primary_managed_projects\" && (R.attr.is_manager))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_managed_workbook\", \"scope\": P.attr.grants.maintenance_managed_workbook.scope, \"version\": P.attr.grants.maintenance_managed_workbook.version, \"field_permissions\": P.attr.grants.maintenance_managed_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-update-contract-amount",
+        "actions": [
+          "update_contract_amount"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"update_contract_amount\" in P.attr.grants.maintenance_managed_workbook.actions && \"data_customer\" in P.attr.grants.maintenance_managed_workbook.field_permissions && \"data_purchase_cost\" in P.attr.grants.maintenance_managed_workbook.field_permissions && \"data_profit\" in P.attr.grants.maintenance_managed_workbook.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_managed_workbook.scope == \"primary_managed_projects\" && (R.attr.is_manager))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_managed_workbook\", \"scope\": P.attr.grants.maintenance_managed_workbook.scope, \"version\": P.attr.grants.maintenance_managed_workbook.version, \"field_permissions\": P.attr.grants.maintenance_managed_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-validate",
+        "actions": [
+          "validate"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"validate\" in P.attr.grants.maintenance_managed_workbook.actions && \"data_customer\" in P.attr.grants.maintenance_managed_workbook.field_permissions && \"data_purchase_cost\" in P.attr.grants.maintenance_managed_workbook.field_permissions && \"data_profit\" in P.attr.grants.maintenance_managed_workbook.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_managed_workbook.scope == \"primary_managed_projects\" && (R.attr.is_manager))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_managed_workbook\", \"scope\": P.attr.grants.maintenance_managed_workbook.scope, \"version\": P.attr.grants.maintenance_managed_workbook.version, \"field_permissions\": P.attr.grants.maintenance_managed_workbook.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,5 +1,6 @@
 import type { AuthzSnapshot, Decision } from "../api/authz";
 import { EXECUTABLE_RESOURCES, EXECUTABLE_SURFACES, KNOWN_MODULES } from "./generated";
+import type { AuthorizationContext } from "./contextTypes";
 
 export interface Need {
   readonly resource_id: string;
@@ -55,33 +56,66 @@ export function routeRule(path: string): Rule {
 export function hasControlledRoute(path: string): boolean {
   return Object.values(surfaces).some(s => s.page_routes.includes(path));
 }
-export function actionAllowed(snapshot: AuthzSnapshot | null, resource: string, action: string): boolean {
+export type RuleState = "deny" | "resolve" | "allow";
+function everyState(values: readonly RuleState[]): RuleState {
+  return !values.length || values.includes("deny") ? "deny" : values.includes("resolve") ? "resolve" : "allow";
+}
+function someState(values: readonly RuleState[]): RuleState {
+  return values.includes("allow") ? "allow" : values.includes("resolve") ? "resolve" : "deny";
+}
+export function actionState(snapshot: AuthzSnapshot | null, resource: string, action: string,
+  context?: AuthorizationContext | null): RuleState {
   const definition = vocabulary[resource], state = snapshot?.resources[resource];
   if (snapshot?.schema_version !== 1 || !definition || !state ||
-      state.migration_state !== "implemented" || state.runtime_state !== "enabled") return false;
-  const visit = (id: string, visited: ReadonlySet<string>): boolean => {
+      state.migration_state !== "implemented" || state.runtime_state !== "enabled") return "deny";
+  const contextual = definition.scopes[state.scope_kind]?.requires_context === true;
+  const bound = context?.resources[resource];
+  const contextMatches = !!context && context.catalog_version === snapshot.catalog_version &&
+    context.authorization_epoch === snapshot.authorization_epoch && !!bound &&
+    (bound.grant_version ?? 0) === state.grant_version;
+  const visit = (id: string, visited: ReadonlySet<string>): RuleState => {
     const descriptor = definition.actions[id];
-    if (!descriptor || visited.has(id) || state.decisions[id]?.effect !== "allow") return false;
+    const probe = state.decisions[id]?.effect;
+    if (!descriptor || visited.has(id) || !probe || probe === "deny") return "deny";
+    // Display is an explicit module switch. It never borrows read access or grants facts.
+    const needsContext = descriptor.kind !== "display" && (contextual || probe === "requires_context");
+    let own: RuleState = "allow";
+    if (needsContext) {
+      if (!context) own = "resolve";
+      else if (!contextMatches || bound?.decisions[id]?.effect !== "allow") return "deny";
+    } else if (probe !== "allow") return "deny";
+    const fields = needsContext && context ? bound?.field_permissions ?? [] : state.field_permissions;
+    if (!descriptor.requires_fields.every(f => state.field_permissions.includes(f) && fields.includes(f))) return "deny";
     const next = new Set(visited).add(id);
-    return descriptor.requires_fields.every(f => state.field_permissions.includes(f)) &&
-      descriptor.requires_actions.every(a => visit(a, next)) &&
-      (!descriptor.requires_any_actions.length || descriptor.requires_any_actions.some(a => visit(a, next)));
+    return everyState([own, ...descriptor.requires_actions.map(a => visit(a, next)),
+      ...(descriptor.requires_any_actions.length ? [someState(descriptor.requires_any_actions.map(a => visit(a, next)))] : [])]);
   };
   return visit(action, new Set());
 }
-export function ruleAllowed(snapshot: AuthzSnapshot | null, rule: Rule,
-  legacy: Readonly<Record<string, boolean>> = {}): boolean {
-  if (snapshot?.schema_version !== 1) return false;
-  return rule.anyOf.some(clause => clause.length > 0 && clause.every(need => {
+export function actionAllowed(snapshot: AuthzSnapshot | null, resource: string, action: string,
+  context?: AuthorizationContext | null): boolean {
+  return actionState(snapshot, resource, action, context) === "allow";
+}
+/** Resolve only admits a fixed authorization view, never an ordinary business request. */
+export function ruleState(snapshot: AuthzSnapshot | null, rule: Rule,
+  legacy: Readonly<Record<string, boolean>> = {}, context?: AuthorizationContext | null): RuleState {
+  if (snapshot?.schema_version !== 1) return "deny";
+  return someState(rule.anyOf.map(clause => everyState(clause.map(need => {
     const state = snapshot.resources[need.resource_id], definition = vocabulary[need.resource_id];
     if (!definition || !state || !need.actions.length ||
         need.actions.some(a => !definition.actions[a]) ||
-        need.field_permissions.some(f => !(f in definition.fields))) return false;
+        need.field_permissions.some(f => !(f in definition.fields))) return "deny";
     if (state.runtime_state === "legacy" && state.migration_state !== "retired")
-      return legacy[need.resource_id] === true;
-    return need.actions.every(a => actionAllowed(snapshot, need.resource_id, a)) &&
-      need.field_permissions.every(f => state.field_permissions.includes(f));
-  }));
+      return legacy[need.resource_id] === true ? "allow" : "deny";
+    const contextual = definition.scopes[state.scope_kind]?.requires_context === true;
+    const fields = contextual && context ? context.resources[need.resource_id]?.field_permissions ?? [] : state.field_permissions;
+    if (!need.field_permissions.every(f => state.field_permissions.includes(f) && fields.includes(f))) return "deny";
+    return everyState(need.actions.map(a => actionState(snapshot, need.resource_id, a, context)));
+  }))));
+}
+export function ruleAllowed(snapshot: AuthzSnapshot | null, rule: Rule,
+  legacy: Readonly<Record<string, boolean>> = {}, context?: AuthorizationContext | null): boolean {
+  return ruleState(snapshot, rule, legacy, context) === "allow";
 }
 export type BlockAccess<K extends string = string> = Record<K, Decision>;
 /** A response projection is local to that response. It cannot grant actor access. */

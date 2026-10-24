@@ -1,3 +1,8 @@
+import { useAuthz } from "../../authz/AuthzProvider";
+import { withContextSurface } from "../../authz/ContextSurface";
+import { useContextAdmission } from "../../authz/access";
+import { useContextTransport } from "../../authz/domainTransport";
+import { surfaceRule, actionRule, allRule } from "../../authz/rules";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Card, Input, List, Modal, Pagination, Space, Spin, Table, Tag, Typography } from "antd";
 import {
@@ -67,14 +72,16 @@ function SiteLines({ rows, label }: { rows: SourceCancellationSiteLine[]; label:
 }
 
 /** 项目和登录账号切换后，旧选择及在途响应不能进入新的确认上下文。 */
-export default function SourceCancelImpactPanel(props: Props) {
-  const sessionToken = localStorage.getItem("token") ?? "";
-  return <SourceCancelImpactContent key={`${props.projectId}:${sessionToken}`} {...props} sessionToken={sessionToken} />;
+function SourceCancelImpactPanel(props: Props) {
+  const authz = useAuthz();
+  return <SourceCancelImpactContent {...props} sessionToken={authz.token ?? ""} />;
 }
+export default withContextSurface(SourceCancelImpactPanel, surfaceRule("maintenance_source_cancellation.cascade"), props => props.projectId);
 
-function SourceCancelImpactContent({ projectId, canConfirm, onChanged, registerRefresh, sessionToken }: Props & { sessionToken: string }) {
+function SourceCancelImpactContent({ projectId, canConfirm: legacyCanConfirm, onChanged, registerRefresh, sessionToken }: Props & { sessionToken: string }) {
   const [page, setPage] = useState(1);
   const [items, setItems] = useState<SourceCancellationCandidate[]>([]);
+  const [loadedPage, setLoadedPage] = useState<number | null>(null);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +97,10 @@ function SourceCancelImpactContent({ projectId, canConfirm, onChanged, registerR
   const [needsRefresh, setNeedsRefresh] = useState(false);
   const [retry, setRetry] = useState(false);
   const [leaveUnknown, setLeaveUnknown] = useState(false);
+  const admission = useContextAdmission();
+  const canConfirm = admission.state(allRule(surfaceRule("maintenance_source_cancellation.cascade"), actionRule("maintenance_source_cancellation", "confirm")), legacyCanConfirm) !== "deny";
+  const capture = useContextTransport(projectId, true);
+  const writeCapture = useContextTransport(JSON.stringify([projectId, selected?.batch_id, selected?.source_order_id, reason]), legacyCanConfirm);
   const currentPage = useRef(1);
   const listGeneration = useRef(0);
   const resultGeneration = useRef(0);
@@ -99,7 +110,7 @@ function SourceCancelImpactContent({ projectId, canConfirm, onChanged, registerR
   const mounted = useRef(true);
   const readList = useLatestRead();
   const sessionIsCurrent = useCallback(() => mounted.current
-    && (localStorage.getItem("token") ?? "") === sessionToken, [sessionToken]);
+    && capture.isCurrent() && (localStorage.getItem("token") ?? "") === sessionToken, [sessionToken, capture]);
   const activeDemands = detail?.demands.filter(row => row.is_active) ?? [];
   const exactSiteLines = detail?.exact_site_lines.filter(row => row.is_active) ?? [];
 
@@ -115,7 +126,7 @@ function SourceCancelImpactContent({ projectId, canConfirm, onChanged, registerR
     setLoading(true);
     try {
       let requestedPage = currentPage.current;
-      let response = await listSourceCancellations(projectId, { page: requestedPage, page_size: PAGE_SIZE });
+      let response = await listSourceCancellations(projectId, { page: requestedPage, page_size: PAGE_SIZE }, capture);
       if (!isValid()) return false;
       const lastPage = Math.max(1, Math.ceil(response.data.total / PAGE_SIZE));
       if (requestedPage > lastPage) {
@@ -123,11 +134,12 @@ function SourceCancelImpactContent({ projectId, canConfirm, onChanged, registerR
         currentPage.current = lastPage;
         setPage(lastPage);
         if (response.data.total > 0) {
-          response = await listSourceCancellations(projectId, { page: lastPage, page_size: PAGE_SIZE });
+          response = await listSourceCancellations(projectId, { page: lastPage, page_size: PAGE_SIZE }, capture);
           if (!isValid()) return false;
         }
       }
       setItems(response.data.items);
+      setLoadedPage(requestedPage);
       setTotal(response.data.total);
       setError(null);
       setNeedsRefresh(false);
@@ -151,7 +163,7 @@ function SourceCancelImpactContent({ projectId, canConfirm, onChanged, registerR
     const seq = ++detailSeq.current;
     setDetailLoading(true); setDetail(null); setDetailError(null);
     try {
-      const response = await getSourceCancellation(projectId, candidate.batch_id, candidate.source_order_id);
+      const response = await getSourceCancellation(projectId, candidate.batch_id, candidate.source_order_id, capture);
       if (seq === detailSeq.current && sessionIsCurrent()) setDetail(response.data);
     } catch (failure) {
       if (seq === detailSeq.current && sessionIsCurrent()) setDetailError(readError(failure, "影响详情加载失败，请重试。"));
@@ -214,9 +226,9 @@ function SourceCancelImpactContent({ projectId, canConfirm, onChanged, registerR
     setDetail(null); setDetailError(null); setDetailLoading(true); setStatusChecking(true);
     // Reads observe the receipt and current candidate. Only explicit retry may POST.
     const statusRead = getSourceCancellationStatus(
-      projectId, current.batchId, current.sourceOrderId, current.body.idempotency_key, sessionToken,
+      projectId, current.batchId, current.sourceOrderId, current.body.idempotency_key, sessionToken, capture,
     );
-    void getSourceCancellation(projectId, current.batchId, current.sourceOrderId).then(response => {
+    void getSourceCancellation(projectId, current.batchId, current.sourceOrderId, capture).then(response => {
       if (isCurrent()) setDetail(response.data);
     }, () => { /* A removed candidate can return 409; the independent receipt read decides its result. */ })
       .finally(() => { if (isCurrent()) setDetailLoading(false); });
@@ -257,11 +269,11 @@ function SourceCancelImpactContent({ projectId, canConfirm, onChanged, registerR
     setLoading(false);
     setBusy(true); setDetailError(null);
     try {
-      const response = await confirmSourceCancellation(projectId, current.batchId, current.sourceOrderId, current.body, sessionToken);
-      if (!sessionIsCurrent()) return;
+      const response = await confirmSourceCancellation(projectId, current.batchId, current.sourceOrderId, current.body, sessionToken, writeCapture);
+      if (!writeCapture.isCurrent() || !sessionIsCurrent()) return;
       showResult(response.data);
     } catch (failure) {
-      if (sessionIsCurrent()) {
+      if (writeCapture.isCurrent() && sessionIsCurrent()) {
         const status = (failure as { response?: { status?: number } })?.response?.status;
         if (status != null && status >= 400 && status < 500) {
           attempt.current = null; setRetry(false);
@@ -294,7 +306,7 @@ function SourceCancelImpactContent({ projectId, canConfirm, onChanged, registerR
       /> : null}
       {resultWarnings.map((warning, index) => <Alert key={index} type="warning" showIcon message={warning} />)}
       <Button loading={loading} disabled={busy || retry} onClick={() => void loadList()}>刷新影响清单</Button>
-      <List loading={loading} dataSource={items}
+      <List loading={loading} dataSource={loadedPage === page ? items : []}
         locale={{ emptyText: error ? "影响清单暂不可用" : "当前没有已取消候选或未知非生效状态告警" }}
         renderItem={candidate => <List.Item key={`${candidate.batch_id}:${candidate.source_order_id}`}>
           <Space direction="vertical" size={8} style={{ width: "100%", minWidth: 0 }}>

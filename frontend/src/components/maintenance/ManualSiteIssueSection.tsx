@@ -1,3 +1,7 @@
+import { withContextSurface } from "../../authz/ContextSurface";
+import { useContextAdmission } from "../../authz/access";
+import { useContextTransport, withTransportSignal } from "../../authz/domainTransport";
+import { actionRule, surfaceRule } from "../../authz/rules";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App, Alert, AutoComplete, Button, Card, Empty, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -217,7 +221,12 @@ function DemandOrderAutoComplete({
   onValueChange: (next: string) => void;
   onCandidateChange: (lineKey: string, candidate: SiteIssueDemandCandidate | null) => void;
 }) {
-  const [options, setOptions] = useState<SiteIssueDemandCandidate[]>([]);
+  const capture = useContextTransport(JSON.stringify([projectId, partId]), true);
+  const abort = useRef<AbortController | null>(null);
+  const [optionsState, setOptionsState] = useState<{ owner: string; rows: SiteIssueDemandCandidate[] }>({ owner: "", rows: [] });
+  const owner = JSON.stringify([projectId, partId]);
+  const options = optionsState.owner === owner ? optionsState.rows : [];
+  const setOptions = useCallback((rows: SiteIssueDemandCandidate[]) => setOptionsState({ owner, rows }), [owner]);
   // 代次守卫：只认最新一次请求，慢响应不覆盖新输入（PartPicker 同范式）。
   const gen = useRef(0);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -225,20 +234,22 @@ function DemandOrderAutoComplete({
   const fetchCandidates = useCallback((q: string) => {
     if (partId == null) return;
     const g = ++gen.current;
+    abort.current?.abort(); abort.current = new AbortController();
+    const readCapture = withTransportSignal(capture, abort.current.signal);
     getSiteIssueDemandCandidates(projectId, {
       partId,
       ...(q ? { q } : {}),
       pageSize: 50,
-    })
+    }, readCapture)
       .then(({ data }) => {
-        if (g !== gen.current) return;
+        if (g !== gen.current || !readCapture.isCurrent()) return;
         setOptions(data.rows ?? []);
       })
       .catch(() => {
-        if (g !== gen.current) return;
+        if (g !== gen.current || !readCapture.isCurrent()) return;
         setOptions([]);
       });
-  }, [projectId, partId]);
+  }, [projectId, partId, capture, setOptions]);
 
   // 选定 PN（或项目变化）即拉一次该 PN 的候选；未选 PN 不拉，避免无界下拉。
   useEffect(() => {
@@ -257,10 +268,11 @@ function DemandOrderAutoComplete({
   // 卸载：清掉防抖定时器并作废在途响应，不许写已卸载的行。
   useEffect(() => () => {
     if (timer.current) clearTimeout(timer.current);
-    gen.current += 1;
+    gen.current += 1; abort.current?.abort();
   }, []);
 
   const onSearch = (text: string) => {
+    abort.current?.abort(); gen.current += 1; setOptions([]);
     if (timer.current) clearTimeout(timer.current);
     const q = text.trim();
     if (partId == null || !q) return; // 未选 PN / 清空搜索：退回已加载的 PN 候选
@@ -303,9 +315,9 @@ function DemandOrderAutoComplete({
   );
 }
 
-export default function ManualSiteIssueSection({
+function ManualSiteIssueSection({
   projectId,
-  canManage,
+  canManage: legacyCanManage,
   issues,
   onChanged,
   reloadIssues,
@@ -318,6 +330,10 @@ export default function ManualSiteIssueSection({
   reloadIssues: () => Promise<void>;
 }) {
   const { message } = App.useApp();
+  const admission = useContextAdmission();
+  const canManage = admission.surface("maintenance_issue.manual", legacyCanManage) !== "deny";
+  const can = (action: string) => canManage && admission.state(actionRule("maintenance_issue", action), legacyCanManage) !== "deny";
+  const pageCapture = useContextTransport(projectId, legacyCanManage);
   // epoch：任何项目变化 / 卸载 / 弹窗重开都自增；await 之后必须复核。
   const epochRef = useRef(0);
   const mountedRef = useRef(true);
@@ -356,6 +372,8 @@ export default function ManualSiteIssueSection({
   const [voidTarget, setVoidTarget] = useState<SiteIssueDocument | null>(null);
   const [voidReason, setVoidReason] = useState("");
   const [voiding, setVoiding] = useState(false);
+  const editorCapture = useContextTransport(JSON.stringify([projectId, editorOpen, editing?.issue_id, editing?.version, editor, lines]), legacyCanManage);
+  const voidCapture = useContextTransport(JSON.stringify([projectId, voidTarget?.issue_id, voidTarget?.version, voidReason]), legacyCanManage);
 
   // 项目变化 / 卸载：epoch 前进 + 全部局部状态清空，旧表单不留到新项目。
   useEffect(() => {
@@ -543,7 +561,7 @@ export default function ManualSiteIssueSection({
   // 弹窗 epoch 前进都自增。迟到预览的 generation 落后即丢弃，不得回填
   // frozenRef/preview——否则「预览后改字段」会把旧结果当成可确认依据。
   const runPreview = async () => {
-    if (previewingRef.current || submittingRef.current) return;
+    if (!can("preview_manual") || !editorCapture.isCurrent() || previewingRef.current || submittingRef.current) return;
     const built = buildRequest(editor, lines);
     if (!built.ok) {
       setEditorError(built.error);
@@ -562,9 +580,10 @@ export default function ManualSiteIssueSection({
         issued_by: built.header.issued_by as string,
         site_location: built.header.site_location as string,
         lines: built.lines,
-      });
+      }, editorCapture);
+      if (!editorCapture.isCurrent()) return;
       if (
-        !mountedRef.current
+        !pageCapture.isCurrent() || !mountedRef.current
         || epoch !== epochRef.current
         || generation !== previewGenerationRef.current
       ) return;
@@ -578,7 +597,7 @@ export default function ManualSiteIssueSection({
       setPreview(data);
     } catch {
       if (
-        mountedRef.current
+        pageCapture.isCurrent() && mountedRef.current
         && epoch === epochRef.current
         && generation === previewGenerationRef.current
       ) {
@@ -587,7 +606,7 @@ export default function ManualSiteIssueSection({
     } finally {
       // 同一弹窗内，即使编辑已推进 generation，也要结束这次 loading；
       // 但旧 epoch 的 finally 不能解开新项目/新弹窗正在持有的锁。
-      if (mountedRef.current && epoch === epochRef.current) {
+      if (pageCapture.isCurrent() && mountedRef.current && epoch === epochRef.current) {
         previewingRef.current = false;
         setPreviewLoading(false);
       }
@@ -595,7 +614,7 @@ export default function ManualSiteIssueSection({
   };
 
   const confirmSave = async () => {
-    if (submittingRef.current) return;
+    if (!can(editing ? "update_manual" : "create_manual") || !editorCapture.isCurrent() || submittingRef.current) return;
     const frozen = frozenRef.current;
     if (!frozen || frozen.epoch !== epochRef.current) return;
     submittingRef.current = true;
@@ -617,7 +636,7 @@ export default function ManualSiteIssueSection({
             reason: string;
           }),
           lines: frozen.lines,
-        });
+        }, editorCapture);
       } else {
         await createManualSiteIssue(requestedProject, {
           idempotency_key: frozen.key,
@@ -630,9 +649,9 @@ export default function ManualSiteIssueSection({
             reason: string;
           }),
           lines: frozen.lines,
-        });
+        }, editorCapture);
       }
-      if (!mountedRef.current || epoch !== epochRef.current) return;
+      if (!pageCapture.isCurrent() || !mountedRef.current || epoch !== epochRef.current) return;
       // 写入已成功：无论刷新结果如何，登记本体不能被误报为失败。
       setEditorOpen(false);
       frozenRef.current = null;
@@ -645,20 +664,20 @@ export default function ManualSiteIssueSection({
         refreshFailed = true;
       }
       // 每段 await 后复核：项目切换/卸载后不再碰新上下文的父回调。
-      if (!mountedRef.current || epoch !== epochRef.current) return;
+      if (!pageCapture.isCurrent() || !mountedRef.current || epoch !== epochRef.current) return;
       try {
         await onChanged();
       } catch {
         refreshFailed = true;
       }
-      if (!mountedRef.current || epoch !== epochRef.current) return;
+      if (!pageCapture.isCurrent() || !mountedRef.current || epoch !== epochRef.current) return;
       if (refreshFailed) {
         message.warning(`${wrote}，但列表刷新失败；数据已保存，请手动刷新页面`);
       } else {
         message.success(wrote);
       }
     } catch {
-      if (mountedRef.current && epoch === epochRef.current) {
+      if (pageCapture.isCurrent() && mountedRef.current && epoch === epochRef.current) {
         setEditorError(
           editing
             ? "更正失败：单据版本可能已被他人更新，请关闭后重试"
@@ -666,7 +685,7 @@ export default function ManualSiteIssueSection({
         );
       }
     } finally {
-      if (mountedRef.current && epoch === epochRef.current) {
+      if (pageCapture.isCurrent() && mountedRef.current && epoch === epochRef.current) {
         submittingRef.current = false;
         setSubmitting(false);
       }
@@ -674,7 +693,7 @@ export default function ManualSiteIssueSection({
   };
 
   const confirmVoid = async () => {
-    if (voidingRef.current || !voidTarget || !voidReason.trim()) return;
+    if (!can("void") || !voidCapture.isCurrent() || voidingRef.current || !voidTarget || !voidReason.trim()) return;
     voidingRef.current = true;
     setVoiding(true);
     const epoch = epochRef.current;
@@ -693,8 +712,8 @@ export default function ManualSiteIssueSection({
         version: voidTarget.version,
         idempotency_key: voidAttemptRef.current.key,
         reason: voidReason.trim(),
-      });
-      if (!mountedRef.current || epoch !== epochRef.current) return;
+      }, voidCapture);
+      if (!pageCapture.isCurrent() || !mountedRef.current || epoch !== epochRef.current) return;
       setVoidTarget(null);
       setVoidReason("");
       voidAttemptRef.current = null;
@@ -704,24 +723,24 @@ export default function ManualSiteIssueSection({
       } catch {
         refreshFailed = true;
       }
-      if (!mountedRef.current || epoch !== epochRef.current) return;
+      if (!pageCapture.isCurrent() || !mountedRef.current || epoch !== epochRef.current) return;
       try {
         await onChanged();
       } catch {
         refreshFailed = true;
       }
-      if (!mountedRef.current || epoch !== epochRef.current) return;
+      if (!pageCapture.isCurrent() || !mountedRef.current || epoch !== epochRef.current) return;
       if (refreshFailed) {
         message.warning("人工领用单已作废，但列表刷新失败；请手动刷新页面");
       } else {
         message.success("人工领用单已作废，退出统计与导出");
       }
     } catch {
-      if (mountedRef.current && epoch === epochRef.current) {
+      if (pageCapture.isCurrent() && mountedRef.current && epoch === epochRef.current) {
         message.error("作废失败，请刷新后重试");
       }
     } finally {
-      if (mountedRef.current && epoch === epochRef.current) {
+      if (pageCapture.isCurrent() && mountedRef.current && epoch === epochRef.current) {
         voidingRef.current = false;
         setVoiding(false);
       }
@@ -761,8 +780,7 @@ export default function ManualSiteIssueSection({
         <Button
           type="primary"
           aria-label="人工登记领用"
-          disabled={editingLocked}
-          onClick={openCreate}
+          disabled={editingLocked || !can("preview_manual")} onClick={openCreate}
         >
           人工登记领用
         </Button>
@@ -799,8 +817,7 @@ export default function ManualSiteIssueSection({
                     <Button
                       aria-label={`更正 ${issue.issue_no}`}
                       size="small"
-                      disabled={editingLocked}
-                      onClick={() => openEdit(issue)}
+                      disabled={editingLocked || !can("preview_manual")} onClick={() => openEdit(issue)}
                     >
                       更正
                     </Button>
@@ -808,7 +825,7 @@ export default function ManualSiteIssueSection({
                       aria-label={`作废 ${issue.issue_no}`}
                       size="small"
                       danger
-                      disabled={voiding}
+                      disabled={voiding || !can("void")}
                       onClick={() => {
                         newDialogEpoch();
                         setVoidTarget(issue);
@@ -834,8 +851,8 @@ export default function ManualSiteIssueSection({
         confirmLoading={previewLoading || submitting}
         okButtonProps={{
           disabled: preview
-            ? !editor.reason.trim() || submitting
-            : previewLoading,
+            ? !can(editing ? "update_manual" : "create_manual") || !editor.reason.trim() || submitting
+            : !can("preview_manual") || previewLoading,
         }}
         onOk={() => {
           if (preview) void confirmSave();
@@ -1023,3 +1040,5 @@ export default function ManualSiteIssueSection({
     </Card>
   );
 }
+
+export default withContextSurface(ManualSiteIssueSection, surfaceRule("maintenance_issue.manual"), props => props.projectId);

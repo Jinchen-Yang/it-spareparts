@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -240,12 +241,12 @@ describe("BadReturnPanel", () => {
       project_id: "project-1",
       page: 1,
       page_size: 50,
-    });
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(api.searchMaintenanceBadReturns).toHaveBeenCalledWith({
       project_id: "project-1",
       page: 1,
       page_size: 20,
-    });
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it("管理员可在待判定义务上关联标准品类并填写判定原因", async () => {
@@ -281,6 +282,7 @@ describe("BadReturnPanel", () => {
         category_id: 9,
         reason: "核对标准品类主数据后确认",
       }),
+      expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }),
     ));
     expect(onChanged).toHaveBeenCalled();
   });
@@ -371,7 +373,7 @@ describe("BadReturnPanel", () => {
         lines: [{ obligation_id: "obligation-required", quantity: 2 }],
         note: "现场集中返件",
         reason: "现场坏件已收集",
-      }),
+      }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     const submitted = api.createMaintenanceBadReturnDraft.mock.calls[0][0];
     expect(submitted).not.toHaveProperty("return_id");
@@ -415,7 +417,7 @@ describe("BadReturnPanel", () => {
         project_id: "project-1",
         version: 1,
         reason: "已核对现场返件数量",
-      }),
+      }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     expect(await within(card).findByText("已登记")).toBeInTheDocument();
     await waitFor(() => {
@@ -462,7 +464,7 @@ describe("BadReturnPanel", () => {
         version: 2,
         logistics_reference: "LOG-REF-001",
         reason: "现场已交寄",
-      }),
+      }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     expect(await within(card).findByText("在途")).toBeInTheDocument();
     expect(within(card).getByText("物流参考：LOG-REF-001")).toBeInTheDocument();
@@ -515,7 +517,7 @@ describe("BadReturnPanel", () => {
         warehouse_reference: "WH-CHECK-001",
         inbound_reference: "RKD-001",
         reason: "仓库已验收坏件",
-      }),
+      }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     expect(await within(card).findByText("仓库已确认")).toBeInTheDocument();
     expect(within(card).getByText("仓库参考：WH-CHECK-001")).toBeInTheDocument();
@@ -566,7 +568,7 @@ describe("BadReturnPanel", () => {
         project_id: "project-1",
         version: 2,
         reason: "返还数量登记错误",
-      }),
+      }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     expect(await within(card).findByText("已作废")).toBeInTheDocument();
 
@@ -586,7 +588,7 @@ describe("BadReturnPanel", () => {
         replaces_return_id: "return-1",
         lines: [{ obligation_id: "obligation-required", quantity: 2 }],
         reason: "按正确业务事实重建",
-      }),
+      }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
   });
 
@@ -700,7 +702,7 @@ describe("BadReturnPanel", () => {
     );
     expect(api.searchMaintenanceReturnObligations).toHaveBeenCalledWith(expect.objectContaining({
       project_id: "project-1",
-    }));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     rerender(
       <BadReturnPanel
         projectId="project-2"
@@ -788,7 +790,7 @@ describe("BadReturnPanel", () => {
       project_id: "project-1",
       page: 2,
       page_size: 50,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(await within(panel).findByText("PN-PAGE-2")).toBeInTheDocument();
     expect(within(panel).getByText("PN-REQUIRED")).toBeInTheDocument();
 
@@ -797,10 +799,15 @@ describe("BadReturnPanel", () => {
       project_id: "project-1",
       page: 2,
       page_size: 20,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(await within(panel).findByText("HJFH-20260809-021")).toBeInTheDocument();
     expect(within(panel).getByText("HJFH-20260809-001")).toBeInTheDocument();
     expect(within(panel).queryByRole("button", { name: "加载更多返还义务" })).toBeNull();
     expect(within(panel).queryByRole("button", { name: "加载更多返还单" })).toBeNull();
   });
 });
+
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

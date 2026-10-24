@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../../test/legacyAuthorization";
 import { cleanupAntd, renderWithoutMotion as render } from "../../../../test/antdRender";
 import { useCallback, useRef, useState } from "react";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
@@ -163,7 +164,7 @@ describe("领用返还统一读回", () => {
     await act(async () => {
       fireEvent.keyDown(search, { key: "Enter", code: "Enter", charCode: 13 });
     });
-    await waitFor(() => expect(api.searchSiteIssues).toHaveBeenCalledWith(expect.objectContaining({ q: "已执行筛选" })));
+    await waitFor(() => expect(api.searchSiteIssues).toHaveBeenCalledWith(expect.objectContaining({ q: "已执行筛选" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     fireEvent.click(await screen.findByRole("button", { name: "加载更多领用单" }));
     await screen.findByText("ISSUE-PAGE-2-V0");
     fireEvent.change(search, { target: { value: "未提交的新输入" } });
@@ -193,3 +194,8 @@ describe("领用返还统一读回", () => {
     expect(readers.size).toBe(0);
   });
 });
+
+vi.mock("../../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

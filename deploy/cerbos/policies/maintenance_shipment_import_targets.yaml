@@ -1,0 +1,29 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_shipment_import_targets",
+    "rules": [
+      {
+        "name": "explicit-apply",
+        "actions": [
+          "apply"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"apply\" in P.attr.grants.maintenance_shipment_import_targets.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_shipment_import_targets.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_shipment_import_targets.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_shipment_import_targets.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_shipment_import_targets.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_shipment_import_targets\", \"scope\": P.attr.grants.maintenance_shipment_import_targets.scope, \"version\": P.attr.grants.maintenance_shipment_import_targets.version, \"field_permissions\": P.attr.grants.maintenance_shipment_import_targets.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

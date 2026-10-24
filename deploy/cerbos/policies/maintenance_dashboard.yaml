@@ -1,0 +1,529 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_dashboard",
+    "rules": [
+      {
+        "name": "explicit-adjust-valuation-parameters",
+        "actions": [
+          "adjust_valuation_parameters"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"adjust_valuation_parameters\" in P.attr.grants.maintenance_dashboard.actions && \"read_valuation\" in P.attr.grants.maintenance_dashboard.actions && \"data_profit\" in P.attr.grants.maintenance_dashboard.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-export",
+        "actions": [
+          "export"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"export\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-consumption",
+        "actions": [
+          "read_consumption"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_consumption\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-consumption-issues",
+        "actions": [
+          "read_consumption_issues"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_consumption_issues\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-options",
+        "actions": [
+          "read_options"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_options\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-orders",
+        "actions": [
+          "read_orders"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_orders\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-parts",
+        "actions": [
+          "read_parts"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_parts\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-projects",
+        "actions": [
+          "read_projects"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_projects\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-quantity-checks",
+        "actions": [
+          "read_quantity_checks"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_quantity_checks\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-receipts",
+        "actions": [
+          "read_receipts"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_receipts\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-summary",
+        "actions": [
+          "read_summary"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_summary\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-valuation",
+        "actions": [
+          "read_valuation"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_valuation\" in P.attr.grants.maintenance_dashboard.actions && \"data_profit\" in P.attr.grants.maintenance_dashboard.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-checks",
+        "actions": [
+          "show_checks"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_checks\" in P.attr.grants.maintenance_dashboard.actions && \"read_quantity_checks\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-consumption",
+        "actions": [
+          "show_consumption"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_consumption\" in P.attr.grants.maintenance_dashboard.actions && \"read_consumption\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-consumption-issues",
+        "actions": [
+          "show_consumption_issues"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_consumption_issues\" in P.attr.grants.maintenance_dashboard.actions && \"read_consumption_issues\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-export",
+        "actions": [
+          "show_export"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_export\" in P.attr.grants.maintenance_dashboard.actions && \"export\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-filters",
+        "actions": [
+          "show_filters"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_filters\" in P.attr.grants.maintenance_dashboard.actions && \"read_options\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-orders",
+        "actions": [
+          "show_orders"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_orders\" in P.attr.grants.maintenance_dashboard.actions && \"read_orders\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-overview",
+        "actions": [
+          "show_overview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_overview\" in P.attr.grants.maintenance_dashboard.actions && \"read_summary\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-parts",
+        "actions": [
+          "show_parts"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_parts\" in P.attr.grants.maintenance_dashboard.actions && \"read_parts\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-projects",
+        "actions": [
+          "show_projects"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_projects\" in P.attr.grants.maintenance_dashboard.actions && \"read_projects\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-receipt-drill",
+        "actions": [
+          "show_receipt_drill"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_receipt_drill\" in P.attr.grants.maintenance_dashboard.actions && \"read_receipts\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-receipt-ranking",
+        "actions": [
+          "show_receipt_ranking"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_receipt_ranking\" in P.attr.grants.maintenance_dashboard.actions && \"read_summary\" in P.attr.grants.maintenance_dashboard.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-valuation",
+        "actions": [
+          "show_valuation"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_valuation\" in P.attr.grants.maintenance_dashboard.actions && \"read_valuation\" in P.attr.grants.maintenance_dashboard.actions && \"data_profit\" in P.attr.grants.maintenance_dashboard.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-valuation-parameters",
+        "actions": [
+          "show_valuation_parameters"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_valuation_parameters\" in P.attr.grants.maintenance_dashboard.actions && \"adjust_valuation_parameters\" in P.attr.grants.maintenance_dashboard.actions && \"data_profit\" in P.attr.grants.maintenance_dashboard.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-valuation-summary",
+        "actions": [
+          "show_valuation_summary"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_valuation_summary\" in P.attr.grants.maintenance_dashboard.actions && \"read_summary\" in P.attr.grants.maintenance_dashboard.actions && \"data_profit\" in P.attr.grants.maintenance_dashboard.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_dashboard.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_dashboard.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_dashboard\", \"scope\": P.attr.grants.maintenance_dashboard.scope, \"version\": P.attr.grants.maintenance_dashboard.version, \"field_permissions\": P.attr.grants.maintenance_dashboard.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

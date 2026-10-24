@@ -10,6 +10,9 @@ import {
 } from "../../api/maintenanceBossBoard";
 import { saveBlob } from "../../api/maintenanceWorkbooks";
 
+import { withContextSurface, contextSurfaces } from "../../authz/ContextSurface";
+import { useContextTransport } from "../../authz/domainTransport";
+
 const { Text } = Typography;
 const STORAGE_KEY = "maintenance_project_export_fields_v1";
 
@@ -68,7 +71,7 @@ async function readError(error: unknown): Promise<string> {
  * 字段目录始终来自服务端权限白名单；本地只记住这些公开 key 的选择状态，
  * 每次打开都会重新取目录并做交集，权限收窄后不会残留不可见字段。
  */
-export default function MaintenanceProjectExportButton({
+function MaintenanceProjectExportButton({
   filters,
 }: MaintenanceProjectExportButtonProps) {
   const { message } = App.useApp();
@@ -79,6 +82,9 @@ export default function MaintenanceProjectExportButton({
   const [loadingOptions, setLoadingOptions] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const transport = useContextTransport(JSON.stringify([open, filters, selected]), true);
+  const optionsTransport = useContextTransport(JSON.stringify([open, filters]), true);
 
   const grouped = useMemo(() => {
     const groups = new Map<string, BoardProjectExportField[]>();
@@ -103,7 +109,8 @@ export default function MaintenanceProjectExportButton({
     setFields([]);
     setSelected([]);
     try {
-      const { data } = await getBoardProjectExportOptions();
+      const { data } = await getBoardProjectExportOptions(optionsTransport);
+      if (!optionsTransport.isCurrent()) return;
       const availableKeys = new Set(data.fields.map((field) => field.key));
       const defaults = data.default_fields.filter((key) => availableKeys.has(key));
       const fallbackDefaults = defaults.length
@@ -115,11 +122,13 @@ export default function MaintenanceProjectExportButton({
       setDefaultFields(fallbackDefaults);
       applySelection(initial, data.fields);
     } catch (loadError) {
+      if (!optionsTransport.isCurrent()) return;
       setDefaultFields([]);
       setSelected([]);
-      setError(await readError(loadError));
+      const detail = await readError(loadError);
+      if (optionsTransport.isCurrent()) setError(detail);
     } finally {
-      setLoadingOptions(false);
+      if (optionsTransport.isCurrent()) setLoadingOptions(false);
     }
   };
 
@@ -127,7 +136,7 @@ export default function MaintenanceProjectExportButton({
     if (open) void loadOptions();
     // 只以弹窗开关触发：filters 改变不会重拉字段目录，下载时仍读取最新 props。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, optionsTransport]);
 
   const toggleField = (key: string, checked: boolean) => {
     const next = checked
@@ -144,14 +153,16 @@ export default function MaintenanceProjectExportButton({
       const result = await downloadBoardProjectsExport({
         ...filters,
         fields: selected,
-      });
+      }, transport);
+      if (!transport.isCurrent()) return;
       saveBlob(result.blob, result.filename);
       message.success("维保项目清单已开始下载");
       setOpen(false);
     } catch (downloadError) {
-      setError(await readError(downloadError));
+      const detail = await readError(downloadError);
+      if (transport.isCurrent()) setError(detail);
     } finally {
-      setDownloading(false);
+      if (transport.isCurrent()) setDownloading(false);
     }
   };
 
@@ -229,3 +240,5 @@ export default function MaintenanceProjectExportButton({
     </>
   );
 }
+
+export default withContextSurface(MaintenanceProjectExportButton, contextSurfaces("maintenance_summary.project_export"), props => props.filters);

@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 import { COLORS } from "../../../theme";
 import { cleanupAntd, renderWithoutMotion as render } from "../../../test/antdRender";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
@@ -97,13 +98,13 @@ vi.mock("../../../api/maintenanceOperations", async () => {
     searchMaintenanceBadReturns: (...a: unknown[]) => searchMaintenanceBadReturns(...a),
     // 返还收货台账（2026-09-11）：面板挂载即拉汇总与列表，测试给空态即可
     getReturnReceiptDemands: (...a: unknown[]) => getBoardProjectOrders(...a),
-    getReturnReceiptSummary: vi.fn().mockResolvedValue({
+    getReturnReceiptSummary: async () => ({
       data: { project_id: "p", project_total_qty: "0.000", unassigned_qty: "0.000", by_demand: [] },
     }),
-    searchReturnReceipts: vi.fn().mockResolvedValue({
+    searchReturnReceipts: async () => ({
       data: { total: 0, page: 1, page_size: 50, items: [] },
     }),
-    getReturnReceiptAudit: vi.fn().mockResolvedValue({ data: { receipt_id: "r", items: [] } }),
+    getReturnReceiptAudit: async () => ({ data: { receipt_id: "r", items: [] } }),
   };
 });
 vi.mock("../../../api/maintenanceProjectProcurement", async () => {
@@ -258,7 +259,7 @@ describe("免返标注", () => {
     dialog = await screen.findByRole("dialog");
     fireEvent.change(within(dialog).getByRole("textbox", { name: "免返标注" }), { target: { value: "  " } });
     fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
-    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenLastCalledWith("p1", expect.objectContaining({ no_return_note: null })));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenLastCalledWith("p1", expect.objectContaining({ no_return_note: null }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(await screen.findByText("未标注")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "编辑免返标注" }));
@@ -305,7 +306,7 @@ describe("免返标注", () => {
     expect(updateMaintenanceProject).not.toHaveBeenCalled();
     fireEvent.change(input, { target: { value: "😀".repeat(2000) } });
     fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
-    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({ no_return_note: "😀".repeat(2000) })));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({ no_return_note: "😀".repeat(2000) }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
@@ -407,7 +408,7 @@ describe("项目备注", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(updateMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({
       version: 3, project_note: "自由备注\n<img src=x onerror=alert(1)>",
-    }));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(updateMaintenanceProject.mock.calls[0][1]).not.toHaveProperty("no_return_note");
     const rendered = await screen.findByText("自由备注 <img src=x onerror=alert(1)>");
     expect(rendered.querySelector("img")).toBeNull();
@@ -422,7 +423,7 @@ describe("项目备注", () => {
     let dialog = await screen.findByRole("dialog");
     fireEvent.change(within(dialog).getByRole("textbox", { name: "项目备注" }), { target: { value: " \n " } });
     fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
-    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({ project_note: null })));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({ project_note: null }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(updateMaintenanceProject.mock.calls[0][1]).not.toHaveProperty("no_return_note");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "编辑免返标注" }));
@@ -452,7 +453,7 @@ describe("项目备注", () => {
     expect(updateMaintenanceProject).not.toHaveBeenCalled();
     fireEvent.change(input, { target: { value: "😀".repeat(500) } });
     fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
-    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({ project_note: "😀".repeat(500) })));
+    await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({ project_note: "😀".repeat(500) }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it.each([401, 403, 409])("保存遇%s保留项目备注草稿，不报告成功", async (status) => {
@@ -560,7 +561,7 @@ describe("项目面板", () => {
     expect(await screen.findByRole("heading", { name: "合成项目A" })).toBeInTheDocument();
     expect(searchBoardProjects).toHaveBeenCalledWith({
       q: "合成项目A", page: 1, page_size: 200, lifecycle: "all", business_type: "all",
-    });
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(getBoardProject).not.toHaveBeenCalled();
     expect(screen.queryByRole("alert")).toBeNull();
   });
@@ -579,7 +580,7 @@ describe("项目面板", () => {
       .toContain("1000.00"));
     expect(searchBoardProjects).toHaveBeenNthCalledWith(2, {
       q: "合成项目A", page: 2, page_size: 200, lifecycle: "all", business_type: "all",
-    });
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(getBoardProject).not.toHaveBeenCalled();
     expect(screen.getByText("已归档")).toBeInTheDocument();
     expect(screen.getByTestId("panel-health-band").textContent).not.toContain("999.00");
@@ -863,7 +864,7 @@ describe("项目面板", () => {
     renderPanel();
     await waitFor(() => expect(getMaintenanceProjectWorkspace).toHaveBeenCalledWith(
       "p1",
-      expect.objectContaining({ collection_page: 2, collection_page_size: 100 }),
+      expect.objectContaining({ collection_page: 2, collection_page_size: 100 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     fireEvent.click(await screen.findByRole("tab", { name: "回款" }));
     expect(await screen.findByText("REC-PAGE-1")).toBeInTheDocument();
@@ -983,8 +984,8 @@ describe("项目面板", () => {
     fireEvent.click(await screen.findByRole("tab", { name: "领用与返还" }));
     expect(await screen.findByText("CKD-PAGE-2")).toBeInTheDocument();
     expect(screen.getByText("PN-2")).toBeInTheDocument();
-    expect(searchSiteIssues).toHaveBeenCalledWith(expect.objectContaining({ page_size: 100 }));
-    expect(searchSiteIssues).toHaveBeenCalledWith(expect.objectContaining({ page: 2 }));
+    expect(searchSiteIssues).toHaveBeenCalledWith(expect.objectContaining({ page_size: 100 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
+    expect(searchSiteIssues).toHaveBeenCalledWith(expect.objectContaining({ page: 2 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(searchMaintenanceReturnObligations).not.toHaveBeenCalled();
     expect(searchMaintenanceBadReturns).not.toHaveBeenCalled();
   });
@@ -999,7 +1000,7 @@ describe("项目面板", () => {
     downloadProjectMaster.mockResolvedValue(new Blob(["x"]));
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: /下载本项目总表/ }));
-    await waitFor(() => expect(downloadProjectMaster).toHaveBeenCalledWith("p1"));
+    await waitFor(() => expect(downloadProjectMaster).toHaveBeenCalledWith("p1", undefined, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("tab 内下载只取该 sheet（#38 在哪下载就在哪上传）", async () => {
@@ -1008,7 +1009,7 @@ describe("项目面板", () => {
     fireEvent.click(await screen.findByRole("tab", { name: "备件与需求单" }));
     fireEvent.click(await screen.findByRole("button", { name: /下载备件成本/ }));
     await waitFor(() =>
-      expect(downloadProjectMaster).toHaveBeenCalledWith("p1", ["03_备件订单"]));
+      expect(downloadProjectMaster).toHaveBeenCalledWith("p1", ["03_备件订单"], expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("无上传动作键时 tab 内没有上传入口", async () => {
@@ -1088,7 +1089,7 @@ describe("项目面板", () => {
     await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({
       business_type: label === "未标注" ? "" : label,
       version: 7, reason: "面板编辑基本信息",
-    })));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("未修改的历史自由文本类型保留，取消后再次打开不会提交上次未保存的选择", async () => {
@@ -1184,7 +1185,7 @@ describe("项目面板", () => {
         version: 4,
         salesperson: "赵销售",
         reason: "面板编辑基本信息",
-      }),
+      }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
   });
 
@@ -1218,7 +1219,7 @@ describe("项目面板", () => {
 
     await waitFor(() => expect(updateMaintenanceProject).toHaveBeenCalledWith(
       "p1",
-      expect.objectContaining({ version: 5, salesperson: null }),
+      expect.objectContaining({ version: 5, salesperson: null }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
   });
 
@@ -1724,7 +1725,7 @@ describe("返回项目墙（v1.35：URL 化后的返回保持）", () => {
     expect(await screen.findByRole("tab", { name: "分析定位" })).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByTestId("project-analytics-context")).toHaveAttribute("data-project-id", "p1");
     expect(screen.getByTestId("project-analytics-context")).toHaveTextContent(returnPath);
-    await waitFor(() => expect(getMaintenanceProject).toHaveBeenCalledWith("p1"));
+    await waitFor(() => expect(getMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(searchSiteIssues).not.toHaveBeenCalled();
     expect(getBoardProjectOrders).not.toHaveBeenCalled();
     const back = screen.getByRole("link", { name: /返回分析/ });
@@ -1761,3 +1762,9 @@ describe("返回项目墙（v1.35：URL 化后的返回保持）", () => {
     expect(await screen.findByTestId("project-analytics-context")).toHaveTextContent("无分析来源");
   });
 });
+
+// Preserve old page contracts under an explicit legacy resource snapshot.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

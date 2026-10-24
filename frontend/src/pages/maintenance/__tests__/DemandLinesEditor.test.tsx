@@ -1,3 +1,4 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
 /**
  * DemandLinesEditor（v1.36 Phase E 行编辑/撤销）专项：
  * - digest 传递：编辑/撤销都带读取时的 digest；
@@ -147,7 +148,7 @@ describe("DemandLinesEditor 编辑（OCC digest）", () => {
       fireEvent.click(within(dialog).getByRole("button", { name: /保\s*存\s*修\s*改/ }));
     });
     await waitFor(() => expect(mocks.patch).toHaveBeenCalledTimes(1));
-    expect(mocks.patch.mock.calls[0]).toEqual(["L1", { qty: 6 }, "按实物更正", D1]);
+    expect(mocks.patch.mock.calls[0]).toEqual(["L1", { qty: 6 }, "按实物更正", D1, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })]);
     await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
   });
 
@@ -266,7 +267,7 @@ describe("DemandLinesEditor 撤销（override clear）", () => {
     await act(async () => { fireEvent.click(ok); });
     await waitFor(() => expect(mocks.clear).toHaveBeenCalledTimes(1));
     expect(mocks.clear.mock.calls[0]).toEqual([
-      "L1", "qty", "页面改错了，恢复原值", D1,
+      "L1", "qty", "页面改错了，恢复原值", D1, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }),
     ]);
     await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(2));
   });
@@ -296,7 +297,7 @@ describe("DemandLinesEditor 撤销（override clear）", () => {
       fireEvent.click(within(dialog).getByRole("button", { name: /确\s*认\s*撤\s*销/ }));
     });
     await waitFor(() => expect(mocks.clear).toHaveBeenCalledTimes(1));
-    expect(mocks.clear.mock.calls[0]).toEqual(["L1", "qty", "恢复数量", D1]);
+    expect(mocks.clear.mock.calls[0]).toEqual(["L1", "qty", "恢复数量", D1, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })]);
   });
 
   it("撤销 409：弹窗保留原因 → 点重载换新 digest → 重新确认成功（不自动重试）", async () => {
@@ -439,3 +440,10 @@ describe("DemandLinesEditor 并发隔离（epoch）", () => {
     expect(mocks.list.mock.calls.length).toBe(listCalls); // 成功后的重读不再发生
   });
 });
+
+// These existing business behavior fixtures intentionally exercise the legacy runtime.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(),
+  useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

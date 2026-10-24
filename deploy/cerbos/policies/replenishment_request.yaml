@@ -1,0 +1,109 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "replenishment_request",
+    "rules": [
+      {
+        "name": "explicit-export-screening",
+        "actions": [
+          "export_screening"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"export_screening\" in P.attr.grants.replenishment_request.actions && \"data_pool_price_governance\" in P.attr.grants.replenishment_request.field_permissions && (R.attr.module_probe || ((P.attr.grants.replenishment_request.scope == \"all\" && (true)) || (P.attr.grants.replenishment_request.scope == \"own_applications\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_request\", \"scope\": P.attr.grants.replenishment_request.scope, \"version\": P.attr.grants.replenishment_request.version, \"field_permissions\": P.attr.grants.replenishment_request.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.replenishment_request.actions && \"data_pool_price_governance\" in P.attr.grants.replenishment_request.field_permissions && (R.attr.module_probe || ((P.attr.grants.replenishment_request.scope == \"all\" && (true)) || (P.attr.grants.replenishment_request.scope == \"own_applications\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_request\", \"scope\": P.attr.grants.replenishment_request.scope, \"version\": P.attr.grants.replenishment_request.version, \"field_permissions\": P.attr.grants.replenishment_request.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-revise",
+        "actions": [
+          "revise"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"revise\" in P.attr.grants.replenishment_request.actions && \"data_pool_price_governance\" in P.attr.grants.replenishment_request.field_permissions && (R.attr.module_probe || ((P.attr.grants.replenishment_request.scope == \"all\" && (true)) || (P.attr.grants.replenishment_request.scope == \"own_applications\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_request\", \"scope\": P.attr.grants.replenishment_request.scope, \"version\": P.attr.grants.replenishment_request.version, \"field_permissions\": P.attr.grants.replenishment_request.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-exports",
+        "actions": [
+          "show_exports"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_exports\" in P.attr.grants.replenishment_request.actions && \"export_screening\" in P.attr.grants.replenishment_request.actions && \"read\" in P.attr.grants.replenishment_request.actions && (R.attr.module_probe || ((P.attr.grants.replenishment_request.scope == \"all\" && (true)) || (P.attr.grants.replenishment_request.scope == \"own_applications\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_request\", \"scope\": P.attr.grants.replenishment_request.scope, \"version\": P.attr.grants.replenishment_request.version, \"field_permissions\": P.attr.grants.replenishment_request.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-versions",
+        "actions": [
+          "show_versions"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_versions\" in P.attr.grants.replenishment_request.actions && \"read\" in P.attr.grants.replenishment_request.actions && (R.attr.module_probe || ((P.attr.grants.replenishment_request.scope == \"all\" && (true)) || (P.attr.grants.replenishment_request.scope == \"own_applications\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"replenishment_request\", \"scope\": P.attr.grants.replenishment_request.scope, \"version\": P.attr.grants.replenishment_request.version, \"field_permissions\": P.attr.grants.replenishment_request.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

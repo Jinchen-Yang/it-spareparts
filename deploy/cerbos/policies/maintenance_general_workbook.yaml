@@ -1,0 +1,129 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_general_workbook",
+    "rules": [
+      {
+        "name": "explicit-download",
+        "actions": [
+          "download"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"download\" in P.attr.grants.maintenance_general_workbook.actions && \"data_customer\" in P.attr.grants.maintenance_general_workbook.field_permissions && \"data_purchase_cost\" in P.attr.grants.maintenance_general_workbook.field_permissions && \"data_profit\" in P.attr.grants.maintenance_general_workbook.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_general_workbook.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_general_workbook.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_general_workbook\", \"scope\": P.attr.grants.maintenance_general_workbook.scope, \"version\": P.attr.grants.maintenance_general_workbook.version, \"field_permissions\": P.attr.grants.maintenance_general_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-collection-roundtrip",
+        "actions": [
+          "show_collection_roundtrip"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_collection_roundtrip\" in P.attr.grants.maintenance_general_workbook.actions && \"download\" in P.attr.grants.maintenance_general_workbook.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_general_workbook.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_general_workbook.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_general_workbook\", \"scope\": P.attr.grants.maintenance_general_workbook.scope, \"version\": P.attr.grants.maintenance_general_workbook.version, \"field_permissions\": P.attr.grants.maintenance_general_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-expense-roundtrip",
+        "actions": [
+          "show_expense_roundtrip"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_expense_roundtrip\" in P.attr.grants.maintenance_general_workbook.actions && \"download\" in P.attr.grants.maintenance_general_workbook.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_general_workbook.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_general_workbook.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_general_workbook\", \"scope\": P.attr.grants.maintenance_general_workbook.scope, \"version\": P.attr.grants.maintenance_general_workbook.version, \"field_permissions\": P.attr.grants.maintenance_general_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-parts-roundtrip",
+        "actions": [
+          "show_parts_roundtrip"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_parts_roundtrip\" in P.attr.grants.maintenance_general_workbook.actions && \"download\" in P.attr.grants.maintenance_general_workbook.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_general_workbook.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_general_workbook.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_general_workbook\", \"scope\": P.attr.grants.maintenance_general_workbook.scope, \"version\": P.attr.grants.maintenance_general_workbook.version, \"field_permissions\": P.attr.grants.maintenance_general_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-project-master",
+        "actions": [
+          "show_project_master"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_project_master\" in P.attr.grants.maintenance_general_workbook.actions && \"download\" in P.attr.grants.maintenance_general_workbook.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_general_workbook.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_general_workbook.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_general_workbook\", \"scope\": P.attr.grants.maintenance_general_workbook.scope, \"version\": P.attr.grants.maintenance_general_workbook.version, \"field_permissions\": P.attr.grants.maintenance_general_workbook.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-site-roundtrip",
+        "actions": [
+          "show_site_roundtrip"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_site_roundtrip\" in P.attr.grants.maintenance_general_workbook.actions && \"download\" in P.attr.grants.maintenance_general_workbook.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_general_workbook.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_general_workbook.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_general_workbook\", \"scope\": P.attr.grants.maintenance_general_workbook.scope, \"version\": P.attr.grants.maintenance_general_workbook.version, \"field_permissions\": P.attr.grants.maintenance_general_workbook.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

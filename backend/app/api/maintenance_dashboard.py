@@ -44,6 +44,17 @@ from xlsxwriter import Workbook
 from app.api.date_validation import validate_date_query
 from app.api.maintenance_expense_collection_workbook import _require_profit_visibility
 from app.auth import current_role
+from app.authz import runtime
+from app.api.maintenance_project_scope import identity_for, legacy_page, legacy_gate
+from app.services import maintenance_dashboard_access as protected_dashboard
+from app.services import maintenance_dashboard_export as dashboard_export
+# Preserve existing Python helper imports while using one pure formatter.
+from app.services.maintenance_dashboard_export import (
+    ExportColumn, _unit_label_of, _cell, _export_row, _decimal_or_text,
+    _project_export_columns, _part_export_columns, _receipt_export_columns,
+    _check_export_columns, _orders_export_columns, _consumption_daily_export_columns,
+    _consumption_issues_export_columns,
+)
 from app.db import get_db
 from app.models.maintenance_project import MaintenanceProject
 from app.security import (
@@ -184,10 +195,17 @@ def options(
     response: Response,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_dashboard", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_dashboard")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """筛选器候选项与可见性说明；项目列表随授权范围收敛。"""
+    if runtime.is_authoritative(db, "maintenance_dashboard"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_dashboard.read(db, identity, endpoint='options', params={},
+            view=view, precondition=authorization_precondition)
     response.headers["Cache-Control"] = "no-store"
     visible = _amounts_visible(ctx)
     scope = dash.resolve_project_scope(db, ctx, None)
@@ -242,14 +260,21 @@ def summary(
     value_retention_ratio: str | None = Query(None, max_length=32),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_dashboard", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_dashboard")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """T1 回收与领用总览：卡片 + 趋势 + 件况结构 + Top 项目。
 
     金额卡片仅对通过利润门的调用方构建（响应内无该键，而非 0 值）；
     比例参数只在金额可见时生效（数量视图不受影响）。
     """
+    if runtime.is_authoritative(db, "maintenance_dashboard"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_dashboard.read(db, identity, endpoint='summary', params={'range_':range_, 'date_from':date_from, 'date_to':date_to, 'project':project, 'business_type':business_type, 'q':q, 'value_retention_ratio':value_retention_ratio},
+            view=view, precondition=authorization_precondition)
     response.headers["Cache-Control"] = "no-store"
     visible = _amounts_visible(ctx)
     # 比例合法性对所有角色一致校验（422）；仅金额可见时才参与构建。
@@ -287,14 +312,21 @@ def projects(
     page_size: int = Query(dash.DEFAULT_PAGE_SIZE, ge=1, le=dash.MAX_PAGE_SIZE),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_dashboard", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_dashboard")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """T2 项目对比：范围内项目全量行（含零行）；返还率按项目逐行给出。
 
     行级试算与 summary/parts/导出同参（root 裁决补传）：缺省 0.5、显式值
     （含 0）逐字生效，避免表格与导出同屏口径分裂。
     """
+    if runtime.is_authoritative(db, "maintenance_dashboard"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_dashboard.read(db, identity, endpoint='projects', params={'range_':range_, 'date_from':date_from, 'date_to':date_to, 'project':project, 'business_type':business_type, 'q':q, 'sort':sort, 'value_retention_ratio':value_retention_ratio, 'page':page, 'page_size':page_size},
+            view=view, precondition=authorization_precondition)
     response.headers["Cache-Control"] = "no-store"
     _reject_amount_sort(ctx, sort)
     ratio = _retention_ratio(value_retention_ratio)
@@ -335,10 +367,17 @@ def parts(
     value_retention_ratio: str | None = Query(None, max_length=32),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_dashboard", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_dashboard")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """T3 PN 排名：PN 身份归并后的返件/坏件/领用与（可见时）试算列。"""
+    if runtime.is_authoritative(db, "maintenance_dashboard"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_dashboard.read(db, identity, endpoint='parts', params={'range_':range_, 'date_from':date_from, 'date_to':date_to, 'project':project, 'business_type':business_type, 'q':q, 'sort':sort, 'page':page, 'page_size':page_size, 'value_retention_ratio':value_retention_ratio},
+            view=view, precondition=authorization_precondition)
     response.headers["Cache-Control"] = "no-store"
     _reject_amount_sort(ctx, sort)
     visible = _amounts_visible(ctx)
@@ -382,9 +421,12 @@ def valuation(
     value_retention_ratio: str | None = Query(None, max_length=32),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _profit: None = Depends(_require_profit_visibility),
+    _page: None = Depends(legacy_page("maintenance_dashboard", "page_maintenance")),
+    _profit: None = Depends(legacy_gate("maintenance_dashboard", _require_profit_visibility)),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_dashboard")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """估价专页（金额域）：政策版本 + 总卡 + 分 PN 估价行（R34 三域）。
 
@@ -392,6 +434,10 @@ def valuation(
     readonly 兜底模板有 data_profit 但无 page_maintenance，不能只查利润键）。
     比例缺省 = 50%（可调；显式 0 合法）；待估行不填 0，也不计入试算合计。
     """
+    if runtime.is_authoritative(db, "maintenance_dashboard"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_dashboard.read(db, identity, endpoint='valuation', params={'range_':range_, 'date_from':date_from, 'date_to':date_to, 'project':project, 'business_type':business_type, 'q':q, 'sort':sort, 'page':page, 'page_size':page_size, 'value_retention_ratio':value_retention_ratio},
+            view=view, precondition=authorization_precondition)
     response.headers["Cache-Control"] = "no-store"
     ratio = _retention_ratio(value_retention_ratio)
     filters = _filters(
@@ -500,10 +546,17 @@ def receipts(
     value_retention_ratio: str | None = Query(None, max_length=32),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_dashboard", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_dashboard")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """返件实收明细（T1/T3 下钻）：行级；退货 return_qty 不在此口径。"""
+    if runtime.is_authoritative(db, "maintenance_dashboard"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_dashboard.read(db, identity, endpoint='receipts', params={'range_':range_, 'date_from':date_from, 'date_to':date_to, 'project':project, 'business_type':business_type, 'q':q, 'test_result':test_result, 'source':source, 'created_by':created_by, 'sort':sort, 'page':page, 'page_size':page_size, 'value_retention_ratio':value_retention_ratio},
+            view=view, precondition=authorization_precondition)
     response.headers["Cache-Control"] = "no-store"
     visible = _amounts_visible(ctx)
     ratio = _retention_ratio(value_retention_ratio)
@@ -551,8 +604,11 @@ def quantity_checks(
     page_size: int = Query(dash.DEFAULT_PAGE_SIZE, ge=1, le=dash.MAX_PAGE_SIZE),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_dashboard", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_dashboard")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """T4 需求单数量核对（当前累计）：N/R/差额/超收 + 未关联实收。
 
@@ -560,6 +616,10 @@ def quantity_checks(
     不发布「欠返/逾期/已返」状态。q（B-F10）按有效需求行 PN 命中**选择
     整张需求单**（选入单仍整单全 PN/全期累计 N/R，不裁局部、不忽略 q）。
     """
+    if runtime.is_authoritative(db, "maintenance_dashboard"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_dashboard.read(db, identity, endpoint='quantity-checks', params={'range_':range_, 'date_from':date_from, 'date_to':date_to, 'project':project, 'business_type':business_type, 'q':q, 'sort':sort, 'page':page, 'page_size':page_size},
+            view=view, precondition=authorization_precondition)
     response.headers["Cache-Control"] = "no-store"
     try:
         requested = _parse_project_filter(project)
@@ -607,14 +667,21 @@ def orders(
     ),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_dashboard", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_dashboard")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """M01 期间下单（数量域）：制单日期入期的有效需求单原 qty + 去重单数。
 
     不扣退货、不扣免返（原 qty 口径）；无关键词参数（单域，同 T4）；
     无金额列——任何角色都只有数量。
     """
+    if runtime.is_authoritative(db, "maintenance_dashboard"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_dashboard.read(db, identity, endpoint='orders', params={'range_':range_, 'date_from':date_from, 'date_to':date_to, 'project':project, 'business_type':business_type},
+            view=view, precondition=authorization_precondition)
     response.headers["Cache-Control"] = "no-store"
     filters = _filters(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
@@ -643,13 +710,20 @@ def consumption_daily(
     page_size: int = Query(dash.DEFAULT_PAGE_SIZE, ge=1, le=dash.MAX_PAGE_SIZE),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_dashboard", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_dashboard")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """M03 每日每项目已计消耗：数量全计；金额只读既有成本（利润门）。
 
     未计成本量/覆盖率/来源标注仅金额可见用户获得；只读，不回算。
     """
+    if runtime.is_authoritative(db, "maintenance_dashboard"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_dashboard.read(db, identity, endpoint='consumption', params={'range_':range_, 'date_from':date_from, 'date_to':date_to, 'project':project, 'business_type':business_type, 'page':page, 'page_size':page_size},
+            view=view, precondition=authorization_precondition)
     response.headers["Cache-Control"] = "no-store"
     visible = _amounts_visible(ctx)
     filters = _filters(
@@ -687,14 +761,21 @@ def consumption_issues(
     page_size: int = Query(dash.DEFAULT_PAGE_SIZE, ge=1, le=dash.MAX_PAGE_SIZE),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_dashboard", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_dashboard")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """M03 领用明细下钻（数量域 + 利润门成本证据）：日×项目可核对。
 
     ``project_id`` 与授权范围取交集（集合语义），越权项目自然为空，
     不扩全量。
     """
+    if runtime.is_authoritative(db, "maintenance_dashboard"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_dashboard.read(db, identity, endpoint='consumption/issues', params={'range_':range_, 'date_from':date_from, 'date_to':date_to, 'project':project, 'business_type':business_type, 'issue_date':issue_date, 'project_id':project_id, 'page':page, 'page_size':page_size},
+            view=view, precondition=authorization_precondition)
     response.headers["Cache-Control"] = "no-store"
     visible = _amounts_visible(ctx)
     filters = _filters(
@@ -762,14 +843,30 @@ def export(
     value_retention_ratio: str | None = Query(None, max_length=32),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_dashboard", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_dashboard")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> StreamingResponse:
     """导出当前筛选集：CSV 撇号只加公式形态单元格；XLSX 数值写数值单元格。
 
     无金额权时导出不含任何金额列与估价元数据（列头都没有，不是置空）。
     价值保留比例仅金额可见导出携带（参数伴随结果，无全局写入）。
     """
+    if runtime.is_authoritative(db, 'maintenance_dashboard'):
+        prepared = protected_dashboard.prepare_export(db, identity, params={
+            'range': range_, 'date_from': date_from, 'date_to': date_to, 'project': project,
+            'business_type': business_type, 'q': q, 'kind': kind, 'format': format,
+            'test_result': test_result, 'source': source, 'created_by': created_by,
+            'value_retention_ratio': value_retention_ratio,
+        }, view=view, precondition=authorization_precondition)
+        if view == 'authorization':
+            return prepared
+        filename = f'maintenance-dashboard-{kind}.{format}'
+        response = (_csv_stream(prepared.header, prepared.values, filename, sanitize=_safe_formula_only)
+                    if format == 'csv' else _xlsx_response(prepared.header, prepared.values, filename, None))
+        return _guard_export_stream(response, db.get_bind(), identity, prepared.provenance)
     visible = _amounts_visible(ctx)
     ratio = _retention_ratio(value_retention_ratio)
     filters = _filters(
@@ -782,228 +879,8 @@ def export(
                      amounts=visible, kind=kind,
                      ratio_explicit=value_retention_ratio is not None),
     )
-    if kind == "projects":
-        rows = dash.build_project_rows(
-            db, filters, include_amounts=visible,
-            ratio=ratio if visible else None,
-        )
-        header, columns = _project_export_columns(visible)
-        # 静态审查补充（§106）：混合单位按 项目×单位 展开——数量/率用本桶
-        # 值，金额不重复父项总额（单位内已估金额；待估单位留空）。单一单位
-        # 行保持原样。
-        data = []
-        for row in rows:
-            buckets = row.get("unit_breakdown") or []
-            if len(buckets) <= 1:
-                item = dict(row)
-                item["_unit_label"] = _unit_label_of(row)
-                data.append(item)
-                continue
-            valuation = dict(row.get("valuation") or {})
-            main_by_unit = {
-                entry.get("unit"): entry
-                for entry in valuation.get("unit_breakdown", [])
-            }
-            domains_by_unit = {
-                domain: {
-                    entry.get("unit"): entry
-                    for entry in payload.get("unit_breakdown", [])
-                }
-                for domain, payload in valuation.get("domains", {}).items()
-            }
-            for entry in buckets:
-                unit = entry.get("unit")
-                item = dict(row)
-                item["_unit_label"] = unit or "待核"
-                for key in ("receipt_qty", "bad_receipt_qty",
-                            "scrap_receipt_qty", "issued_qty",
-                            "exempt_issued_qty", "pending_requirement_qty",
-                            "unlinked_receipt_qty", "return_rate_pct",
-                            "rate_numerator", "rate_denominator"):
-                    item[key] = entry.get(key)
-                if valuation:
-                    main = main_by_unit.get(unit) or {
-                        "estimated_bad_qty": "0.000",
-                        "pending_bad_qty": "0.000",
-                        "awaiting_ratio_bad_qty": "0.000",
-                        "coverage_pct": None,
-                    }
-                    unit_valuation = dict(valuation)
-                    unit_valuation["estimated_bad_qty"] = main.get(
-                        "estimated_bad_qty"
-                    )
-                    unit_valuation["pending_bad_qty"] = main.get(
-                        "pending_bad_qty"
-                    )
-                    unit_valuation["awaiting_ratio_bad_qty"] = main.get(
-                        "awaiting_ratio_bad_qty"
-                    )
-                    unit_valuation["coverage_pct"] = main.get("coverage_pct")
-                    # 值键用本单位已估金额（B-F06：全待估单位不写 0.00）。
-                    if "value_inc_tax" in main:
-                        unit_valuation["bad_estimated_value_inc_tax"] = (
-                            main["value_inc_tax"]
-                        )
-                        unit_valuation["bad_estimated_value_ex_tax"] = (
-                            main["value_ex_tax"]
-                        )
-                    else:
-                        unit_valuation.pop("bad_estimated_value_inc_tax", None)
-                        unit_valuation.pop("bad_estimated_value_ex_tax", None)
-                    if valuation.get("domains"):
-                        unit_domains = {}
-                        for domain, by_unit in domains_by_unit.items():
-                            domain_entry = by_unit.get(unit) or {
-                                "coverage_pct": None,
-                            }
-                            merged = {
-                                **valuation["domains"][domain],
-                                "coverage_pct": domain_entry.get("coverage_pct"),
-                            }
-                            # 三域值用本单位已估金额（B3 05:12）：无已估本桶
-                            # → 键移除（空格，B-F06 口径），不摊/复制父域总额。
-                            for value_key in (
-                                "value_inc_tax", "value_ex_tax"
-                            ):
-                                if value_key in domain_entry:
-                                    merged[value_key] = domain_entry[value_key]
-                                else:
-                                    merged.pop(value_key, None)
-                            unit_domains[domain] = merged
-                        unit_valuation["domains"] = unit_domains
-                    item["valuation"] = unit_valuation
-                data.append(item)
-    elif kind == "parts":
-        rows = dash.build_part_rows(
-            db, filters, include_amounts=visible,
-            ratio=ratio if visible else None,
-        )
-        header, columns = _part_export_columns(visible)
-        data = [dict(row) for row in rows]
-    elif kind == "receipts":
-        rows, _total = dash.build_receipt_detail_rows(
-            db, filters, include_amounts=visible,
-            test_result=(test_result.strip() or None) if test_result else None,
-            source=(source.strip() or None) if source else None,
-            created_by=(created_by.strip() or None) if created_by else None,
-            ratio=ratio if visible else None,
-        )
-        header, columns = _receipt_export_columns(visible)
-        for row in rows:
-            # 登记人：有显示名给「显示名（账号）」，否则账号原样。
-            name = row.get("created_by_name")
-            row["_registrant"] = (
-                f"{name}（{row['created_by']}）" if name else row.get("created_by")
-            )
-        data = rows
-    elif kind == "quantity_checks":
-        # q 整单选择与 API 同参同集（B-F10）。
-        part_ids, keyword = dash._part_keyword(db, q)
-        payload = dash.build_quantity_checks_payload(
-            db, filters.scope,
-            projects=filters.projects,
-            order_date_from=filters.start,
-            order_date_to=filters.end,
-            part_ids=part_ids, keyword=keyword,
-        )
-        header, columns = _check_export_columns()
-        # 静态审查补充（§104）：导出按 单×单位 展开——件/台分母不并算，
-        # 待核量不丢；无单位事实的行保留原行。
-        data = []
-        for row in payload["rows"]:
-            entries = row.get("unit_breakdown") or []
-            if not entries:
-                item = dict(row)
-                item["_unit_label"] = _unit_label_of(row)
-                data.append(item)
-                continue
-            for entry in entries:
-                item = dict(row)
-                item["_unit_label"] = entry.get("unit") or "待核"
-                for key in ("demand_qty", "received_qty", "difference_qty",
-                            "over_received_qty", "undated_receipt_qty"):
-                    item[key] = entry.get(key)
-                data.append(item)
-    elif kind == "orders":
-        payload = consumption.period_orders(
-            db, start=filters.start, end=filters.end, projects=filters.projects,
-        )
-        header, columns = _orders_export_columns()
-        # 静态审查补充（§106）：按 项目×单位 展开，数量不丢；去重单数是
-        # 不可相加元信息——只在首单位行出现一次。
-        data = []
-        for row in payload["rows"]:
-            dated = {
-                entry.get("unit"): entry
-                for entry in row.get("unit_breakdown", [])
-            }
-            undated = {
-                entry.get("unit"): entry
-                for entry in row.get("undated_unit_breakdown", [])
-            }
-            units = dash.sorted_unit_keys(set(dated) | set(undated))
-            if not units:
-                item = dict(row)
-                item["_unit_label"] = _unit_label_of(row)
-                data.append(item)
-                continue
-            for index, unit in enumerate(units):
-                item = dict(row)
-                item["_unit_label"] = unit or "待核"
-                item["order_qty"] = dated.get(unit, {}).get(
-                    "order_qty", "0.000"
-                )
-                item["undated_order_qty"] = undated.get(unit, {}).get(
-                    "order_qty", "0.000"
-                )
-                item["order_count"] = row["order_count"] if index == 0 else None
-                item["undated_order_count"] = (
-                    row["undated_order_count"] if index == 0 else None
-                )
-                data.append(item)
-    elif kind == "consumption_daily":
-        payload = consumption.daily_consumption(
-            db, start=filters.start, end=filters.end, projects=filters.projects,
-            include_amounts=visible,
-        )
-        # B-F09：导出按 日×项目×单位 展开（不再输出跨单位合算行）。
-        data = []
-        for row in payload["rows"]:
-            for entry in row.get("unit_breakdown", []):
-                data.append({
-                    "issue_date": row["issue_date"],
-                    "project_code": row["project_code"],
-                    "display_name": row["display_name"],
-                    "unit": entry.get("unit") or "待核",
-                    "issued_qty": entry.get("issued_qty"),
-                    "cost_amount_ex_tax": entry.get("cost_amount_ex_tax"),
-                    "cost_amount_inc_tax": entry.get("cost_amount_inc_tax"),
-                    "uncosted_qty": entry.get("uncosted_qty"),
-                    "coverage_pct": entry.get("coverage_pct"),
-                    "sources": row.get("sources"),
-                })
-        header, columns = _consumption_daily_export_columns(visible)
-    else:
-        rows = consumption.consumption_issue_rows(
-            db, start=filters.start, end=filters.end, projects=filters.projects,
-            include_amounts=visible,
-        )
-        data = [dict(row) for row in rows]
-        for row in data:
-            row["_unit_label"] = row.get("unit") or "待核"
-        header, columns = _consumption_issues_export_columns(visible)
-    if len(data) > dash.MAX_EXPORT_ROWS:
-        raise HTTPException(
-            status_code=413,
-            detail=f"筛选集超过 {dash.MAX_EXPORT_ROWS} 行，请缩小范围后导出",
-        )
-    if visible and kind in ("projects", "parts", "receipts"):
-        # R34：试算参数伴随导出（仅金额可见）；缺省已按 50% 解析（显式值回显，
-        # 未提供时回显默认 0.5）。注意：本端点参数 format 遮蔽内建，不能写
-        # format(ratio, "f")。
-        for row in data:
-            row["_retention_ratio"] = f"{ratio:f}"
-    values = [_export_row(row, columns) for row in data]
+    header, values = dashboard_export.materialize(db, filters, kind=kind, visible=visible,
+        ratio=ratio, q=q, test_result=test_result, source=source, created_by=created_by)
     filename = f"maintenance-dashboard-{kind}.{format}"
     if format == "csv":
         return _csv_stream(
@@ -1012,266 +889,11 @@ def export(
     return _xlsx_response(header, values, filename, db)
 
 
-ExportColumn = tuple[str, str | None, bool]  # (标签, 取值路径或常量列, 是否数值)
-
-
-def _unit_label_of(row: dict) -> str:
-    """单位列显示（B-F09/M12）：单一单位照写；仅待核写「待核」；混合「混合」。"""
-    unit = row.get("unit")
-    if unit is not None:
-        return unit
-    breakdown = row.get("unit_breakdown") or []
-    if not breakdown:
-        return ""
-    if len(breakdown) == 1 and breakdown[0].get("unit") is None:
-        return "待核"
-    return "混合"
-
-
-def _cell(row: dict, path: str):
-    node: object = row
-    for part in path.split("."):
-        if not isinstance(node, dict):
-            return None
-        node = node.get(part)
-    return node
-
-
-def _export_row(row: dict, columns: list[ExportColumn]) -> list:
-    values = []
-    for _label, path, numeric in columns:
-        if path is None:  # 常量列：估价政策版本（仅金额可见导出存在）
-            values.append(policy.POLICY_VERSION)
-            continue
-        value = _cell(row, path)
-        if isinstance(value, (list, tuple)):
-            value = ",".join(str(item) for item in value)
-        if isinstance(value, dict):
-            value = ",".join(f"{k}={v}" for k, v in value.items())
-        if numeric and value is not None and value != "":
-            value = _decimal_or_text(value)
-        values.append(value)
-    return values
-
-
-def _decimal_or_text(value):
-    """数值列：Decimal 保留精确文本（CSV），XLSX 侧再转 float；解析失败原样。"""
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return value
-
-
-def _project_export_columns(visible: bool) -> tuple[list[str], list[ExportColumn]]:
-    columns: list[ExportColumn] = [
-        ("项目编码", "project_code", False),
-        ("项目名称", "display_name", False),
-        ("业务类型", "business_type", False),
-        ("单位", "_unit_label", False),
-        ("返件实收合计", "receipt_qty", True),
-        ("其中坏件实收", "bad_receipt_qty", True),
-        ("其中废品", "scrap_receipt_qty", True),
-        ("实际领用（未采集件况）", "issued_qty", True),
-        ("免返领用量", "exempt_issued_qty", True),
-        ("待判定返还要求量", "pending_requirement_qty", True),
-        ("未关联需求单实收", "unlinked_receipt_qty", True),
-        ("同期返还率%", "return_rate_pct", True),
-        ("率分子（同期实收）", "rate_numerator", True),
-        ("率分母（同期领用）", "rate_denominator", True),
-        ("无返还备注", "no_return_note", False),
-    ]
-    if visible:
-        columns += [
-            ("坏件试算价值-含税", "valuation.bad_estimated_value_inc_tax", True),
-            ("坏件试算价值-不含税", "valuation.bad_estimated_value_ex_tax", True),
-            ("已估坏件量", "valuation.estimated_bad_qty", True),
-            ("待估坏件量", "valuation.pending_bad_qty", True),
-            ("待试算坏件量（缺比例）", "valuation.awaiting_ratio_bad_qty", True),
-            ("覆盖率%", "valuation.coverage_pct", True),
-            ("采购域覆盖率%", "valuation.domains.purchase.coverage_pct", True),
-            ("销售域覆盖率%", "valuation.domains.sales.coverage_pct", True),
-            ("成本域覆盖率%", "valuation.domains.cost.coverage_pct", True),
-            # 三域各双税（B3 05:12/M10/R34-06）：双税分别计算，缺估域空格。
-            ("三域-采购-坏件价值-含税", "valuation.domains.purchase.value_inc_tax", True),
-            ("三域-采购-坏件价值-不含税", "valuation.domains.purchase.value_ex_tax", True),
-            ("三域-销售-坏件价值-含税", "valuation.domains.sales.value_inc_tax", True),
-            ("三域-销售-坏件价值-不含税", "valuation.domains.sales.value_ex_tax", True),
-            ("三域-领用已计成本-价值-含税", "valuation.domains.cost.value_inc_tax", True),
-            ("三域-领用已计成本-价值-不含税", "valuation.domains.cost.value_ex_tax", True),
-            ("价值保留比例", "_retention_ratio", False),
-            ("估价政策版本", None, False),
-        ]
-    return [label for label, _path, _numeric in columns], columns
-
-
-def _part_export_columns(visible: bool) -> tuple[list[str], list[ExportColumn]]:
-    columns: list[ExportColumn] = [
-        ("PN", "pn", False),
-        ("描述", "description", False),
-        ("单位", "unit", False),
-        ("返件实收", "receipt_qty", True),
-        ("坏件实收", "bad_receipt_qty", True),
-        ("实际领用（未采集件况）", "issued_qty", True),
-        ("项目数", "project_count", True),
-        ("同期返还率%", "return_rate_pct", True),
-        ("率分子（同期实收）", "rate_numerator", True),
-        ("率分母（同期领用）", "rate_denominator", True),
-    ]
-    if visible:
-        columns += [
-            ("坏件试算价值-含税", "valuation.bad_estimated_value_inc_tax", True),
-            ("坏件试算价值-不含税", "valuation.bad_estimated_value_ex_tax", True),
-            ("已估坏件量", "valuation.estimated_bad_qty", True),
-            ("待估坏件量", "valuation.pending_bad_qty", True),
-            ("待试算坏件量（缺比例）", "valuation.awaiting_ratio_bad_qty", True),
-            ("覆盖率%", "valuation.coverage_pct", True),
-            ("三域-采购-坏件价值-含税", "valuation.domains.purchase.value_inc_tax", True),
-            ("三域-采购-坏件价值-不含税", "valuation.domains.purchase.value_ex_tax", True),
-            ("三域-销售-坏件价值-含税", "valuation.domains.sales.value_inc_tax", True),
-            ("三域-销售-坏件价值-不含税", "valuation.domains.sales.value_ex_tax", True),
-            ("三域-领用已计成本-价值-含税", "valuation.domains.cost.value_inc_tax", True),
-            ("三域-领用已计成本-价值-不含税", "valuation.domains.cost.value_ex_tax", True),
-            ("采购域已估坏件量", "valuation.domains.purchase.estimated_bad_qty", True),
-            ("采购域待估坏件量", "valuation.domains.purchase.pending_bad_qty", True),
-            ("采购域覆盖率%", "valuation.domains.purchase.coverage_pct", True),
-            ("销售域已估坏件量", "valuation.domains.sales.estimated_bad_qty", True),
-            ("销售域待估坏件量", "valuation.domains.sales.pending_bad_qty", True),
-            ("销售域覆盖率%", "valuation.domains.sales.coverage_pct", True),
-            ("成本域已估坏件量", "valuation.domains.cost.estimated_bad_qty", True),
-            ("成本域待估坏件量", "valuation.domains.cost.pending_bad_qty", True),
-            ("成本域覆盖率%", "valuation.domains.cost.coverage_pct", True),
-            ("价值保留比例", "_retention_ratio", False),
-            ("估价政策版本", None, False),
-        ]
-    return [label for label, _path, _numeric in columns], columns
-
-
-def _receipt_export_columns(visible: bool) -> tuple[list[str], list[ExportColumn]]:
-    columns: list[ExportColumn] = [
-        ("业务日", "occurred_at", False),
-        ("项目编码", "project_code", False),
-        ("来源需求单号", "source_order_no", False),
-        ("PN", "pn", False),
-        ("描述", "description", False),
-        ("类型", "receipt_kind", False),
-        ("单位", "unit", False),
-        ("件况", "test_result", False),
-        ("数量", "qty", True),
-        ("来源", "source", False),
-        ("登记人", "_registrant", False),
-        ("需复核", "review_required", False),
-    ]
-    if visible:
-        columns += [
-            ("估价状态", "valuation.state", False),
-            ("选用参考", "valuation.chosen", False),
-            ("件况分类", "valuation.classification", False),
-            ("折算系数", "valuation.factor", True),
-            ("参考价-含税", "valuation.price_inc_tax", True),
-            ("参考价-不含税", "valuation.price_ex_tax", True),
-            ("行价值-含税", "valuation.value_inc_tax", True),
-            ("行价值-不含税", "valuation.value_ex_tax", True),
-            ("三域-采购-行价值-含税", "valuation.domains.purchase.value_inc_tax", True),
-            ("三域-采购-行价值-不含税", "valuation.domains.purchase.value_ex_tax", True),
-            ("三域-销售-行价值-含税", "valuation.domains.sales.value_inc_tax", True),
-            ("三域-销售-行价值-不含税", "valuation.domains.sales.value_ex_tax", True),
-            ("三域-领用已计成本-价值-含税", "valuation.domains.cost.value_inc_tax", True),
-            ("三域-领用已计成本-价值-不含税", "valuation.domains.cost.value_ex_tax", True),
-            ("待估原因", "valuation.reason", False),
-            ("价值保留比例", "_retention_ratio", False),
-            ("估价政策版本", None, False),
-        ]
-    return [label for label, _path, _numeric in columns], columns
-
-
-def _check_export_columns() -> tuple[list[str], list[ExportColumn]]:
-    columns: list[ExportColumn] = [
-        ("需求单号", "order_no", False),
-        ("项目编码", "project_code", False),
-        ("项目名称", "display_name", False),
-        ("制单日期", "order_date", False),
-        ("需求类型", "demand_type", False),
-        ("仓库", "warehouse", False),
-        ("单位", "_unit_label", False),
-        ("需求量N", "demand_qty", True),
-        ("实收R", "received_qty", True),
-        ("差额max(N-R,0)", "difference_qty", True),
-        ("超收max(R-N,0)", "over_received_qty", True),
-        ("基数状态", "basis_state", False),
-        ("待核对原因", "reason_codes", False),
-        ("无业务日实收", "undated_receipt_qty", True),
-        ("无返还备注", "no_return_note", False),
-    ]
-    return [label for label, _path, _numeric in columns], columns
-
-
-def _orders_export_columns() -> tuple[list[str], list[ExportColumn]]:
-    """M01 导出：纯数量域，无金额列（任何角色）；无日期单单列（B-F12）。"""
-    columns: list[ExportColumn] = [
-        ("项目编码", "project_code", False),
-        ("项目名称", "display_name", False),
-        ("业务类型", "business_type", False),
-        ("单位", "_unit_label", False),
-        ("期间下单量（原qty，不扣退货/免返）", "order_qty", True),
-        ("期间下单单数", "order_count", True),
-        ("无制单日期下单量（未计入期间）", "undated_order_qty", True),
-        ("无制单日期单数", "undated_order_count", True),
-    ]
-    return [label for label, _path, _numeric in columns], columns
-
-
-def _consumption_daily_export_columns(
-    visible: bool,
-) -> tuple[list[str], list[ExportColumn]]:
-    """M03 日表导出：日×项目×单位展开（B-F09）；成本/覆盖/来源列仅利润门。"""
-    columns: list[ExportColumn] = [
-        ("业务日", "issue_date", False),
-        ("项目编码", "project_code", False),
-        ("项目名称", "display_name", False),
-        ("单位", "unit", False),
-        ("领用量", "issued_qty", True),
-    ]
-    if visible:
-        columns += [
-            ("已计成本-不含税", "cost_amount_ex_tax", True),
-            ("已计成本-含税", "cost_amount_inc_tax", True),
-            ("未计成本量", "uncosted_qty", True),
-            ("已计成本覆盖率%", "coverage_pct", True),
-            ("成本来源", "sources", False),
-        ]
-    return [label for label, _path, _numeric in columns], columns
-
-
-def _consumption_issues_export_columns(
-    visible: bool,
-) -> tuple[list[str], list[ExportColumn]]:
-    """M03 领用明细导出：行级数量 + （有权时）成本证据，可核对。"""
-    columns: list[ExportColumn] = [
-        ("业务日", "issue_date", False),
-        ("项目编码", "project_code", False),
-        ("项目名称", "display_name", False),
-        ("领用单号", "issue_no", False),
-        ("PN", "pn", False),
-        ("单位", "_unit_label", False),
-        ("数量", "qty", True),
-    ]
-    if visible:
-        columns += [
-            ("成本来源", "cost_source", False),
-            ("参考侧", "reference_side", False),
-            ("算法版本", "algorithm_version", False),
-            ("不含税单价", "unit_cost_ex_tax", True),
-            ("含税单价", "unit_cost_inc_tax", True),
-            ("不含税成本", "cost_amount_ex_tax", True),
-            ("含税成本", "cost_amount_inc_tax", True),
-        ]
-    return [label for label, _path, _numeric in columns], columns
-
-
 # ---------- 流式下载助手（自持副本；勿 import 巨型 api.maintenance） ----------
 
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 _CSV_SPOOL_MEMORY_BYTES = 5 * 1024 * 1024
+
 _MAX_CSV_DATA_ROWS = 1_000_000
 _MAX_CSV_DYNAMIC_TEXT_BYTES = 64 * 1024 * 1024
 _MAX_CSV_OUTPUT_BYTES = 512 * 1024 * 1024
@@ -1279,6 +901,8 @@ _MAX_CSV_OUTPUT_BYTES = 512 * 1024 * 1024
 _INVALID_DOWNLOAD_NAME = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]+')
 _INVALID_ASCII_FALLBACK = re.compile(r"[^A-Za-z0-9._-]+")
 _RFC5987_SAFE = "!#$&+-.^_`|~"
+
+
 
 
 def _safe_formula_only(value):
@@ -1444,7 +1068,8 @@ def _xlsx_response(
                         raise HTTPException(413, "单元格超过 Excel 字符上限")
                     sheet.write_string(row_index, column, value)
         output.seek(0)
-        _release_db_before_stream(db, output)
+        if db is not None:
+            _release_db_before_stream(db, output)
     except BaseException:
         output.close()
         raise
@@ -1459,3 +1084,27 @@ def _xlsx_response(
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+def _guard_export_stream(response, bind, identity, provenance):
+    """Recheck before headers and every chunk; no DB transaction spans streaming."""
+    from starlette.concurrency import run_in_threadpool
+    from app.authz.provenance import validate_provenance
+    def check():
+        with Session(bind) as snapshot:
+            validate_provenance(snapshot, identity, provenance)
+    try:
+        check()
+    except BaseException:
+        response._resource.close()
+        raise
+    original = response.body_iterator
+    async def chunks():
+        try:
+            async for chunk in original:
+                await run_in_threadpool(check)
+                yield chunk
+        finally:
+            response._resource.close()
+    response.body_iterator = chunks()
+    return response

@@ -31,7 +31,27 @@ def project_projection():
     return "workbook" if get_settings().maintenance_project_master_v2_enabled else "v1"
 
 
-def can_view_amounts(db, ctx, project_id=None):
+def _canonical_access(access, project_id=None):
+    from app.authz.service import ResourceAccess
+    from app.authz.context_registry import ENTRY_CONTRACTS
+    if type(access) is not ResourceAccess or access.object_ref is None:
+        raise ValueError("行级查询需要实际领域许可")
+    if access.resource not in {"maintenance_row_workbench", "maintenance_global_rows", "maintenance_managed_rows"}:
+        raise ValueError("不能借用其它模块的字段或范围许可")
+    contract = ENTRY_CONTRACTS.get(access.entry_id, {}).get("branches", {}).get(access.context_branch, {})
+    if access.action not in contract.get("requirements", {}).get(access.resource, ()):
+        raise ValueError("行级许可与实际入口不匹配")
+    if access.object_ref.kind == "project":
+        if not project_id or access.object_ref.id != project_id:
+            raise ValueError("行级许可不属于当前项目")
+    elif access.object_ref.kind != "collection" or access.predicate is None:
+        raise ValueError("行级集合必须使用实际 SQL 授权计划")
+    return access
+
+
+def can_view_amounts(db, ctx, project_id=None, *, authorization_access=None):
+    if authorization_access is not None:
+        return "data_purchase_cost" in _canonical_access(authorization_access, project_id).field_permissions
     if not config.ENABLE_RBAC or ctx.role == "admin":
         return True
     perms = ctx.permissions if ctx.permissions is not None else permissions.effective(ctx.role, None)
@@ -42,17 +62,17 @@ def can_view_amounts(db, ctx, project_id=None):
     ))
 
 
-def visible_fields(db, ctx, project_id=None):
-    if project_id:
+def visible_fields(db, ctx, project_id=None, *, authorization_access=None):
+    if project_id and authorization_access is None:
         enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
-    allowed = can_view_amounts(db, ctx, project_id)
+    allowed = can_view_amounts(db, ctx, project_id, authorization_access=authorization_access)
     return [field for field in FIELDS.values() if not field.amount or allowed]
 
 
-def field_metadata(db, ctx, project_id=None, *, projection="workbook", direct_project=False):
-    fields = visible_fields(db, ctx, project_id)
+def field_metadata(db, ctx, project_id=None, *, projection="workbook", direct_project=False, authorization_access=None):
+    fields = visible_fields(db, ctx, project_id, authorization_access=authorization_access)
     stmt = query(db, ctx, project_id=project_id, projection=projection,
-                 direct_project=direct_project).order_by(None)
+                 direct_project=direct_project, authorization_access=authorization_access).order_by(None)
     result = []
     for field in fields:
         item = field.metadata()
@@ -69,15 +89,24 @@ def field_metadata(db, ctx, project_id=None, *, projection="workbook", direct_pr
 
 
 def query(db, ctx, *, project_id=None, window=None, filters=(), export_order=False,
-          order_no=None, contract_no=None, projection="workbook", direct_project=False):
+          order_no=None, contract_no=None, projection="workbook", direct_project=False, authorization_access=None):
     if direct_project and not project_id:
         raise ValueError("direct project query requires project_id")
-    if project_id:
+    if project_id and authorization_access is None:
         enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     # 单项目直达与全局目录有既有权限差异（canonical 销售），不可相互替换。
+    if authorization_access is not None:
+        access = _canonical_access(authorization_access, project_id)
+        if access.object_ref.kind == "collection":
+            from app.services.maintenance_authorization import project_condition
+            from app.models.maintenance_project import MaintenanceProject
+            allowed_projects = select(MaintenanceProject.project_id).where(project_condition(access))
+        else:
+            allowed_projects = None  # Exact project already passed its actual-object gate.
+    else:
+        allowed_projects = None if direct_project else resolve_visible_project_ids(db, ctx)
     stmt = master.assigned_lines_query(
-        project_id=project_id, window=window,
-        allowed_project_ids=None if direct_project else resolve_visible_project_ids(db, ctx),
+        project_id=project_id, window=window, allowed_project_ids=allowed_projects,
         export_order=export_order,
     )
     if order_no is not None:
@@ -88,15 +117,15 @@ def query(db, ctx, *, project_id=None, window=None, filters=(), export_order=Fal
             == normalize_contract_no(contract_no),
         )
     return apply_row_filters(
-        stmt, filters, can_filter_amounts=can_view_amounts(db, ctx, project_id),
+        stmt, filters, can_filter_amounts=can_view_amounts(db, ctx, project_id, authorization_access=authorization_access),
         projection=projection,
     )
 
 
-def project_page(db, ctx, *, project_id, filters, order_no, contract_no, page, page_size):
+def project_page(db, ctx, *, project_id, filters, order_no, contract_no, page, page_size, authorization_access=None):
     stmt = query(db, ctx, project_id=project_id, filters=filters,
                  order_no=order_no, contract_no=contract_no, projection=project_projection(),
-                 direct_project=True)
+                 direct_project=True, authorization_access=authorization_access)
     total = count(db, stmt)
     size = (page_size or 20) if page is not None else None
     if page is not None:

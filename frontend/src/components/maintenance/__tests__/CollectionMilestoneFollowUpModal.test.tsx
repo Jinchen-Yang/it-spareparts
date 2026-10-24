@@ -1,3 +1,4 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRef, type Ref, type RefObject } from "react";
@@ -285,3 +286,8 @@ describe("CollectionMilestoneFollowUpModal", () => {
     expect(within(container as HTMLElement).getByLabelText(COLLECTION_FOLLOW_UP.reasonLabel)).toBeInTheDocument();
   });
 });
+
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

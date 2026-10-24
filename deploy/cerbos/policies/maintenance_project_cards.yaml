@@ -1,0 +1,49 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_project_cards",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.maintenance_project_cards.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_project_cards.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_project_cards.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_project_cards\", \"scope\": P.attr.grants.maintenance_project_cards.scope, \"version\": P.attr.grants.maintenance_project_cards.version, \"field_permissions\": P.attr.grants.maintenance_project_cards.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-cards",
+        "actions": [
+          "show_cards"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_cards\" in P.attr.grants.maintenance_project_cards.actions && \"read\" in P.attr.grants.maintenance_project_cards.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_project_cards.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_project_cards.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_project_cards\", \"scope\": P.attr.grants.maintenance_project_cards.scope, \"version\": P.attr.grants.maintenance_project_cards.version, \"field_permissions\": P.attr.grants.maintenance_project_cards.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

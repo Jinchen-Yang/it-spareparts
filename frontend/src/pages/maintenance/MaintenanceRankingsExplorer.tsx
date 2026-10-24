@@ -1,3 +1,4 @@
+import { useModuleAccess } from "../../authz/access";
 import { useCallback, useMemo } from "react";
 import { Alert, Button, Card, Empty, Pagination, Select, Skeleton, Space, Table, Tag, Typography } from "antd";
 import { ArrowRightOutlined, BarChartOutlined, FundOutlined, TableOutlined } from "@ant-design/icons";
@@ -23,14 +24,15 @@ export default function MaintenanceRankingsExplorer({ refreshKey = 0 }: { refres
   const location = useLocation();
   const navigate = useNavigate();
   const params = explorerParamsFromSearch(search);
-  const { data, loading, error, reload } = useMaintenanceExplorer(params, refreshKey);
+  const { data, context, loading, error, reload } = useMaintenanceExplorer(params, refreshKey);
   useVisibleMaintenanceRefresh(async () => { if (loading) return false; reload(); return true; });
   const metric = params.metric || "issued";
   const dimension = params.dimension || "pn";
   const layout = search.get("layout") === "B" ? "B" : search.get("layout") === "C" ? "C" : "A";
   const perms = readPermissionMap();
-  const canCost = !!perms.data_purchase_cost && data?.meta.cost_visibility !== "restricted";
-  const canCustomer = !!perms.data_customer && data?.meta.customer_visibility !== "restricted";
+  const module = useModuleAccess("maintenance_analysis", context);
+  const canCost = module.field("data_purchase_cost", !!perms.data_purchase_cost) && data?.meta.cost_visibility !== "restricted";
+  const canCustomer = module.field("data_customer", !!perms.data_customer) && data?.meta.customer_visibility !== "restricted";
   const patch = useCallback((changes: Record<string, string | null>) => setSearch(previous => {
     const next = new URLSearchParams(previous);
     Object.entries(changes).forEach(([key, value]) => value == null ? next.delete(key) : next.set(key, value));
@@ -70,7 +72,7 @@ export default function MaintenanceRankingsExplorer({ refreshKey = 0 }: { refres
     {loading && !data ? <Card><Skeleton active paragraph={{ rows: 6 }} /></Card> : error ? <Alert type="error" showIcon message={error} action={<Button onClick={reload}>重试</Button>} /> : data && <>
       <div className="me-kpis">
         <Kpi label="实际领用" value={`${fmt(data.summary.issued_qty)} 件`} note="当前期间的确认领用" />
-        <Kpi label="已知需求成本（含税）" value={data.summary.cost_state === "restricted" ? "无权限" : fmt(data.summary.cost_inc, "cost")} note={`${fmt(data.summary.missing_lines)} 行缺价，未当作零元`} />
+        <Kpi label="已知需求成本（含税）" value={!canCost || data.summary.cost_state === "restricted" ? "无权限" : fmt(data.summary.cost_inc, "cost")} note={canCost ? `${fmt(data.summary.missing_lines)} 行缺价，未当作零元` : "需要成本查看权限"} />
         <Kpi label="涉及项目 / PN" value={`${fmt(data.summary.project_count)} / ${fmt(data.summary.pn_count)}`} note="当前筛选范围内" />
         <Kpi label="Top 10 占比" value={cumulativeEnabled ? percent(chartShare) : "不计算"} note={!data.meta.additive ? "去重需求单在组间可能重叠" : data.meta.has_negative ? "包含负值，关闭集中度" : "分母为筛选全集，非当前页"} />
       </div>

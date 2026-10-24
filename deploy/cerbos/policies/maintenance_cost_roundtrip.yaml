@@ -1,0 +1,49 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_cost_roundtrip",
+    "rules": [
+      {
+        "name": "explicit-apply",
+        "actions": [
+          "apply"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"apply\" in P.attr.grants.maintenance_cost_roundtrip.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_cost_roundtrip.field_permissions && \"data_profit\" in P.attr.grants.maintenance_cost_roundtrip.field_permissions && \"data_customer\" in P.attr.grants.maintenance_cost_roundtrip.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_cost_roundtrip.scope == \"all_contracts\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_cost_roundtrip\", \"scope\": P.attr.grants.maintenance_cost_roundtrip.scope, \"version\": P.attr.grants.maintenance_cost_roundtrip.version, \"field_permissions\": P.attr.grants.maintenance_cost_roundtrip.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-template-download",
+        "actions": [
+          "template_download"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"template_download\" in P.attr.grants.maintenance_cost_roundtrip.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_cost_roundtrip.field_permissions && \"data_profit\" in P.attr.grants.maintenance_cost_roundtrip.field_permissions && \"data_customer\" in P.attr.grants.maintenance_cost_roundtrip.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_cost_roundtrip.scope == \"all_contracts\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_cost_roundtrip\", \"scope\": P.attr.grants.maintenance_cost_roundtrip.scope, \"version\": P.attr.grants.maintenance_cost_roundtrip.version, \"field_permissions\": P.attr.grants.maintenance_cost_roundtrip.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

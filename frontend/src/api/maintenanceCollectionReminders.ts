@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
 
 /**
@@ -131,6 +132,7 @@ export interface CollectionMilestoneRow {
 }
 
 export interface CollectionProjectDetailResponse {
+  authorization_context?: import("../authz/contextTypes").AuthorizationContext;
   project: CollectionProjectRef;
   summary: CollectionReminderCounts;
   rows: CollectionMilestoneRow[];
@@ -295,7 +297,7 @@ const collectionPlanImportBase = (batchId: string) =>
 
 export const searchCollectionReminders = (
   body: CollectionReminderSearchRequest = {},
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal } = {}, capture?: ContextRequestTransport
 ) => {
   const request = {
     q: body.q?.trim() || "",
@@ -305,12 +307,12 @@ export const searchCollectionReminders = (
     page_size: body.page_size ?? 24,
   };
   return options.signal
-    ? api.post<CollectionReminderDirectoryResponse>(
+    ? domainApi(capture).post<CollectionReminderDirectoryResponse>(
       "/maintenance/collection-reminders/search",
       request,
       { signal: options.signal },
     )
-    : api.post<CollectionReminderDirectoryResponse>(
+    : domainApi(capture).post<CollectionReminderDirectoryResponse>(
       "/maintenance/collection-reminders/search",
       request,
     );
@@ -318,25 +320,25 @@ export const searchCollectionReminders = (
 
 export const getCollectionMilestones = (
   projectId: string,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal } = {}, capture?: ContextRequestTransport
 ) => options.signal
-  ? api.get<CollectionProjectDetailResponse>(collectionMilestonesPath(projectId), {
+  ? domainApi(capture).get<CollectionProjectDetailResponse>(collectionMilestonesPath(projectId), {
     signal: options.signal,
   })
-  : api.get<CollectionProjectDetailResponse>(collectionMilestonesPath(projectId));
+  : domainApi(capture).get<CollectionProjectDetailResponse>(collectionMilestonesPath(projectId));
 
 export const followUpCollectionMilestone = (
   milestoneId: string,
-  body: CollectionFollowUpRequest,
-) => api.post<CollectionFollowUpResponse>(
+  body: CollectionFollowUpRequest, capture?: ContextRequestTransport
+) => domainApi(capture).post<CollectionFollowUpResponse>(
   `${collectionMilestoneBase(milestoneId)}/follow-ups`,
   body,
 );
 
-export const previewCollectionPlan = (file: File, idempotencyKey: string) => {
+export const previewCollectionPlan = (file: File, idempotencyKey: string, capture?: ContextRequestTransport) => {
   const form = new FormData();
   form.append("file", file);
-  return api.post<CollectionPreviewResponse>(
+  return domainApi(capture).post<CollectionPreviewResponse>(
     "/maintenance/collection-plan-imports/preview",
     form,
     {
@@ -349,7 +351,7 @@ export const previewCollectionPlan = (file: File, idempotencyKey: string) => {
 export const searchCollectionPlanBindingOptions = (
   batchId: string,
   params: { q: string; page?: number; page_size?: number },
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal } = {}, capture?: ContextRequestTransport
 ) => {
   const query = {
     q: params.q.trim(),
@@ -357,11 +359,11 @@ export const searchCollectionPlanBindingOptions = (
     page_size: params.page_size ?? 20,
   };
   return options.signal
-    ? api.get<CollectionBindingOptionsResponse>(
+    ? domainApi(capture).get<CollectionBindingOptionsResponse>(
       `${collectionPlanImportBase(batchId)}/binding-options`,
       { params: query, signal: options.signal },
     )
-    : api.get<CollectionBindingOptionsResponse>(
+    : domainApi(capture).get<CollectionBindingOptionsResponse>(
       `${collectionPlanImportBase(batchId)}/binding-options`,
       { params: query },
     );
@@ -369,14 +371,14 @@ export const searchCollectionPlanBindingOptions = (
 
 export const applyCollectionPlan = (
   batchId: string,
-  body: CollectionApplyRequest,
-) => api.post<CollectionApplyResponse>(
+  body: CollectionApplyRequest, capture?: ContextRequestTransport
+) => domainApi(capture).post<CollectionApplyResponse>(
   `${collectionPlanImportBase(batchId)}/apply`,
   body,
 );
 
-export const downloadCollectionPlanSourceFile = (batchId: string) =>
-  api.get<Blob>(`${collectionPlanImportBase(batchId)}/source-file`, {
+export const downloadCollectionPlanSourceFile = (batchId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<Blob>(`${collectionPlanImportBase(batchId)}/source-file`, {
     responseType: "blob",
   });
 

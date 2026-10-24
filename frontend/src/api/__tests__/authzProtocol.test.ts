@@ -30,7 +30,7 @@ const me = catalogCases.cases[1].response.json as unknown as AuthzSnapshot;
 const account = accountCases.cases[0].response
   .json as unknown as AccountModules;
 describe("S1 documented wire after explicit S2 migration", () => {
-  it("accepts the full real backend catalog, with all 23 S2 resources executable", () => {
+  it("accepts the full real backend catalog, with all 96 S2/S3 resources executable", () => {
     const real = {
       ...catalog,
       modules: manifest.map((module) => ({
@@ -40,10 +40,13 @@ describe("S1 documented wire after explicit S2 migration", () => {
         configurable: module.migration_state === "implemented",
       })),
     } as AuthzCatalog;
-    expect(real.modules).toHaveLength(87);
+    expect(real.modules).toHaveLength(115);
     expect(validateCatalog(real)).toEqual(real);
-    expect(real.modules.filter(m => m.configurable)).toHaveLength(23);
+    expect(real.modules.filter(m => m.configurable)).toHaveLength(96);
     expect(real.modules.find(m => m.id === "sales_analysis")!.actions.map(a => a.id)).not.toContain("read");
+    const missingSource = clone(real);
+    delete (missingSource.modules.find(m => m.id === "maintenance_project") as any).legacy_sources;
+    expect(() => validateCatalog(missingSource)).toThrow();
     const invalid = clone(real);
     invalid.modules.find(
       (m) => m.surfaces.length,

@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ summary: vi.fn(), search: vi.fn(), demands: vi.fn(), projects: vi.fn(), create: vi.fn(), update: vi.fn(), audit: vi.fn(), categories: vi.fn() }));
@@ -39,17 +40,17 @@ describe("返还台账的登记、更正和加载恢复", () => {
     render(<ReturnReceiptsSection projectId="p1" registerRefresh={(_key, reader) => { if (reader) refresh = reader; }} />);
     await screen.findByText("PN-1");
     fireEvent.click(screen.getByTitle("Next Page"));
-    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ page: 2 })));
+    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ page: 2 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     fireEvent.click(screen.getAllByRole("checkbox")[1]);
     expect(screen.getByRole("button", { name: "批量修改" })).toBeInTheDocument();
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "返还一级品类" }));
     fireEvent.click(await screen.findByText("硬盘", { selector: ".ant-select-item-option-content" }));
-    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ category_major: "硬盘", page: 1 })));
+    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ category_major: "硬盘", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(screen.queryByRole("button", { name: "批量修改" })).not.toBeInTheDocument();
     const search = screen.getByPlaceholderText("搜索返件 PN、凭据或备注");
     fireEvent.change(search, { target: { value: "未提交文本" } });
     await act(async () => { await refresh(); });
-    expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ category_major: "硬盘", page: 1 }));
+    expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ category_major: "硬盘", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(mocks.search.mock.calls[mocks.search.mock.calls.length - 1]?.[1]).not.toHaveProperty("q");
     expect(search).toHaveValue("未提交文本");
   });
@@ -78,14 +79,14 @@ describe("返还台账的登记、更正和加载恢复", () => {
     const search = screen.getByPlaceholderText("搜索返件 PN、凭据或备注");
     fireEvent.change(search, { target: { value: "已搜索凭据" } });
     fireEvent.keyDown(search, { key: "Enter", code: "Enter", charCode: 13 });
-    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ q: "已搜索凭据" })));
+    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ q: "已搜索凭据" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     fireEvent.click(screen.getByTitle("Next Page"));
-    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ page: 2 })));
+    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ page: 2 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     fireEvent.click(screen.getByRole("button", { name: "修改" }));
     const note = within(screen.getByRole("dialog")).getByLabelText("备注（可选）");
     fireEvent.change(note, { target: { value: "尚未保存的输入" } });
     await act(async () => { expect(await refresh()).toBe(true); });
-    expect(mocks.search).toHaveBeenLastCalledWith("p1", { page: 2, page_size: 20, line_status: "all", q: "已搜索凭据" });
+    expect(mocks.search).toHaveBeenLastCalledWith("p1", { page: 2, page_size: 20, line_status: "all", q: "已搜索凭据" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(note).toHaveValue("尚未保存的输入");
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
@@ -113,7 +114,7 @@ describe("返还台账的登记、更正和加载恢复", () => {
     fireEvent.change(within(dialog).getByLabelText("修改原因（必填，留痕审计）"), { target: { value: "核对后更正" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
     await waitFor(() => expect(mocks.update).toHaveBeenCalled());
-    expect(mocks.update.mock.calls[0]).toEqual(["r1", expect.objectContaining({ version: 3, note: null, evidence_ref: null, wbdd_no: null, condition: null, pn: "RETURN-PN", description: "返件型号" })]);
+    expect(mocks.update.mock.calls[0]).toEqual(["r1", expect.objectContaining({ version: 3, note: null, evidence_ref: null, wbdd_no: null, condition: null, pn: "RETURN-PN", description: "返件型号" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })]);
   });
   it("转移项目清空原需求单并重新加载目标候选", async () => {
     render(<ReturnReceiptsSection projectId="p1" />); fireEvent.click(await screen.findByRole("button", { name: "修改" }));
@@ -121,13 +122,13 @@ describe("返还台账的登记、更正和加载恢复", () => {
     fireEvent.mouseDown(within(dialog).getByLabelText(/项目（转移/)); fireEvent.click(await screen.findByText("目标项目 · P2"));
     fireEvent.change(within(dialog).getByLabelText("修改原因（必填，留痕审计）"), { target: { value: "项目归属修正" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
-    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith("r1", expect.objectContaining({ project_id: "p2", wbdd_no: null })));
-    expect(mocks.demands).toHaveBeenCalledWith("p2", expect.anything());
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith("r1", expect.objectContaining({ project_id: "p2", wbdd_no: null }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
+    expect(mocks.demands).toHaveBeenCalledWith("p2", expect.anything(), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
   it("需求单候选超过10页仍继续，失败有重试提示", async () => {
     mocks.demands.mockImplementation((_id, { page }: { page: number }) => Promise.resolve({ data: { rows: [{ order_no: `WBDD-${page}` }], total: 11 } }));
     render(<ReturnReceiptsSection projectId="p1" />);
-    await waitFor(() => expect(mocks.demands).toHaveBeenCalledWith("p1", { page: 11, page_size: 100 }));
+    await waitFor(() => expect(mocks.demands).toHaveBeenCalledWith("p1", { page: 11, page_size: 100 }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     mocks.demands.mockRejectedValue(new Error("down")); fireEvent.click(screen.getByRole("button", { name: "登记返还" }));
     expect(await screen.findByRole("button", { name: "重试加载需求单" })).toBeInTheDocument();
   });
@@ -143,7 +144,7 @@ describe("返还台账的登记、更正和加载恢复", () => {
     fireEvent.click(await screen.findByRole("button", { name: "重新加载" })); await screen.findByText("PN-1");
     const row = screen.getByText("未关联需求单", { selector: "td" }).closest("tr")!;
     fireEvent.click(within(row).getByRole("button", { name: "查看明细" }));
-    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ unassigned: true })));
+    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith("p1", expect.objectContaining({ unassigned: true }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
   it("历史失败可重试并展示数量以外的完整字段", async () => {
     mocks.audit.mockRejectedValueOnce(new Error("down")).mockResolvedValueOnce({ data: { items: [{ id: 1, project_id: "p1", action: "update", operated_by: "审计人员", operated_at: null, reason: "更换型号", before_json: { pn: "OLD-PN", note: "旧说明", project_id: "p0" }, after_json: { pn: "NEW-PN", note: null, project_id: "p1" } }] } });
@@ -268,7 +269,7 @@ describe("登记返还按 PN 建议需求单", () => {
     render(<ReturnReceiptsSection projectId="p1" />);
     fireEvent.click(await screen.findByRole("button", { name: "登记返还" }));
     fireEvent.click(screen.getByText("选择测试返件"));
-    await waitFor(() => expect(mocks.demands).toHaveBeenCalledWith("p1", { part_id: 12, page_size: 50 }));
+    await waitFor(() => expect(mocks.demands).toHaveBeenCalledWith("p1", { part_id: 12, page_size: 50 }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     openDemandSelect(screen.getByRole("dialog"));
     expect(await screen.findByText("含此 PN", { selector: ".ant-select-item-group" })).toBeInTheDocument();
     expect(screen.getByText("其他需求单", { selector: ".ant-select-item-group" })).toBeInTheDocument();
@@ -299,7 +300,7 @@ describe("登记返还按 PN 建议需求单", () => {
     fireEvent.click(await screen.findByText("WBDD-2（2026-08-01） · 剩余可录 18", { selector: ".ant-select-item-option-content" }));
     await waitFor(() => expect(within(dialog).getByText("WBDD-2（2026-08-01） · 剩余可录 18", { selector: ".ant-select-selection-item" })).toBeInTheDocument());
     fireEvent.click(screen.getByText("选择测试返件"));
-    await waitFor(() => expect(mocks.demands).toHaveBeenCalledWith("p1", { part_id: 12, page_size: 50 }));
+    await waitFor(() => expect(mocks.demands).toHaveBeenCalledWith("p1", { part_id: 12, page_size: 50 }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(within(dialog).queryByText("WBDD-MATCH（2026-09-01） · 剩余可录 18", { selector: ".ant-select-selection-item" })).not.toBeInTheDocument();
     fireEvent.change(within(dialog).getByRole("spinbutton"), { target: { value: "1" } });
     fireEvent.click(within(dialog).getByRole("button", { name: /^登\s*记$/ }));
@@ -312,7 +313,7 @@ describe("登记返还按 PN 建议需求单", () => {
     render(<ReturnReceiptsSection projectId="p1" />);
     fireEvent.click(await screen.findByRole("button", { name: "登记返还" }));
     fireEvent.click(screen.getByText("选择测试返件"));
-    await waitFor(() => expect(mocks.demands).toHaveBeenCalledWith("p1", { part_id: 12, page_size: 50 }));
+    await waitFor(() => expect(mocks.demands).toHaveBeenCalledWith("p1", { part_id: 12, page_size: 50 }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     openDemandSelect(screen.getByRole("dialog"));
     expect(await screen.findByText("含此 PN", { selector: ".ant-select-item-group" })).toBeInTheDocument();
     const hint = screen.getByText("本项目无含此 PN 的需求单");
@@ -364,7 +365,7 @@ describe("D-31 需求单容量候选", () => {
     render(<ReturnReceiptsSection projectId="p1" />);
     fireEvent.click(await screen.findByRole("button", { name: "修改" }));
     const dialog = screen.getByRole("dialog");
-    await waitFor(() => expect(mocks.demands).toHaveBeenCalledWith("p1", expect.objectContaining({ receipt_id: "r1" })));
+    await waitFor(() => expect(mocks.demands).toHaveBeenCalledWith("p1", expect.objectContaining({ receipt_id: "r1" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     fireEvent.mouseDown(within(dialog).getByLabelText(/维保需求单（可选/));
     expect(await screen.findByText(/WBDD-1.*剩余可录 0.*当前关联/, { selector: ".ant-select-item-option-content" })).toBeInTheDocument();
     fireEvent.change(within(dialog).getByLabelText("修改原因（必填，留痕审计）"), { target: { value: "清点" } });
@@ -374,7 +375,7 @@ describe("D-31 需求单容量候选", () => {
     expect(mocks.update).not.toHaveBeenCalled();
     fireEvent.change(within(dialog).getByRole("spinbutton"), { target: { value: "1" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
-    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith("r1", expect.objectContaining({ qty: 1, wbdd_no: "WBDD-1" })));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith("r1", expect.objectContaining({ qty: 1, wbdd_no: "WBDD-1" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("服务端容量 409 中文原文在表单中明确显示", async () => {
@@ -386,8 +387,16 @@ describe("D-31 需求单容量候选", () => {
     const dialog = screen.getByRole("dialog");
     fireEvent.click(within(dialog).getByText("选择测试返件"));
     fireEvent.change(within(dialog).getByRole("spinbutton"), { target: { value: "2" } });
+    // Wait for the PN suggestion to settle its automatic demand selection before freezing the command.
+    await waitFor(() => expect(within(dialog).getByLabelText(/维保需求单（可选/)).toHaveValue(""));
+    await act(async () => {});
     fireEvent.click(within(dialog).getByRole("button", { name: /^登\s*记$/ }));
     expect(await within(dialog).findByText(message)).toBeInTheDocument();
   });
 
 });
+
+vi.mock("../../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

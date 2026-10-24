@@ -33,6 +33,9 @@ class MaintenanceBadSalvage(Base):
     __tablename__ = "maintenance_bad_salvage"
 
     salvage_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_user_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("sys_user.id", ondelete="RESTRICT"), nullable=True
+    )
     project_id: Mapped[str] = mapped_column(
         ForeignKey("maintenance_project.project_id"), nullable=False
     )

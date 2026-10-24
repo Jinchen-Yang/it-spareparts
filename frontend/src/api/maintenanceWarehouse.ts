@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
 
 export interface WarehouseImportPreview {
@@ -167,22 +168,22 @@ export interface WarehouseSearchResult<T> {
   page_size: number;
 }
 
-export const previewWarehouseImport = (file: File) => {
+export const previewWarehouseImport = (file: File, capture?: ContextRequestTransport) => {
   const body = new FormData();
   body.append("file", file);
-  return api.post<WarehouseImportPreview>("/maintenance/warehouse-imports/preview", body);
+  return domainApi(capture).post<WarehouseImportPreview>("/maintenance/warehouse-imports/preview", body);
 };
 
 export const applyWarehouseImport = (
   preview: WarehouseImportPreview,
   file: File,
-  reason: string,
+  reason: string, capture?: ContextRequestTransport
 ) => {
   const body = new FormData();
   body.append("file", file);
   body.append("preview_token", preview.preview_token);
   body.append("reason", reason);
-  return api.post<WarehouseImportResult>(
+  return domainApi(capture).post<WarehouseImportResult>(
     `/maintenance/warehouse-imports/${preview.import_id}/apply`,
     body,
   );
@@ -193,7 +194,7 @@ export const searchWarehouseDocuments = (body: {
   document_type?: string;
   page: number;
   page_size: number;
-}) => api.post<WarehouseSearchResult<WarehouseDocumentSummary>>(
+}, capture?: ContextRequestTransport) => domainApi(capture).post<WarehouseSearchResult<WarehouseDocumentSummary>>(
   "/maintenance/warehouse-documents/search",
   body,
 );
@@ -204,7 +205,7 @@ export const searchWarehouseAmbiguities = (body: {
   ambiguity_type?: string;
   page: number;
   page_size: number;
-}) => api.post<WarehouseSearchResult<WarehouseAmbiguitySummary>>(
+}, capture?: ContextRequestTransport) => domainApi(capture).post<WarehouseSearchResult<WarehouseAmbiguitySummary>>(
   "/maintenance/warehouse-ambiguities/search",
   body,
 );
@@ -218,8 +219,8 @@ export const resolveWarehouseAmbiguity = (
     link_kind?: string;
     target_type?: string;
     target_id?: string;
-  },
-) => api.post(
+  }, capture?: ContextRequestTransport
+) => domainApi(capture).post(
   `/maintenance/warehouse-ambiguities/${ambiguityId}/resolve`,
   body,
 );

@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -60,7 +61,7 @@ describe("PN 紧凑图", () => {
     expect(within(cost).getByText("部分缺价")).toBeInTheDocument();
     expect(within(capture).getByText(/部分缺价的 PN 按已知金额排序/)).toBeInTheDocument();
     expect(fetchExplorer).toHaveBeenCalledTimes(1);
-    expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ dimension: "pn", metric: "effective", top_n: 15, include_pn_overview: true }), expect.any(AbortSignal));
+    expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ dimension: "pn", metric: "effective", top_n: 15, include_pn_overview: true }), expect.any(AbortSignal), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it.each([false, true])("Top 净量与总量均为正时，负值说明仍遵循全集标志 %s", async hasNegative => {
@@ -98,7 +99,7 @@ describe("PN 紧凑图", () => {
     expect(within(capture).queryByText("已知需求成本（含税）")).not.toBeInTheDocument();
     expect(within(capture).queryByText(/9,007,199/)).not.toBeInTheDocument();
     expect(within(capture).queryByText("COST-FIRST")).not.toBeInTheDocument();
-    expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ metric: "effective" }), expect.any(AbortSignal));
+    expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ metric: "effective" }), expect.any(AbortSignal), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it("全缺价仍展示成本榜及未知，不能伪装成没有记录或零元", async () => {
@@ -190,3 +191,9 @@ describe("PN 紧凑图", () => {
     await act(async () => finish(fixture()));
   });
 });
+
+// Existing page behavior runs under the explicit legacy authorization mode.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

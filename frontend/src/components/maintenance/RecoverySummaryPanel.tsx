@@ -1,3 +1,7 @@
+import { useContextQuery } from "../../authz/contextQuery";
+import { withContextSurface, contextSurfaces } from "../../authz/ContextSurface";
+import { useModuleAccess } from "../../authz/access";
+import { authorizationErrorText } from "../../authz/requestLifecycle";
 import { useEffect, useRef, useState } from "react";
 import { App, Alert, Card, Tag, Typography } from "antd";
 import {
@@ -19,30 +23,15 @@ function errorText(error: unknown): string {
   return "收回清单加载失败，请重试";
 }
 
-export default function RecoverySummaryPanel({ projectId }: { projectId: string }) {
-  const { message } = App.useApp();
-  const [data, setData] = useState<MaintenanceRecoverySummary | null>(null);
-  const [loading, setLoading] = useState(true);
-  const generation = useRef(0);
-
-  useEffect(() => {
-    const request = ++generation.current;
-    setLoading(true);
-    getMaintenanceProjectRecoverySummary(projectId)
-      .then(({ data: response }) => {
-        if (request === generation.current) setData(response);
-      })
-      .catch((error: unknown) => {
-        if (request === generation.current) {
-          setData(null);
-          message.error(errorText(error));
-        }
-      })
-      .finally(() => {
-        if (request === generation.current) setLoading(false);
-      });
-    return () => { generation.current += 1; };
-  }, [projectId]);
+function RecoverySummaryPanel({ projectId }: { projectId: string }) {
+  const query = useContextQuery({
+    entryId: "GET /api/maintenance/projects/stable/{project_id}/recovery-summary", rule: contextSurfaces("maintenance_recovery.summary"),
+    queryKey: [projectId], legacyAllowed: true,
+    query: async capture => (await getMaintenanceProjectRecoverySummary(projectId, capture)).data,
+  });
+  const data = query.data, loading = query.loading;
+  const permissionDenied = (query.error as { response?: { status?: number } })?.response?.status === 403;
+  const module = useModuleAccess("maintenance_recovery", query.context);
 
   return (
     <Card
@@ -50,6 +39,7 @@ export default function RecoverySummaryPanel({ projectId }: { projectId: string 
       title="收回清单"
       extra={loading ? <Tag>加载中</Tag> : <Tag>项目结束收回口径</Tag>}
     >
+      {query.error && <Alert type="error" showIcon message={authorizationErrorText(query.error, "收回清单加载失败")} />}
       <div className="bad-return-metric-grid" aria-busy={loading}>
         <div>
           <span>好件收回</span>
@@ -86,3 +76,5 @@ export default function RecoverySummaryPanel({ projectId }: { projectId: string 
     </Card>
   );
 }
+
+export default withContextSurface(RecoverySummaryPanel, contextSurfaces("maintenance_recovery.summary"), props => props.projectId);

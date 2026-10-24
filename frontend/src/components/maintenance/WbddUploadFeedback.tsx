@@ -1,3 +1,5 @@
+import { withContextSurface } from "../../authz/ContextSurface";
+import { surfaceRule } from "../../authz/rules";
 import { Alert, Space, Typography } from "antd";
 import type { WbddImportReport } from "../../api/maintenanceWbddImport";
 
@@ -9,7 +11,7 @@ const FIELD_LABELS: Record<string, string> = {
 };
 
 /** 聚合回执只解释本批处理结果，不用原始身份或字段值生成样例。 */
-export default function WbddUploadFeedback({ report }: { report: Partial<WbddImportReport> }) {
+function WbddUploadFeedback({ report }: { report: Partial<WbddImportReport> }) {
   const counts: [string, number | null | undefined][] = [
     ["新增", report.fact_rows_inserted],
     ["匹配已有", report.fact_rows_updated],
@@ -59,3 +61,5 @@ export default function WbddUploadFeedback({ report }: { report: Partial<WbddImp
     />
   );
 }
+
+export default withContextSurface(WbddUploadFeedback, surfaceRule("maintenance_wbdd_snapshot.upload"), props => props.report.batch_id);

@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_collection_followup",
+    "rules": [
+      {
+        "name": "explicit-evidence-read",
+        "actions": [
+          "evidence_read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"evidence_read\" in P.attr.grants.maintenance_collection_followup.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_collection_followup.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_collection_followup.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_collection_followup\", \"scope\": P.attr.grants.maintenance_collection_followup.scope, \"version\": P.attr.grants.maintenance_collection_followup.version, \"field_permissions\": P.attr.grants.maintenance_collection_followup.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-evidence-upload",
+        "actions": [
+          "evidence_upload"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"evidence_upload\" in P.attr.grants.maintenance_collection_followup.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_collection_followup.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_collection_followup.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_collection_followup\", \"scope\": P.attr.grants.maintenance_collection_followup.scope, \"version\": P.attr.grants.maintenance_collection_followup.version, \"field_permissions\": P.attr.grants.maintenance_collection_followup.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.maintenance_collection_followup.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_collection_followup.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_collection_followup.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_collection_followup\", \"scope\": P.attr.grants.maintenance_collection_followup.scope, \"version\": P.attr.grants.maintenance_collection_followup.version, \"field_permissions\": P.attr.grants.maintenance_collection_followup.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-record",
+        "actions": [
+          "record"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"record\" in P.attr.grants.maintenance_collection_followup.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_collection_followup.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_collection_followup.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_collection_followup\", \"scope\": P.attr.grants.maintenance_collection_followup.scope, \"version\": P.attr.grants.maintenance_collection_followup.version, \"field_permissions\": P.attr.grants.maintenance_collection_followup.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

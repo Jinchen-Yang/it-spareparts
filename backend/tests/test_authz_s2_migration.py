@@ -13,6 +13,7 @@ path=Path(__file__).parents[1]/'alembic/versions/c9d4e8f2a6b1_business_authoriza
 spec=importlib.util.spec_from_file_location('frozen_s2',path)
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 S1='a7c2e9f4b6d1'
+S2='c9d4e8f2a6b1'
 EMPTY={'schema_version':1,'template_snapshot':None,'resource_overrides':{}}
 OLD={'actions':['read','export'],'scope':'assigned_customers','field_permissions':['data_customer']}
 DENY={'actions':[],'scope':'assigned_customers','field_permissions':[]}
@@ -20,7 +21,8 @@ DENY={'actions':[],'scope':'assigned_customers','field_permissions':[]}
 def down(db):
  db.commit();command.downgrade(_alembic_cfg(),S1);db.expire_all()
 def up(db):
- db.commit();command.upgrade(_alembic_cfg(),'head');db.expire_all()
+ # This suite proves the frozen S2 boundary; later migrations have their own receipts.
+ db.commit();command.upgrade(_alembic_cfg(),S2);db.expire_all()
 def row(db,uid):
  return db.execute(text('SELECT token_version,authorization_profile,authorization_legacy_seed_eligible FROM sys_user WHERE id=:id'),{'id':uid}).mappings().one()
 def insert(db,name,*,eligible=True,role='sales',profile=None,active=True):
@@ -128,4 +130,10 @@ def test_downgrade_refuses_new_or_unprovable_state(db,change):
   with pytest.raises(RuntimeError):command.downgrade(_alembic_cfg(),S1)
   assert db.execute(text("SELECT to_regclass('sys_authorization_migration_receipt')")).scalar() is not None
  finally:
-  db.rollback();command.upgrade(_alembic_cfg(),'head')
+  db.rollback()
+  if change=='canonical_insert':
+   # Remove only this test's deliberately inconsistent materialization before
+   # restoring later schemas, whose migration must reject source/Grant drift.
+   db.execute(text("DELETE FROM sys_authorization_grant WHERE resource='inventory' AND user_id IN (SELECT id FROM sys_user WHERE username='s2_unrecorded')"))
+   db.commit()
+  command.upgrade(_alembic_cfg(),'head')

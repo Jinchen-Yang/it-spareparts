@@ -1,0 +1,69 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_document_import",
+    "rules": [
+      {
+        "name": "explicit-apply",
+        "actions": [
+          "apply"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"apply\" in P.attr.grants.maintenance_document_import.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_document_import.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_document_import.scope == \"all_imports\" && (true)) || (P.attr.grants.maintenance_document_import.scope == \"own_imports\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_document_import\", \"scope\": P.attr.grants.maintenance_document_import.scope, \"version\": P.attr.grants.maintenance_document_import.version, \"field_permissions\": P.attr.grants.maintenance_document_import.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-preview",
+        "actions": [
+          "preview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"preview\" in P.attr.grants.maintenance_document_import.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_document_import.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_document_import.scope == \"all_imports\" && (true)) || (P.attr.grants.maintenance_document_import.scope == \"own_imports\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_document_import\", \"scope\": P.attr.grants.maintenance_document_import.scope, \"version\": P.attr.grants.maintenance_document_import.version, \"field_permissions\": P.attr.grants.maintenance_document_import.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.maintenance_document_import.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_document_import.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_document_import.scope == \"all_imports\" && (true)) || (P.attr.grants.maintenance_document_import.scope == \"own_imports\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_document_import\", \"scope\": P.attr.grants.maintenance_document_import.scope, \"version\": P.attr.grants.maintenance_document_import.version, \"field_permissions\": P.attr.grants.maintenance_document_import.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

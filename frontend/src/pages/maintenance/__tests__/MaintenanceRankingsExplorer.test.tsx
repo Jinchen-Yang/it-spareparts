@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -59,7 +60,7 @@ describe("三视图与跳转", () => {
   it("PN 同文字不同实体保持稳定part key选择，不能按显示PN合并", async () => {
     const data = fixture(); data.chart_rows[1] = { ...second, label: "PN-A" }; fetchExplorer.mockResolvedValue(data); mount();
     const buttons = await screen.findAllByRole("button", { name: /PN-A，实际领用/ }); fireEvent.click(buttons[1]);
-    await waitFor(() => expect(fetchExplorer).toHaveBeenLastCalledWith(expect.objectContaining({ focus: "part:2" }), expect.any(AbortSignal)));
+    await waitFor(() => expect(fetchExplorer).toHaveBeenLastCalledWith(expect.objectContaining({ focus: "part:2" }), expect.any(AbortSignal), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
   it("图表使用独立chart_rows，不拿第2页明细当Top排名", async () => {
     const data = fixture(); data.page = 2; data.rows = [row("part:40", "PAGE-2-PN")]; fetchExplorer.mockResolvedValue(data); mount("/maintenance/analytics?page=2");
@@ -79,7 +80,7 @@ describe("三视图与跳转", () => {
     expect(orderColumn).toBeGreaterThan(-1);
     expect(within(detailRow).getAllByRole("cell")[orderColumn]).toHaveTextContent(/^1,234$/);
     expect(screen.queryByRole("button", { name: /PAGE-2-ORDERS，需求单数/ })).not.toBeInTheDocument();
-    expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ metric: "orders", page: 2 }), expect.any(AbortSignal));
+    expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ metric: "orders", page: 2 }), expect.any(AbortSignal), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
   it.each(["orders", "negative", "zero", "unknown"])("%s不绘累计百分比、不伪造集中度", async state => {
     const data = fixture();
@@ -121,7 +122,7 @@ describe("三视图与跳转", () => {
       expect(screen.queryByText("不计算")).not.toBeInTheDocument();
       expect(screen.queryByText("包含负值，关闭集中度")).not.toBeInTheDocument();
     }
-    expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ dimension: "pn", metric: "effective" }), expect.any(AbortSignal));
+    expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ dimension: "pn", metric: "effective" }), expect.any(AbortSignal), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
   it("累计比例直接使用后端精确累计值，不相加已舍入的行占比", async () => {
     const data = fixture(); data.chart_rows = [ { ...first, share_pct: "33.3", cumulative_share_pct: "33.3" }, { ...second, share_pct: "33.3", cumulative_share_pct: "66.7" } ]; data.summary.top_share_pct = "66.7";
@@ -153,7 +154,7 @@ describe("三视图与跳转", () => {
   it("排列图条形支持键盘Enter钻取", async () => {
     mount("/maintenance/analytics?layout=B"); const target = await screen.findByRole("button", { name: /PN-B，实际领用/ });
     expect(target).toHaveAttribute("tabindex", "0"); fireEvent.keyDown(target, { key: "Enter" });
-    await waitFor(() => expect(fetchExplorer).toHaveBeenLastCalledWith(expect.objectContaining({ focus: "part:2" }), expect.any(AbortSignal)));
+    await waitFor(() => expect(fetchExplorer).toHaveBeenLastCalledWith(expect.objectContaining({ focus: "part:2" }), expect.any(AbortSignal), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
   it("未归属项目和没有事实的格子不能跳转", async () => {
     const data = fixture(); data.focus.rows = [{ ...project, key: "__unassigned__", project_id: null, label: "未归属" }]; data.matrix.columns[1] = { ...project2, project_id: null };
@@ -258,13 +259,19 @@ describe("三视图与跳转", () => {
 describe("项目分析定位", () => {
   it("目标PN覆盖返回页的旧focus，项目范围始终由当前项目确定", async () => {
     mount("/maintenance/projects/project-2?pnKey=part%3A2&analysis_dimension=pn&analysis_focus=part%3A2", <MaintenanceProjectAnalyticsContext projectId="project-2" analyticsReturn="/maintenance/analytics?range=all&focus=part%3A1&project=project-1,project-2&customer=客户&warehouse=+广州仓+" />);
-    await waitFor(() => expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ dimension: "pn", focus: "part:2", project: "project-2", customer: "客户", warehouse: " 广州仓 " }), expect.any(AbortSignal)));
+    await waitFor(() => expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ dimension: "pn", focus: "part:2", project: "project-2", customer: "客户", warehouse: " 广州仓 " }), expect.any(AbortSignal), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(await screen.findByText("当前筛选下的分析定位")).toBeInTheDocument();
   });
   it("项目排名矩阵可进入所点击PN，而return继续保存项目排名", async () => {
     mount("/maintenance/projects/project-2?pnKey=part%3A2&analysis_dimension=project&analysis_focus=project-2", <MaintenanceProjectAnalyticsContext projectId="project-2" analyticsReturn="/maintenance/analytics?dim=project&focus=project-1&metric=cost" />);
-    await waitFor(() => expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ dimension: "pn", focus: "part:2", project: "project-2", metric: "cost" }), expect.any(AbortSignal)));
+    await waitFor(() => expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ dimension: "pn", focus: "part:2", project: "project-2", metric: "cost" }), expect.any(AbortSignal), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
-  it("客户分组定位使用目标客户而非返回原focus", async () => { mount("/maintenance/projects/project-2?analysis_dimension=customer&analysis_focus=客户乙", <MaintenanceProjectAnalyticsContext projectId="project-2" analyticsReturn="/maintenance/analytics?dim=customer&focus=客户甲" />); await waitFor(() => expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ dimension: "customer", focus: "客户乙", project: "project-2" }), expect.any(AbortSignal))); });
+  it("客户分组定位使用目标客户而非返回原focus", async () => { mount("/maintenance/projects/project-2?analysis_dimension=customer&analysis_focus=客户乙", <MaintenanceProjectAnalyticsContext projectId="project-2" analyticsReturn="/maintenance/analytics?dim=customer&focus=客户甲" />); await waitFor(() => expect(fetchExplorer).toHaveBeenCalledWith(expect.objectContaining({ dimension: "customer", focus: "客户乙", project: "project-2" }), expect.any(AbortSignal), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }))); });
   it("无效选中项显示无记录，不默默换到别的PN", async () => { const data = fixture(); data.focus.row = null; fetchExplorer.mockResolvedValue(data); mount("/maintenance/projects/project-2?pnKey=part%3A2", <MaintenanceProjectAnalyticsContext projectId="project-2" analyticsReturn="/maintenance/analytics?focus=part%3A2" />); expect(await screen.findByText(/该选中项在当前项目与筛选条件下没有记录/)).toBeInTheDocument(); expect(screen.queryByText("PN-A")).not.toBeInTheDocument(); });
 });
+
+// Existing page behavior runs under the explicit legacy authorization mode.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

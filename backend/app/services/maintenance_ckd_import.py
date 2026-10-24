@@ -208,7 +208,8 @@ def _parse_ckd_rows(rows, column_aliases: dict | None) -> dict:
 
 
 def store_preview(
-    db: Session, parsed: dict, operated_by: str, *, idempotency_key: str, commit: bool = True
+    db: Session, parsed: dict, operated_by: str, *, idempotency_key: str, commit: bool = True, identity=None,
+    authorization_precondition=None, producer_authorization=None
 ) -> str:
     """落 raw 行并返回 batch_id。零业务写入；Idempotency-Key 重放收敛。
 
@@ -216,15 +217,25 @@ def store_preview(
     同一个事务（round-5 Blocker 8），避免「batch 已提交、proposal 未更新」
     的孤儿窗口。
     """
+    from app.services import maintenance_import_authorization as authorization
+    from app.services import authorization_artifacts as artifacts
+    permit = authorization.prepare_preview(db, kind='shipment_import_batch', parsed=parsed,
+        identity=identity, idempotency_key=idempotency_key, precondition=authorization_precondition,
+        producer_authorization=producer_authorization, commit=commit)
+    if permit is not None:
+        operated_by = permit.actor.username
     existing = db.execute(
         select(MaintenanceCkdImportBatch).where(
-            MaintenanceCkdImportBatch.uploaded_by == operated_by,
+            (MaintenanceCkdImportBatch.owner_user_id == permit.actor.id if permit else
+             (MaintenanceCkdImportBatch.owner_user_id.is_(None) & (MaintenanceCkdImportBatch.uploaded_by == operated_by))),
             MaintenanceCkdImportBatch.idempotency_key == idempotency_key,
         )
     ).scalar_one_or_none()
     if existing is not None:
         if existing.file_hash != parsed["file_hash"]:
             raise CkdBatchError("同一 Idempotency-Key 对应不同文件内容，拒绝重放")
+        if permit is not None:
+            artifacts.load_artifact_binding(db, target=artifacts.ArtifactTarget('shipment_import_batch', existing.batch_id, 1))
         return existing.batch_id
     batch = MaintenanceCkdImportBatch(
         batch_id=str(uuid4()),
@@ -232,6 +243,7 @@ def store_preview(
         filename=parsed["filename"][:255],
         idempotency_key=idempotency_key,
         uploaded_by=operated_by,
+        owner_user_id=permit.actor.id if permit else None,
         head_rows=len(parsed["heads"]),
         line_rows=parsed["line_count"],
         status="pending",
@@ -332,6 +344,7 @@ def store_preview(
         "line_rows": batch.line_rows,
         "issue_rows": issue_rows,
     }
+    authorization.finish_preview(db, permit, batch, idempotency_key)
     if commit:
         db.commit()
     return batch.batch_id
@@ -377,12 +390,24 @@ def apply_batch(
     operated_by: str,
     *,
     allowed_project_ids: set[str] | None = None,
+    identity=None, commit=True, _authorization=None,
 ) -> dict:
     """把「维保供货」明细入前置库账本。失败关闭：任何关键异常整批零写。
 
     allowed_project_ids=None 表示全范围（admin/boss）；非 None 时批次解析出的
     任何项目超出范围即整批拒绝（CkdScopeDenied）。
     """
+    from app.authz import runtime
+    from app.services import maintenance_import_authorization as authorization
+    if _authorization is not None:
+        if type(_authorization) is not authorization.ImportApplyAuthorization or commit:
+            raise ValueError('导入只接受实际受控事务许可')
+        if (_authorization.db is not db or _authorization.transaction is not db.get_transaction()
+                or _authorization.context.contexts[0].entry_id != authorization.CKD_APPLY
+                or _authorization.context.contexts[0].ref.id != batch_id):
+            raise ValueError('导入写事务或实际批次不匹配')
+    elif runtime.is_authoritative(db, 'maintenance_shipment_import'):
+        return authorization.apply_batch(db, identity, kind='shipment_import_batch', batch_id=batch_id)
     batch = db.get(MaintenanceCkdImportBatch, batch_id)
     if batch is None:
         raise CkdBatchError("发货单批次不存在")
@@ -409,7 +434,8 @@ def apply_batch(
             "rejected_rows": len(bad_head_rows) + len(bad_line_rows),
             "rejection_reason": "发货单批次存在关键异常行，整批拒绝应用",
         }
-        db.commit()
+        if commit:
+            db.commit()
         raise CkdBatchError(
             f"发货单批次存在 {len(bad_head_rows) + len(bad_line_rows)} 行关键异常，"
             "整批拒绝应用（raw 已保留）"
@@ -511,7 +537,8 @@ def apply_batch(
                 failures.append(f"{head.order_no}: {exc}")
     if failures:
         # 失败关闭：回滚全部已写入流水，批次标记 failed
-        db.rollback()
+        if commit:
+            db.rollback()
         batch = db.get(MaintenanceCkdImportBatch, batch_id)
         batch.status = "failed"
         batch.report_json = {
@@ -519,12 +546,14 @@ def apply_batch(
             "rejection_reason": "发货单批次存在应用异常，整批零写入",
             "failures": failures[:20],
         }
-        db.commit()
+        if commit:
+            db.commit()
         raise CkdBatchError(
             f"发货单批次应用失败 {len(failures)} 行，整批拒绝（已回滚全部写入）"
         )
     batch.status = "applied"
     batch.applied_by = operated_by
     batch.applied_at = datetime.now(timezone.utc)
-    db.commit()
+    if commit:
+        db.commit()
     return summary

@@ -1,3 +1,5 @@
+import { useContextQuery } from "../../../authz/contextQuery";
+import { surfaceRule } from "../../../authz/rules";
 /** T4 需求单数量核对（当前累计）：N/R/差额/超收整单口径；不发布返还状态。
  *
  * 契约 v2 §6（B-F10）：该页签支持关键词 q——按命中 PN 选择**整张需求单**，
@@ -37,43 +39,12 @@ export default function DashboardQuantityChecksTab({
   params, sorts, sort, page, pageSize, refreshKey,
   onSortChange, onPageChange, maxExportRows, ownerToken, onSessionMismatch,
 }: DashboardTabProps) {
-  const [data, setData] = useState<QuantityChecksResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const seqRef = useRef(0);
-
-  const load = useCallback(async () => {
-    // 请求前绑定组件所属会话（B-F03/04）：失配即上报壳层停用，不发旧会话请求。
-    if (!sessionUnchanged(ownerToken)) {
-      onSessionMismatch();
-      return;
-    }
-    const seq = seqRef.current + 1;
-    seqRef.current = seq;
-    const token = sessionToken();
-    setLoading(true);
-    setError(null);
-    try {
-      const resp = await fetchDashboardQuantityChecks({
-        ...params, sort, page, page_size: pageSize,
-      });
-      if (seqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      setData(resp);
-    } catch (err) {
-      if (seqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      setData(null);
-      setError(apiErrorMessage(err));
-    } finally {
-      if (seqRef.current === seq && sessionUnchanged(token)) setLoading(false);
-    }
-  }, [params, sort, page, pageSize, ownerToken, onSessionMismatch]);
-
-  useEffect(() => {
-    void load();
-    return () => { seqRef.current += 1; };
-  }, [load, refreshKey]);
+  const dataQuery = useContextQuery({ entryId: "GET /api/maintenance/analytics/maintenance-dashboard/quantity-checks",
+    rule: surfaceRule("maintenance_dashboard.checks"), queryKey: [params, sort, page, pageSize, refreshKey], legacyAllowed: true,
+    onStale: onSessionMismatch, query: capture => fetchDashboardQuantityChecks({ ...params, sort, page, page_size: pageSize }, capture) });
+  const data = dataQuery.data, loading = dataQuery.loading;
+  const error = dataQuery.error ? apiErrorMessage(dataQuery.error) : null;
+  const load = dataQuery.retry;
 
   const onTableChange: TableProps<QuantityCheckRow>["onChange"] = (pg) => {
     if (pg.pageSize && pg.pageSize !== pageSize) onPageChange(1, pg.pageSize);

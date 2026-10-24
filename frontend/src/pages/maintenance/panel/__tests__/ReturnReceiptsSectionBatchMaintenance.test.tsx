@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../../test/legacyAuthorization";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 
@@ -85,7 +86,7 @@ describe("ReturnReceiptsSection 批量修改/作废接线（v1.36）", () => {
     fireEvent.change(within(dialog).getAllByPlaceholderText("备注")[0], { target: { value: "批量改的备注" } });
     fireEvent.change(within(dialog).getByPlaceholderText("如：实物清点批量修正"), { target: { value: "批量清点" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "修改 1 条" }));
-    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith("ra", { version: 3, reason: "批量清点", note: "批量改的备注" }));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith("ra", { version: 3, reason: "批量清点", note: "批量改的备注" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     // 关窗 → 父列表刷新 + onChanged 通知 + 勾选清空（入口消失）
     fireEvent.click(within(dialog).getByRole("button", { name: "关 闭" }));
     await waitFor(() => expect(mocks.search.mock.calls.filter((call) => call[0] === "p1").length).toBeGreaterThan(1));
@@ -113,3 +114,8 @@ describe("ReturnReceiptsSection 批量修改/作废接线（v1.36）", () => {
     expect(screen.queryByRole("button", { name: "批量作废" })).not.toBeInTheDocument();
   });
 });
+
+vi.mock("../../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

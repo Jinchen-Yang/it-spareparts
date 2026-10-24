@@ -1,3 +1,5 @@
+import { legacyAuthorizationState } from "../../../test/legacyAuthorization";
+import { prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
 import { cleanup, fireEvent, render, screen, waitFor } from "../../../test/antdRender";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -725,7 +727,7 @@ describe("MaintenanceBatchTransferButton", () => {
       payload_hash: "a".repeat(64),
       data_version: 17,
       row_keys: ["row-matched"],
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(mocks.apply.mock.calls[0][0]).not.toHaveProperty("canonical");
     expect(mocks.apply.mock.calls[0][0]).not.toHaveProperty("mapping");
     await waitFor(() => expect(onApplied).toHaveBeenCalledTimes(1));
@@ -988,7 +990,7 @@ describe("MaintenanceBatchTransferButton", () => {
       receipt_date: "2026-01-10",
       actual_amount: "120.00",
       reason: "已核对银行回单，以本文件为准",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await waitFor(() => expect(mocks.preview).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(/已裁决收款单 SK-9/)).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText("人工裁决：以本文件为准")).not.toBeInTheDocument());
@@ -1192,7 +1194,7 @@ describe("MaintenanceBatchTransferButton", () => {
       receipt_date: "2026-01-10",
       actual_amount: "0",
       reason: "上游作废，已核对",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await waitFor(() => expect(mocks.preview).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(/已裁决收款单 SK-1：上游已作废，台账原行按 0 元更正/)).toBeInTheDocument();
   });
@@ -1221,7 +1223,7 @@ describe("MaintenanceBatchTransferButton", () => {
       receipt_date: "2026-01-12",
       actual_amount: "120.50",
       reason: "已核对银行回单",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("批量下载按服务端表单/字段白名单并携带主页当前筛选", async () => {
@@ -1238,10 +1240,18 @@ describe("MaintenanceBatchTransferButton", () => {
       sort: "name",
       forms: ["project", "collection"],
       fields: ["project_name", "collection_received_inc_tax"],
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(mocks.saveBlob).toHaveBeenCalledWith(
       expect.any(Blob),
       "维保批量导出.xlsx",
     );
   });
 });
+
+// Existing behavior fixtures explicitly run before the canonical module cutover.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(),
+  useAuthz: () => legacyAuthorizationState(),
+}));
+
+beforeEach(() => prepareLegacyPageFixture());

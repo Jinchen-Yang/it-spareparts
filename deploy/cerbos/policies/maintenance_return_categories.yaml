@@ -1,0 +1,29 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_return_categories",
+    "rules": [
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.maintenance_return_categories.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_return_categories.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_return_categories\", \"scope\": P.attr.grants.maintenance_return_categories.scope, \"version\": P.attr.grants.maintenance_return_categories.version, \"field_permissions\": P.attr.grants.maintenance_return_categories.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

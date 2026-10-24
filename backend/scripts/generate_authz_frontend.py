@@ -13,6 +13,9 @@ import sys
 BACKEND = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND))
 from app.authz.catalog import RESOURCE_DEFINITIONS, resource_descriptors, validate_catalog
+from app.authz.context_registry import (
+    CLOSED_KINDS, COLLECTION_REFS, ENTRY_CONTRACTS, AUTHORIZATION_VIEWS,
+)
 
 OUTPUT = BACKEND.parent / "frontend/src/authz/generated.ts"
 
@@ -25,6 +28,10 @@ def generate() -> str:
     surfaces = {}
     for module in descriptors:
         resource = module["id"]
+        sources = module.get("legacy_sources")
+        if (not isinstance(sources, list) or any(not isinstance(source, str) for source in sources)
+                or len(set(sources)) != len(sources)):
+            raise ValueError(f"Explicit legacy_sources string array required: {resource}")
         if resource not in RESOURCE_DEFINITIONS:
             continue
         definition = RESOURCE_DEFINITIONS[resource]
@@ -42,7 +49,9 @@ def generate() -> str:
             if type(surface.get("route_entry")) is not bool:
                 raise ValueError(f"Explicit route_entry required: {surface['id']}")
             routes = surface.get("page_routes")
-            if not routes or len(set(routes)) != len(routes) or any(not p.startswith("/") for p in routes):
+            if (not isinstance(routes, list) or (surface["route_entry"] and not routes)
+                    or len(set(routes)) != len(routes)
+                    or any(not isinstance(p, str) or not p.startswith("/") for p in routes)):
                 raise ValueError(f"Closed page_routes required: {surface['id']}")
             rule = surface.get("data_rule")
             if not isinstance(rule, dict) or not isinstance(rule.get("anyOf"), list) or not rule["anyOf"]:
@@ -60,7 +69,27 @@ def generate() -> str:
             surfaces[surface["id"]] = {"resource_id": resource, **{
                 k: surface[k] for k in ("display_actions", "page_routes", "route_entry", "data_rule")
             }}
-    payload = {"known": known, "resources": executable, "surfaces": surfaces}
+    context_entries = {
+        key: {
+            "branches": value["branches"],
+            "slots": {
+                slot: {field: data[field] for field in (
+                    "kind", "object_type", "collection_ref", "purpose", "authorizing"
+                ) if field in data}
+                for slot, data in value["slots"].items()
+            },
+        }
+        for key, value in ENTRY_CONTRACTS.items()
+    }
+    context_views = {key: {field: value[field] for field in (
+        "method", "path", "view", "only_entry_actions", "no_business_payload",
+        "authorization_requirements", "target_entry_ids", "locator_path_parameter",
+    ) if field in value} for key, value in AUTHORIZATION_VIEWS.items()}
+    if not set(context_views) <= set(context_entries):
+        raise ValueError("Authorization view has no executable entry contract")
+    payload = {"known": known, "resources": executable, "surfaces": surfaces,
+               "contexts": {"kinds": CLOSED_KINDS, "collections": COLLECTION_REFS,
+                            "entries": context_entries, "views": context_views}}
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     dump = lambda value: json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
     return (
@@ -71,11 +100,19 @@ def generate() -> str:
         f"export const KNOWN_MODULES = {dump(known)} as const;\n"
         f"export const EXECUTABLE_RESOURCES = {dump(executable)} as const;\n"
         f"export const EXECUTABLE_SURFACES = {dump(surfaces)} as const;\n"
+        f"export const CONTEXT_KINDS = {dump(CLOSED_KINDS)} as const;\n"
+        f"export const CONTEXT_COLLECTION_REFS = {dump(COLLECTION_REFS)} as const;\n"
+        f"export const CONTEXT_ENTRY_CONTRACTS = {dump(context_entries)} as const;\n"
+        f"export const CONTEXT_AUTHORIZATION_VIEWS = {dump(context_views)} as const;\n"
         "export type ResourceId = keyof typeof EXECUTABLE_RESOURCES;\n"
         "export type ActionId<R extends ResourceId> = keyof typeof EXECUTABLE_RESOURCES[R]['actions'];\n"
         "export type FieldId<R extends ResourceId> = keyof typeof EXECUTABLE_RESOURCES[R]['fields'];\n"
         "export type ScopeId<R extends ResourceId> = keyof typeof EXECUTABLE_RESOURCES[R]['scopes'];\n"
         "export type SurfaceId = keyof typeof EXECUTABLE_SURFACES;\n"
+        "export type ContextKind = typeof CONTEXT_KINDS[number];\n"
+        "export type CollectionRef = typeof CONTEXT_COLLECTION_REFS[number];\n"
+        "export type ContextEntryId = keyof typeof CONTEXT_ENTRY_CONTRACTS;\n"
+        "export type AuthorizationViewId = keyof typeof CONTEXT_AUTHORIZATION_VIEWS;\n"
     )
 
 

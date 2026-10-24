@@ -3,7 +3,7 @@
 from decimal import Decimal
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi import Response, Request, APIRouter, Depends, HTTPException, Path, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.api.maintenance_project_scope import enforce_maintenance_project_access
 from app.auth import current_identity, current_role, require_admin
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_return_authorization as canonical
 from app.db import get_db
 from app.models.maintenance_bad_return import (
     MaintenanceBadReturn,
@@ -42,6 +44,7 @@ BadReturnStatus = Literal[
 
 
 class ReturnObligationSearch(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1, max_length=36)
@@ -64,6 +67,7 @@ class BadReturnLineCreate(BaseModel):
 
 
 class BadReturnCreate(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1, max_length=36)
@@ -75,6 +79,7 @@ class BadReturnCreate(BaseModel):
 
 
 class BadReturnSearch(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1, max_length=36)
@@ -94,6 +99,7 @@ class BadReturnSearch(BaseModel):
 
 
 class BadReturnCommand(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1, max_length=36)
@@ -112,6 +118,7 @@ class BadReturnWarehouseConfirm(BadReturnCommand):
 
 
 class ResolveReturnCategory(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1, max_length=36)
@@ -186,14 +193,27 @@ def search_return_obligations(
     body: ReturnObligationSearch,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_obligation", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_obligation")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/return-obligations/search', {**body.model_dump(exclude={"authorization_precondition"}), **{}},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     enforce_maintenance_project_access(db, project_id=body.project_id, ctx=ctx)
     try:
         payload = returns.search_return_obligations(
             db,
-            **body.model_dump(),
+            **body.model_dump(exclude={"authorization_precondition"}),
         )
         if payload is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
@@ -227,9 +247,22 @@ def get_project_return_rate(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_obligation", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_obligation")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'GET /api/maintenance/projects/stable/{project_id}/return-rate', {'project_id': project_id},
+                view=request.query_params.get("view"), precondition=request.query_params.get("authorization_precondition"))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     try:
         payload = returns.project_return_rate(db, project_id=project_id)
@@ -255,10 +288,23 @@ def get_project_return_rate(
 @router.get("/return-categories")
 def list_return_categories(
     db: Session = Depends(get_db),
-    _page: None = Depends(require_page("page_maintenance")),
-    _admin: str = Depends(require_admin),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_categories", "page_maintenance")),
+    _admin: str = Depends(auth_transport.legacy_gate("maintenance_return_categories", lambda ctx: require_admin(ctx.role))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_categories")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'GET /api/maintenance/return-categories', {},
+                view=request.query_params.get("view"), precondition=request.query_params.get("authorization_precondition"))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     """List stable category identities used by the admin-only resolution flow."""
 
     rows = list(
@@ -294,11 +340,24 @@ def search_bad_returns(
     body: BadReturnSearch,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_obligation", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_obligation")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/bad-returns/search', {**body.model_dump(exclude={"authorization_precondition"}), **{}},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     enforce_maintenance_project_access(db, project_id=body.project_id, ctx=ctx)
-    payload = returns.search_bad_returns(db, **body.model_dump())
+    payload = returns.search_bad_returns(db, **body.model_dump(exclude={"authorization_precondition"}))
     if payload is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
     record_access_log(
@@ -321,16 +380,29 @@ def create_bad_return(
     body: BadReturnCreate,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_obligation", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_return_obligation", require_action("action_maintenance_bad_return_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_obligation")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/bad-returns', {**body.model_dump(exclude={"authorization_precondition"}), **{}},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     enforce_maintenance_project_access(db, project_id=body.project_id, ctx=ctx)
     operator = _real_operator(db, ident)
     try:
         payload = returns.create_bad_return(
             db,
-            **body.model_dump(),
+            **body.model_dump(exclude={"authorization_precondition"}),
             operated_by=operator,
         )
         if payload is None:
@@ -369,6 +441,7 @@ def _transition(
             return_id=return_id,
             **body.model_dump(
                 exclude={
+                    "authorization_precondition",
                     "logistics_reference",
                     "warehouse_reference",
                     "inbound_reference",
@@ -402,10 +475,23 @@ def submit_bad_return(
     return_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_obligation", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_return_obligation", require_action("action_maintenance_bad_return_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_obligation")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/bad-returns/{return_id}/submit', {**body.model_dump(exclude={"authorization_precondition"}), **{'return_id': return_id}},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     return _transition(
         return_id=return_id,
         body=body,
@@ -422,10 +508,23 @@ def mark_bad_return_in_transit(
     return_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_obligation", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_return_obligation", require_action("action_maintenance_bad_return_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_obligation")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/bad-returns/{return_id}/in-transit', {**body.model_dump(exclude={"authorization_precondition"}), **{'return_id': return_id}},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     return _transition(
         return_id=return_id,
         body=body,
@@ -443,10 +542,23 @@ def warehouse_confirm_bad_return(
     return_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_obligation", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_return_obligation", require_action("action_maintenance_bad_return_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_obligation")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/bad-returns/{return_id}/warehouse-confirm', {**body.model_dump(exclude={"authorization_precondition"}), **{'return_id': return_id}},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     return _transition(
         return_id=return_id,
         body=body,
@@ -465,10 +577,23 @@ def void_bad_return(
     return_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_obligation", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_return_obligation", require_action("action_maintenance_bad_return_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_obligation")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/bad-returns/{return_id}/void', {**body.model_dump(exclude={"authorization_precondition"}), **{'return_id': return_id}},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     return _transition(
         return_id=return_id,
         body=body,
@@ -485,10 +610,23 @@ def resolve_return_category(
     obligation_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
-    _admin: str = Depends(require_admin),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_return_obligation", "page_maintenance")),
+    _admin: str = Depends(auth_transport.legacy_gate("maintenance_return_obligation", lambda ctx: require_admin(ctx.role))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_return_obligation")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/return-obligations/{obligation_id}/resolve-category', {**body.model_dump(exclude={"authorization_precondition"}), **{'obligation_id': obligation_id}},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     _enforce_return_obligation_access(
         db,
         obligation_id=obligation_id,
@@ -499,7 +637,7 @@ def resolve_return_category(
         payload = returns.resolve_obligation_category(
             db,
             obligation_id=obligation_id,
-            **body.model_dump(),
+            **body.model_dump(exclude={"authorization_precondition"}),
             operated_by=operator,
         )
         if payload is None:

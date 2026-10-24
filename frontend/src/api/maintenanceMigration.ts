@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
 
 export type MigrationRunStatus = "previewed" | "reconciled" | "approved";
@@ -270,22 +271,22 @@ export interface MigrationRunSummary {
   created_at: string;
 }
 
-export const previewMaintenanceMigration = (body: MigrationPreviewInput) =>
-  api.post<MigrationRunDetail>("/maintenance/migration-runs/preview", body);
+export const previewMaintenanceMigration = (body: MigrationPreviewInput, capture?: ContextRequestTransport) =>
+  domainApi(capture).post<MigrationRunDetail>("/maintenance/migration-runs/preview", body);
 
 export const searchMaintenanceMigrationRuns = (body: {
   statuses: MigrationRunStatus[];
   page: number;
   page_size: number;
-}) => api.post<{
+}, capture?: ContextRequestTransport) => domainApi(capture).post<{
   items: MigrationRunSummary[];
   total: number;
   page: number;
   page_size: number;
 }>("/maintenance/migration-runs/search", body);
 
-export const getMaintenanceMigrationRun = (runId: string) =>
-  api.get<MigrationRunDetail>(`/maintenance/migration-runs/${runId}`);
+export const getMaintenanceMigrationRun = (runId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<MigrationRunDetail>(`/maintenance/migration-runs/${runId}`);
 
 export const getMaintenanceMigrationEvidence = (
   runId: string,
@@ -294,14 +295,14 @@ export const getMaintenanceMigrationEvidence = (
     section: MigrationEvidenceSection;
     page: number;
     page_size: number;
-  },
-) => api.get<MigrationEvidencePage>(
+  }, capture?: ContextRequestTransport
+) => domainApi(capture).get<MigrationEvidencePage>(
   `/maintenance/migration-runs/${runId}/projects/${projectId}/evidence`,
   { params },
 );
 
-export const getMaintenanceMigrationManifest = (runId: string) =>
-  api.get<Record<string, unknown>>(`/maintenance/migration-runs/${runId}/manifest`);
+export const getMaintenanceMigrationManifest = (runId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<Record<string, unknown>>(`/maintenance/migration-runs/${runId}/manifest`);
 
 export const reconcileMaintenanceMigrationRun = (
   runId: string,
@@ -310,8 +311,8 @@ export const reconcileMaintenanceMigrationRun = (
     operation_key: string;
     reason: string;
     project_signoffs: MigrationProjectSignoff[];
-  },
-) => api.post<MigrationRunDetail>(
+  }, capture?: ContextRequestTransport
+) => domainApi(capture).post<MigrationRunDetail>(
   `/maintenance/migration-runs/${runId}/reconcile`,
   body,
 );
@@ -323,8 +324,8 @@ export const approveMaintenanceMigrationRun = (
     operation_key: string;
     reason: string;
     supplied_fingerprint: string;
-  },
-) => api.post<MigrationRunDetail>(
+  }, capture?: ContextRequestTransport
+) => domainApi(capture).post<MigrationRunDetail>(
   `/maintenance/migration-runs/${runId}/approve`,
   body,
 );

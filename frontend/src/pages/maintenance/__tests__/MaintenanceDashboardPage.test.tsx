@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 /** 维保数据看板页（R33/D-0022 + R34/D-0024）：五页签、金额遮蔽（不渲染而非 ¥0）、
  * 试算比例（默认 50% / 显式 0 / 自定义）、三域并列不相加、期间下单与每日消耗
  * （M01/M03）、返件明细下钻（M-AC09）、会话守卫（DL-010）、T4 当前累计口径、
@@ -721,9 +723,9 @@ describe("维保数据看板页", () => {
     expect(query().get("tab")).toBeNull();
     expect(query().get("ratio")).toBeNull();
     expect(fetchDashboardSummary).toHaveBeenCalledWith(
-      { range: "7d", value_retention_ratio: "0.5" },
+      { range: "7d", value_retention_ratio: "0.5" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     );
-    expect(fetchDashboardOrders).toHaveBeenCalledWith({ range: "7d" });
+    expect(fetchDashboardOrders).toHaveBeenCalledWith({ range: "7d" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     // 无业务日期实收以提示条单独说明（partial-missing 状态）
     expect(screen.getByTestId("overview-notes")).toHaveTextContent("无业务日期");
     // Sunny 01:20 裁定：无显式 ratio 默认按 50% 试算（不是待试算，更不是 ¥0）
@@ -762,11 +764,11 @@ describe("维保数据看板页", () => {
     fireEvent.click(screen.getByRole("tab", { name: "PN 排名与估价" }));
     await screen.findByText("MDDA-PN-1");
     expect(fetchDashboardParts).toHaveBeenCalledWith(
-      expect.objectContaining({ range: "7d", sort: "bad_receipt_qty_desc", page: 1, page_size: 20 }),
+      expect.objectContaining({ range: "7d", sort: "bad_receipt_qty_desc", page: 1, page_size: 20 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     );
     expect(fetchDashboardParts).toHaveBeenCalledWith(expect.not.objectContaining({
       value_retention_ratio: expect.anything(),
-    }));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(fetchDashboardValuation).not.toHaveBeenCalled();
     expect(screen.queryByRole("columnheader", { name: /坏件试算价值/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: /三域参考/ })).not.toBeInTheDocument();
@@ -788,7 +790,7 @@ describe("维保数据看板页", () => {
     renderPage("/maintenance/dashboard?tab=parts");
     await screen.findByText("MDDA-PN-1");
     expect(fetchDashboardValuation).toHaveBeenCalledWith(
-      expect.objectContaining({ value_retention_ratio: "0.5" }),
+      expect.objectContaining({ value_retention_ratio: "0.5" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     );
     expect(query().get("ratio")).toBeNull();
     const note = screen.getByTestId("valuation-policy-note");
@@ -815,7 +817,7 @@ describe("维保数据看板页", () => {
     fireEvent.click(screen.getByRole("button", { name: "恢复默认（50%）" }));
     await waitFor(() => expect(query().get("ratio")).toBeNull());
     await waitFor(() => expect(fetchDashboardValuation).toHaveBeenLastCalledWith(
-      expect.objectContaining({ value_retention_ratio: "0.5" }),
+      expect.objectContaining({ value_retention_ratio: "0.5" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     await waitFor(() => expect(screen.getByTestId("retention-ratio-state"))
       .toHaveTextContent("默认试算比例 50%"));
@@ -836,7 +838,7 @@ describe("维保数据看板页", () => {
     fireEvent.click(screen.getByRole("button", { name: "30%" }));
     await waitFor(() => expect(query().get("ratio")).toBe("0.3"));
     await waitFor(() => expect(fetchDashboardValuation).toHaveBeenCalledWith(
-      expect.objectContaining({ value_retention_ratio: "0.3" }),
+      expect.objectContaining({ value_retention_ratio: "0.3" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     // 政策响应回显实际比例值；默认文案退场，切到「当前试算比例」
     await waitFor(() => expect(screen.getByTestId("valuation-policy-note"))
@@ -854,7 +856,7 @@ describe("维保数据看板页", () => {
     // 导出参数随比例
     fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
     await waitFor(() => expect(downloadDashboardExport).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "parts", format: "csv", value_retention_ratio: "0.3" }),
+      expect.objectContaining({ kind: "parts", format: "csv", value_retention_ratio: "0.3" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
   });
 
@@ -901,7 +903,7 @@ describe("维保数据看板页", () => {
     await screen.findByText("MDDA-PN-1");
     expect(screen.getByTestId("retention-ratio-state")).toHaveTextContent("当前试算比例 0%");
     expect(fetchDashboardValuation).toHaveBeenCalledWith(
-      expect.objectContaining({ value_retention_ratio: "0" }),
+      expect.objectContaining({ value_retention_ratio: "0" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     );
     // 显式 0 保留在 URL（分享一致），不被默认覆盖
     expect(query().get("ratio")).toBe("0");
@@ -915,13 +917,13 @@ describe("维保数据看板页", () => {
     // M01 卡片与项目表
     expect(screen.getByTestId("kpi-order-qty").textContent).toContain("10");
     expect(screen.getByTestId("kpi-order-count").textContent).toContain("2");
-    expect(fetchDashboardOrders).toHaveBeenCalledWith({ range: "7d" });
+    expect(fetchDashboardOrders).toHaveBeenCalledWith({ range: "7d" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(fetchDashboardConsumption).toHaveBeenCalledWith(
-      expect.objectContaining({ page: 1, page_size: 20 }),
+      expect.objectContaining({ page: 1, page_size: 20 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     );
     expect(fetchDashboardConsumption).toHaveBeenCalledWith(expect.not.objectContaining({
       q: expect.anything(),
-    }));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     // M03：数量全计；金额只报已知小计 + 未计成本量/覆盖率/来源（M-AC02）
     expect(screen.getByTestId("kpi-consumption-qty").textContent).toContain("6");
     expect(screen.getByTestId("kpi-consumption-cost").textContent).toContain("90.4");
@@ -937,7 +939,7 @@ describe("维保数据看板页", () => {
     await waitFor(() => expect(fetchDashboardConsumptionIssues).toHaveBeenCalledWith(
       expect.objectContaining({
         issue_date: "2026-10-20", project_id: "p1", page: 1, page_size: 50,
-      }),
+      }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     expect(await screen.findByText("MDDA-PN-2")).toBeInTheDocument();
     // 两条领用行数量均计（4 + 2）；仅一条有已计成本，另一条标「未计成本」；
@@ -953,16 +955,16 @@ describe("维保数据看板页", () => {
     const ordersCard = screen.getByTestId("orders-cards").closest(".ant-card") as HTMLElement;
     fireEvent.click(within(ordersCard).getByRole("button", { name: "导出 CSV" }));
     await waitFor(() => expect(downloadDashboardExport).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "orders", format: "csv", range: "7d" }),
+      expect.objectContaining({ kind: "orders", format: "csv", range: "7d" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     const consumptionCard = screen.getByTestId("consumption-cards").closest(".ant-card") as HTMLElement;
     fireEvent.click(within(consumptionCard).getAllByRole("button", { name: "导出 CSV" })[0]);
     await waitFor(() => expect(downloadDashboardExport).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "consumption_daily", format: "csv" }),
+      expect.objectContaining({ kind: "consumption_daily", format: "csv" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     fireEvent.click(within(consumptionCard).getAllByRole("button", { name: "导出 CSV" })[1]);
     await waitFor(() => expect(downloadDashboardExport).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "consumption_issues", format: "csv" }),
+      expect.objectContaining({ kind: "consumption_issues", format: "csv" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
   });
 
@@ -1008,13 +1010,13 @@ describe("维保数据看板页", () => {
     // B-F10：q 下发给 quantity-checks（选择整单，不是局部裁剪 N/R）；
     // 搜索框在该页签可用（不再剥离 q）
     expect(fetchDashboardQuantityChecks).toHaveBeenCalledWith(
-      expect.objectContaining({ q: "ST" }),
+      expect.objectContaining({ q: "ST" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     );
     expect(screen.getByPlaceholderText("搜 PN / 描述")).toBeInTheDocument();
     // 导出与 API 同一筛选集（含 q）
     fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
     await waitFor(() => expect(downloadDashboardExport).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "quantity_checks", format: "csv", q: "ST" }),
+      expect.objectContaining({ kind: "quantity_checks", format: "csv", q: "ST" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
   });
 
@@ -1024,9 +1026,9 @@ describe("维保数据看板页", () => {
     await selectOption("时间范围", "近 30 天");
     await waitFor(() => expect(query().get("range")).toBe("30d"));
     await waitFor(() => expect(fetchDashboardSummary).toHaveBeenLastCalledWith(
-      { range: "30d", value_retention_ratio: "0.5" },
+      { range: "30d", value_retention_ratio: "0.5" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
-    await waitFor(() => expect(fetchDashboardOrders).toHaveBeenLastCalledWith({ range: "30d" }));
+    await waitFor(() => expect(fetchDashboardOrders).toHaveBeenLastCalledWith({ range: "30d" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("T2 项目对比：期间下单列并入对比，导出 CSV 用当前筛选集", async () => {
@@ -1035,23 +1037,23 @@ describe("维保数据看板页", () => {
     // M01 并入：项目一期间下单 8（1 单）
     expect(screen.getByRole("columnheader", { name: /期间下单量/ })).toBeInTheDocument();
     expect(screen.getAllByText("8").length).toBeGreaterThan(0);
-    expect(fetchDashboardOrders).toHaveBeenCalledWith({ range: "7d" });
+    expect(fetchDashboardOrders).toHaveBeenCalledWith({ range: "7d" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     // 比例参数照常下发（默认 0.5）：后端已接入该参数（独立复核实测
     // 默认 .5 / 显式 0 / 自定义 0.2 在表与 CSV/XLSX 一致），无缺口可说明
     expect(fetchDashboardProjects).toHaveBeenCalledWith(
-      expect.objectContaining({ value_retention_ratio: "0.5" }),
+      expect.objectContaining({ value_retention_ratio: "0.5" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     );
     fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
     await waitFor(() => expect(downloadDashboardExport).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "projects", format: "csv", range: "7d", value_retention_ratio: "0.5",
-      }),
+      }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     await waitFor(() => expect(screen.getByText(/已导出 maintenance-dashboard-projects\.csv/)).toBeInTheDocument());
     // 行内返件明细（M-AC09）：项目维度求交下钻
     fireEvent.click(screen.getByRole("button", { name: "查看 项目一 返件明细" }));
     await waitFor(() => expect(fetchDashboardReceipts).toHaveBeenCalledWith(
-      expect.objectContaining({ project: "p1", sort: "occurred_desc", page: 1, page_size: 20 }),
+      expect.objectContaining({ project: "p1", sort: "occurred_desc", page: 1, page_size: 20 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
   });
 
@@ -1073,7 +1075,7 @@ describe("维保数据看板页", () => {
     expect(within(ranking).queryByText("importer")).not.toBeInTheDocument();
     fireEvent.click(within(ranking).getByRole("button", { name: "查看 张三 登记的返件明细" }));
     await waitFor(() => expect(fetchDashboardReceipts).toHaveBeenCalledWith(
-      expect.objectContaining({ created_by: "zhangsan", sort: "occurred_desc", page: 1 }),
+      expect.objectContaining({ created_by: "zhangsan", sort: "occurred_desc", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     expect(await screen.findByText("返件明细：登记人 张三（zhangsan）")).toBeInTheDocument();
     const drawer = document.querySelector(".ant-drawer-content") as HTMLElement;
@@ -1092,7 +1094,7 @@ describe("维保数据看板页", () => {
       expect.objectContaining({
         project: "p1", value_retention_ratio: "0.5",
         sort: "occurred_desc", page: 1, page_size: 20,
-      }),
+      }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     expect(await screen.findByText("返件明细：项目一")).toBeInTheDocument();
     expect(await screen.findByText("MDDA-PN-2")).toBeInTheDocument();
@@ -1106,7 +1108,7 @@ describe("维保数据看板页", () => {
     await waitFor(() => expect(downloadDashboardExport).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "receipts", format: "csv", project: "p1", value_retention_ratio: "0.5",
-      }),
+      }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
   });
 
@@ -1122,7 +1124,7 @@ describe("维保数据看板页", () => {
       expect.objectContaining({
         range: "custom", date_from: "2026-10-18", date_to: "2026-10-18",
         value_retention_ratio: "0.5",
-      }),
+      }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     expect(await screen.findByText(/返件明细：2026-10-18/)).toBeInTheDocument();
   });
@@ -1135,14 +1137,14 @@ describe("维保数据看板页", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "查看 项目一 返件明细" }));
     await waitFor(() => expect(fetchDashboardReceipts).toHaveBeenCalledWith(
-      expect.objectContaining({ project: "p1" }),
+      expect.objectContaining({ project: "p1" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     // 绝不带原选集（p1,p2）或其他项目（p2）扩大范围
     expect(fetchDashboardReceipts).not.toHaveBeenCalledWith(
-      expect.objectContaining({ project: "p1,p2" }),
+      expect.objectContaining({ project: "p1,p2" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     );
     expect(fetchDashboardReceipts).not.toHaveBeenCalledWith(
-      expect.objectContaining({ project: "p2" }),
+      expect.objectContaining({ project: "p2" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     );
   });
 
@@ -1151,7 +1153,7 @@ describe("维保数据看板页", () => {
     await screen.findByText("MDDA-PN-1");
     fireEvent.click(screen.getByRole("button", { name: "查看 MDDA-PN-1 返件明细" }));
     await waitFor(() => expect(fetchDashboardReceipts).toHaveBeenCalledWith(
-      expect.objectContaining({ q: "MDDA-PN-1", value_retention_ratio: "0.5" }),
+      expect.objectContaining({ q: "MDDA-PN-1", value_retention_ratio: "0.5" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     expect(await screen.findByText(/返件明细：MDDA-PN-1/)).toBeInTheDocument();
     // 关闭 Drawer 回到原页签视图（返回状态保留：URL 未被改写）
@@ -1172,7 +1174,7 @@ describe("维保数据看板页", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "查看 项目一 返件明细" }));
     await waitFor(() => expect(fetchDashboardReceipts).toHaveBeenCalledWith(
-      expect.not.objectContaining({ value_retention_ratio: expect.anything() }),
+      expect.not.objectContaining({ value_retention_ratio: expect.anything() }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     expect(await screen.findByText("MDDA-PN-2")).toBeInTheDocument();
     expect(screen.queryByRole("columnheader", { name: /试算价值/ })).not.toBeInTheDocument();
@@ -1199,7 +1201,8 @@ describe("维保数据看板页", () => {
     fetchDashboardOptions.mockImplementationOnce(
       () => new Promise<DashboardOptions>((resolve) => { resolveOptions = resolve; }),
     );
-    renderPage();
+    const mounted = renderPage();
+    await waitFor(() => expect(fetchDashboardOptions).toHaveBeenCalledTimes(1));
     // 静默换号后 A 的 options 才返回（迟到）
     localStorage.setItem("token", "token-b");
     await act(async () => { resolveOptions(optionsWithAmounts); });
@@ -1215,6 +1218,9 @@ describe("维保数据看板页", () => {
     }, { timeout: 5000 });
     // 失活不是禁用功能：按当前会话刷新即恢复（正向对照）
     fireEvent.click(within(stale).getByRole("button", { name: /刷\s*新/ }));
+    // BrowserRouter navigate(0) reloads the document. Model that explicit reload in MemoryRouter.
+    mounted.unmount();
+    renderPage();
     await waitFor(
       () => expect(screen.getByTestId("kpi-receipt").textContent).toContain("3"),
       { timeout: 5000 },
@@ -1335,10 +1341,10 @@ describe("维保数据看板页", () => {
     renderPage("/maintenance/dashboard?tab=consumption&q=ST");
     await screen.findByTestId("consumption-cards");
     expect(fetchDashboardOrders).toHaveBeenCalledWith(
-      expect.not.objectContaining({ q: expect.anything() }),
+      expect.not.objectContaining({ q: expect.anything() }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     );
     expect(fetchDashboardConsumption).toHaveBeenCalledWith(
-      expect.not.objectContaining({ q: expect.anything() }),
+      expect.not.objectContaining({ q: expect.anything() }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     );
     // 卡片：平面 issued null → 「混合单位」+ 分桶行；金额 22.60 是跨单位同币种小计
     const qtyCard = screen.getByTestId("kpi-consumption-qty");
@@ -1753,3 +1759,10 @@ describe("B2 独立反馈（B2-F01~F05）", () => {
     expect(rate).toHaveTextContent("混合单位：分子分母不可跨单位加总");
   });
 });
+
+// Existing page behavior runs under the explicit legacy authorization mode.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(),
+  useAuthz: () => useState(legacyAuthorizationState)[0],
+}));
+beforeEach(() => prepareLegacyPageFixture());

@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../test/legacyAuthorization";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "../../test/antdRender";
 
@@ -1391,3 +1392,8 @@ describe("作废预演（Codex 复审：预算跳过 / 同名文件 / 清单上�
     expect(uploadImportBatch).not.toHaveBeenCalled();
   });
 });
+
+vi.mock("../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

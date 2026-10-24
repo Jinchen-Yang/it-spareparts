@@ -110,21 +110,22 @@ def canonical_management_required(db: Session) -> bool:
     return (authorization_mode() == "unified_modules"
             or db.scalar(select(SysAuthorizationCutover.resource).limit(1)) is not None
             or db.scalar(select(SysAuthorizationMigrationReceipt.entity_id).where(
-                SysAuthorizationMigrationReceipt.migration_key == 'authz_s2',
+                SysAuthorizationMigrationReceipt.migration_key.in_(('authz_s2', 'authz_s3')),
                 SysAuthorizationMigrationReceipt.entity_kind == 'artifact_protocol').limit(1)) is not None)
 
 
-def mark_artifact_protocol_used(bind: Engine) -> None:
+def mark_artifact_protocol_used(bind: Engine, *, protocol: str = 'authz_s2') -> None:
     """Commit the format marker before publishing any unified filesystem artifact.
 
     Independent of a later request rollback: once new-format bytes may exist,
     withdrawing configuration or downgrading must not restore a legacy reader.
     """
     from app.models.authorization import SysAuthorizationMigrationReceipt
-    if not isinstance(bind, Engine):
+    if not isinstance(bind, Engine) or protocol not in ('authz_s2', 'authz_s3'):
         raise ValueError('产物权威标记必须使用独立引擎事务')
     with Session(bind) as db, db.begin():
         db.execute(insert(SysAuthorizationMigrationReceipt).values(
-            migration_key='authz_s2', entity_kind='artifact_protocol', entity_id='global',
-            before_state={}, after_state={'schema_version': 1, 'authority': 'unified_modules'},
+            migration_key=protocol, entity_kind='artifact_protocol', entity_id='global',
+            before_state={}, after_state={'schema_version': 2 if protocol == 'authz_s3' else 1,
+                                          'authority': 'unified_modules'},
         ).on_conflict_do_nothing(index_elements=['migration_key', 'entity_kind', 'entity_id']))

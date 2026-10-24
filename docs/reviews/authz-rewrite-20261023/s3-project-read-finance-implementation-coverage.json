@@ -1,0 +1,1693 @@
+{
+  "scope": "project_read_finance",
+  "expected_total": 94,
+  "actual_total": 94,
+  "meaning": "Registry metadata is not implementation evidence. Pass status requires live PG/PDP HTTP/SQL or concurrency tests; pending remain open. No production or CI completion claim.",
+  "additional_shared_facades": [
+    {
+      "facade": "maintenance_project_assignments.assignment_command",
+      "entries": [
+        "POST /api/maintenance/projects/stable/{project_id}/manager-assignment",
+        "POST /api/maintenance/project-manager-assignments/{assignment_id}/archive"
+      ],
+      "tests": "backend/tests/test_authz_s3_assignment_commands.py",
+      "status": "semantic_tests_passed"
+    },
+    {
+      "facade": "maintenance_project_assignments.read_manager_directory",
+      "entry": "POST /api/maintenance/project-manager-assignments/search",
+      "status": "semantic_tests_passed",
+      "tests": "backend/tests/test_authz_s3_assignment_commands.py"
+    }
+  ],
+  "entries": [
+    {
+      "entry_id": "GET /api/maintenance/analytics/explorer",
+      "source": "backend/app/api/maintenance_analytics.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_analysis_access.read",
+      "query_or_lock_boundary": "Plan SQL before aggregate/count/page; same RR fields/filters; all/unassigned only unconditional actual plan",
+      "semantic_test_file": "backend/tests/test_authz_s3_analysis.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_analysis",
+          "action": "read_explorer"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/filter-options",
+      "source": "backend/app/api/maintenance_analytics.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_analysis_access.read",
+      "query_or_lock_boundary": "Plan SQL before aggregate/count/page; same RR fields/filters; all/unassigned only unconditional actual plan",
+      "semantic_test_file": "backend/tests/test_authz_s3_analysis.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_analysis",
+          "action": "read_filter_options"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/pn-ranking",
+      "source": "backend/app/api/maintenance_analytics.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_analysis_access.read",
+      "query_or_lock_boundary": "Plan SQL before aggregate/count/page; same RR fields/filters; all/unassigned only unconditional actual plan",
+      "semantic_test_file": "backend/tests/test_authz_s3_analysis.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_analysis",
+          "action": "read_pn_ranking"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/spend-trend",
+      "source": "backend/app/api/maintenance_analytics.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_analysis_access.read",
+      "query_or_lock_boundary": "Plan SQL before aggregate/count/page; same RR fields/filters; all/unassigned only unconditional actual plan",
+      "semantic_test_file": "backend/tests/test_authz_s3_analysis.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_analysis",
+          "action": "read_spend_trend"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/match-audit",
+      "source": "backend/app/api/maintenance_audit.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_diagnostics_access.read_match_audit",
+      "query_or_lock_boundary": "registered global collection; live explicit action before diagnostic facts",
+      "semantic_test_file": "backend/tests/test_authz_s3_diagnostics.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_audit",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "PATCH /api/maintenance/projects/stable/collections/{collection_id}",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_finance_access.execute",
+      "query_or_lock_boundary": "actual parent/input proof; full domain locks then actor SHARE; live recheck; projection before commit",
+      "semantic_test_file": "backend/tests/test_authz_s3_finance.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_collection",
+          "action": "update"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/collections",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_finance_access.execute",
+      "query_or_lock_boundary": "actual parent/input proof; full domain locks then actor SHARE; live recheck; projection before commit",
+      "semantic_test_file": "backend/tests/test_authz_s3_finance.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_collection",
+          "action": "create"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/workspace",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_read_access.read_workspace",
+      "query_or_lock_boundary": "six independent resources; denied block facts short circuit; own fields; same RR",
+      "semantic_test_file": "backend/tests/test_authz_s3_workspace.py",
+      "bindings": [
+        {
+          "composite": {
+            "entry_id": "GET /api/maintenance/projects/stable/{project_id}/workspace",
+            "admission": "OR of the actual requested allow blocks; all-denied 403. Missing enabled canonical resource/runtime fault is whole 503. No fallback to legacy fields.",
+            "blocks": [
+              {
+                "id": "project_identity",
+                "require": [
+                  "maintenance_project",
+                  "read"
+                ],
+                "payload": [
+                  "project stable descriptive metadata"
+                ],
+                "denied": "project retains only stable supplied project_id locator; no descriptions, assignments or contract values"
+              },
+              {
+                "id": "operation_summary",
+                "require": [
+                  "maintenance_project_operations",
+                  "read_workspace"
+                ],
+                "payload": [
+                  "project.metrics",
+                  "project.manager_tracking",
+                  "project.task_summary",
+                  "project.reminder_count",
+                  "reminders",
+                  "return_rate",
+                  "completeness"
+                ],
+                "denied": "summary objects=null, reminders=[], counts=null; no underlying aggregation SQL",
+                "fields": "Exact same-resource C/F guards, including ratio/status/colour/completeness/amount-derived signals. This intentionally grants aggregate HealthBand, never raw financial rows."
+              },
+              {
+                "id": "contracts",
+                "require": [
+                  "maintenance_contract",
+                  "read"
+                ],
+                "payload": [
+                  "project.contracts"
+                ],
+                "denied": "project.contracts=[]; no contract row SQL; independent aggregate total can still exist under operation_summary"
+              },
+              {
+                "id": "collection_snapshots",
+                "require": [
+                  "maintenance_collection",
+                  "read_snapshots"
+                ],
+                "payload": [
+                  "collection_snapshots"
+                ],
+                "denied": "{rows:[],total:null,restricted:true}; no snapshot rows/count SQL"
+              },
+              {
+                "id": "requisitions",
+                "require": [
+                  "maintenance_issue",
+                  "read_workspace"
+                ],
+                "payload": [
+                  "requisitions"
+                ],
+                "denied": "{rows:[],total:null,restricted:true}; no requisition rows/count SQL"
+              },
+              {
+                "id": "approved_expenses",
+                "require": [
+                  "maintenance_expense",
+                  "read_workspace"
+                ],
+                "payload": [
+                  "approved_expenses"
+                ],
+                "denied": "{rows:[],total:null,restricted:true}; same when own F absent because original full rows are financial; no expense row/count SQL"
+              }
+            ],
+            "block_access": "Fixed block IDs above → S1 Decision. Only describes this projection, not a reusable Grant.",
+            "workbook_preview": "Structural sheet names/protocol may remain. overview.row_count is null unless contracts AND collection_snapshots allowed; site_requisitions row_count requires requisitions, approved_expenses requires its own allow+F, manager_tracking requires operation_summary. Denied totals never coerced to zero. It is not a file-download capability.",
+            "not_a_block": "No current top-level cost_gaps exists. maintenance_cost_fill.read_workspace may be retired from this entry unless implementation exposes a separately requested real diagnostic block; do not invoke it merely to obtain summary cost counts.",
+            "revision": "workbook_revision/data_version are business OCC, not authorization_revision; fingerprint never confers data rights."
+          }
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/collection-milestones/{milestone_id}/evidence",
+      "source": "backend/app/api/maintenance_collection_evidence.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_collection_followup_access.read/record/evidence_read/evidence_upload",
+      "query_or_lock_boundary": "project plan before count/page; own planned-amount projection; actual milestone/contract/parent plus bytes-bound upload; domain locks then actor and atomic close",
+      "semantic_test_file": "backend/tests/test_authz_s3_collection_followup.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_collection_followup",
+          "action": "evidence_read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/collection-milestones/{milestone_id}/evidence",
+      "source": "backend/app/api/maintenance_collection_evidence.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_collection_followup_access.read/record/evidence_read/evidence_upload",
+      "query_or_lock_boundary": "project plan before count/page; own planned-amount projection; actual milestone/contract/parent plus bytes-bound upload; domain locks then actor and atomic close",
+      "semantic_test_file": "backend/tests/test_authz_s3_collection_followup.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_collection_followup",
+          "action": "evidence_upload"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/collection-milestones/{milestone_id}/follow-ups",
+      "source": "backend/app/api/maintenance_collection_reminders.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_collection_followup_access.read/record/evidence_read/evidence_upload",
+      "query_or_lock_boundary": "project plan before count/page; own planned-amount projection; actual milestone/contract/parent plus bytes-bound upload; domain locks then actor and atomic close",
+      "semantic_test_file": "backend/tests/test_authz_s3_collection_followup.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_collection_followup",
+          "action": "record"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/collection-reminders/search",
+      "source": "backend/app/api/maintenance_collection_reminders.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_collection_followup_access.read/record/evidence_read/evidence_upload",
+      "query_or_lock_boundary": "project plan before count/page; own planned-amount projection; actual milestone/contract/parent plus bytes-bound upload; domain locks then actor and atomic close",
+      "semantic_test_file": "backend/tests/test_authz_s3_collection_followup.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_collection_followup_directory",
+          "action": "search"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/collection-milestones",
+      "source": "backend/app/api/maintenance_collection_reminders.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_collection_followup_access.read/record/evidence_read/evidence_upload",
+      "query_or_lock_boundary": "project plan before count/page; own planned-amount projection; actual milestone/contract/parent plus bytes-bound upload; domain locks then actor and atomic close",
+      "semantic_test_file": "backend/tests/test_authz_s3_collection_followup.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_collection_followup",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/collection-plan-imports/preview",
+      "source": "backend/app/api/maintenance_collection_plan_imports.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_collection_plan_access.preview/apply/read",
+      "query_or_lock_boundary": "bytes and complete immutable plan sidecar; current independent owner/all reader contract; whole-plan domain locks then actor SHARE; atomic files+metadata rollback",
+      "semantic_test_file": "backend/tests/test_authz_s3_collection_plan.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_collection_plan_import",
+          "action": "preview"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/collection-plan-imports/{batch_id}/apply",
+      "source": "backend/app/api/maintenance_collection_plan_imports.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_collection_plan_access.preview/apply/read",
+      "query_or_lock_boundary": "bytes and complete immutable plan sidecar; current independent owner/all reader contract; whole-plan domain locks then actor SHARE; atomic files+metadata rollback",
+      "semantic_test_file": "backend/tests/test_authz_s3_collection_plan.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_collection_plan_import",
+          "action": "apply"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/collection-plan-imports/{batch_id}/binding-options",
+      "source": "backend/app/api/maintenance_collection_plan_imports.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_collection_plan_access.preview/apply/read",
+      "query_or_lock_boundary": "bytes and complete immutable plan sidecar; current independent owner/all reader contract; whole-plan domain locks then actor SHARE; atomic files+metadata rollback",
+      "semantic_test_file": "backend/tests/test_authz_s3_collection_plan.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_collection_plan_import_read",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/collection-plan-imports/{batch_id}/source-file",
+      "source": "backend/app/api/maintenance_collection_plan_imports.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_collection_plan_access.preview/apply/read",
+      "query_or_lock_boundary": "bytes and complete immutable plan sidecar; current independent owner/all reader contract; whole-plan domain locks then actor SHARE; atomic files+metadata rollback",
+      "semantic_test_file": "backend/tests/test_authz_s3_collection_plan.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_collection_plan_import_read",
+          "action": "raw_download"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "PATCH /api/maintenance/projects/stable/contracts/{project_contract_id}",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_finance_access.execute",
+      "query_or_lock_boundary": "complete resync domain closure before actor SHARE; locked current grant and own fields; atomic failure",
+      "semantic_test_file": "backend/tests/test_authz_s3_finance.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_contract",
+          "action": "update"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/contracts/{project_contract_id}/archive",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_finance_access.execute",
+      "query_or_lock_boundary": "complete resync domain closure before actor SHARE; locked current grant and own fields; atomic failure",
+      "semantic_test_file": "backend/tests/test_authz_s3_finance.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_contract",
+          "action": "archive"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/contracts",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_finance_access.execute",
+      "query_or_lock_boundary": "complete resync domain closure before actor SHARE; locked current grant and own fields; atomic failure",
+      "semantic_test_file": "backend/tests/test_authz_s3_finance.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_contract",
+          "action": "create"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/board",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_cost_access.read/prepare_export",
+      "query_or_lock_boundary": "source-sales SQL predicate before aggregate/page/count; hidden costs never selected; same RR materialization and streamed provenance checks",
+      "semantic_test_file": "backend/tests/test_authz_s3_source_cost.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_contract_cost",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/board/export",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_cost_access.read/prepare_export",
+      "query_or_lock_boundary": "source-sales SQL predicate before aggregate/page/count; hidden costs never selected; same RR materialization and streamed provenance checks",
+      "semantic_test_file": "backend/tests/test_authz_s3_source_cost.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_contract_cost",
+          "action": "export"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/as-of",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_diagnostics_access.read_business_date",
+      "query_or_lock_boundary": "registered global collection; live explicit action before diagnostic facts",
+      "semantic_test_file": "backend/tests/test_authz_s3_diagnostics.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_business_date",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/export",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_cost_access.read/prepare_export",
+      "query_or_lock_boundary": "source-sales SQL predicate before aggregate/page/count; hidden costs never selected; same RR materialization and streamed provenance checks",
+      "semantic_test_file": "backend/tests/test_authz_s3_source_cost.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost",
+          "action": "export_summary"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/export-workbook",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_global_workbook_authorization.read",
+      "query_or_lock_boundary": "exact full-source field contract; SQL before workbook rendering in one RR; bounded complete spool; current grant and real source relations rechecked before headers and each chunk",
+      "semantic_test_file": "backend/tests/test_authz_s3_global_workbooks.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost",
+          "action": "export_workbook"
+        }
+      ],
+      "independent_review": {
+        "report": "docs/reviews/authz-rewrite-20261023/s3-global-independent-review.md",
+        "test_files": [
+          "backend/tests/test_authz_s3_global_independent.py"
+        ],
+        "assertions": [
+          "post-render current Grant/fields revoked rejects release",
+          "post-render actual source reparent invalidates proof",
+          "denied release closes complete spool"
+        ]
+      }
+    },
+    {
+      "entry_id": "GET /api/maintenance/export-workbooks",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_global_workbook_authorization.read",
+      "query_or_lock_boundary": "exact full-source field contract; SQL before workbook rendering in one RR; bounded complete spool; current grant and real source relations rechecked before headers and each chunk",
+      "semantic_test_file": "backend/tests/test_authz_s3_global_workbooks.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost",
+          "action": "export_workbook"
+        }
+      ],
+      "independent_review": {
+        "report": "docs/reviews/authz-rewrite-20261023/s3-global-independent-review.md",
+        "test_files": [
+          "backend/tests/test_authz_s3_global_independent.py"
+        ],
+        "assertions": [
+          "post-render current Grant/fields revoked rejects release",
+          "post-render actual source reparent invalidates proof",
+          "denied release closes complete spool"
+        ]
+      }
+    },
+    {
+      "entry_id": "GET /api/maintenance/lines",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_cost_access.read/prepare_export",
+      "query_or_lock_boundary": "source-sales SQL predicate before aggregate/page/count; hidden costs never selected; same RR materialization and streamed provenance checks",
+      "semantic_test_file": "backend/tests/test_authz_s3_source_cost.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost",
+          "action": "read_lines"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/lines/export",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_cost_access.read/prepare_export",
+      "query_or_lock_boundary": "source-sales SQL predicate before aggregate/page/count; hidden costs never selected; same RR materialization and streamed provenance checks",
+      "semantic_test_file": "backend/tests/test_authz_s3_source_cost.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost",
+          "action": "export_lines"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/orders/export",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_global_workbook_authorization.read",
+      "query_or_lock_boundary": "exact full-source field contract; SQL before workbook rendering in one RR; bounded complete spool; current grant and real source relations rechecked before headers and each chunk",
+      "semantic_test_file": "backend/tests/test_authz_s3_global_workbooks.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost",
+          "action": "export_orders"
+        }
+      ],
+      "independent_review": {
+        "report": "docs/reviews/authz-rewrite-20261023/s3-global-independent-review.md",
+        "test_files": [
+          "backend/tests/test_authz_s3_global_independent.py"
+        ],
+        "assertions": [
+          "post-render current Grant/fields revoked rejects release",
+          "post-render actual source reparent invalidates proof",
+          "denied release closes complete spool"
+        ]
+      }
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_cost_access.read/prepare_export",
+      "query_or_lock_boundary": "source-sales SQL predicate before aggregate/page/count; hidden costs never selected; same RR materialization and streamed provenance checks",
+      "semantic_test_file": "backend/tests/test_authz_s3_source_cost.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost",
+          "action": "read_projects"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/recompute",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_global_workbook_authorization.recompute",
+      "query_or_lock_boundary": "actual full global source and site closure; all domain work before final actor/PDP; late revocation rolls back facts",
+      "semantic_test_file": "backend/tests/test_authz_s3_global_workbooks.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost",
+          "action": "recompute"
+        }
+      ],
+      "independent_review": {
+        "report": "docs/reviews/authz-rewrite-20261023/s3-global-independent-review.md",
+        "test_files": [
+          "backend/tests/test_authz_s3_global_independent.py"
+        ],
+        "assertions": [
+          "post-render current Grant/fields revoked rejects release",
+          "post-render actual source reparent invalidates proof",
+          "denied release closes complete spool"
+        ]
+      }
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/site-issue-costs/backfill",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_operation_backfill_access.execute",
+      "query_or_lock_boundary": "complete global target metadata and input digest; every actual old/new parent; no-parent real subject not empty; domain locks then final actor; late revoke full rollback",
+      "semantic_test_file": "backend/tests/test_authz_s3_operation_backfills.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost_fill",
+          "action": "backfill"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/cost-gaps",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_read_access.read_cost_gaps",
+      "query_or_lock_boundary": "same RR actual project; own resource fields; independent action",
+      "semantic_test_file": "backend/tests/test_authz_s3_workspace.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost_fill",
+          "action": "read_gaps"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "PATCH /api/maintenance/projects/stable/{project_id}/cost-gaps",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_finance_access.execute",
+      "query_or_lock_boundary": "actual child/current parent before lookup; complete domain locks then actor SHARE; recheck before projection/commit",
+      "semantic_test_file": "backend/tests/test_authz_s3_finance.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost_fill",
+          "action": "fill"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/cost-gaps/recompute",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_finance_access.execute",
+      "query_or_lock_boundary": "actual child/current parent before lookup; complete domain locks then actor SHARE; recheck before projection/commit",
+      "semantic_test_file": "backend/tests/test_authz_s3_finance.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost_fill",
+          "action": "recompute"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/roundtrip-import",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_roundtrip_authorization.apply",
+      "query_or_lock_boundary": "actual bytes + full intents and global recompute closure; stable owner receipt with immutable operations and raw file; final actor/PDP before commit; atomic archive cleanup",
+      "semantic_test_file": "backend/tests/test_authz_s3_roundtrip.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost_roundtrip",
+          "action": "apply"
+        }
+      ],
+      "independent_review": {
+        "report": "docs/reviews/authz-rewrite-20261023/s3-roundtrip-independent-review.md",
+        "test_files": [
+          "backend/tests/test_authz_s3_roundtrip_independent.py"
+        ],
+        "assertions": [
+          "actual raw metadata tamper rejects replay",
+          "second publication failure preserves first committed archive",
+          "field-only revocation before commit rolls back all facts and receipt"
+        ]
+      }
+    },
+    {
+      "entry_id": "GET /api/maintenance/roundtrip-template",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_global_workbook_authorization.read",
+      "query_or_lock_boundary": "exact full-source field contract; SQL before workbook rendering in one RR; bounded complete spool; current grant and real source relations rechecked before headers and each chunk",
+      "semantic_test_file": "backend/tests/test_authz_s3_global_workbooks.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost_roundtrip",
+          "action": "template_download"
+        }
+      ],
+      "independent_review": {
+        "report": "docs/reviews/authz-rewrite-20261023/s3-global-independent-review.md",
+        "test_files": [
+          "backend/tests/test_authz_s3_global_independent.py"
+        ],
+        "assertions": [
+          "post-render current Grant/fields revoked rejects release",
+          "post-render actual source reparent invalidates proof",
+          "denied release closes complete spool"
+        ]
+      }
+    },
+    {
+      "entry_id": "GET /api/maintenance/roundtrip-templates",
+      "source": "backend/app/api/maintenance.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_global_workbook_authorization.read",
+      "query_or_lock_boundary": "exact full-source field contract; SQL before workbook rendering in one RR; bounded complete spool; current grant and real source relations rechecked before headers and each chunk",
+      "semantic_test_file": "backend/tests/test_authz_s3_global_workbooks.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_cost_roundtrip",
+          "action": "template_download"
+        }
+      ],
+      "independent_review": {
+        "report": "docs/reviews/authz-rewrite-20261023/s3-global-independent-review.md",
+        "test_files": [
+          "backend/tests/test_authz_s3_global_independent.py"
+        ],
+        "assertions": [
+          "post-render current Grant/fields revoked rejects release",
+          "post-render actual source reparent invalidates proof",
+          "denied release closes complete spool"
+        ]
+      }
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/maintenance-dashboard/consumption",
+      "source": "backend/app/api/maintenance_dashboard.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_dashboard_access.read",
+      "query_or_lock_boundary": "Plan SQL before source/issue/receipt facts; same RR independent action and own F projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_dashboard.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_dashboard",
+          "action": "read_consumption"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/maintenance-dashboard/consumption/issues",
+      "source": "backend/app/api/maintenance_dashboard.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_dashboard_access.read",
+      "query_or_lock_boundary": "Plan SQL before source/issue/receipt facts; same RR independent action and own F projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_dashboard.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_dashboard",
+          "action": "read_consumption_issues"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/maintenance-dashboard/export",
+      "source": "backend/app/api/maintenance_dashboard.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_dashboard_access.prepare_export",
+      "query_or_lock_boundary": "kind read AND export; sameRR SQL/field materialization; generated schema2 lineage; headers and each chunk revalidate",
+      "semantic_test_file": "backend/tests/test_authz_s3_dashboard.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_dashboard",
+          "action": "export",
+          "branches": [
+            {
+              "when": {
+                "query.kind": "projects"
+              },
+              "require": [
+                "maintenance_dashboard",
+                "read_projects"
+              ]
+            },
+            {
+              "when": {
+                "query.kind": "parts"
+              },
+              "require": [
+                "maintenance_dashboard",
+                "read_parts"
+              ]
+            },
+            {
+              "when": {
+                "query.kind": "receipts"
+              },
+              "require": [
+                "maintenance_dashboard",
+                "read_receipts"
+              ]
+            },
+            {
+              "when": {
+                "query.kind": "quantity_checks"
+              },
+              "require": [
+                "maintenance_dashboard",
+                "read_quantity_checks"
+              ]
+            },
+            {
+              "when": {
+                "query.kind": "orders"
+              },
+              "require": [
+                "maintenance_dashboard",
+                "read_orders"
+              ]
+            },
+            {
+              "when": {
+                "query.kind": "consumption_daily"
+              },
+              "require": [
+                "maintenance_dashboard",
+                "read_consumption"
+              ]
+            },
+            {
+              "when": {
+                "query.kind": "consumption_issues"
+              },
+              "require": [
+                "maintenance_dashboard",
+                "read_consumption_issues"
+              ]
+            }
+          ],
+          "additional_field_rules": "Current own F controls financial columns. Supplying valuation retention ratio additionally requires adjust_valuation_parameters; never obtains fields from another resource.",
+          "conditional_action": {
+            "when": "value_retention_ratio explicitly present",
+            "require": [
+              "maintenance_dashboard",
+              "adjust_valuation_parameters"
+            ]
+          }
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/maintenance-dashboard/options",
+      "source": "backend/app/api/maintenance_dashboard.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_dashboard_access.read",
+      "query_or_lock_boundary": "Plan SQL before source/issue/receipt facts; same RR independent action and own F projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_dashboard.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_dashboard",
+          "action": "read_options"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/maintenance-dashboard/orders",
+      "source": "backend/app/api/maintenance_dashboard.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_dashboard_access.read",
+      "query_or_lock_boundary": "Plan SQL before source/issue/receipt facts; same RR independent action and own F projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_dashboard.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_dashboard",
+          "action": "read_orders"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/maintenance-dashboard/parts",
+      "source": "backend/app/api/maintenance_dashboard.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_dashboard_access.read",
+      "query_or_lock_boundary": "Plan SQL before source/issue/receipt facts; same RR independent action and own F projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_dashboard.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_dashboard",
+          "action": "read_parts",
+          "conditional_action": {
+            "when": "value_retention_ratio explicitly present",
+            "require": [
+              "maintenance_dashboard",
+              "adjust_valuation_parameters"
+            ]
+          }
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/maintenance-dashboard/projects",
+      "source": "backend/app/api/maintenance_dashboard.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_dashboard_access.read",
+      "query_or_lock_boundary": "Plan SQL before source/issue/receipt facts; same RR independent action and own F projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_dashboard.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_dashboard",
+          "action": "read_projects",
+          "conditional_action": {
+            "when": "value_retention_ratio explicitly present",
+            "require": [
+              "maintenance_dashboard",
+              "adjust_valuation_parameters"
+            ]
+          }
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/maintenance-dashboard/quantity-checks",
+      "source": "backend/app/api/maintenance_dashboard.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_dashboard_access.read",
+      "query_or_lock_boundary": "Plan SQL before source/issue/receipt facts; same RR independent action and own F projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_dashboard.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_dashboard",
+          "action": "read_quantity_checks"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/maintenance-dashboard/receipts",
+      "source": "backend/app/api/maintenance_dashboard.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_dashboard_access.read",
+      "query_or_lock_boundary": "Plan SQL before source/issue/receipt facts; same RR independent action and own F projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_dashboard.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_dashboard",
+          "action": "read_receipts",
+          "conditional_action": {
+            "when": "value_retention_ratio explicitly present",
+            "require": [
+              "maintenance_dashboard",
+              "adjust_valuation_parameters"
+            ]
+          }
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/maintenance-dashboard/summary",
+      "source": "backend/app/api/maintenance_dashboard.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_dashboard_access.read",
+      "query_or_lock_boundary": "Plan SQL before source/issue/receipt facts; same RR independent action and own F projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_dashboard.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_dashboard",
+          "action": "read_summary",
+          "conditional_action": {
+            "when": "value_retention_ratio explicitly present",
+            "require": [
+              "maintenance_dashboard",
+              "adjust_valuation_parameters"
+            ]
+          }
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/analytics/maintenance-dashboard/valuation",
+      "source": "backend/app/api/maintenance_dashboard.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_dashboard_access.read",
+      "query_or_lock_boundary": "Plan SQL before source/issue/receipt facts; same RR independent action and own F projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_dashboard.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_dashboard",
+          "action": "read_valuation",
+          "conditional_action": {
+            "when": "value_retention_ratio explicitly present",
+            "require": [
+              "maintenance_dashboard",
+              "adjust_valuation_parameters"
+            ]
+          }
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/expense-attribution/backfill",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_operation_backfill_access.execute",
+      "query_or_lock_boundary": "complete global target metadata and input digest; every actual old/new parent; no-parent real subject not empty; domain locks then final actor; late revoke full rollback",
+      "semantic_test_file": "backend/tests/test_authz_s3_operation_backfills.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_expense",
+          "action": "backfill"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "PATCH /api/maintenance/projects/stable/expenses/{expense_id}/status",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_finance_access.execute",
+      "query_or_lock_boundary": "actual child/current parent before lookup; complete domain locks then actor SHARE; recheck before projection/commit",
+      "semantic_test_file": "backend/tests/test_authz_s3_finance.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_expense",
+          "action": "update_status"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/expenses",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_finance_access.execute",
+      "query_or_lock_boundary": "actual parent/input proof; full domain locks then actor SHARE; live recheck; projection before commit",
+      "semantic_test_file": "backend/tests/test_authz_s3_finance.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_expense",
+          "action": "create"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "PUT /api/maintenance/projects/stable/{project_id}/expenses/readiness",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_finance_access.execute",
+      "query_or_lock_boundary": "actual parent/input proof; full domain locks then actor SHARE; live recheck; projection before commit",
+      "semantic_test_file": "backend/tests/test_authz_s3_finance.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_expense",
+          "action": "mark_readiness"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/reconcile/expenses",
+      "source": "backend/app/api/maintenance_expense_reconcile.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_diagnostics_access.read_expense_reconcile",
+      "query_or_lock_boundary": "registered global collection; live explicit action before diagnostic facts",
+      "semantic_test_file": "backend/tests/test_authz_s3_diagnostics.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_expense_reconcile",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/front-stock",
+      "source": "backend/app/api/maintenance_front_stock.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_read_access.read_front_stock",
+      "query_or_lock_boundary": "same RR object check and cost projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_workspace.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_front_stock",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "PATCH /api/maintenance/projects/stable/site-issues/{issue_id}/status",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "update_status"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/site-issues",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "create"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/site-issues/manual/preview",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "preview_manual"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "PATCH /api/maintenance/site-issues/manual/{issue_id}",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "update_manual"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/site-issues/projects/{project_id}",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "create"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/site-issues/projects/{project_id}/candidates/search",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "read_candidates"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/site-issues/projects/{project_id}/demand-candidates",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "read_demand_candidates"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/site-issues/projects/{project_id}/manual",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "create_manual"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/site-issues/search",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "read_search"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "PATCH /api/maintenance/site-issues/{issue_id}",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "update"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/site-issues/{issue_id}/confirm",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "confirm"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "PATCH /api/maintenance/site-issues/{issue_id}/header",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "correct_header"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "PATCH /api/maintenance/site-issues/{issue_id}/lines/{issue_line_id}",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "correct_line"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/site-issues/{issue_id}/preview",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "preview"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/site-issues/{issue_id}/void",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_site_issue_access.read/execute",
+      "query_or_lock_boundary": "exact actual project and issue/line metadata; same RR facts; stable command key; all pending domain effects before final actor SHARE/PDP; revoke rolls back issue/line/receipt",
+      "semantic_test_file": "backend/tests/test_authz_s3_site_issue.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_issue",
+          "action": "void"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable",
+      "source": "backend/app/api/maintenance_projects.py",
+      "status": "semantic_tests_passed",
+      "facade": "fixed canonical D05 rejection",
+      "query_or_lock_boundary": "409 regardless of admin/full grants; no project/alias/audit writes; never-cutover legacy compatibility",
+      "semantic_test_file": "backend/tests/test_authz_s3_projects.py",
+      "bindings": [
+        {
+          "business_rejection": "D05 manual project creation disabled; no Grant/action invented"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/business-type-backfill/apply",
+      "source": "backend/app/api/maintenance_projects.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_backfill_access.preview/apply",
+      "query_or_lock_boundary": "verified complete command-plan targets; exact empty admission; domain before actor locks",
+      "semantic_test_file": "backend/tests/test_authz_s3_project_backfill.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_project_backfill",
+          "action": "apply"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/business-type-backfill/preview",
+      "source": "backend/app/api/maintenance_projects.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_backfill_access.preview/apply",
+      "query_or_lock_boundary": "verified complete command-plan targets; exact empty admission; domain before actor locks",
+      "semantic_test_file": "backend/tests/test_authz_s3_project_backfill.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_project_backfill",
+          "action": "preview"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}",
+      "source": "backend/app/api/maintenance_projects.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_access.read_overview",
+      "query_or_lock_boundary": "real project context before projected facts",
+      "semantic_test_file": "backend/tests/test_authz_s3_projects.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_project",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "PATCH /api/maintenance/projects/stable/{project_id}",
+      "source": "backend/app/api/maintenance_projects.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_access.change_project",
+      "query_or_lock_boundary": "catalog/project/assignment locks then final sorted users; recheck before write",
+      "semantic_test_file": "backend/tests/test_authz_s3_projects.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_project",
+          "action": "update"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/archive",
+      "source": "backend/app/api/maintenance_projects.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_access.change_project",
+      "query_or_lock_boundary": "catalog/project/assignment locks then final sorted users",
+      "semantic_test_file": "backend/tests/test_authz_s3_projects.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_project",
+          "action": "archive"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/restore",
+      "source": "backend/app/api/maintenance_projects.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_access.change_project",
+      "query_or_lock_boundary": "catalog/project/assignment locks then final sorted users",
+      "semantic_test_file": "backend/tests/test_authz_s3_projects.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_project",
+          "action": "restore"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/boss-board/projects",
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_board_access.read",
+      "query_or_lock_boundary": "same RR; exact independent action; project Plan before facts/count/page; own C/F/K column projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_board.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_project_cards",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/boss-board/projects/search",
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_board_access.read",
+      "query_or_lock_boundary": "project Plan before search/count/page; financial filters use card Grant only",
+      "semantic_test_file": "backend/tests/test_authz_s3_board.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_project_cards",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable",
+      "source": "backend/app/api/maintenance_projects.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_access.read_directory",
+      "query_or_lock_boundary": "project_condition before q/count/page",
+      "semantic_test_file": "backend/tests/test_authz_s3_projects.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_project_directory",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/search",
+      "source": "backend/app/api/maintenance_projects.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_access.read_directory",
+      "query_or_lock_boundary": "project_condition before q/count/page",
+      "semantic_test_file": "backend/tests/test_authz_s3_projects.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_project_directory",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/operations",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_access.read_operations_directory",
+      "query_or_lock_boundary": "project predicate in each financial CTE before aggregate/count/page; hidden field filters denied",
+      "semantic_test_file": "backend/tests/test_authz_s3_workspace.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_operation_directory",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/operations/search",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_access.read_operations_directory",
+      "query_or_lock_boundary": "project predicate in each financial CTE before aggregate/count/page; hidden field filters denied",
+      "semantic_test_file": "backend/tests/test_authz_s3_workspace.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_operation_directory",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/tasks",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_read_access.read_tasks",
+      "query_or_lock_boundary": "same RR actual project; own resource fields; independent action",
+      "semantic_test_file": "backend/tests/test_authz_s3_workspace.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_project_operations",
+          "action": "read_tasks"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/purchases",
+      "source": "backend/app/api/maintenance_project_operations.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_read_access.read_purchases",
+      "query_or_lock_boundary": "same RR actual project; own resource fields; independent action",
+      "semantic_test_file": "backend/tests/test_authz_s3_workspace.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_project_purchase",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/recovery-summary",
+      "source": "backend/app/api/maintenance_recovery.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_project_read_access.read_recovery",
+      "query_or_lock_boundary": "same RR object check and cost projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_workspace.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_recovery",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/boss-board/attention",
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_board_access.read",
+      "query_or_lock_boundary": "same RR; exact independent action; project Plan before facts/count/page; own C/F/K column projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_board.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_summary",
+          "action": "read_attention"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/boss-board/health",
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_board_access.read",
+      "query_or_lock_boundary": "same RR; exact independent action; project Plan before facts/count/page; own C/F/K column projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_board.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_source_health",
+          "action": "read"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/boss-board/orders/{source_order_id}/lines",
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_board_access.read/prepare_export",
+      "query_or_lock_boundary": "actual parent/source or registered unassigned branch; all only actual PDP; hidden columns not selected; rendered export current provenance recheck",
+      "semantic_test_file": "backend/tests/test_authz_s3_board.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_summary",
+          "action": "read_order_lines"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "POST /api/maintenance/boss-board/projects/export",
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_board_access.read/prepare_export",
+      "query_or_lock_boundary": "actual parent/source or registered unassigned branch; all only actual PDP; hidden columns not selected; rendered export current provenance recheck",
+      "semantic_test_file": "backend/tests/test_authz_s3_board.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_summary",
+          "action": "export"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/boss-board/projects/export/options",
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_board_access.read/prepare_export",
+      "query_or_lock_boundary": "actual parent/source or registered unassigned branch; all only actual PDP; hidden columns not selected; rendered export current provenance recheck",
+      "semantic_test_file": "backend/tests/test_authz_s3_board.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_summary",
+          "action": "read_export_options"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/boss-board/projects/{project_id}",
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_board_access.read",
+      "query_or_lock_boundary": "same RR; exact independent action; project Plan before facts/count/page; own C/F/K column projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_board.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_summary",
+          "action": "read_project"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/boss-board/projects/{project_id}/orders",
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_board_access.read/prepare_export",
+      "query_or_lock_boundary": "actual parent/source or registered unassigned branch; all only actual PDP; hidden columns not selected; rendered export current provenance recheck",
+      "semantic_test_file": "backend/tests/test_authz_s3_board.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_summary",
+          "action": "read_orders"
+        }
+      ],
+      "independent_review": null
+    },
+    {
+      "entry_id": "GET /api/maintenance/boss-board/summary",
+      "source": "backend/app/api/maintenance_boss_board.py",
+      "status": "semantic_tests_passed",
+      "facade": "maintenance_board_access.read",
+      "query_or_lock_boundary": "same RR; exact independent action; project Plan before facts/count/page; own C/F/K column projection",
+      "semantic_test_file": "backend/tests/test_authz_s3_board.py",
+      "bindings": [
+        {
+          "resource_id": "maintenance_summary",
+          "action": "read_summary"
+        }
+      ],
+      "independent_review": null
+    }
+  ]
+}

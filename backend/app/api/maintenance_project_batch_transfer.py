@@ -21,11 +21,14 @@ from datetime import date
 from decimal import Decimal
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app import config, permissions
+from app.authz import runtime
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_batch_transfer_authorization as canonical
 from app.auth import current_identity, current_role
 from app.api.maintenance_project_operations import _real_operator, real_operator_or_none
 from app.api.maintenance_project_scope import resolve_visible_project_ids
@@ -41,6 +44,7 @@ from app.security import (
     require_page,
 )
 from app.services import import_safety
+from app.services.maintenance_transfer_options import _DOWNLOAD_FORMS, _field_form_keys, _download_options, _options_payload
 from app.services import maintenance_boss_board as board
 from app.services import maintenance_bulk_import as bulk
 from app.services import maintenance_project_assignments
@@ -57,49 +61,10 @@ router = APIRouter(
 
 _IMPORT_ACTION = "action_maintenance_ledger_import"
 
-_DOWNLOAD_FORMS = (
-    {
-        "key": "project_master",
-        "label": "项目主档与期限",
-        "description": "项目名称、负责人、期限、生命周期等主数据",
-        "groups": {"项目基础", "期限"},
-        "default_selected": True,
-    },
-    {
-        "key": "contract",
-        "label": "合同",
-        "description": "销售单号、含税合同额及完整性状态",
-        "groups": {"合同与回款"},
-        "key_prefixes": ("contract_",),
-        "explicit_keys": {"contract_nos"},
-        "default_selected": True,
-    },
-    {
-        "key": "collection",
-        "label": "累计回款",
-        "description": "已确认累计实收及数据状态",
-        "groups": {"合同与回款"},
-        "key_prefixes": ("collection_",),
-        "default_selected": True,
-    },
-    {
-        "key": "maintenance_activity",
-        "label": "维保业务统计",
-        "description": "单据、数量、预交付与供退货统计",
-        "groups": {"业务统计"},
-        "default_selected": False,
-    },
-    {
-        "key": "cost",
-        "label": "成本与状态",
-        "description": "按账号权限提供已知成本、成本率和卡片状态",
-        "groups": {"成本"},
-        "default_selected": False,
-    },
-)
 
 
 class BatchApplyRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     preview_token: str = Field(min_length=25, max_length=256)
@@ -109,6 +74,7 @@ class BatchApplyRequest(BaseModel):
 
 
 class ReceiptRulingRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     contract_no: str = Field(min_length=1, max_length=64)
@@ -120,6 +86,7 @@ class ReceiptRulingRequest(BaseModel):
 
 
 class BatchDownloadRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     forms: list[str] = Field(min_length=1, max_length=len(_DOWNLOAD_FORMS))
@@ -162,6 +129,27 @@ def _require_board_view(
     raise HTTPException(status.HTTP_403_FORBIDDEN, "无维保项目查看权限")
 
 
+def _board_context(db: Session = Depends(get_db), ctx: UserContext = Depends(get_current_user_context)):
+    if runtime.is_authoritative(db, canonical.EXPORT):
+        return ctx
+    return _require_board_view(ctx)
+
+
+def _canonical_write(db, identity, entry, params, view, precondition):
+    try:
+        return canonical.execute(db, identity, entry_id=entry, params=params, view=view, precondition=precondition)
+    except HTTPException:
+        raise
+    except bulk.BulkImportNotFound as exc:
+        raise HTTPException(404, {"code":"not_found","message":str(exc)}) from exc
+    except (bulk.BulkImportConflict, catalog.MaintenanceProjectCatalogConflict, operations.MaintenanceOperationConflict) as exc:
+        raise HTTPException(409, {"code":getattr(exc,"code",None) or "transfer_conflict","message":str(exc)}) from exc
+    except (bulk.BulkImportInvalid, catalog.MaintenanceProjectCatalogError, operations.MaintenanceOperationError) as exc:
+        raise HTTPException(422, {"code":"invalid_transfer","message":str(exc)}) from exc
+    except pipeline.ArchiveError as exc:
+        raise HTTPException(403, {"code":"AUTHZ_ARTIFACT_UNAVAILABLE","message":"原件校验失败"}) from exc
+
+
 def _can_import(ctx: UserContext) -> bool:
     if not config.ENABLE_RBAC or ctx.role == "admin":
         return True
@@ -181,108 +169,21 @@ def _has_profit_data(ctx: UserContext) -> bool:
     return bool(permissions.runtime_safe(graph).get("data_profit"))
 
 
-def _field_form_keys(field: project_export.ExportField) -> list[str]:
-    keys: list[str] = []
-    for form in _DOWNLOAD_FORMS:
-        if field.group not in form.get("groups", set()):
-            continue
-        prefixes = form.get("key_prefixes")
-        explicit = form.get("explicit_keys", set())
-        if prefixes or explicit:
-            if field.key not in explicit and not any(
-                field.key.startswith(prefix) for prefix in prefixes or ()
-            ):
-                continue
-        keys.append(str(form["key"]))
-    return keys
-
-
-def _download_options(ctx: UserContext) -> tuple[list[dict], list[dict], list[str], list[str]]:
-    export = project_export.export_options(ctx)
-    available_keys = {field["key"] for field in export["fields"]}
-    fields_by_key = {field.key: field for field in project_export.EXPORT_FIELDS}
-    fields = [
-        {
-            **field,
-            "form_keys": _field_form_keys(fields_by_key[field["key"]]),
-        }
-        for field in export["fields"]
-        if _field_form_keys(fields_by_key[field["key"]])
-    ]
-    default_fields = [
-        key
-        for key in export["default_fields"]
-        if key in available_keys
-        and any(field["key"] == key for field in fields)
-    ]
-    default_forms = list(
-        dict.fromkeys(
-            form_key
-            for field in fields
-            if field["key"] in default_fields
-            for form_key in field["form_keys"]
-        )
-    )
-    forms = [
-        {
-            "key": form["key"],
-            "label": form["label"],
-            "description": form["description"],
-            "default_selected": form["key"] in default_forms,
-        }
-        for form in _DOWNLOAD_FORMS
-        if any(form["key"] in field["form_keys"] for field in fields)
-    ]
-    return forms, fields, default_forms, default_fields
-
-
 @router.get("/options")
 def transfer_options(
     response: Response,
     _auth: str = Depends(current_role),
-    ctx: UserContext = Depends(_require_board_view),
+    ctx: UserContext = Depends(_board_context),
+    db: Session = Depends(get_db),
+    canonical_identity=Depends(auth_transport.identity_for(canonical.EXPORT)),
+    view: str | None = None,
+    authorization_precondition: str | None = None,
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    forms, fields, default_forms, default_fields = _download_options(ctx)
-    return {
-        "can_import": _can_import(ctx),
-        "can_download": True,
-        "max_files": bulk.MAX_TRANSFER_FILES,
-        "accepted_extensions": [".xlsx"],
-        "import_kinds": [
-            {
-                "key": (
-                    "sales_contract"
-                    if form["form_type"] == "sales_contract_amount"
-                    else "receipt"
-                ),
-                "label": form["label"],
-                "description": (
-                    "含税额按订单金额/含税标记/税率/税金/未税金额交叉校验"
-                    if form["form_type"] == "sales_contract_amount"
-                    else "累计值只取实收金额；销售收款额和优惠额仅用于对账"
-                ),
-                "required_fields": form["required_fields"],
-                "accepted_aliases": form["accepted_headers"],
-                "metric_basis": (
-                    {
-                        "contract_amount": "inc_tax",
-                        "sales_source_sync": "amount_ex_tax+tax_rate_if_unique",
-                    }
-                    if form["form_type"] == "sales_contract_amount"
-                    else {
-                        "collection": "actual_received_inc_tax",
-                        "source_field": "收款明细.实收金额",
-                    }
-                ),
-            }
-            for form in bulk.registered_forms()
-        ],
-        "download_forms": forms,
-        "download_fields": fields,
-        "default_forms": default_forms,
-        "default_fields": default_fields,
-    }
+    if isinstance(db, Session) and runtime.is_authoritative(db, canonical.EXPORT):
+        return canonical.read(db,canonical_identity,entry_id=canonical.OPTIONS,params={},legacy_context=ctx,
+            view=view,precondition=authorization_precondition)
+    return _options_payload(ctx,can_import=_can_import(ctx))
 
 
 @router.post("/preview")
@@ -292,11 +193,14 @@ async def preview_transfer(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
     _action: None = Depends(
-        require_action(_IMPORT_ACTION, require_data="data_profit")
+        auth_transport.legacy_gate(canonical.RESOURCE, require_action(_IMPORT_ACTION, require_data="data_profit"))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
+    view: str | None = None,
+    authorization_precondition: str | None = Form(default=None, max_length=32768),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     if not files or len(files) > bulk.MAX_TRANSFER_FILES:
@@ -324,6 +228,8 @@ async def preview_transfer(
                 {"code": "invalid_xlsx", "message": str(exc)},
             ) from exc
         payloads.append((filename, data))
+    if isinstance(db, Session) and runtime.is_authoritative(db, canonical.RESOURCE):
+        return _canonical_write(db,canonical_identity,canonical.PREVIEW,{'files':payloads},view,authorization_precondition)
     operator = _operator(ident)
     allowed_project_ids = resolve_visible_project_ids(db, ctx)
     record_access_log(
@@ -380,12 +286,17 @@ def apply_transfer(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
     _action: None = Depends(
-        require_action(_IMPORT_ACTION, require_data="data_profit")
+        auth_transport.legacy_gate(canonical.RESOURCE, require_action(_IMPORT_ACTION, require_data="data_profit"))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
+    view: str | None = None,
 ) -> dict:
+    if isinstance(db, Session) and runtime.is_authoritative(db, canonical.RESOURCE):
+        return _canonical_write(db,canonical_identity,canonical.APPLY,
+            body.model_dump(exclude={'authorization_precondition'}),view,body.authorization_precondition)
     operator = _operator(ident)
     allow_admin = ctx.role in {"admin", "boss"}
     allowed_project_ids = resolve_visible_project_ids(db, ctx)
@@ -495,9 +406,14 @@ def rule_receipt(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
+    view: str | None = None,
 ) -> dict:
+    if isinstance(db, Session) and runtime.is_authoritative(db, canonical.RESOURCE):
+        return _canonical_write(db,canonical_identity,canonical.RULING,
+            body.model_dump(exclude={'authorization_precondition'}),view,body.authorization_precondition)
     """人工裁决收款单台账冲突：旧行留档、更正行生效，不动快照（下次预览出 update 行）。"""
 
     if ctx.role not in {"admin", "boss"} or not _has_profit_data(ctx):
@@ -552,8 +468,14 @@ def download_transfer(
     body: BatchDownloadRequest,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    ctx: UserContext = Depends(_require_board_view),
+    ctx: UserContext = Depends(_board_context),
+    canonical_identity=Depends(auth_transport.identity_for(canonical.EXPORT)),
+    view: str | None = None,
 ) -> Response:
+    if isinstance(db, Session) and runtime.is_authoritative(db, canonical.EXPORT):
+        return canonical.read(db,canonical_identity,entry_id=canonical.DOWNLOAD,
+            params=body.model_dump(exclude={'authorization_precondition'}),legacy_context=ctx,
+            view=view,precondition=body.authorization_precondition)
     forms, fields, _default_forms, _default_fields = _download_options(ctx)
     allowed_forms = {form["key"] for form in forms}
     field_options = {field["key"]: field for field in fields}

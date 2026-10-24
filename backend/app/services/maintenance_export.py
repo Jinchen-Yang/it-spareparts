@@ -8,7 +8,7 @@ from tempfile import SpooledTemporaryFile, TemporaryDirectory
 from openpyxl.utils.datetime import to_excel
 from xlsxwriter import Workbook
 from xlsxwriter.worksheet import Worksheet
-from sqlalchemy import and_, func, select, text
+from sqlalchemy import ARRAY, String, and_, func, literal, select, text
 from sqlalchemy.orm import Bundle, Session
 
 from app import config
@@ -217,8 +217,13 @@ def _preflight_row_limits(
     db: Session,
     date_from: date | None,
     date_to: date | None,
+    *, authorization_condition=None, field_context=None,
 ) -> None:
     filters = _date_filters(date_from, date_to)
+    if authorization_condition is not None:
+        filters = (*filters, authorization_condition)
+    hide_customer = field_context is not None and is_field_hidden(field_context, 'end_customer')
+    hide_cost = field_context is not None and is_field_hidden(field_context, 'unit_cost')
     rendered_project = func.coalesce(
         func.nullif(FMaintenanceOrder.project_raw, ""),
         FMaintenanceOrder.project_std,
@@ -229,7 +234,7 @@ def _preflight_row_limits(
         + _octet_length(FMaintenanceOrder.order_no)
         + _octet_length(FMaintenanceOrder.linked_sales_order_no)
         + _octet_length(rendered_project)
-        + _octet_length(FMaintenanceOrder.end_customer)
+        + (0 if hide_customer else _octet_length(FMaintenanceOrder.end_customer))
         + _octet_length(FMaintenanceOrder.demand_type)
         + _octet_length(FMaintenanceOrder.business_type)
         + _octet_length(FMaintenanceOrder.salesperson)
@@ -256,13 +261,14 @@ def _preflight_row_limits(
         + _octet_length(FMaintenanceLine.pn_raw)
         + _octet_length(FMaintenanceLine.description)
         + _octet_length(FMaintenanceLine.serial_numbers)
-        + _octet_length(FMaintenanceLine.cost_source)
-        + _octet_length(FMaintenanceLine.cost_tax_basis)
-        + _octet_length(FMaintenanceLine.price_month)
-        + _octet_length(FMaintenanceLine.linked_purchase_order_no)
-        + _octet_length(FMaintenanceLine.confidence)
-        + _octet_length(FMaintenanceLine.reference_side)
-        + _octet_length(func.array_to_string(FMaintenanceLine.anomaly_flags, "、"))
+        + (0 if hide_cost else (
+            _octet_length(FMaintenanceLine.cost_source)
+            + _octet_length(FMaintenanceLine.cost_tax_basis)
+            + _octet_length(FMaintenanceLine.price_month)
+            + _octet_length(FMaintenanceLine.linked_purchase_order_no)
+            + _octet_length(FMaintenanceLine.confidence)
+            + _octet_length(FMaintenanceLine.reference_side)
+            + _octet_length(func.array_to_string(FMaintenanceLine.anomaly_flags, "、"))))
         + LINE_RENDERED_TEXT_OVERHEAD_BYTES
     )
     line_count, line_dynamic_text_bytes = db.execute(
@@ -282,17 +288,28 @@ def _preflight_row_limits(
         raise ExcelExportTooLarge("维保订单 XLSX 动态文本超过 64 MiB 上限")
 
 
-def _export_statement(date_from: date | None, date_to: date | None):
+def _export_statement(date_from: date | None, date_to: date | None, *, authorization_condition=None, field_context=None):
     """只传输工作簿需要的列；Bundle 返回轻量 Row，不建立宽表 ORM 实体。"""
+    hide_customer = field_context is not None and is_field_hidden(field_context, 'end_customer')
+    hide_cost = field_context is not None and is_field_hidden(field_context, 'unit_cost')
+    def column(model, field, hidden=False):
+        return literal(None).label(field) if hidden else getattr(model, field)
     order = Bundle("order", *(
-        getattr(FMaintenanceOrder, field) for field in (
+        column(FMaintenanceOrder, field, hide_customer and field == 'end_customer') for field in (
             "id", "raw_order_id", "order_no", "order_date", "linked_sales_order_no",
             "project_raw", "project_std", "end_customer", "demand_type", "business_type",
             "salesperson", "warehouse", "maint_start", "maint_end", "data_status",
         )
     ))
     line = Bundle("line", *(
-        getattr(FMaintenanceLine, field) for field in (
+        (literal([], type_=ARRAY(String)).label(field) if hide_cost and field == 'anomaly_flags'
+         else column(FMaintenanceLine, field, hide_cost and field in (
+             'unit_cost', 'cost_amount', 'unit_cost_inc_tax', 'unit_cost_ex_tax',
+             'cost_amount_inc_tax', 'cost_amount_ex_tax', 'cost_source', 'cost_tax_basis',
+             'price_month', 'trace_months', 'linked_purchase_order_no', 'price_distance_days',
+             'confidence', 'reference_side', 'reference_pool_group_id', 'reference_pool_version',
+             'reference_sample_count', 'reference_from_date', 'reference_to_date', 'reference_latest_date')))
+        for field in (
             "id", "raw_line_id", "line_no", "pn_std", "pn_raw", "description",
             "qty", "return_qty", "serial_numbers", "unit_cost", "cost_amount",
             "unit_cost_inc_tax", "unit_cost_ex_tax", "cost_amount_inc_tax",
@@ -304,9 +321,9 @@ def _export_statement(date_from: date | None, date_to: date | None):
         )
     ))
     override = Bundle(
-        "override", MaintenanceManualCostOverride.active,
-        MaintenanceManualCostOverride.unit_cost_inc_tax,
-        MaintenanceManualCostOverride.unit_cost_ex_tax,
+        "override", column(MaintenanceManualCostOverride, 'active', hide_cost),
+        column(MaintenanceManualCostOverride, 'unit_cost_inc_tax', hide_cost),
+        column(MaintenanceManualCostOverride, 'unit_cost_ex_tax', hide_cost),
     )
     return (
         select(order, line, override)
@@ -320,6 +337,7 @@ def _export_statement(date_from: date | None, date_to: date | None):
             ),
         )
         .where(*_date_filters(date_from, date_to))
+        .where(authorization_condition if authorization_condition is not None else literal(True))
         .order_by(*wbdd_export_order_by())
         .execution_options(stream_results=True, yield_per=1000)
     )
@@ -330,8 +348,12 @@ def _build_workbook(
     user_ctx: UserContext,
     date_from: date | None = None,
     date_to: date | None = None,
+    *, authorization_condition=None, strict_projection=False,
 ) -> SpooledTemporaryFile:
-    _preflight_row_limits(db, date_from, date_to)
+    if strict_projection:
+        _preflight_row_limits(db, date_from, date_to, authorization_condition=authorization_condition, field_context=user_ctx)
+    else:
+        _preflight_row_limits(db, date_from, date_to)
     mask_fields = prepare_field_visibility(user_ctx)
     hide_cost_anomalies = is_field_hidden(user_ctx, "unit_cost")
     workbook = None
@@ -361,7 +383,8 @@ def _build_workbook(
         orders.append(ORDER_HEADERS)
         lines.append(LINE_HEADERS)
 
-        statement = _export_statement(date_from, date_to)
+        statement = (_export_statement(date_from, date_to, authorization_condition=authorization_condition,
+            field_context=user_ctx) if strict_projection else _export_statement(date_from, date_to))
         previous_order_id = None
         order_count = 0
         line_count = 0
@@ -497,6 +520,7 @@ def build_workbook(
     user_ctx: UserContext,
     date_from: date | None = None,
     date_to: date | None = None,
+    *, authorization_condition=None, strict_projection=False,
 ) -> SpooledTemporaryFile:
     """跨进程非阻塞构建逐单工作簿，避免并发任务叠加临时磁盘和内存。"""
     if not _ORDER_EXPORT_LOCK.acquire(blocking=False):
@@ -509,6 +533,9 @@ def build_workbook(
         if not acquired:
             raise ExcelExportBusy("已有逐单维保导出正在执行，请稍后重试")
         _acquire_shared_source_lock(db)
+        if strict_projection:
+            return _build_workbook(db, user_ctx, date_from, date_to,
+                authorization_condition=authorization_condition, strict_projection=True)
         return _build_workbook(db, user_ctx, date_from, date_to)
     finally:
         _ORDER_EXPORT_LOCK.release()

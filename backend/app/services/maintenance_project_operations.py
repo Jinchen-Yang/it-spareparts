@@ -10,6 +10,7 @@ from __future__ import annotations
 from calendar import monthrange
 from collections.abc import Iterable
 from collections import defaultdict
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
@@ -293,6 +294,30 @@ def _workbook_data_version(project_id: str, revision: int) -> str:
     return hashlib.sha256(f"{project_id}:{revision}".encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True)
+class WorkbookStateSnapshot:
+    project_id: str
+    revision: int
+    data_version: str
+    expense_ready_through: date | None = None
+    last_export_id: str | None = None
+    last_exported_at: datetime | None = None
+    last_applied_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+def read_workbook_state(db: Session, *, project_id: str) -> WorkbookStateSnapshot:
+    """Read-only baseline: a never-written project has the existing revision-zero token."""
+    columns = (MaintenanceProjectWorkbookState.project_id, MaintenanceProjectWorkbookState.revision,
+        MaintenanceProjectWorkbookState.data_version, MaintenanceProjectWorkbookState.expense_ready_through,
+        MaintenanceProjectWorkbookState.last_export_id, MaintenanceProjectWorkbookState.last_exported_at,
+        MaintenanceProjectWorkbookState.last_applied_at, MaintenanceProjectWorkbookState.updated_at)
+    row = db.execute(select(*columns).where(MaintenanceProjectWorkbookState.project_id == project_id)).first()
+    if row is None:
+        return WorkbookStateSnapshot(project_id, 0, _workbook_data_version(project_id, 0))
+    return WorkbookStateSnapshot(*row)
+
+
 def get_or_create_workbook_state(
     db: Session,
     *,
@@ -423,6 +448,7 @@ def _project(db: Session, project_id: str) -> MaintenanceProject | None:
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == project_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
 
 
@@ -1007,6 +1033,7 @@ def create_expense(
     status_mapping_version: str,
     reason: str,
     operated_by: str,
+    _authorize=None,
 ) -> dict | None:
     project = _lock_project_for_fact_write(db, project_id)
     if project is None:
@@ -1035,6 +1062,8 @@ def create_expense(
         )
         if relation is None:
             raise MaintenanceOperationError("报销关联合同不存在或不属于当前项目")
+    if _authorize is not None:
+        _authorize()
     row = MaintenanceProjectExpenseAttribution(
         expense_id=_required(expense_id, "报销稳定编号"),
         project_id=project_id,
@@ -1091,6 +1120,7 @@ def mark_expense_readiness(
     correction_reason: str | None = None,
     reason: str,
     operated_by: str,
+    _authorize=None,
 ) -> dict | None:
     """Confirm that the approved-expense feed is complete through one month."""
 
@@ -1105,6 +1135,8 @@ def mark_expense_readiness(
     if ready_through > current_business_month:
         raise MaintenanceOperationError("费用数据水位不能超过当前业务月份，禁止填写未来月份")
     state = get_or_create_workbook_state(db, project_id=project_id, lock=True)
+    if _authorize is not None:
+        _authorize()
     is_correction = bool(
         state.expense_ready_through is not None
         and ready_through < state.expense_ready_through
@@ -2926,6 +2958,7 @@ def update_expense_status(
     status_mapping_version: str,
     reason: str,
     operated_by: str,
+    _authorize=None,
 ) -> dict | None:
     """Advance one attributed expense while preserving the original fact row."""
 
@@ -2945,7 +2978,7 @@ def update_expense_status(
     row = db.scalar(
         select(MaintenanceProjectExpenseAttribution)
         .where(MaintenanceProjectExpenseAttribution.expense_id == expense_id)
-        .with_for_update()
+        .with_for_update().execution_options(populate_existing=True)
     )
     if row is None:
         return None
@@ -2964,6 +2997,10 @@ def update_expense_status(
             f"报销状态不能从 {row.normalized_status} 变更为 {normalized_status}"
         )
 
+    if row.project_id != project_id:
+        raise MaintenanceOperationConflict("报销归属已变化，请重新解析当前项目")
+    if _authorize is not None:
+        _authorize()
     before = expense_dict(row)
     row.raw_status = _required(raw_status, "报销原始状态")
     row.status_mapping_state = (
@@ -3179,6 +3216,7 @@ def recompute_cost_gaps(
     reason: str,
     operated_by: str,
     allow_downgrade: bool = False,
+    _authorize=None,
 ) -> dict | None:
     """Persist newly available deterministic evidence for unresolved issue lines.
 
@@ -3201,6 +3239,19 @@ def recompute_cost_gaps(
         # 2026-08-19：作废领用行不参与成本重算（#55）
         MaintenanceSiteIssueLine.is_active.is_(True),
     )
+    if _authorize is not None:
+        # Acquire the complete write set before the final actor SHARE. Later
+        # bounded calculation/flush batches reuse these existing domain locks.
+        for model, key, condition in (
+            (MaintenanceSiteIssue, MaintenanceSiteIssue.issue_id,
+             MaintenanceSiteIssue.project_id == project_id),
+            (MaintenanceSiteIssueLine, MaintenanceSiteIssueLine.issue_line_id,
+             MaintenanceSiteIssueLine.issue_id.in_(select(MaintenanceSiteIssue.issue_id).where(
+                 MaintenanceSiteIssue.project_id == project_id))),
+        ):
+            for _ in db.execute(select(key).where(condition).order_by(key).with_for_update()).yield_per(1000):
+                pass
+        _authorize()
     candidate_total = int(
         db.scalar(
             select(func.count())
@@ -3217,7 +3268,7 @@ def recompute_cost_gaps(
     for offset in range(0, candidate_total, _COST_RECOMPUTE_BATCH_SIZE):
         candidates = list(
             db.execute(
-                select(MaintenanceSiteIssueLine, MaintenanceSiteIssue)
+                select(MaintenanceSiteIssueLine, MaintenanceSiteIssue).execution_options(populate_existing=True)
                 .join(
                     MaintenanceSiteIssue,
                     MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
@@ -3316,6 +3367,7 @@ def fill_manual_cost(
     evidence: str,
     reason: str,
     operated_by: str,
+    _authorize=None,
 ) -> dict | None:
     project = _lock_project_for_fact_write(db, project_id)
     if project is None:
@@ -3332,7 +3384,7 @@ def fill_manual_cost(
             # 2026-08-19：已作废的领用行不能补价（#55）
             MaintenanceSiteIssueLine.is_active.is_(True),
         )
-        .with_for_update()
+        .with_for_update().execution_options(populate_existing=True)
     ).one_or_none()
     if result is None:
         return None
@@ -3346,6 +3398,8 @@ def fill_manual_cost(
         or issue.normalized_status not in {"confirmed", "corrected"}
     ):
         raise MaintenanceOperationError("只有已确认且状态已映射的现场领用可以补价")
+    if _authorize is not None:
+        _authorize()
     audit_as_of = business_today()
     manual_unit_cost = _money_amount(manual_unit_cost, label="人工未税单价")
     before = _cost_audit_snapshot(line, as_of=audit_as_of)
@@ -3730,6 +3784,28 @@ def _resync_contract_expenses_locked(
     }
 
 
+
+def _prelock_contract_expense_authorization(db, envelope):
+    """Canonical contract writes finish every resync row lock before actor SHARE.
+
+    The existing outer data-change/contract identity locks prevent new matching
+    imports. Lock all attribution rows of the complete envelope because a new
+    mapping can select a duplicate/native row not present in raw_ids.
+    """
+    from app.services.maintenance_expense_integrity import raw_backed_key
+    raw_ids = set(envelope['raw_ids'])
+    for raw_id in sorted(raw_ids):
+        db.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(
+            f'maintenance-expense-row:{raw_id}',0))))
+    attributions = list(db.scalars(select(MaintenanceProjectExpenseAttribution)
+        .where(MaintenanceProjectExpenseAttribution.project_id.in_(sorted(envelope['projects'])))
+        .order_by(MaintenanceProjectExpenseAttribution.expense_id)
+        .with_for_update().execution_options(populate_existing=True)))
+    raw_ids.update(key for row in attributions if (key:=raw_backed_key(row)))
+    list(db.scalars(select(FProjectExpense).where(FProjectExpense.raw_line_id.in_(sorted(raw_ids)))
+        .order_by(FProjectExpense.raw_line_id).with_for_update().execution_options(populate_existing=True)))
+
+
 def create_contract(
     db: Session,
     *,
@@ -3746,6 +3822,7 @@ def create_contract(
     source: str,
     reason: str,
     operated_by: str,
+    _authorize=None,
 ) -> dict | None:
     if db.scalar(select(MaintenanceProject.project_id).where(
         MaintenanceProject.project_id == project_id
@@ -3783,6 +3860,9 @@ def create_contract(
         raise MaintenanceOperationError("合同关系结束日期必须晚于开始日期")
     if contract_amount is not None:
         contract_amount = _money_amount(contract_amount, label="合同金额")
+    if _authorize is not None:
+        _prelock_contract_expense_authorization(db,envelope)
+        _authorize()
     row = MaintenanceProjectContract(
         project_contract_id=str(uuid4()),
         project_id=project_id,
@@ -3833,6 +3913,7 @@ def update_contract(
     updates: dict,
     reason: str,
     operated_by: str,
+    _authorize=None,
 ) -> dict | None:
     probe = db.execute(
         select(
@@ -3858,10 +3939,15 @@ def update_contract(
     row = envelope["contracts"].get(project_contract_id)
     if row is None:
         return None
+    if row.project_id != project_id:
+        raise MaintenanceOperationConflict("合同所属项目已变化，请重试")
     if row.version != version:
         raise MaintenanceOperationConflict(
             f"项目合同关系已变化（当前版本 {row.version}），请刷新后重试"
         )
+    if _authorize is not None:
+        _prelock_contract_expense_authorization(db,envelope)
+        _authorize()
     before = contract_dict(row)
     allowed = {
         "contract_no",
@@ -3942,6 +4028,7 @@ def archive_contract(
     effective_to: date,
     reason: str,
     operated_by: str,
+    _authorize=None,
 ) -> dict | None:
     probe = db.execute(
         select(
@@ -3967,12 +4054,17 @@ def archive_contract(
     row = envelope["contracts"].get(project_contract_id)
     if row is None:
         return None
+    if row.project_id != project_id:
+        raise MaintenanceOperationConflict("合同所属项目已变化，请重试")
     if row.version != version:
         raise MaintenanceOperationConflict(
             f"项目合同关系已变化（当前版本 {row.version}），请刷新后重试"
         )
     if effective_to <= row.effective_from:
         raise MaintenanceOperationError("合同关系结束日期必须晚于开始日期")
+    if _authorize is not None:
+        _prelock_contract_expense_authorization(db,envelope)
+        _authorize()
     before = contract_dict(row)
     row.effective_to = effective_to
     row.version += 1
@@ -4013,6 +4105,7 @@ def create_collection(
     bump_revision: bool = True,
     source: str = "direct_api",
     import_batch_id: str | None = None,
+    _authorize=None,
 ) -> dict | None:
     project = _lock_project_for_fact_write(db, project_id)
     if project is None:
@@ -4039,6 +4132,8 @@ def create_collection(
             report_month=report_month,
             cumulative_amount=cumulative_amount,
         )
+    if _authorize is not None:
+        _authorize()
     row = MaintenanceCollectionSnapshot(
         collection_id=str(uuid4()),
         project_id=project_id,
@@ -4083,6 +4178,7 @@ def update_collection(
     bump_revision: bool = True,
     source: str | None = None,
     import_batch_id: str | None = None,
+    _authorize=None,
 ) -> dict | None:
     """CAS + 单调性守卫 + 事实审计的唯一回款快照更新路径。
 
@@ -4106,6 +4202,7 @@ def update_collection(
         select(MaintenanceCollectionSnapshot)
         .where(MaintenanceCollectionSnapshot.collection_id == collection_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if row is None:
         return None
@@ -4140,6 +4237,8 @@ def update_collection(
             cumulative_amount=proposed_amount,
             exclude_collection_id=row.collection_id,
         )
+    if _authorize is not None:
+        _authorize()
     for key in {
         "report_month",
         "cumulative_amount",
@@ -5285,6 +5384,7 @@ def project_workspace(
     requisition_page_size: int | None = 20,
     expense_page: int = 1,
     expense_page_size: int | None = 20,
+    block_contexts: dict[str, UserContext] | None = None,
 ) -> dict | None:
     """Load canonical project totals plus independently paged detail rows.
 
@@ -5293,14 +5393,27 @@ def project_workspace(
     the public workspace API always supplies bounded integer page sizes.
     """
 
-    base = maintenance_project.project_overview(
-        db,
-        project_id,
-        as_of=as_of,
-        user_ctx=user_ctx,
-    )
-    if base is None:
+    canonical = block_contexts is not None
+    denied_fields = replace(user_ctx, permissions={}, explicit_field_policy=True) if canonical else user_ctx
+    def allowed(block):
+        return not canonical or block in block_contexts
+    def fields(block):
+        return block_contexts.get(block, denied_fields) if canonical else user_ctx
+    summary_allowed = allowed("operation_summary")
+    identity_base = (maintenance_project.project_overview(db, project_id, as_of=as_of,
+        user_ctx=fields("project_identity"), include_contracts=False)
+        if canonical and allowed("project_identity") else None)
+    base = (maintenance_project.project_overview(db, project_id, as_of=as_of,
+        user_ctx=fields("operation_summary"), include_identity=not canonical,
+        summary_projection=canonical) if summary_allowed else None)
+    if not canonical and base is None:
         return None
+    if base is None:
+        base = {"project":{"project_id":project_id},"contracts":[],"total_contract_amount":None,
+                "completeness":{"status":"restricted","issues":[]}}
+    contract_base = (maintenance_project.project_overview(db, project_id, as_of=as_of,
+        user_ctx=fields("contracts"), include_identity=False)
+        if canonical and allowed("contracts") else None)
     effective_ids = {
         row["project_contract_id"]
         for row in base["contracts"]
@@ -5343,103 +5456,109 @@ def project_workspace(
         MaintenanceSiteIssue.status_mapping_state == "mapped",
         MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
     )
-    issue_fact = db.execute(
-        select(
-            func.count().label("total"),
-            func.count().filter(eligible_issue).label("eligible_total"),
-            func.count()
-            .filter(and_(eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None)))
-            .label("cost_gap_count"),
-            func.count()
-            .filter(
-                and_(
-                    eligible_issue,
-                    MaintenanceSiteIssueLine.cost_source == "sales_window",
+    if summary_allowed:
+        issue_fact = db.execute(
+            select(
+                func.count().label("total"),
+                func.count().filter(eligible_issue).label("eligible_total"),
+                func.count()
+                .filter(and_(eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None)))
+                .label("cost_gap_count"),
+                func.count()
+                .filter(
+                    and_(
+                        eligible_issue,
+                        MaintenanceSiteIssueLine.cost_source == "sales_window",
+                    )
                 )
+                .label("sales_estimate_lines"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (eligible_issue, MaintenanceSiteIssueLine.cost_amount_ex_tax),
+                            else_=Decimal("0.00"),
+                        )
+                    ),
+                    Decimal("0.00"),
+                ).label("consumed_known_ex_tax"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax),
+                            else_=Decimal("0.00"),
+                        )
+                    ),
+                    Decimal("0.00"),
+                ).label("consumed_known_inc_tax"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                and_(
+                                    eligible_issue,
+                                    MaintenanceSiteIssueLine.cost_source == "sales_window",
+                                ),
+                                MaintenanceSiteIssueLine.cost_amount_ex_tax,
+                            ),
+                            else_=Decimal("0.00"),
+                        )
+                    ),
+                    Decimal("0.00"),
+                ).label("sales_estimate_cost_ex_tax"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                and_(
+                                    eligible_issue,
+                                    MaintenanceSiteIssueLine.cost_source == "sales_window",
+                                ),
+                                MaintenanceSiteIssueLine.cost_amount_inc_tax,
+                            ),
+                            else_=Decimal("0.00"),
+                        )
+                    ),
+                    Decimal("0.00"),
+                ).label("sales_estimate_cost_inc_tax"),
             )
-            .label("sales_estimate_lines"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (eligible_issue, MaintenanceSiteIssueLine.cost_amount_ex_tax),
-                        else_=Decimal("0.00"),
-                    )
-                ),
-                Decimal("0.00"),
-            ).label("consumed_known_ex_tax"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax),
-                        else_=Decimal("0.00"),
-                    )
-                ),
-                Decimal("0.00"),
-            ).label("consumed_known_inc_tax"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            and_(
-                                eligible_issue,
-                                MaintenanceSiteIssueLine.cost_source == "sales_window",
-                            ),
-                            MaintenanceSiteIssueLine.cost_amount_ex_tax,
-                        ),
-                        else_=Decimal("0.00"),
-                    )
-                ),
-                Decimal("0.00"),
-            ).label("sales_estimate_cost_ex_tax"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            and_(
-                                eligible_issue,
-                                MaintenanceSiteIssueLine.cost_source == "sales_window",
-                            ),
-                            MaintenanceSiteIssueLine.cost_amount_inc_tax,
-                        ),
-                        else_=Decimal("0.00"),
-                    )
-                ),
-                Decimal("0.00"),
-            ).label("sales_estimate_cost_inc_tax"),
-        )
-        .select_from(MaintenanceSiteIssue)
-        .join(
-            MaintenanceSiteIssueLine,
-            MaintenanceSiteIssueLine.issue_id == MaintenanceSiteIssue.issue_id,
-        )
-        .where(
-            MaintenanceSiteIssue.project_id == project_id,
-            MaintenanceSiteIssue.issue_date <= as_of,
-            # 2026-08-19：作废领用行不计入工作区领用/成本统计（#55）
-            MaintenanceSiteIssueLine.is_active.is_(True),
-        )
-    ).one()
-    requisition_total = int(issue_fact.total)
-    eligible_requisition_total = int(issue_fact.eligible_total)
-    cost_gap_count = int(issue_fact.cost_gap_count)
-    unmapped_issue_count = int(
-        db.scalar(
-            select(func.count(func.distinct(MaintenanceSiteIssue.issue_id))).where(
+            .select_from(MaintenanceSiteIssue)
+            .join(
+                MaintenanceSiteIssueLine,
+                MaintenanceSiteIssueLine.issue_id == MaintenanceSiteIssue.issue_id,
+            )
+            .where(
                 MaintenanceSiteIssue.project_id == project_id,
                 MaintenanceSiteIssue.issue_date <= as_of,
-                or_(
-                    MaintenanceSiteIssue.status_mapping_state != "mapped",
-                    MaintenanceSiteIssue.normalized_status == "unknown",
-                ),
+                # 2026-08-19：作废领用行不计入工作区领用/成本统计（#55）
+                MaintenanceSiteIssueLine.is_active.is_(True),
             )
+        ).one()
+        requisition_total = int(issue_fact.total)
+        eligible_requisition_total = int(issue_fact.eligible_total)
+        cost_gap_count = int(issue_fact.cost_gap_count)
+        unmapped_issue_count = int(
+            db.scalar(
+                select(func.count(func.distinct(MaintenanceSiteIssue.issue_id))).where(
+                    MaintenanceSiteIssue.project_id == project_id,
+                    MaintenanceSiteIssue.issue_date <= as_of,
+                    or_(
+                        MaintenanceSiteIssue.status_mapping_state != "mapped",
+                        MaintenanceSiteIssue.normalized_status == "unknown",
+                    ),
+                )
+            )
+            or 0
         )
-        or 0
-    )
-    consumed_known_ex_tax = Decimal(issue_fact.consumed_known_ex_tax)
-    consumed_known_inc_tax = Decimal(issue_fact.consumed_known_inc_tax)
-    sales_estimate_cost_ex_tax = Decimal(issue_fact.sales_estimate_cost_ex_tax)
-    sales_estimate_cost_inc_tax = Decimal(issue_fact.sales_estimate_cost_inc_tax)
-    sales_estimate_lines = int(issue_fact.sales_estimate_lines)
+        consumed_known_ex_tax = Decimal(issue_fact.consumed_known_ex_tax)
+        consumed_known_inc_tax = Decimal(issue_fact.consumed_known_inc_tax)
+        sales_estimate_cost_ex_tax = Decimal(issue_fact.sales_estimate_cost_ex_tax)
+        sales_estimate_cost_inc_tax = Decimal(issue_fact.sales_estimate_cost_inc_tax)
+        sales_estimate_lines = int(issue_fact.sales_estimate_lines)
+    else:
+        requisition_total = eligible_requisition_total = cost_gap_count = unmapped_issue_count = 0
+        consumed_known_ex_tax = consumed_known_inc_tax = Decimal("0.00")
+        sales_estimate_cost_ex_tax = sales_estimate_cost_inc_tax = Decimal("0.00")
+        sales_estimate_lines = 0
 
     expense_eligible = and_(
         MaintenanceProjectExpenseAttribution.status_mapping_state == "mapped",
@@ -5447,194 +5566,240 @@ def project_workspace(
         MaintenanceProjectExpenseAttribution.ownership_mapping_state == "mapped",
         MaintenanceProjectExpenseAttribution.project_contract_id.is_not(None),
     )
-    expense_fact = db.execute(
-        select(
-            func.count().filter(expense_eligible).label("approved_total"),
-            func.count()
-            .filter(
-                or_(
-                    MaintenanceProjectExpenseAttribution.status_mapping_state
-                    != "mapped",
-                    MaintenanceProjectExpenseAttribution.normalized_status
-                    == "unknown",
-                    MaintenanceProjectExpenseAttribution.ownership_mapping_state
-                    != "mapped",
-                    MaintenanceProjectExpenseAttribution.project_contract_id.is_(None),
+    if summary_allowed:
+        expense_fact = db.execute(
+            select(
+                func.count().filter(expense_eligible).label("approved_total"),
+                func.count()
+                .filter(
+                    or_(
+                        MaintenanceProjectExpenseAttribution.status_mapping_state
+                        != "mapped",
+                        MaintenanceProjectExpenseAttribution.normalized_status
+                        == "unknown",
+                        MaintenanceProjectExpenseAttribution.ownership_mapping_state
+                        != "mapped",
+                        MaintenanceProjectExpenseAttribution.project_contract_id.is_(None),
+                    )
+                )
+                .label("unmapped_expense_count"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                expense_eligible,
+                                MaintenanceProjectExpenseAttribution.amount_ex_tax,
+                            ),
+                            else_=Decimal("0.00"),
+                        )
+                    ),
+                    Decimal("0.00"),
+                ).label("approved_expense_ex_tax"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                expense_eligible,
+                                MaintenanceProjectExpenseAttribution.amount_inc_tax,
+                            ),
+                            else_=Decimal("0.00"),
+                        )
+                    ),
+                    Decimal("0.00"),
+                ).label("approved_expense_inc_tax"),
+            ).where(
+                MaintenanceProjectExpenseAttribution.project_id == project_id,
+                MaintenanceProjectExpenseAttribution.expense_date <= as_of,
+            )
+        ).one()
+        approved_expense_total = int(expense_fact.approved_total)
+        unmapped_expense_count = int(expense_fact.unmapped_expense_count)
+        approved_expense_ex_tax = Decimal(expense_fact.approved_expense_ex_tax)
+        approved_expense_inc_tax = Decimal(expense_fact.approved_expense_inc_tax)
+    else:
+        approved_expense_total = unmapped_expense_count = 0
+        approved_expense_ex_tax = approved_expense_inc_tax = Decimal("0.00")
+
+    if allowed("collection_snapshots"):
+        collection_total = int(
+            db.scalar(
+                select(func.count())
+                .select_from(MaintenanceCollectionSnapshot)
+                .where(
+                    MaintenanceCollectionSnapshot.project_id == project_id,
+                    # 2026-08-21：total 与行集同口径——未来月份照常计数（770c68a 改了
+                    # 行集漏了计数，出现 rows=4/total=3 的分页错位）。指标仍 <= as_of。
                 )
             )
-            .label("unmapped_expense_count"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            expense_eligible,
-                            MaintenanceProjectExpenseAttribution.amount_ex_tax,
-                        ),
-                        else_=Decimal("0.00"),
-                    )
-                ),
-                Decimal("0.00"),
-            ).label("approved_expense_ex_tax"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            expense_eligible,
-                            MaintenanceProjectExpenseAttribution.amount_inc_tax,
-                        ),
-                        else_=Decimal("0.00"),
-                    )
-                ),
-                Decimal("0.00"),
-            ).label("approved_expense_inc_tax"),
-        ).where(
-            MaintenanceProjectExpenseAttribution.project_id == project_id,
-            MaintenanceProjectExpenseAttribution.expense_date <= as_of,
+            or 0
         )
-    ).one()
-    approved_expense_total = int(expense_fact.approved_total)
-    unmapped_expense_count = int(expense_fact.unmapped_expense_count)
-    approved_expense_ex_tax = Decimal(expense_fact.approved_expense_ex_tax)
-    approved_expense_inc_tax = Decimal(expense_fact.approved_expense_inc_tax)
-
-    collection_total = int(
-        db.scalar(
-            select(func.count())
-            .select_from(MaintenanceCollectionSnapshot)
-            .where(
-                MaintenanceCollectionSnapshot.project_id == project_id,
-                # 2026-08-21：total 与行集同口径——未来月份照常计数（770c68a 改了
-                # 行集漏了计数，出现 rows=4/total=3 的分页错位）。指标仍 <= as_of。
-            )
-        )
-        or 0
-    )
+    else:
+        collection_total = None
     state = db.get(MaintenanceProjectWorkbookState, project_id)
-    manager_update_completed = project_id in _manager_update_completed_project_ids(
-        db,
-        project_ids=[project_id],
-        report_month=as_of,
-    )
-    manager_tracking = _manager_tracking_facts(
-        db,
-        project_ids=[project_id],
-    ).get(project_id)
-    project_summary, reminders, completeness = _project_card_from_facts(
-        base=base,
-        latest_confirmed=latest_confirmed,
-        consumed_known_ex_tax=consumed_known_ex_tax,
-        consumed_known_inc_tax=consumed_known_inc_tax,
-        sales_estimate_cost_ex_tax=sales_estimate_cost_ex_tax,
-        sales_estimate_cost_inc_tax=sales_estimate_cost_inc_tax,
-        sales_estimate_lines=sales_estimate_lines,
-        cost_gap_count=cost_gap_count,
-        unmapped_issue_count=unmapped_issue_count,
-        approved_expense_ex_tax=approved_expense_ex_tax,
-        approved_expense_inc_tax=approved_expense_inc_tax,
-        unmapped_expense_count=unmapped_expense_count,
-        state=state,
-        as_of=as_of,
-        user_ctx=user_ctx,
-        manager_update_completed=manager_update_completed,
-        manager_tracking_facts=manager_tracking,
-    )
-    _attach_manager_and_missing_labels(
-        project_summary,
-        maintenance_project_assignments.active_assignment_views(
+    if summary_allowed:
+        manager_update_completed = project_id in _manager_update_completed_project_ids(
             db,
             project_ids=[project_id],
-        ).get(project_id),
-    )
-    project_summary["return_rate"] = maintenance_bad_returns.project_return_rate(
-        db,
-        project_id=project_id,
-    )
-    manual_count_statement = (
-        select(func.count())
-        .select_from(MaintenanceSourceOrderAssignment)
-        .join(
-            FMaintenanceOrder,
-            FMaintenanceOrder.raw_order_id
-            == MaintenanceSourceOrderAssignment.source_order_id,
+            report_month=as_of,
         )
-        .where(
-            MaintenanceSourceOrderAssignment.project_id == project_id,
-            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        manager_tracking = _manager_tracking_facts(
+            db,
+            project_ids=[project_id],
+        ).get(project_id)
+        project_summary, reminders, completeness = _project_card_from_facts(
+            base=base,
+            latest_confirmed=latest_confirmed,
+            consumed_known_ex_tax=consumed_known_ex_tax,
+            consumed_known_inc_tax=consumed_known_inc_tax,
+            sales_estimate_cost_ex_tax=sales_estimate_cost_ex_tax,
+            sales_estimate_cost_inc_tax=sales_estimate_cost_inc_tax,
+            sales_estimate_lines=sales_estimate_lines,
+            cost_gap_count=cost_gap_count,
+            unmapped_issue_count=unmapped_issue_count,
+            approved_expense_ex_tax=approved_expense_ex_tax,
+            approved_expense_inc_tax=approved_expense_inc_tax,
+            unmapped_expense_count=unmapped_expense_count,
+            state=state,
+            as_of=as_of,
+            user_ctx=fields("operation_summary"),
+            manager_update_completed=manager_update_completed,
+            manager_tracking_facts=manager_tracking,
         )
-    )
-    project_summary["manual_source_order_count"] = int(
-        db.scalar(active_beta_maintenance_orders(manual_count_statement, FMaintenanceOrder)) or 0
-    )
+        if allowed("project_identity"):
+            _attach_manager_and_missing_labels(
+                project_summary,
+                maintenance_project_assignments.active_assignment_views(
+                    db,
+                    project_ids=[project_id],
+                ).get(project_id),
+            )
+        project_summary["return_rate"] = (maintenance_bad_returns.return_rates_for_projects(
+            db, project_ids=[project_id])[project_id] if canonical else
+            maintenance_bad_returns.project_return_rate(db, project_id=project_id))
+        manual_count_statement = (
+            select(func.count())
+            .select_from(MaintenanceSourceOrderAssignment)
+            .join(
+                FMaintenanceOrder,
+                FMaintenanceOrder.raw_order_id
+                == MaintenanceSourceOrderAssignment.source_order_id,
+            )
+            .where(
+                MaintenanceSourceOrderAssignment.project_id == project_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            )
+        )
+        project_summary["manual_source_order_count"] = int(
+            db.scalar(active_beta_maintenance_orders(manual_count_statement, FMaintenanceOrder)) or 0
+        )
+    else:
+        project_summary = {"project_id":project_id,"metrics":None,"manager_tracking":None,
+            "task_summary":None,"reminder_count":None,"return_rate":None}
+        reminders, completeness = [], None
+    if canonical:
+        if identity_base is not None:
+            project_summary.update(identity_base["project"])
+        project_summary["contracts"] = contract_base["contracts"] if contract_base else []
 
-    issue_statement = (
-        select(MaintenanceSiteIssue, MaintenanceSiteIssueLine)
-        .join(
-            MaintenanceSiteIssueLine,
-            MaintenanceSiteIssueLine.issue_id == MaintenanceSiteIssue.issue_id,
+    if allowed("requisitions"):
+        if not summary_allowed:
+            requisition_total = int(db.scalar(select(func.count()).select_from(MaintenanceSiteIssue)
+                .join(MaintenanceSiteIssueLine,MaintenanceSiteIssueLine.issue_id==MaintenanceSiteIssue.issue_id)
+                .where(MaintenanceSiteIssue.project_id==project_id,MaintenanceSiteIssue.issue_date<=as_of,
+                       MaintenanceSiteIssueLine.is_active.is_(True))) or 0)
+            eligible_requisition_total = int(db.scalar(select(func.count()).select_from(MaintenanceSiteIssue)
+                .join(MaintenanceSiteIssueLine,MaintenanceSiteIssueLine.issue_id==MaintenanceSiteIssue.issue_id)
+                .where(MaintenanceSiteIssue.project_id==project_id,MaintenanceSiteIssue.issue_date<=as_of,
+                       MaintenanceSiteIssueLine.is_active.is_(True),eligible_issue)) or 0)
+        issue_statement = (
+            select(MaintenanceSiteIssue, MaintenanceSiteIssueLine)
+            .join(
+                MaintenanceSiteIssueLine,
+                MaintenanceSiteIssueLine.issue_id == MaintenanceSiteIssue.issue_id,
+            )
+            .where(
+                MaintenanceSiteIssue.project_id == project_id,
+                MaintenanceSiteIssue.issue_date <= as_of,
+                # 2026-08-19：作废领用行不出现在工作区领用明细（#55）
+                MaintenanceSiteIssueLine.is_active.is_(True),
+            )
+            .order_by(
+                MaintenanceSiteIssue.issue_date,
+                MaintenanceSiteIssue.issue_no,
+                MaintenanceSiteIssueLine.line_no,
+                MaintenanceSiteIssueLine.issue_line_id,
+            )
         )
-        .where(
-            MaintenanceSiteIssue.project_id == project_id,
-            MaintenanceSiteIssue.issue_date <= as_of,
-            # 2026-08-19：作废领用行不出现在工作区领用明细（#55）
-            MaintenanceSiteIssueLine.is_active.is_(True),
-        )
-        .order_by(
-            MaintenanceSiteIssue.issue_date,
-            MaintenanceSiteIssue.issue_no,
-            MaintenanceSiteIssueLine.line_no,
-            MaintenanceSiteIssueLine.issue_line_id,
-        )
-    )
-    if requisition_page_size is not None:
-        issue_statement = issue_statement.offset(
-            (requisition_page - 1) * requisition_page_size
-        ).limit(requisition_page_size)
-    issue_rows = db.execute(issue_statement).all()
-    requisition_rows: list[dict] = []
-    for issue, line in issue_rows:
-        eligible = (
-            issue.status_mapping_state == "mapped"
-            and issue.normalized_status in {"confirmed", "corrected"}
-        )
-        requisition_rows.append(
-            {
-                "issue_id": issue.issue_id,
-                "issue_no": issue.issue_no,
-                "issue_date": issue.issue_date.isoformat(),
-                "status_mapping_state": issue.status_mapping_state,
-                "normalized_status": issue.normalized_status,
-                "source": issue.source,
-                "import_batch_id": issue.import_batch_id,
-                **site_issue_line_dict(line),
-                "counts_cost": eligible,
-            }
-        )
+        if requisition_page_size is not None:
+            issue_statement = issue_statement.offset(
+                (requisition_page - 1) * requisition_page_size
+            ).limit(requisition_page_size)
+        issue_rows = db.execute(issue_statement).all()
+        requisition_rows: list[dict] = []
+        for issue, line in issue_rows:
+            eligible = (
+                issue.status_mapping_state == "mapped"
+                and issue.normalized_status in {"confirmed", "corrected"}
+            )
+            requisition_rows.append(
+                {
+                    "issue_id": issue.issue_id,
+                    "issue_no": issue.issue_no,
+                    "issue_date": issue.issue_date.isoformat(),
+                    "status_mapping_state": issue.status_mapping_state,
+                    "normalized_status": issue.normalized_status,
+                    "source": issue.source,
+                    "import_batch_id": issue.import_batch_id,
+                    **site_issue_line_dict(line),
+                    "counts_cost": eligible,
+                }
+            )
+    else:
+        issue_rows, requisition_rows, requisition_total = [], [], None
+        eligible_requisition_total = None
 
-    expense_statement = (
-        select(MaintenanceProjectExpenseAttribution)
-        .where(
-            MaintenanceProjectExpenseAttribution.project_id == project_id,
-            MaintenanceProjectExpenseAttribution.expense_date <= as_of,
-            expense_eligible,
+    expense_rows_allowed = allowed("approved_expenses") and not is_field_hidden(fields("approved_expenses"), "expense_inc")
+    if expense_rows_allowed:
+        if not summary_allowed:
+            approved_expense_total = int(db.scalar(select(func.count()).select_from(MaintenanceProjectExpenseAttribution)
+                .where(MaintenanceProjectExpenseAttribution.project_id==project_id,
+                       MaintenanceProjectExpenseAttribution.expense_date<=as_of,expense_eligible)) or 0)
+        expense_statement = (
+            select(MaintenanceProjectExpenseAttribution)
+            .where(
+                MaintenanceProjectExpenseAttribution.project_id == project_id,
+                MaintenanceProjectExpenseAttribution.expense_date <= as_of,
+                expense_eligible,
+            )
+            .order_by(
+                MaintenanceProjectExpenseAttribution.expense_date,
+                MaintenanceProjectExpenseAttribution.expense_ref,
+                MaintenanceProjectExpenseAttribution.expense_id,
+            )
         )
-        .order_by(
-            MaintenanceProjectExpenseAttribution.expense_date,
-            MaintenanceProjectExpenseAttribution.expense_ref,
-            MaintenanceProjectExpenseAttribution.expense_id,
-        )
-    )
-    if expense_page_size is not None:
-        expense_statement = expense_statement.offset(
-            (expense_page - 1) * expense_page_size
-        ).limit(expense_page_size)
-    approved_expense_rows = list(db.scalars(expense_statement))
+        if expense_page_size is not None:
+            expense_statement = expense_statement.offset(
+                (expense_page - 1) * expense_page_size
+            ).limit(expense_page_size)
+        approved_expense_rows = list(db.scalars(expense_statement))
+    else:
+        approved_expense_rows = []
+        if canonical:
+            approved_expense_total = None
 
-    contract_numbers_by_id = {
-        row["project_contract_id"]: row["contract_no"] for row in base["contracts"]
-    }
-    cost_restricted = is_field_hidden(user_ctx, "unit_cost")
-    profit_restricted = is_field_hidden(user_ctx, "contract_amount")
-    expense_restricted = is_field_hidden(user_ctx, "expense_inc")
+    row_contracts = base["contracts"]
+    if canonical and (allowed("requisitions") or allowed("collection_snapshots") or expense_rows_allowed):
+        row_contracts = [{"project_contract_id":row.project_contract_id,"contract_no":row.contract_no,
+            "included_in_total":row.included_in_total,"effective_from":row.effective_from.isoformat(),
+            "effective_to":row.effective_to.isoformat() if row.effective_to else None}
+            for row in db.execute(select(MaintenanceProjectContract.project_contract_id,
+                MaintenanceProjectContract.contract_no,MaintenanceProjectContract.included_in_total,
+                MaintenanceProjectContract.effective_from,MaintenanceProjectContract.effective_to)
+                .where(MaintenanceProjectContract.project_id==project_id))]
+    contract_numbers_by_id = {row["project_contract_id"]:row["contract_no"] for row in row_contracts}
+    cost_restricted = is_field_hidden(fields("requisitions"), "unit_cost")
+    profit_restricted = is_field_hidden(fields("collection_snapshots"), "contract_amount")
+    expense_restricted = is_field_hidden(fields("approved_expenses"), "expense_inc")
     if cost_restricted:
         hidden_cost_keys = {
             "manual_unit_cost",
@@ -5684,7 +5849,7 @@ def project_workspace(
         if issue_date not in applicable_contracts_by_date:
             numbers = [
                 row["contract_no"]
-                for row in base["contracts"]
+                for row in row_contracts
                 if row["included_in_total"]
                 and date.fromisoformat(row["effective_from"]) <= issue_date
                 and (
@@ -5737,43 +5902,46 @@ def project_workspace(
     last_exported_at = (
         state.last_exported_at.isoformat() if state and state.last_exported_at else None
     )
-    collection_statement = (
-        select(MaintenanceCollectionSnapshot)
-        .where(
-            MaintenanceCollectionSnapshot.project_id == project_id,
-            # 2026-08-21：不再静默隐藏未来月份（用户实测踩坑——实收填了未来月
-            # 页面空白无解释）。未来月份照常返回，前端打「未来月份」标记；
-            # 指标计算（latest_confirmed）仍保持 <= as_of 口径不变。
+    if allowed("collection_snapshots"):
+        collection_statement = (
+            select(MaintenanceCollectionSnapshot)
+            .where(
+                MaintenanceCollectionSnapshot.project_id == project_id,
+                # 2026-08-21：不再静默隐藏未来月份（用户实测踩坑——实收填了未来月
+                # 页面空白无解释）。未来月份照常返回，前端打「未来月份」标记；
+                # 指标计算（latest_confirmed）仍保持 <= as_of 口径不变。
+            )
+            .order_by(
+                MaintenanceCollectionSnapshot.report_month,
+                MaintenanceCollectionSnapshot.collection_id,
+            )
         )
-        .order_by(
-            MaintenanceCollectionSnapshot.report_month,
-            MaintenanceCollectionSnapshot.collection_id,
-        )
-    )
-    if collection_page_size is not None:
-        collection_statement = collection_statement.offset(
-            (collection_page - 1) * collection_page_size
-        ).limit(collection_page_size)
-    collection_rows = [
-        {
-            "collection_id": row.collection_id,
-            "project_contract_id": row.project_contract_id,
-            "contract_no": contract_numbers_by_id.get(row.project_contract_id),
-            "report_month": row.report_month.isoformat(),
-            "cumulative_amount": (
-                None if profit_restricted else _money(row.cumulative_amount)
-            ),
-            "receipt_reference": (
-                None if profit_restricted else row.receipt_reference
-            ),
-            "status": row.status,
-            "remark": None if profit_restricted else row.remark,
-            "source": row.source,
-            "import_batch_id": row.import_batch_id,
-            "version": row.version,
-        }
-        for row in db.scalars(collection_statement)
-    ]
+        if collection_page_size is not None:
+            collection_statement = collection_statement.offset(
+                (collection_page - 1) * collection_page_size
+            ).limit(collection_page_size)
+        collection_rows = [
+            {
+                "collection_id": row.collection_id,
+                "project_contract_id": row.project_contract_id,
+                "contract_no": contract_numbers_by_id.get(row.project_contract_id),
+                "report_month": row.report_month.isoformat(),
+                "cumulative_amount": (
+                    None if profit_restricted else _money(row.cumulative_amount)
+                ),
+                "receipt_reference": (
+                    None if profit_restricted else row.receipt_reference
+                ),
+                "status": row.status,
+                "remark": None if profit_restricted else row.remark,
+                "source": row.source,
+                "import_batch_id": row.import_batch_id,
+                "version": row.version,
+            }
+            for row in db.scalars(collection_statement)
+        ]
+    else:
+        collection_rows = []
     payload = {
         "project": project_summary,
         "workbook_revision": state.revision if state is not None else 0,
@@ -5791,7 +5959,7 @@ def project_workspace(
         },
         "approved_expenses": {
             "rows": expense_payload_rows,
-            "total": 0 if expense_restricted else approved_expense_total,
+            "total": (None if canonical else 0) if expense_restricted else approved_expense_total,
             "page": expense_page,
             "page_size": expense_page_size or approved_expense_total or 1,
         },
@@ -5800,10 +5968,10 @@ def project_workspace(
         "workbook_preview": {
             "protocol_version": "2.0",
             "sheets": [
-                {"code": "overview", "name": "01_总览", "row_count": len(project_summary["contracts"]) + collection_total, "ownership": "append_only"},
+                {"code": "overview", "name": "01_总览", "row_count": (len(project_summary["contracts"]) + collection_total) if allowed("contracts") and allowed("collection_snapshots") else None, "ownership": "append_only"},
                 {"code": "site_requisitions", "name": "02_备件消耗", "row_count": eligible_requisition_total, "ownership": "system"},
-                {"code": "approved_expenses", "name": "03_报销单", "row_count": 0 if expense_restricted else approved_expense_total, "ownership": "system"},
-                {"code": "manager_tracking", "name": "04_项目经理追踪与提醒", "row_count": len(reminder_rows), "ownership": "system"},
+                {"code": "approved_expenses", "name": "03_报销单", "row_count": (None if canonical else 0) if expense_restricted else approved_expense_total, "ownership": "system"},
+                {"code": "manager_tracking", "name": "04_项目经理追踪与提醒", "row_count": len(reminder_rows) if summary_allowed else None, "ownership": "system"},
             ],
             "latest_tracking_month": as_of.strftime("%Y-%m"),
             "last_exported_at": last_exported_at,
@@ -5816,6 +5984,18 @@ def project_workspace(
         "as_of": as_of.isoformat(),
         "completeness": completeness,
     }
+    if canonical:
+        for block in ("collection_snapshots","requisitions","approved_expenses"):
+            payload[block]["restricted"] = not allowed(block) or (block == "approved_expenses" and not expense_rows_allowed)
+        if not allowed("project_identity"):
+            for key in ("manager_assignment","missing_data_labels","attachment_status"):
+                project_summary.pop(key,None)
+        if summary_allowed and is_field_hidden(fields("operation_summary"), "contract_amount"):
+            # These signals are calculated from planned/received amounts even
+            # when their numeric leaves have already been masked.
+            tracking = project_summary.get("manager_tracking") or {}
+            for key in ("next_collection_milestone", "outstanding_collection_milestones"):
+                tracking[key] = None
     payload["data_version"] = _payload_token(payload)
     return payload
 
@@ -6315,8 +6495,22 @@ def _directory_reminder_query(
     task_status: str | None = None,
     due_from: date | None = None,
     due_to: date | None = None,
+    authorized_projects=None,
 ):
     """Build reminder/task project sets in SQL before applying pagination."""
+
+    def scoped(column):
+        return column.in_(authorized_projects) if authorized_projects is not None else literal(True)
+    # Global identity conflicts are a narrow completeness input. Only identities
+    # present in the authorized project set participate; no other financial row
+    # or aggregate is admitted by this identity lookup.
+    conflict_scope = literal(True)
+    if authorized_projects is not None:
+        scoped_contracts = select(MaintenanceProjectContract.contract_id, MaintenanceProjectContract.contract_no).where(
+            scoped(MaintenanceProjectContract.project_id)).cte('directory_authorized_contract_identity')
+        conflict_scope = or_(scoped(MaintenanceProjectContract.project_id),
+            MaintenanceProjectContract.contract_id.in_(select(scoped_contracts.c.contract_id)),
+            MaintenanceProjectContract.contract_no.in_(select(scoped_contracts.c.contract_no)))
 
     current_contract = and_(
         MaintenanceProjectContract.effective_from <= as_of,
@@ -6336,7 +6530,7 @@ def _directory_reminder_query(
             MaintenanceProjectContract.contract_id,
             MaintenanceProjectContract.contract_no,
         )
-        .where(effective_contract)
+        .where(effective_contract, conflict_scope)
         .cte("directory_effective_contract")
     )
     duplicate_contract_ids = (
@@ -6430,6 +6624,7 @@ def _directory_reminder_query(
                 Decimal("0.00"),
             ).label("total_contract_amount"),
         )
+        .where(scoped(MaintenanceProjectContract.project_id))
         .group_by(MaintenanceProjectContract.project_id)
         .cte("directory_contract_fact")
     )
@@ -6448,6 +6643,7 @@ def _directory_reminder_query(
             .label("row_number"),
         )
         .where(
+            scoped(MaintenanceCollectionSnapshot.project_id),
             MaintenanceCollectionSnapshot.status == "confirmed",
             MaintenanceCollectionSnapshot.report_month <= as_of,
         )
@@ -6512,6 +6708,7 @@ def _directory_reminder_query(
             # 2026-08-19：作废领用行不计入目录提醒的缺口/已领成本（#55）
             MaintenanceSiteIssueLine.is_active.is_(True),
         )
+        .where(scoped(MaintenanceSiteIssue.project_id))
         .group_by(MaintenanceSiteIssue.project_id)
         .cte("directory_issue_fact")
     )
@@ -6529,6 +6726,7 @@ def _directory_reminder_query(
                 MaintenanceSiteIssue.normalized_status == "unknown",
             ),
         )
+        .where(scoped(MaintenanceSiteIssue.project_id))
         .group_by(MaintenanceSiteIssue.project_id)
         .cte("directory_issue_status_fact")
     )
@@ -6570,6 +6768,7 @@ def _directory_reminder_query(
             ).label("approved_expense"),
         )
         .where(MaintenanceProjectExpenseAttribution.expense_date <= as_of)
+        .where(scoped(MaintenanceProjectExpenseAttribution.project_id))
         .group_by(MaintenanceProjectExpenseAttribution.project_id)
         .cte("directory_expense_fact")
     )
@@ -6611,6 +6810,7 @@ def _directory_reminder_query(
                 ranked_collection.c.row_number == 1,
             ),
         )
+        .where(scoped(MaintenanceCollectionMilestone.project_id))
         .cte("directory_milestone_progress")
     )
     outstanding_milestone = (
@@ -6650,6 +6850,7 @@ def _directory_reminder_query(
             MaintenanceCollectionMilestone.project_id,
             func.count().label("milestone_count"),
         )
+        .where(scoped(MaintenanceCollectionMilestone.project_id))
         .group_by(MaintenanceCollectionMilestone.project_id)
         .cte("directory_milestone_fact")
     )
@@ -6662,6 +6863,8 @@ def _directory_reminder_query(
         .where(
             BusinessFileLink.entity_type
             == "maintenance_acceptance_deliverable",
+            BusinessFileLink.entity_id.in_(select(MaintenanceAcceptanceDeliverable.deliverable_id).where(
+                scoped(MaintenanceAcceptanceDeliverable.project_id))),
             BusinessFileLink.archived_at.is_(None),
             BusinessFile.security_state == "active",
         )
@@ -6685,6 +6888,7 @@ def _directory_reminder_query(
             == MaintenanceAcceptanceDeliverable.deliverable_id,
         )
         .where(
+            scoped(MaintenanceAcceptanceDeliverable.project_id),
             MaintenanceAcceptanceDeliverable.deliverable_type
             == "acceptance_report"
         )
@@ -7208,6 +7412,8 @@ def project_operations(
     task_status: str | None = None,
     due_from: date | None = None,
     due_to: date | None = None,
+    project_condition=None,
+    owner_condition=None,
 ) -> dict:
     required_fields = _reminder_filter_required_fields(reminder)
     required_fields += _task_type_filter_required_fields(task_type)
@@ -7216,10 +7422,10 @@ def project_operations(
     if due_from is not None and due_to is not None and due_from > due_to:
         raise MaintenanceOperationError("截止日期起点不能晚于终点")
     rows: list[dict] = []
-    filters = []
+    filters = [project_condition] if project_condition is not None else []
     if owner_scope == "me":
         filters.append(
-            maintenance_project_assignments.owned_project_condition(user_ctx)
+            owner_condition if owner_condition is not None else maintenance_project_assignments.owned_project_condition(user_ctx)
         )
     if not include_inactive:
         filters.append(MaintenanceProject.is_active.is_(True))
@@ -7278,6 +7484,7 @@ def project_operations(
             task_status=task_status,
             due_from=due_from,
             due_to=due_to,
+            authorized_projects=select(MaintenanceProject.project_id).where(*filters) if project_condition is not None else None,
         )
         total = int(
             db.scalar(select(func.count()).select_from(matching_query.subquery()))

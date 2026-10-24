@@ -402,6 +402,7 @@ def register_receipt(
     serial_numbers: list[str] | None = None,
     idempotency_key: str | None = None,
     operated_by: str,
+    owner_user_id: int | None = None,
 ) -> dict:
     lock_receipt_context(db)
     _get_project(db, project_id, lock=True)
@@ -444,6 +445,9 @@ def register_receipt(
             ).with_for_update().execution_options(populate_existing=True)
         ).scalar_one_or_none()
         if existing is not None:
+            if owner_user_id is not None and existing.owner_user_id != owner_user_id:
+                from app.authz.errors import authz_error
+                raise authz_error(403, "AUTHZ_FORBIDDEN", "当前账号不能认领其他账号或历史匿名回执")
             original = db.scalar(select(MaintenanceProjectOperationAudit.after_json)
                 .where(MaintenanceProjectOperationAudit.entity_type == _AUDIT_ENTITY_TYPE,
                        MaintenanceProjectOperationAudit.entity_id == existing.rkd_line_id,
@@ -468,6 +472,7 @@ def register_receipt(
         check_receipt_capacity(db, project_id=project_id, source_order_id=source_order_id,
                                requested=qty_clean)
     row = MaintenanceRkdReturnLine(
+        owner_user_id=owner_user_id,
         rkd_line_id=str(uuid4()),
         batch_id=None,
         head_row_id=None,

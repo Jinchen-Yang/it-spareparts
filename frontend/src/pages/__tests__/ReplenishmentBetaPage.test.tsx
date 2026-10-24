@@ -1,3 +1,4 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
 import { TAG_STYLES } from "../../theme";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../test/antdRender";
 import { MemoryRouter } from "react-router-dom";
@@ -246,7 +247,7 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
     fireEvent.click(await screen.findByText(/WX-2026-001/));
 
     const requestNote = await screen.findByDisplayValue("可查看的云端草稿");
-    expect(getCartDraft).toHaveBeenCalledWith(project.project_id);
+    expect(getCartDraft).toHaveBeenCalledWith(project.project_id, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     const cart = screen.getByText("新建维保补库申请").closest(".ant-card");
     expect(cart).not.toBeNull();
     const cartUi = within(cart as HTMLElement);
@@ -294,7 +295,7 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
     fireEvent.mouseDown(await screen.findByRole("combobox"));
     fireEvent.click(await screen.findByText(/WX-2026-001/));
     const requestNote = await screen.findByDisplayValue("只读草稿备注");
-    await waitFor(() => expect(getCartDraft).toHaveBeenCalledWith(project.project_id));
+    await waitFor(() => expect(getCartDraft).toHaveBeenCalledWith(project.project_id, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     replaceCartDraft.mockClear();
     deleteCartDraft.mockClear();
 
@@ -653,9 +654,8 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
     render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
 
     expect(await screen.findByText("当前账号没有可选的维保项目")).toBeInTheDocument();
-    expect(screen.getByText(/负责人\/viewer 挂靠/)).toBeInTheDocument();
-    expect(screen.getByText(/只看自己维保项目.*销售映射/)).toBeInTheDocument();
-    expect(screen.getByText(/老板和管理员.*全范围/)).toBeInTheDocument();
+    expect(screen.getByText(/项目归属与当前账号的项目访问范围/)).toBeInTheDocument();
+    expect(screen.queryByText(/老板和管理员.*全范围/)).toBeNull();
     expect(screen.queryByText(/销售经理需要先/)).toBeNull();
   });
 
@@ -728,7 +728,7 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
     expect(submitCartDraft.mock.calls[0]).toEqual([
       "proj-a",
       1,
-      "cart-submit-request-001",
+      "cart-submit-request-001", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }),
     ]);
     expect(submitCartDraft.mock.calls[1]).toEqual(submitCartDraft.mock.calls[0]);
 
@@ -902,3 +902,10 @@ describe("ReplenishmentBetaPage（原子提交流程）", () => {
     expect(retryPayload.client_request_id).toBe(payload.client_request_id);
   });
 });
+
+// These existing business behavior fixtures intentionally exercise the legacy runtime.
+vi.mock("../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../authz/AuthzProvider")>(),
+  useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

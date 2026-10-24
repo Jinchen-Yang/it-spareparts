@@ -1,5 +1,8 @@
 """Account-scoped Beta allowlists override only the two Beta page keys for admins."""
 
+import json
+import re
+
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
@@ -9,13 +12,13 @@ from sqlalchemy import select
 from app import config, permissions, security
 from app.auth import hash_password
 from app.api.replenishment import (
-    _beta_page_whitelist,
     router as replenishment_router,
 )
 from app.beta_access import beta_feature_availability
 from app.config import get_settings
 from app.main import app
 from app.models.system import SysAuditLog, SysUser
+from tests.authz_pdp_helpers import cerbos_url  # noqa: F401
 
 
 _PASSWORD = "synthetic-beta-admin-password"
@@ -287,9 +290,91 @@ def test_replenishment_allowlist_cannot_be_bypassed_by_legacy_rbac_switch(
         settings.replenishment_beta_enabled = original
 
 
-def test_every_replenishment_route_has_account_allowlist_dependency():
+@pytest.mark.parametrize("rbac_enabled", [True, False])
+def test_every_never_cutover_replenishment_route_enforces_account_allowlist(
+    db, monkeypatch, rbac_enabled,
+):
+    """Test all mounted methods; direct versus composed Depends is immaterial."""
+    from app.authz import runtime
+
+    admin = _named_admin(db, "beta-all-routes-admin")
+    db.commit()
+    monkeypatch.setattr(config, "ENABLE_RBAC", rbac_enabled)
+    monkeypatch.setattr(get_settings(), "replenishment_beta_enabled", True)
+    client, _ = _login(admin.username)
+    assert all(runtime.runtime_states(db)[resource].runtime_state == "legacy" for resource in (
+        "replenishment_capabilities", "replenishment_catalog", "replenishment_project_directory",
+        "replenishment_project_commands", "replenishment_request",
+    ))
+    tested = set()
     for route in replenishment_router.routes:
         if not isinstance(route, APIRoute):
             continue
-        dependencies = {dependency.call for dependency in route.dependant.dependencies}
-        assert _beta_page_whitelist in dependencies, route.path
+        path = "/api" + re.sub(r"\{[^}]+\}", "not-real", route.path)
+        for method in route.methods:
+            response = client.request(method, path, json={} if method in {"POST", "PUT", "PATCH"} else None)
+            assert response.status_code == 403, (method, route.path, response.text)
+            assert "未获得补库申请页面权限" in response.text, (method, route.path, response.text)
+            tested.add((method, route.path))
+    assert len(tested) == 23
+
+
+def test_canonical_replenishment_grant_replaces_old_allowlist_but_keeps_release_and_current_grant(
+    db, monkeypatch, cerbos_url,
+):
+    from app.authz import runtime
+    from app.models.authorization import SysAuthorizationGrant
+
+    settings = get_settings()
+    for name, value in {
+        "authorization_mode": "unified_modules",
+        "authz_enabled_resources": ["replenishment_catalog"],
+        "authz_suspended_resources": [],
+        "authz_sales_analysis_enabled": False,
+        "authz_sales_analysis_suspended": False,
+        "replenishment_beta_enabled": True,
+        "cerbos_url": cerbos_url,
+        "cerbos_timeout_seconds": 2.0,
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+    runtime.activate_configured_resources(db.get_bind())
+    actor = SysUser(username="beta-canonical-only", password_hash=hash_password(_PASSWORD),
+                    role="readonly", permissions={"page_replenishment_beta": False})
+    db.add(actor)
+    db.flush()
+    grant = SysAuthorizationGrant(user_id=actor.id, resource="replenishment_catalog",
+        actions=["read"], scope="all", field_permissions=["data_pool_price_governance"], version=1)
+    db.add(grant)
+    db.commit()
+    assert permissions.effective_for_user(actor)["page_replenishment_beta"] is False
+    client, _ = _login(actor.username)
+    path = "/api/replenishment-beta/catalog"
+    view = client.get(path, params={"view": "authorization"})
+    assert view.status_code == 200, view.text
+    assert set(view.json()) == {"locator", "authorization_context"}
+    context = view.json()["authorization_context"]
+    assert set(context["resources"]) == {"replenishment_catalog"}
+    assert context["resources"]["replenishment_catalog"]["decisions"] == {
+        "read": {"effect": "allow", "reason": None},
+    }
+    proof = {key: context[key] for key in ("catalog_version", "authorization_epoch", "context")}
+    result = client.get(path, params={"authorization_precondition": json.dumps(proof)})
+    assert result.status_code == 200, result.text
+    assert result.json()["authorization_context"]["context"] == context["context"]
+    assert client.get("/api/replenishment-beta/projects").status_code == 403
+    grant.actions = []
+    grant.version += 1
+    db.commit()
+    denied = client.get(path)
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["detail"]["code"] == "AUTHZ_FORBIDDEN"
+    grant.actions = ["read"]
+    grant.version += 1
+    db.commit()
+    monkeypatch.setattr(settings, "replenishment_beta_enabled", False)
+    assert client.get(path).status_code == 404
+    monkeypatch.setattr(settings, "replenishment_beta_enabled", True)
+    monkeypatch.setattr(settings, "authz_enabled_resources", [])
+    suspended = client.get(path)
+    assert suspended.status_code == 503, suspended.text
+    assert suspended.json()["detail"]["code"] == "AUTHZ_RESOURCE_UNAVAILABLE"

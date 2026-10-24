@@ -73,7 +73,7 @@ from app.api import (
 from app.config import check_security, get_settings
 from app.db import engine
 from app.http_controls import MigrationHttpControlsMiddleware
-from app.maintenance_beta import require_maintenance_beta
+from app.maintenance_beta import for_resources as maintenance_beta_for_resources
 from app.maintenance_boss import require_maintenance_boss
 
 _log = logging.getLogger("startup")
@@ -151,7 +151,6 @@ app.include_router(
     maintenance_project_batch_transfer.router, prefix=settings.api_prefix
 )
 app.include_router(maintenance_boss_board.router, prefix=settings.api_prefix)
-maintenance_beta_dependencies = [Depends(require_maintenance_beta)]
 # 新 2 页（卡墙/项目面板，plan v1.3）依赖的 router 随 boss 总闸走：beta 总闸在 v1.23
 # 发布后恒 false（审计 §2 2a），若面板的基础信息/归属挂靠仍挂 beta 闸会整组 404
 # ——2026-08-17 生产实发（「页面不存在」）。回滚口径统一＝关 boss 闸。
@@ -159,7 +158,7 @@ maintenance_boss_dependencies = [Depends(require_maintenance_boss)]
 app.include_router(
     maintenance_acceptance.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_acceptance", "maintenance_acceptance_directory"))],
 )
 # 验收清单导入挂在稳定版项目面板（page_maintenance），不受 Beta 总闸约束
 app.include_router(
@@ -169,7 +168,7 @@ app.include_router(
 app.include_router(
     maintenance_project_assignments.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_assignments"))],
 )
 # 负责人账号搜索（稳定版面板下拉数据源）不随 Beta 总闸——见该模块 docstring
 app.include_router(
@@ -179,12 +178,12 @@ app.include_router(
 app.include_router(
     maintenance_demands.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_demand"))],
 )
 app.include_router(
     maintenance_manager_workbooks.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_manager_workbook"))],
 )
 app.include_router(
     maintenance_source_assignments.router,
@@ -195,14 +194,14 @@ app.include_router(
 app.include_router(
     maintenance_migration.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_migration"))],
 )
 # The stable operations router must precede the project-master ``/{project_id}``
 # route so literal paths such as ``/operations`` cannot be captured as an id.
 app.include_router(
     maintenance_project_operations.operations_beta_router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_issue", "maintenance_contract", "maintenance_collection", "maintenance_expense", "maintenance_cost_fill", "maintenance_project_operations", "maintenance_operation_directory", "maintenance_project_purchase"))],
 )
 # Literal /manual/preview must precede the beta /{issue_id}/preview route.
 app.include_router(
@@ -213,7 +212,7 @@ app.include_router(
 app.include_router(
     maintenance_project_operations.site_issue_beta_router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_issue"))],
 )
 app.include_router(
     maintenance_project_operations.stable_workspace_router,
@@ -223,77 +222,77 @@ app.include_router(
 app.include_router(
     maintenance_bad_returns.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_return_obligation", "maintenance_return_categories"))],
 )
 app.include_router(
     maintenance_project_workbooks.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_project_roundtrip"))],
 )
 app.include_router(
     maintenance_project_workbook_v3.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_project_roundtrip"))],
 )
 app.include_router(
     maintenance_warehouse.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_warehouse", "maintenance_warehouse_import"))],
 )
 app.include_router(
     maintenance_collection_evidence.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_collection_followup"))],
 )
 app.include_router(
     maintenance_collection_reminders.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_collection_followup", "maintenance_collection_followup_directory"))],
 )
 app.include_router(
     maintenance_collection_plan_imports.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_collection_plan_import", "maintenance_collection_plan_import_read"))],
 )
 app.include_router(
     maintenance_ledger.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_ledger_import"))],
 )
 app.include_router(
     maintenance_front_stock.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_front_stock"))],
 )
 app.include_router(
     maintenance_recovery.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_recovery"))],
 )
 app.include_router(
     maintenance_bad_salvage.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_salvage"))],
 )
 app.include_router(
     maintenance_ckd_import.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_shipment_import", "maintenance_shipment_import_targets"))],
 )
 app.include_router(
     maintenance_doc_import.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_document_import", "maintenance_document_import_targets", "maintenance_document_relink"))],
 )
 app.include_router(
     maintenance_ai_fallback.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_ai_document", "maintenance_ai_ledger", "maintenance_ai_proposals"))],
 )
 app.include_router(
     maintenance_expense_reconcile.router,
     prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
+    dependencies=[Depends(maintenance_beta_for_resources("maintenance_expense_reconcile"))],
 )
 app.include_router(
     maintenance_projects.router,

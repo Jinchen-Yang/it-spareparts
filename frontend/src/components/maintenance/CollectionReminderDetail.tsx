@@ -1,3 +1,8 @@
+import { useContextAdmission, useModuleAccess } from "../../authz/access";
+import { actionRule } from "../../authz/rules";
+import { withContextSurface } from "../../authz/ContextSurface";
+import { validateContextualPayload } from "../../authz/contextProtocol";
+import type { BoundAuthorizationContext } from "../../authz/contextTypes";
 import { Alert, Button, Empty, Space, Tag } from "antd";
 import { Link } from "react-router-dom";
 
@@ -53,6 +58,9 @@ function lastOperationText(row: CollectionMilestoneRow): string {
 
 interface CollectionReminderDetailProps {
   detail: CollectionProjectDetailResponse | null;
+  /** Canonical consumers pass the selected object and the query's captured context, never a raw cached DTO. */
+  projectId?: string;
+  authorizationContext?: BoundAuthorizationContext | null;
   loading: boolean;
   error: boolean;
   selected: boolean;
@@ -68,8 +76,10 @@ interface CollectionReminderDetailProps {
   onRetry: () => void;
 }
 
-export default function CollectionReminderDetail({
-  detail,
+function CollectionReminderDetailContent({
+  detail: suppliedDetail,
+  projectId,
+  authorizationContext,
   loading,
   error,
   selected,
@@ -79,7 +89,22 @@ export default function CollectionReminderDetail({
   onImportPlan,
   onRetry,
 }: CollectionReminderDetailProps) {
-  const canFollowUp = capabilities.canFollowUpCollection;
+  const admission = useContextAdmission();
+  const access = useModuleAccess("maintenance_collection_followup", authorizationContext);
+  let detail = suppliedDetail;
+  let contextError = false;
+  if (!access.legacy && suppliedDetail) {
+    try {
+      if (!projectId || suppliedDetail.project.project_id !== projectId || !authorizationContext ||
+          !access.snapshot || !access.isCurrent(authorizationContext.capture)) throw new Error("Unresolved reminder context");
+      validateContextualPayload(suppliedDetail, access.snapshot,
+        { entryId: "GET /api/maintenance/projects/stable/{project_id}/collection-milestones", pathParams: { project_id: projectId } },
+        authorizationContext.value);
+    } catch { detail = null; contextError = true; }
+  }
+  const canFollowUp = admission.state(actionRule("maintenance_collection_followup", "record"), capabilities.canFollowUpCollection) !== "deny";
+  const canImport = admission.state(actionRule("maintenance_collection_plan_import", "preview"), capabilities.canImportCollectionPlan) !== "deny";
+  const canAmounts = access.legacy || access.field("data_profit");
   const summary = detail?.summary;
 
   const actionButtons = (row: CollectionMilestoneRow) => {
@@ -128,7 +153,7 @@ export default function CollectionReminderDetail({
     { key: "contract", title: COLLECTION_PAGE.colContract, render: (_: unknown, row: CollectionMilestoneRow) => row.contract_no ?? "—" },
     { key: "sequence", title: COLLECTION_PAGE.colSequence, render: (_: unknown, row: CollectionMilestoneRow) => COLLECTION_PAGE.sequenceOf(row.sequence) },
     { key: "planned_month", title: COLLECTION_PAGE.colPlannedMonth, render: (_: unknown, row: CollectionMilestoneRow) => row.planned_month ?? "—" },
-    { key: "planned_amount", title: COLLECTION_PAGE.colPlannedAmount, render: (_: unknown, row: CollectionMilestoneRow) => amountText(row.planned_amount) },
+    { key: "planned_amount", title: COLLECTION_PAGE.colPlannedAmount, render: (_: unknown, row: CollectionMilestoneRow) => amountText(canAmounts ? row.planned_amount : null) },
     { key: "state", title: COLLECTION_PAGE.colState, render: (_: unknown, row: CollectionMilestoneRow) => stateTag(row.reminder_state) },
     { key: "last_operation", title: COLLECTION_PAGE.colLastOperation, render: (_: unknown, row: CollectionMilestoneRow) => lastOperationText(row) },
     { key: "actions", title: COLLECTION_PAGE.colActions, render: (_: unknown, row: CollectionMilestoneRow) => actionButtons(row) },
@@ -137,14 +162,14 @@ export default function CollectionReminderDetail({
   return (
     <div data-testid="mcr-detail-pane" className="mcr-detail-pane" style={{ minWidth: 0 }}>
       {!selected && <Empty description={COLLECTION_PAGE.emptyDetail} />}
-      {selected && error && (
+      {selected && (error || contextError) && (
         <Space direction="vertical" size={8}>
           <Alert type="error" showIcon message={COLLECTION_PAGE.detailLoadFailed} />
           <Button onClick={onRetry}>{COLLECTION_PAGE.retry}</Button>
         </Space>
       )}
-      {selected && !error && !detail && <Empty description={COLLECTION_PAGE.emptyDetail} />}
-      {selected && !error && detail && (
+      {selected && !error && !contextError && !detail && <Empty description={COLLECTION_PAGE.emptyDetail} />}
+      {selected && !error && !contextError && detail && (
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <div>
             <Space align="center" wrap style={{ width: "100%", justifyContent: "space-between" }}>
@@ -198,7 +223,7 @@ export default function CollectionReminderDetail({
           {detail.rows.length === 0 ? (
             <Space direction="vertical" size={8}>
               <Empty description={COLLECTION_PAGE.noPlanHint} />
-              {capabilities.canImportCollectionPlan && (
+              {canImport && (
                 <Button onClick={onImportPlan}>{COLLECTION_PAGE.importPlan}</Button>
               )}
             </Space>
@@ -218,3 +243,6 @@ export default function CollectionReminderDetail({
     </div>
   );
 }
+
+export default withContextSurface(CollectionReminderDetailContent,
+  actionRule("maintenance_collection_followup", "read"), props => props.detail?.project.project_id);

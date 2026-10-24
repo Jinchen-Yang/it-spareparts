@@ -85,7 +85,7 @@ def _scope(stmt, project_column, *, allowed, project_ids, business_clause):
 
 def build_statement(*, start, end, q, business_type, project_ids, customer,
                     salesperson, order_no, demand_types, warehouses, cost_sources,
-                    allowed_project_ids, can_cost, can_customer):
+                    allowed_project_ids, can_cost, can_customer, strict_field_projection=False):
     """Public for EXPLAIN/performance checks; execution is exactly one SELECT."""
     ci, _, _, missing = _cost()
     business_clause = _business_type_clause(business_type)
@@ -95,7 +95,7 @@ def build_statement(*, start, end, q, business_type, project_ids, customer,
         description=L.description, business_date=O.order_date,
         source_order_id=O.raw_order_id, order_id=O.id,
         effective=func.coalesce(L.qty, ZERO) - func.coalesce(L.return_qty, ZERO),
-        cost=ci if can_cost else cast(literal(None), Numeric), missing=missing,
+        cost=ci if can_cost else cast(literal(None), Numeric), missing=(missing if can_cost or not strict_field_projection else literal(False)),
         customer_visible=can_customer,
     )).select_from(L).join(O, O.id == L.order_id).outerjoin(
         M, and_(M.line_id == L.id, M.active.is_(True)),
@@ -313,7 +313,7 @@ def explorer(db: Session, *, dimension="pn", metric="issued", focus=None,
              range_="ytd", date_from: date | None = None, date_to: date | None = None,
              q=None, business_type="all", project_ids=None, customer=None, salesperson=None,
              order_no=None, demand_types=None, warehouses=None, cost_sources=None,
-             can_cost: bool, can_customer: bool = True, allowed_project_ids=None):
+             can_cost: bool, can_customer: bool = True, allowed_project_ids=None, strict_field_projection=False):
     if dimension not in DIMENSIONS or metric not in METRICS:
         raise legacy.AnalyticsValidationError("不支持的排名维度或指标")
     if include_pn_overview and dimension != "pn":
@@ -329,7 +329,7 @@ def explorer(db: Session, *, dimension="pn", metric="issued", focus=None,
         start=start, end=end, q=q, business_type=business_type, project_ids=project_ids,
         customer=customer, salesperson=salesperson, order_no=order_no, demand_types=demand_types,
         warehouses=warehouses, cost_sources=cost_sources, allowed_project_ids=allowed_project_ids,
-        can_cost=can_cost, can_customer=can_customer,
+        can_cost=can_cost, can_customer=can_customer, strict_field_projection=strict_field_projection,
     )
     records = list(db.execute(statement).mappings())
     ranks = _rank(records, dimension, metric, can_cost)

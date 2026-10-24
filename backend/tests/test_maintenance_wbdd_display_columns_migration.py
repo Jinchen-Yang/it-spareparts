@@ -75,15 +75,33 @@ def test_receipt_table_shape(db):
     insp = inspect(engine)
     cols = {c["name"]: c for c in insp.get_columns("maintenance_wbdd_import_receipt")}
     assert set(cols) == {"id", "batch_id", "idempotency_key", "uploaded_by",
-                         "file_hash", "layout", "report_json", "created_at"}
+                         "file_hash", "layout", "report_json", "created_at", "owner_user_id"}
     for required in ("batch_id", "idempotency_key", "uploaded_by", "file_hash",
                      "report_json", "created_at"):
         assert cols[required]["nullable"] is False, required
-    uniques = {u["name"]: u for u in
-               insp.get_unique_constraints("maintenance_wbdd_import_receipt")}
-    assert "uq_maintenance_wbdd_import_idempotency" in uniques
-    assert uniques["uq_maintenance_wbdd_import_idempotency"]["column_names"] == [
-        "uploaded_by", "idempotency_key"]
+    # S3 keeps unknown historical owners nullable and splits the old username
+    # uniqueness into exact stable-owner and legacy-only partial indexes.
+    assert cols["owner_user_id"]["nullable"] is True
+    assert isinstance(cols["owner_user_id"]["type"], sa.Integer)
+    owner_fks = [fk for fk in insp.get_foreign_keys("maintenance_wbdd_import_receipt")
+                 if fk["constrained_columns"] == ["owner_user_id"]]
+    assert len(owner_fks) == 1
+    assert owner_fks[0]["referred_table"] == "sys_user"
+    assert owner_fks[0]["referred_columns"] == ["id"]
+    assert owner_fks[0]["options"]["ondelete"] == "RESTRICT"
+    uniques = insp.get_unique_constraints("maintenance_wbdd_import_receipt")
+    assert [unique["column_names"] for unique in uniques] == [["batch_id"]]
+    indexes = {index["name"]: index for index in
+               insp.get_indexes("maintenance_wbdd_import_receipt")}
+    for name, columns, predicate in (
+        ("ux_maintenance_wbdd_import_owner_request", ["owner_user_id", "idempotency_key"],
+         "(owner_user_id IS NOT NULL)"),
+        ("ux_maintenance_wbdd_import_legacy_request", ["uploaded_by", "idempotency_key"],
+         "(owner_user_id IS NULL)"),
+    ):
+        assert indexes[name]["unique"] is True
+        assert indexes[name]["column_names"] == columns
+        assert str(indexes[name]["dialect_options"]["postgresql_where"]) == predicate
 
 
 def test_selected_column_types(db):

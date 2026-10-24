@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -140,7 +141,7 @@ describe("SiteIssueWorkflowPanel", () => {
     fireEvent.change(input, { target: { value: address } });
     fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
     await waitFor(() => expect(api.patchSiteIssue).toHaveBeenCalledWith(
-      "issue-1", expect.objectContaining({ site_location: address }),
+      "issue-1", expect.objectContaining({ site_location: address }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
   });
 
@@ -249,7 +250,7 @@ describe("SiteIssueWorkflowPanel", () => {
     expect(within(panel).getByText("共 21 张，已显示 1 张")).toBeInTheDocument();
     fireEvent.click(within(panel).getByRole("button", { name: "加载更多领用单" }));
     await waitFor(() => expect(api.searchSiteIssues).toHaveBeenCalledWith(
-      expect.objectContaining({ project_id: "project-1", page: 2, page_size: 20 }),
+      expect.objectContaining({ project_id: "project-1", page: 2, page_size: 20 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
 
     fireEvent.click(within(panel).getByRole("button", { name: "编辑草稿" }));
@@ -263,7 +264,7 @@ describe("SiteIssueWorkflowPanel", () => {
     fireEvent.click(within(editorDialog).getByRole("button", { name: "加载更多发货明细" }));
     await waitFor(() => expect(api.searchSiteIssueCandidates).toHaveBeenCalledWith(
       "project-1",
-      expect.objectContaining({ page: 2, page_size: 50 }),
+      expect.objectContaining({ page: 2, page_size: 50 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
   });
 
@@ -296,7 +297,7 @@ describe("SiteIssueWorkflowPanel", () => {
         site_location: "井场 B",
         lines: [{ delivery_line_id: "delivery-1", quantity: 2 }],
         reason: "月度现场实际领用",
-      }),
+      }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     const submitted = api.createSiteIssueDraft.mock.calls[0][1];
     expect(submitted).not.toHaveProperty("issue_id");
@@ -334,7 +335,7 @@ describe("SiteIssueWorkflowPanel", () => {
     fireEvent.click(within(editorDialog).getByRole("button", { name: "提交更正" }));
     await waitFor(() => expect(api.patchSiteIssue).toHaveBeenCalledWith(
       "issue-1",
-      expect.objectContaining({ project_id: "project-1", version: 4, site_location: "井场 C" }),
+      expect.objectContaining({ project_id: "project-1", version: 4, site_location: "井场 C" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
 
     fireEvent.click(within(panel).getByRole("button", { name: "作废" }));
@@ -345,7 +346,7 @@ describe("SiteIssueWorkflowPanel", () => {
     fireEvent.click(within(voidDialog).getByRole("button", { name: "确认作废" }));
     await waitFor(() => expect(api.voidSiteIssue).toHaveBeenCalledWith(
       "issue-1",
-      expect.objectContaining({ project_id: "project-1", version: 4, reason: "现场记录重复录入" }),
+      expect.objectContaining({ project_id: "project-1", version: 4, reason: "现场记录重复录入" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     expect(onChanged).toHaveBeenCalledTimes(2);
   });
@@ -369,7 +370,7 @@ describe("SiteIssueWorkflowPanel", () => {
     fireEvent.click(within(preview).getByRole("button", { name: "确认现场领用" }));
     await waitFor(() => expect(api.confirmSiteIssue).toHaveBeenCalledWith(
       "issue-1",
-      expect.objectContaining({ project_id: "project-1", version: 1 }),
+      expect.objectContaining({ project_id: "project-1", version: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     expect(onChanged).toHaveBeenCalled();
 
@@ -432,3 +433,8 @@ describe("SiteIssueWorkflowPanel", () => {
     expect(screen.getByTestId("manual-site-issue-section")).toBeInTheDocument();
   });
 });
+
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

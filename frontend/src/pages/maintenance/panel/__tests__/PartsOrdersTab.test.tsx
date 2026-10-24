@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -207,18 +208,19 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
     renderTab();
     await waitFor(() => expect(orderLink("WBDD-2")).toBeTruthy());
     await chooseContract("XSDD-2");
+    await waitFor(() => expect(orderLink("WBDD-2")).toBeTruthy());
     fireEvent.click(orderLink("WBDD-2")!);
     fireEvent.click(await screen.findByRole("button", { name: "添加筛选条件" }));
     fireEvent.change(screen.getByRole("textbox", { name: "条件 1 的值" }), { target: { value: "PN-2" } });
     fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
     const filters = '[{"field":"pn_std","op":"contains","value":"PN-2"}]';
     await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith(
-      "p1", expect.objectContaining({ filters, order_no: "WBDD-2", contract_no: "XSDD-2", page: 1 }),
+      "p1", expect.objectContaining({ filters, order_no: "WBDD-2", contract_no: "XSDD-2", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
     expect(await screen.findByText("共 1 行")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "导出完整筛选集 CSV" }));
     await waitFor(() => expect(mocks.exportProjectRows).toHaveBeenCalledWith(
-      "p1", { filters, order_no: "WBDD-2", contract_no: "XSDD-2" }, "csv",
+      "p1", { filters, order_no: "WBDD-2", contract_no: "XSDD-2" }, "csv", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })
     ));
   });
 
@@ -310,7 +312,7 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
     await waitFor(() => expect(orderLink("WBDD-1")).toBeTruthy());
     expect(mocks.getBoardProjectOrders).toHaveBeenCalledWith("p1", {
       page: 1, page_size: 200, contract_no: undefined,
-    });
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(await screen.findByText("PN-2")).toBeInTheDocument();
 
     // 先点选一张需求单：PN 明细按 order_no 向服务端收敛，采购段按 raw id 收敛
@@ -318,23 +320,23 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
     expect(await screen.findByText(/当前过滤：WBDD-1/)).toBeInTheDocument();
     await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 20, order_no: "WBDD-1", contract_no: undefined,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await waitFor(() => expect(mocks.getProjectProcurement).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 10, source_order_id: "RAW-WBDD-1",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await waitFor(() => expect(screen.queryByText("PN-2")).toBeNull());
 
     // 再选合同：三段一起换范围，选中的需求单被清空
     await chooseContract("XSDD-2");
     await waitFor(() => expect(mocks.getBoardProjectOrders).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 200, contract_no: "XSDD-2",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 20, order_no: undefined, contract_no: "XSDD-2",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await waitFor(() => expect(mocks.getProjectProcurement).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 10, source_order_id: undefined,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(screen.queryByText(/当前过滤：/)).toBeNull();
     // 服务端按 XSDD 相等返回的 WBDD-2：单号里没有合同号，也必须原样展示（旧包含匹配会把它滤掉）
     await waitFor(() => expect(orderLink("WBDD-2")).toBeTruthy());
@@ -379,7 +381,7 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
     fireEvent.click(within(linesTable).getByTitle("2"));
     await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
       page: 2, page_size: 20, order_no: undefined, contract_no: undefined,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("PN 明细停在第 2 页时，点选需求单或换合同都回到第 1 页", async () => {
@@ -392,24 +394,24 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
     fireEvent.click(within(linesTable).getByTitle("2"));
     await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
       page: 2, page_size: 20, order_no: undefined, contract_no: undefined,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
 
     // 第 2 页 → 点选需求单 → 第 1 页
     fireEvent.click(orderLink("WBDD-1")!);
     await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 20, order_no: "WBDD-1", contract_no: undefined,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
 
     fireEvent.click(within(linesTable).getByTitle("2"));
     await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
       page: 2, page_size: 20, order_no: "WBDD-1", contract_no: undefined,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
 
     // 第 2 页 → 换合同 → 第 1 页（选中也清空）
     await chooseContract("XSDD-2");
     await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 20, order_no: undefined, contract_no: "XSDD-2",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("落库后 PN 明细总数收缩、当前页越界时夹到最后一页重读，不停在空白页", async () => {
@@ -423,7 +425,7 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
     fireEvent.click(within(linesTable).getByTitle("3"));
     await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
       page: 3, page_size: 20, order_no: undefined, contract_no: undefined,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
 
     // 回传把明细收缩到 3 行：第 3 页为空但 total>0，必须夹到第 1 页重读
     mocks.listProjectPartsRows.mockImplementation(
@@ -433,13 +435,15 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
           : { sheet: "03_备件订单", total: 3, page: params?.page ?? 1, page_size: 20, rows: [] },
       ),
     );
-    await act(async () => {
-      expect(await lastRegistered(registerRefresh)()).toBe(true);
-    });
+    {
+      let readback!: Promise<boolean>;
+      act(() => { readback = lastRegistered(registerRefresh)(); });
+      await act(async () => { expect(await readback).toBe(true); });
+    }
     expect(await screen.findByText("PN-9")).toBeInTheDocument();
     await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 20, order_no: undefined, contract_no: undefined,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await waitFor(() => expect(
       within(linesTable).getByTitle("1").closest("li"),
     ).toHaveClass("ant-pagination-item-active"));
@@ -480,17 +484,21 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
 
     // 03 回传（will_reassign_orders）/ 概览挂靠后父页调用本 tab 的读回：采购链的唯一输入
     // （需求单归属）变了，采购段必须跟着重读，否则「已覆盖并刷新」对它是假的
-    await act(async () => {
-      expect(await lastRegistered(registerRefresh)()).toBe(true);
-    });
+    {
+      let readback!: Promise<boolean>;
+      act(() => { readback = lastRegistered(registerRefresh)(); });
+      await act(async () => { expect(await readback).toBe(true); });
+    }
     expect(mocks.getBoardProjectOrders).toHaveBeenCalledTimes(before.orders + 1);
     expect(mocks.listProjectPartsRows).toHaveBeenCalledTimes(before.lines + 1);
     expect(mocks.getProjectProcurement).toHaveBeenCalledTimes(before.procurement + 1);
 
     mocks.getProjectProcurement.mockRejectedValueOnce(new Error("boom"));
-    await act(async () => {
-      expect(await lastRegistered(registerRefresh)()).toBe(false);
-    });
+    {
+      let readback!: Promise<boolean>;
+      act(() => { readback = lastRegistered(registerRefresh)(); });
+      await act(async () => { expect(await readback).toBe(false); });
+    }
     expect(await screen.findByText("采购订单关联数据加载失败")).toBeInTheDocument();
   });
 
@@ -501,21 +509,23 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
     fireEvent.click(orderLink("WBDD-1")!);
     await waitFor(() => expect(mocks.getProjectProcurement).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 10, source_order_id: "RAW-WBDD-1",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
 
     // 03 回传把 WBDD-1 改派走了：读回只剩 WBDD-2
     mocks.getBoardProjectOrders.mockResolvedValue(ordersPayload([orderRow("WBDD-2", "XSDD-2")]));
-    await act(async () => {
-      expect(await lastRegistered(registerRefresh)()).toBe(true);
-    });
+    {
+      let readback!: Promise<boolean>;
+      act(() => { readback = lastRegistered(registerRefresh)(); });
+      await act(async () => { expect(await readback).toBe(true); });
+    }
     expect(await screen.findByText(/需求单 WBDD-1 已不在当前列表/)).toBeInTheDocument();
     expect(screen.queryByText(/当前过滤：/)).toBeNull();
     await waitFor(() => expect(mocks.getProjectProcurement).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 10, source_order_id: undefined,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await waitFor(() => expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 20, order_no: undefined, contract_no: undefined,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("需求单重载失败时选中不漂移：PN 明细与采购段仍按原选中单过滤", async () => {
@@ -525,24 +535,26 @@ describe("备件与需求单 tab（#259 三处修正）", () => {
     fireEvent.click(orderLink("WBDD-1")!);
     await waitFor(() => expect(mocks.getProjectProcurement).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 10, source_order_id: "RAW-WBDD-1",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
 
     mocks.getBoardProjectOrders.mockRejectedValueOnce({
       response: { data: { detail: "需求单暂不可用" } },
     });
-    await act(async () => {
-      expect(await lastRegistered(registerRefresh)()).toBe(false);
-    });
+    {
+      let readback!: Promise<boolean>;
+      act(() => { readback = lastRegistered(registerRefresh)(); });
+      await act(async () => { expect(await readback).toBe(false); });
+    }
     expect(await screen.findByText("需求单暂不可用")).toBeInTheDocument();
     expect(orderLink("WBDD-1")).not.toBeInTheDocument();   // 需求单列表已清空
     // 但选中的范围是点击时拍的快照，不随列表消失而漂移成「全部」
     expect(screen.getByText(/当前过滤：WBDD-1/)).toBeInTheDocument();
     expect(mocks.getProjectProcurement).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 10, source_order_id: "RAW-WBDD-1",
-    });
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(mocks.listProjectPartsRows).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 20, order_no: "WBDD-1", contract_no: undefined,
-    });
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 });
 
@@ -608,14 +620,14 @@ describe("新增需求入口（v1.36 Phase E）", () => {
     await chooseContract("XSDD-2");
     await waitFor(() => expect(mocks.getBoardProjectOrders).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 200, contract_no: "XSDD-2",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     fireEvent.click(screen.getByRole("button", { name: /^新\s*增\s*需\s*求$/ }));
     fireEvent.click(await screen.findByText("桩创建成功"));
     await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
     // 清掉合同筛选后回读：需求单段按「全部合同」重新拉
     await waitFor(() => expect(mocks.getBoardProjectOrders).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 200, contract_no: undefined,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     // 对话框已随成功关闭
     await waitFor(() => expect(screen.queryByText("桩创建成功")).toBeNull());
   });
@@ -650,3 +662,8 @@ describe("新增需求入口（v1.36 Phase E）", () => {
     await waitFor(() => expect(screen.queryByText("桩创建成功")).toBeNull());
   });
 });
+
+vi.mock("../../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

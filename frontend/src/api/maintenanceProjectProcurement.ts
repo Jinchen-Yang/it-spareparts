@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
 
 export interface ProcurementLine {
@@ -39,8 +40,8 @@ export interface ProjectProcurementQuery {
   source_order_id?: string;
 }
 
-export const getProjectProcurement = (projectId: string, params?: ProjectProcurementQuery) =>
-  api.get<ProjectProcurement>(
+export const getProjectProcurement = (projectId: string, params?: ProjectProcurementQuery, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<ProjectProcurement>(
     `/maintenance/projects/stable/${encodeURIComponent(projectId)}/purchases`,
     { params },
   );

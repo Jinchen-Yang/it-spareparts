@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -28,7 +29,7 @@ describe("返件 Excel 异步预览和明确更正", () => {
     const apply = screen.getByRole("button", { name: "确认导入有效返件" }); expect(apply).toBeDisabled();
     fireEvent.click(screen.getByRole("checkbox")); expect(apply).toBeDisabled();
     fireEvent.change(screen.getByPlaceholderText(/更正原因/), { target: { value: "核实原件" } }); fireEvent.click(apply);
-    await waitFor(() => expect(mocks.apply).toHaveBeenCalledWith("job-1", { plan_hash: "hash-1", preview_token: "token-1", confirm_changes: true, confirm_possible_duplicates: false, reason: "核实原件" }));
+    await waitFor(() => expect(mocks.apply).toHaveBeenCalledWith("job-1", { plan_hash: "hash-1", preview_token: "token-1", confirm_changes: true, confirm_possible_duplicates: false, reason: "核实原件" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await waitFor(() => expect(applied).toHaveBeenCalledOnce());
     expect(await screen.findByText("入库返件已写入台账")).toBeInTheDocument();
   });
@@ -58,7 +59,7 @@ describe("返件 Excel 异步预览和明确更正", () => {
     fireEvent.click(button); fireEvent.click(button);
     await waitFor(() => expect(mocks.saveBlob).toHaveBeenCalledWith(file, "入库.xlsx"));
     expect(mocks.download).toHaveBeenCalledTimes(1);
-    expect(mocks.download).toHaveBeenCalledWith("job-1");
+    expect(mocks.download).toHaveBeenCalledWith("job-1", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(screen.getByText("预览完成")).toBeInTheDocument();
   });
   it("上传响应丢失后重试复用同一原件和幂等键", async () => {
@@ -72,7 +73,7 @@ describe("返件 Excel 异步预览和明确更正", () => {
     mocks.upload.mockResolvedValue({ data: { batch_id: "job-1", status: "ready" } });
     render(<ReturnReceiptImport onApplied={vi.fn()} />); fireEvent.click(screen.getByRole("button", { name: "导入入库单" })); selectFile();
     expect(await screen.findByText("1.500")).toBeInTheDocument();
-    expect(mocks.get).toHaveBeenCalledWith("job-1", 1);
+    expect(mocks.get).toHaveBeenCalledWith("job-1", 1, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(screen.getByRole("button", { name: "重新预览原件" })).toBeEnabled();
   });
   it("有阻断问题不应用；取消之后可重新预览原件", async () => {
@@ -81,8 +82,8 @@ describe("返件 Excel 异步预览和明确更正", () => {
     expect(await screen.findByRole("button", { name: "确认导入有效返件" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "取消本次导入" }));
     fireEvent.click(await screen.findByRole("button", { name: "重新预览原件" }));
-    await waitFor(() => expect(mocks.retry).toHaveBeenCalledWith("job-1"));
-    expect(mocks.cancel).toHaveBeenCalledWith("job-1"); expect(mocks.apply).not.toHaveBeenCalled();
+    await waitFor(() => expect(mocks.retry).toHaveBeenCalledWith("job-1", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
+    expect(mocks.cancel).toHaveBeenCalledWith("job-1", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })); expect(mocks.apply).not.toHaveBeenCalled();
   });
   it("取消等待超过轮询间隔时暂停读取，取消结束恢复操作", async () => {
     let finishCancel!: (value: unknown) => void;
@@ -129,7 +130,7 @@ describe("返件 Excel 异步预览和明确更正", () => {
     expect(apply).toBeDisabled();
     fireEvent.click(screen.getByRole("checkbox", { name: /已核对全部疑似手工重复/ }));
     fireEvent.click(apply);
-    await waitFor(() => expect(mocks.apply).toHaveBeenCalledWith("job-1", expect.objectContaining({ confirm_changes: true, confirm_possible_duplicates: true })));
+    await waitFor(() => expect(mocks.apply).toHaveBeenCalledWith("job-1", expect.objectContaining({ confirm_changes: true, confirm_possible_duplicates: true }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
   it("疑似重复全局计数跨分页阻止未确认应用，重试响应丢失也清空确认", async () => {
     mocks.upload.mockResolvedValue({ data: { ...ready, summary: { ...ready.summary, create: 101, change: 0 }, possible_duplicates_count: 1, rows_total: 101, rows: [{ ...row, action: "create" }] } });
@@ -153,7 +154,7 @@ describe("返件 Excel 异步预览和明确更正", () => {
     render(<ReturnReceiptImport onApplied={vi.fn()} />); fireEvent.click(screen.getByRole("button", { name: "导入入库单" })); selectFile();
     expect(await screen.findByText("等待解析")).toBeInTheDocument();
     expect(await screen.findByText("预览完成", {}, { timeout: 4000 })).toBeInTheDocument();
-    expect(mocks.get).toHaveBeenCalledWith("job-1", 1);
+    expect(mocks.get).toHaveBeenCalledWith("job-1", 1, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
   it("应用响应丢失先核查状态，已成功则刷新台账而不重复提交", async () => {
     const applied = vi.fn().mockResolvedValue(undefined); mocks.apply.mockRejectedValue(new Error("network"));
@@ -190,3 +191,8 @@ describe("返件 Excel 异步预览和明确更正", () => {
     expect(screen.getByText("导入已成功，但台账刷新失败；请刷新页面查看，不要重复导入。").closest('[role="alert"]')).not.toBeNull();
   });
 });
+
+vi.mock("../../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

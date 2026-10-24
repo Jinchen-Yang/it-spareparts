@@ -1,3 +1,7 @@
+import { withContextSurface, contextSurfaces } from "../../../authz/ContextSurface";
+import { useContextAdmission } from "../../../authz/access";
+import { useContextTransport, withTransportSignal } from "../../../authz/domainTransport";
+import { actionRule } from "../../../authz/rules";
 import { formatBusinessDateTime } from "../../../utils/date";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MaintenanceCategoryFilter from "../../../components/maintenance/MaintenanceCategoryFilter";
@@ -105,11 +109,16 @@ function auditValue(value: unknown, item?: { field?: string }): string {
  * 项目必选、需求单可选、PN 不限原领用、按数量统计；登记即视为已收到返件；
  * 修改/作废带版本 CAS 与审计。汇总满足恒等式 Σ(需求单) + 未关联 = 项目总量。
  */
-export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, registerRefresh }: {
+function ReturnReceiptsSectionBody({ projectId, canImport = true, onChanged, registerRefresh }: {
   projectId: string; canImport?: boolean; onChanged?: () => Promise<boolean>;
   registerRefresh?: RegisterPanelRefresh;
 }) {
   const { message } = App.useApp();
+  const admission = useContextAdmission();
+  const capture = useContextTransport(projectId, true);
+  const listAbort = useRef<AbortController | null>(null), demandAbort = useRef<AbortController | null>(null), pnAbort = useRef<AbortController | null>(null), auditAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => auditAbort.current?.abort(), []);
+  useEffect(() => () => { listAbort.current?.abort(); demandAbort.current?.abort(); pnAbort.current?.abort(); }, []);
   const [summary, setSummary] = useState<ReturnReceiptSummary | null>(null);
   const [receipts, setReceipts] = useState<ReturnReceipt[]>([]);
   const [total, setTotal] = useState(0);
@@ -152,7 +161,15 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   const perms = readPermissionMap();
-  const canManage = !!perms.action_maintenance_bad_return_manage;
+  const legacyManage = !!perms.action_maintenance_bad_return_manage;
+  const canLedger = admission.surface("maintenance_return_receipt.ledger", true) !== "deny";
+  const canSummary = admission.surface("maintenance_return_receipt.summary", true) !== "deny";
+  const can = (action: string) => admission.state(actionRule("maintenance_return_receipt", action), legacyManage) !== "deny";
+  const canManage = admission.surface("maintenance_return_receipt.batch_maintain", legacyManage) !== "deny";
+  const canCreate = admission.surface("maintenance_return_receipt.batch_create", legacyManage) !== "deny";
+  const canAudit = admission.surface("maintenance_return_receipt.audit_history", true) !== "deny";
+  const canDemands = admission.state(actionRule("maintenance_return_receipt", "read_demands"), true) !== "deny";
+  const canProjects = admission.state(actionRule("maintenance_project_directory", "read"), legacyManage) !== "deny";
   // 冻结勾选快照交给批量组件；列表刷新后选中集清空，旧请求不会污染新数据
   const selectedReceipts = useMemo(
     () => receipts.filter((item) => selectedIds.includes(item.receipt_id) && item.line_status === "active"),
@@ -160,6 +177,9 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   );
 
   const loadDemands = useCallback(async (id: string, q?: string) => {
+    if (!canDemands || !capture.isCurrent()) return;
+    demandAbort.current?.abort(); demandAbort.current = new AbortController();
+    const requestCapture = withTransportSignal(capture, demandAbort.current.signal);
     const seq = ++demandSeq.current;
     setDemandLoading(true);
     setDemandError(null);
@@ -171,8 +191,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
         const response = await getReturnReceiptDemands(id, {
           page: p, page_size: 100, ...(q ? { q } : {}),
           ...(editingContext.current?.project_id === id ? { receipt_id: editingContext.current.receipt_id } : {}),
-        });
-        if (seq !== demandSeq.current) return;
+        }, requestCapture);
+        if (!requestCapture.isCurrent() || seq !== demandSeq.current) return;
         const rows = response.data.rows ?? [];
         loaded += rows.length;
         const candidates = rows.filter(availableReceiptDemand).map(receiptDemandOption);
@@ -183,20 +203,21 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
       }
       setDemands(options);
     } catch (err) {
-      if (seq === demandSeq.current) setDemandError(readError(err, "需求单候选加载失败，请重试后选择；也可明确不关联需求单"));
+      if (requestCapture.isCurrent() && seq === demandSeq.current) setDemandError(readError(err, "需求单候选加载失败，请重试后选择；也可明确不关联需求单"));
     } finally {
-      if (seq === demandSeq.current) setDemandLoading(false);
+      if (requestCapture.isCurrent() && seq === demandSeq.current) setDemandLoading(false);
     }
-  }, []);
+  }, [capture, canDemands]);
 
   const loadProjects = async () => {
+    if (!canProjects || !capture.isCurrent()) return;
     const seq = ++projectSeq.current;
     setProjectError(null);
     try {
       const options: { value: string; label: string }[] = [];
       for (let p = 1; ; p += 1) {
-        const response = await listMaintenanceProjects({ page: p, page_size: 100, include_inactive: false });
-        if (seq !== projectSeq.current) return;
+        const response = await listMaintenanceProjects({ page: p, page_size: 100, include_inactive: false }, capture);
+        if (!capture.isCurrent() || seq !== projectSeq.current) return;
         const rows = response.data.rows ?? [];
         options.push(...rows.map((row) => ({ value: row.project_id, label: `${row.display_name} · ${row.project_code}` })));
         if (options.length >= response.data.total) break;
@@ -204,43 +225,32 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
       }
       setProjects(options);
     } catch (err) {
-      if (seq === projectSeq.current) setProjectError(readError(err, "项目候选加载失败，请重试"));
+      if (capture.isCurrent() && seq === projectSeq.current) setProjectError(readError(err, "项目候选加载失败，请重试"));
     }
   };
 
   const load = useCallback(async (targetPage: number, withVoided: boolean) => {
+    if (!capture.isCurrent()) return false;
     const seq = ++requestSeq.current;
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const [summaryResult, listResult] = await Promise.allSettled([
-        getReturnReceiptSummary(projectId),
-        searchReturnReceipts(projectId, {
-          page: targetPage,
-          page_size: 20,
-          line_status: withVoided ? "all" : "active",
-          ...filters.current,
-        }),
-      ]);
-      if (seq !== requestSeq.current) return false;
-      if (summaryResult.status === "rejected") throw summaryResult.reason;
-      if (listResult.status === "rejected") throw listResult.reason;
-      setSummary(summaryResult.value.data);
-      setReceipts(listResult.value.data.items ?? []);
-      setTotal(listResult.value.data.total ?? 0);
-      return true;
-    } catch (err) {
-      if (seq === requestSeq.current) {
-        setSummary(null);
-        setReceipts([]);
-        setTotal(0);
-        setLoadError(readError(err, "返还记录加载失败；若刚刚已提交成功，请重试刷新，不要重复登记。"));
-      }
-      return false;
-    } finally {
-      if (seq === requestSeq.current) setLoading(false);
-    }
-  }, [projectId]);
+    listAbort.current?.abort(); listAbort.current = new AbortController();
+    const requestCapture = withTransportSignal(capture, listAbort.current.signal);
+    setLoading(true); setLoadError(null); setReceipts([]); setTotal(0);
+    const tasks = [
+      canSummary ? getReturnReceiptSummary(projectId, requestCapture).then(response => {
+        if (requestCapture.isCurrent() && seq === requestSeq.current) setSummary(response.data);
+      }, error => { if (requestCapture.isCurrent() && seq === requestSeq.current) setSummary(null); throw error; }) : Promise.resolve(),
+      canLedger ? searchReturnReceipts(projectId, { page: targetPage, page_size: 20,
+        line_status: withVoided ? "all" : "active", ...filters.current }, requestCapture).then(response => {
+        if (requestCapture.isCurrent() && seq === requestSeq.current) { setReceipts(response.data.items ?? []); setTotal(response.data.total ?? 0); }
+      }) : Promise.resolve(),
+    ];
+    const results = await Promise.allSettled(tasks);
+    if (!requestCapture.isCurrent() || seq !== requestSeq.current) return false;
+    const failed = results.find(result => result.status === "rejected");
+    if (failed?.status === "rejected") setLoadError(readError(failed.reason, "返还记录加载失败；若刚刚已提交成功，请重试刷新，不要重复登记。"));
+    setLoading(false);
+    return !failed;
+  }, [projectId, capture, canSummary, canLedger]);
 
   const refresh = useCallback(() => load(page, includeVoided), [load, page, includeVoided]);
   useEffect(() => {
@@ -253,7 +263,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
     if (registerRefresh && onChanged) return onChanged();
     const seq = contextSeq.current;
     const loaded = await refresh();
-    if (seq !== contextSeq.current) return false;
+    if (!capture.isCurrent() || seq !== contextSeq.current) return false;
     const changed = onChanged ? await onChanged() : true;
     return loaded && changed;
   }, [refresh, registerRefresh, onChanged]);
@@ -317,10 +327,15 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   // 按 PN 建议需求单（2026-10-12 方案 §3.2）：选定返件 PN 后存「含此 PN」候选；
   // null 表示未选 PN 或建议未就绪/已降级，此时需求单下拉维持全量单列表（现状）
   const [pnMatchedDemands, setPnMatchedDemands] = useState<DemandOption[] | null>(null);
+  const formValues = Form.useWatch([], form);
+  const commandCapture = useContextTransport(JSON.stringify([projectId, modalOpen, editing?.receipt_id, editing?.version, targetProject, pickedPart, formValues]), legacyManage);
 
   // 选定 PN 后按 part_id 拉建议（page_size 50，建议只需置顶展示不必穷尽）；
   // 失败静默降级为全量列表，不打断填单。竞态沿用组件内既有序号守卫。
   const loadPnMatchedDemands = useCallback(async (project: string, partId: number | null) => {
+    pnAbort.current?.abort(); pnAbort.current = new AbortController();
+    const requestCapture = withTransportSignal(capture, pnAbort.current.signal);
+    if (!canDemands || !requestCapture.isCurrent()) return;
     const seq = ++pnDemandSeq.current;
     if (partId == null) {
       setPnMatchedDemands(null);
@@ -330,8 +345,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
       const response = await getReturnReceiptDemands(project, {
         part_id: partId, page_size: 50,
         ...(editingContext.current?.project_id === project ? { receipt_id: editingContext.current.receipt_id } : {}),
-      });
-      if (seq !== pnDemandSeq.current) return;
+      }, requestCapture);
+      if (!requestCapture.isCurrent() || seq !== pnDemandSeq.current) return;
       const options = (response.data.rows ?? []).filter(availableReceiptDemand).map(receiptDemandOption);
       options.forEach((option) => candidateCache.current.set(option.value, option));
       setPnMatchedDemands(options);
@@ -341,12 +356,12 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
         if (current == null || current === "") form.setFieldValue("wbdd_no", options[0].value);
       }
     } catch (err) {
-      if (seq === pnDemandSeq.current) {
+      if (requestCapture.isCurrent() && seq === pnDemandSeq.current) {
         console.warn("按 PN 匹配需求单失败，已回退为全量需求单列表", err);
         setPnMatchedDemands(null);
       }
     }
-  }, [form]);
+  }, [form, capture, canDemands]);
 
   // 清空/重开表单时撤销建议：取消在途请求并回到全量单列表，不动用户已选的 wbdd_no
   const resetPnSuggestion = useCallback(() => {
@@ -409,9 +424,10 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   };
 
   const submit = async () => {
+    if (!commandCapture.isCurrent() || !(editing ? canManage && can("update") : canCreate)) return;
     const seq = contextSeq.current;
     const values = await form.validateFields().catch(() => null);
-    if (!values || seq !== contextSeq.current) return;
+    if (!values || !commandCapture.isCurrent() || seq !== contextSeq.current) return;
     // 超限硬闸：不依赖 maxLength 截断（会静默丢扫描内容），按钮直接不发请求
     if ((values.evidence_ref?.length ?? 0) > EVIDENCE_MAX) {
       setSubmitError(`凭据超过 ${EVIDENCE_MAX} 字符上限（当前 ${values.evidence_ref!.length}），请删减后再保存`);
@@ -466,8 +482,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
           ...(editing.receipt_kind !== "machine" && (serialsRaw.length || editing.serial_numbers?.length)
             ? { serial_numbers: serialsRaw }
             : {}),
-        });
-        if (seq !== contextSeq.current) return;
+        }, commandCapture);
+        if (!capture.isCurrent() || seq !== contextSeq.current) return;
         message.success("返还记录已修改");
       } else {
         const payload = {
@@ -485,16 +501,16 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
         if (createAttempt.current?.content !== content) {
           createAttempt.current = { content, key: `return-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}` };
         }
-        const response = await createReturnReceipt(projectId, { ...payload, idempotency_key: createAttempt.current.key });
-        if (seq !== contextSeq.current) return;
+        const response = await createReturnReceipt(projectId, { ...payload, idempotency_key: createAttempt.current.key }, commandCapture);
+        if (!capture.isCurrent() || seq !== contextSeq.current) return;
         message.success(response.data.replayed ? "重复提交：返回已有登记，未重复计数" : "返还已登记");
       }
       setModalOpen(false);
       await refreshAfterChange();
     } catch (err) {
-      if (seq === contextSeq.current) setSubmitError(readError(err, editing ? "修改失败。版本冲突时请加载最新记录后重新修改；网络失败可原样重试。" : "登记失败，可原样重试；相同内容不会重复登记。"));
+      if (capture.isCurrent() && seq === contextSeq.current) setSubmitError(readError(err, editing ? "修改失败。版本冲突时请加载最新记录后重新修改；网络失败可原样重试。" : "登记失败，可原样重试；相同内容不会重复登记。"));
     } finally {
-      if (seq === contextSeq.current) setSubmitting(false);
+      if (capture.isCurrent() && seq === contextSeq.current) setSubmitting(false);
     }
   };
 
@@ -502,25 +518,26 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   const [voidTarget, setVoidTarget] = useState<ReturnReceipt | null>(null);
   const [voidReason, setVoidReason] = useState("");
   const [voiding, setVoiding] = useState(false);
+  const voidCapture = useContextTransport(JSON.stringify([projectId, voidTarget?.receipt_id, voidTarget?.version, voidReason]), legacyManage);
 
   const confirmVoid = async () => {
-    if (!voidTarget || !voidReason.trim()) return;
+    if (!canManage || !can("void") || !voidCapture.isCurrent() || !voidTarget || !voidReason.trim()) return;
     const seq = contextSeq.current;
     setVoiding(true);
     try {
       await voidReturnReceipt(voidTarget.receipt_id, {
         version: voidTarget.version,
         reason: voidReason.trim(),
-      });
-      if (seq !== contextSeq.current) return;
+      }, voidCapture);
+      if (!capture.isCurrent() || seq !== contextSeq.current) return;
       message.success("返还记录已作废，不再计入统计");
       setVoidTarget(null);
       setVoidReason("");
       await refreshAfterChange();
     } catch (err) {
-      if (seq === contextSeq.current) message.error(readError(err, "作废失败，请刷新后重试"));
+      if (voidCapture.isCurrent() && seq === contextSeq.current) message.error(readError(err, "作废失败，请刷新后重试"));
     } finally {
-      if (seq === contextSeq.current) setVoiding(false);
+      if (capture.isCurrent() && seq === contextSeq.current) setVoiding(false);
     }
   };
 
@@ -530,15 +547,18 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   const [auditError, setAuditError] = useState<string | null>(null);
 
   const openAudit = async (receipt: ReturnReceipt) => {
+    if (!canAudit || !capture.isCurrent()) return;
+    auditAbort.current?.abort();
+    const controller = new AbortController(); auditAbort.current = controller;
     const seq = ++auditSeq.current;
     setAuditTarget(receipt);
     setAuditItems(null);
     setAuditError(null);
     try {
-      const response = await getReturnReceiptAudit(receipt.receipt_id);
-      if (seq === auditSeq.current) setAuditItems(response.data.items ?? []);
+      const response = await getReturnReceiptAudit(receipt.receipt_id, withTransportSignal(capture, controller.signal));
+      if (!controller.signal.aborted && capture.isCurrent() && seq === auditSeq.current) setAuditItems(response.data.items ?? []);
     } catch (err) {
-      if (seq === auditSeq.current) setAuditError(readError(err, "历史加载失败，请重试"));
+      if (!controller.signal.aborted && capture.isCurrent() && seq === auditSeq.current) setAuditError(readError(err, "历史加载失败，请重试"));
     }
   };
 
@@ -645,11 +665,11 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
         <Space size={4}>
           {canManage && item.line_status === "active" ? (
             <>
-              <Button size="small" type="link" onClick={() => openEdit(item)}>修改</Button>
-              <Button size="small" type="link" danger onClick={() => { setVoidTarget(item); setVoidReason(""); }}>作废</Button>
+              {can("update") && <Button size="small" type="link" onClick={() => openEdit(item)}>修改</Button>}
+              {can("void") && <Button size="small" type="link" danger onClick={() => { setVoidTarget(item); setVoidReason(""); }}>作废</Button>}
             </>
           ) : null}
-          <Button size="small" type="link" onClick={() => { void openAudit(item); }}>历史</Button>
+          {canAudit && <Button size="small" type="link" onClick={() => { void openAudit(item); }}>历史</Button>}
         </Space>
       ),
     },
@@ -659,9 +679,9 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       <PanelActionBar
         actionsFirst
-        actions={canManage ? (
+        actions={canManage || canCreate ? (
           <>
-            <Button type="primary" size="small" onClick={openCreate}>登记返还</Button>
+            {canCreate && <Button type="primary" size="small" onClick={openCreate}>登记返还</Button>}
             <ReturnReceiptBatchEntry projectId={projectId} onDone={async () => { await refreshAfterChange(); }} />
             {selectedReceipts.length ? (
               <>
@@ -682,7 +702,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
             ) : null}
           </>
         ) : undefined}
-        workbook={canImport && canManage ? (
+        workbook={canImport && admission.surface("maintenance_return_import.import", legacyManage) !== "deny" ? (
           <ReturnReceiptImport onApplied={refreshAfterChange} />
         ) : undefined}
         trailing={(
@@ -712,7 +732,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
           action={<Button size="small" onClick={() => { void load(page, includeVoided); }}>重新加载</Button>}
         />
       ) : null}
-      <Row gutter={12}>
+      {canSummary && <Row gutter={12}>
         <Col xs={24} sm={8}>
           <Card size="small">
             <div style={{ fontSize: 12, color: "rgba(0,0,0,.45)" }}>项目已返还（有效）</div>
@@ -746,9 +766,9 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
             </div>
           </Card>
         </Col>
-      </Row>
+      </Row>}
 
-      <Space wrap>
+      {canLedger && <><Space wrap>
         <Input.Search value={query} allowClear placeholder="搜索返件 PN、凭据或备注" onChange={(event) => setQuery(event.target.value)} onSearch={(value) => {
           filters.current = { ...filters.current, q: value }; setPage(1); setSelectedIds([]); void load(1, includeVoided);
         }} style={{ width: 280 }} />
@@ -828,6 +848,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
         ]}
       /> : null}
 
+      </>}
       <Modal
         open={modalOpen}
         title={editing ? `修改返还记录（${editing.pn} × ${fmtQty(editing.qty)}）` : "登记返还"}
@@ -966,9 +987,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
       <Modal
         open={voidTarget !== null}
         title={voidTarget ? `作废返还记录（${voidTarget.pn} × ${fmtQty(voidTarget.qty)}）` : ""}
-        confirmLoading={voiding}
         okText="确认作废"
-        okButtonProps={{ danger: true, disabled: !voidReason.trim() }}
+        okButtonProps={{ danger: true, loading: voiding, disabled: !voidReason.trim() }}
         cancelText="取消"
         onCancel={() => { setVoidTarget(null); setVoidReason(""); }}
         onOk={() => { void confirmVoid(); }}
@@ -991,7 +1011,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
         open={auditTarget !== null}
         title={auditTarget ? `操作历史（${auditTarget.pn} × ${fmtQty(auditTarget.qty)}）` : ""}
         footer={null}
-        onCancel={() => { auditSeq.current += 1; setAuditTarget(null); }}
+        onCancel={() => { auditAbort.current?.abort(); auditSeq.current += 1; setAuditTarget(null); }}
         width={640}
       >
         {auditError ? <Alert type="error" message={auditError} action={<Button onClick={() => { if (auditTarget) void openAudit(auditTarget); }}>重新加载历史</Button>} /> : auditItems === null ? (
@@ -1032,4 +1052,8 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
   );
 }
 
+export const ReturnReceiptsSection = withContextSurface(ReturnReceiptsSectionBody, contextSurfaces(
+  "maintenance_return_receipt.ledger", "maintenance_return_receipt.summary", "maintenance_return_receipt.batch_create",
+  "maintenance_return_receipt.batch_maintain", "maintenance_return_receipt.audit_history", "maintenance_return_import.import",
+), props => props.projectId);
 export default ReturnReceiptsSection;

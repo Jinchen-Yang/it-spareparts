@@ -3,7 +3,7 @@
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
+from fastapi import Request, APIRouter, Depends, HTTPException, Path, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 from app import permissions as _perm
 from app.api.maintenance_project_scope import enforce_maintenance_project_access
 from app.auth import current_identity, current_role
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_return_authorization as canonical
 from app.db import get_db
 from app.models.maintenance_bad_salvage import MaintenanceBadSalvage
 from app.models.maintenance_project import MaintenanceProject
@@ -28,6 +30,7 @@ router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
 
 class SalvageCreate(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     part_id: int | None = None
@@ -41,6 +44,7 @@ class SalvageCreate(BaseModel):
 
 
 class SalvageVoid(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1, max_length=36)
@@ -97,9 +101,21 @@ def list_salvages(
     response: Response = None,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_salvage", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_salvage")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'GET /api/maintenance/projects/stable/{project_id}/salvages', {'project_id': project_id},
+                view=request.query_params.get("view"), precondition=request.query_params.get("authorization_precondition"))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     """项目坏件变卖清单 + 贡献毛利（缺成本不按 0）。"""
     response.headers["Cache-Control"] = "no-store"
     project = db.get(MaintenanceProject, project_id)
@@ -121,15 +137,28 @@ def register_salvage(
     body: SalvageCreate = ...,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_salvage", "page_maintenance")),
     _action: None = Depends(
-        require_action(
+        auth_transport.legacy_gate("maintenance_salvage", require_action(
             "action_maintenance_bad_return_manage",
             require_data="data_profit",
-        )
+        ))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_salvage")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/projects/stable/{project_id}/salvages', {**body.model_dump(exclude={"authorization_precondition"}), **{'project_id': project_id}},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     """登记一笔坏件变卖（独立事实 + 同事务 salvage_out，不伪造采购/销售单）。"""
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     operator = _real_operator(db, ident)
@@ -138,7 +167,7 @@ def register_salvage(
             db,
             project_id=project_id,
             operated_by=operator,
-            **body.model_dump(),
+            **body.model_dump(exclude={"authorization_precondition"}),
         )
         if payload is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
@@ -162,15 +191,28 @@ def void_salvage(
     body: SalvageVoid = ...,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_salvage", "page_maintenance")),
     _action: None = Depends(
-        require_action(
+        auth_transport.legacy_gate("maintenance_salvage", require_action(
             "action_maintenance_bad_return_manage",
             require_data="data_profit",
-        )
+        ))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for("maintenance_salvage")),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/salvages/{salvage_id}/void', {**body.model_dump(exclude={"authorization_precondition"}), **{'salvage_id': salvage_id}},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _raise_service_error(exc)
+            raise
     """作废一笔坏件变卖登记（软作废 + salvage_in 回冲，事实保留）。"""
     row = db.get(MaintenanceBadSalvage, salvage_id)
     if row is None:

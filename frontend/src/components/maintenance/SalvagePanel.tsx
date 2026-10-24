@@ -1,3 +1,7 @@
+import { useContextQuery } from "../../authz/contextQuery";
+import { withContextSurface, contextSurfaces } from "../../authz/ContextSurface";
+import { useModuleAccess } from "../../authz/access";
+import { authorizationErrorText } from "../../authz/requestLifecycle";
 import { useEffect, useRef, useState } from "react";
 import { App, Alert, Card, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -53,35 +57,15 @@ const columns: ColumnsType<MaintenanceSalvageRow> = [
   },
 ];
 
-export default function SalvagePanel({ projectId }: { projectId: string }) {
-  const { message } = App.useApp();
-  const [data, setData] = useState<MaintenanceSalvageDirectory | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [permissionDenied, setPermissionDenied] = useState(false);
-  const generation = useRef(0);
-
-  useEffect(() => {
-    const request = ++generation.current;
-    setLoading(true);
-    setPermissionDenied(false);
-    listMaintenanceSalvages(projectId)
-      .then(({ data: response }) => {
-        if (request === generation.current) setData(response);
-      })
-      .catch((error: unknown) => {
-        if (request === generation.current) {
-          setData(null);
-          const status = (error as { response?: { status?: unknown } } | null)?.response?.status;
-          setPermissionDenied(status === 403);
-          // 403 = 缺 data_profit，面板内已明确说明；其它失败才弹错误提示。
-          if (status !== 403) message.error(errorText(error));
-        }
-      })
-      .finally(() => {
-        if (request === generation.current) setLoading(false);
-      });
-    return () => { generation.current += 1; };
-  }, [projectId]);
+function SalvagePanel({ projectId }: { projectId: string }) {
+  const query = useContextQuery({
+    entryId: "GET /api/maintenance/projects/stable/{project_id}/salvages", rule: contextSurfaces("maintenance_salvage.records"),
+    queryKey: [projectId], legacyAllowed: true,
+    query: async capture => (await listMaintenanceSalvages(projectId, capture)).data,
+  });
+  const data = query.data, loading = query.loading;
+  const permissionDenied = (query.error as { response?: { status?: number } })?.response?.status === 403;
+  const module = useModuleAccess("maintenance_salvage", query.context);
 
   return (
     <Card
@@ -89,6 +73,7 @@ export default function SalvagePanel({ projectId }: { projectId: string }) {
       title="坏件变卖清单"
       extra={data ? <Tag>{`有效 ${data.active_count} 笔`}</Tag> : <Tag>尚未接入</Tag>}
     >
+      {query.error && !permissionDenied && <Alert type="error" showIcon message={authorizationErrorText(query.error, "坏件变卖清单加载失败")} />}
       {!data && !loading && permissionDenied && (
         <Alert
           showIcon
@@ -125,3 +110,5 @@ export default function SalvagePanel({ projectId }: { projectId: string }) {
     </Card>
   );
 }
+
+export default withContextSurface(SalvagePanel, contextSurfaces("maintenance_salvage.records"), props => props.projectId);

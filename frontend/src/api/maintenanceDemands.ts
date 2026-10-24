@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
 import type { MaintenanceOrderContact } from "./maintenanceOrderContact";
 import type { DemandReturnSummary, DemandReturnSummaryError } from "./maintenanceReturnRequestSummary";
@@ -97,41 +98,41 @@ export interface MaintenanceDemandVoidFastResult {
   }[];
 }
 
-export const searchMaintenanceDemands = (body: MaintenanceDemandSearchInput) =>
-  api.post<MaintenanceDemandSearchResult>("/maintenance/demands/search", body);
+export const searchMaintenanceDemands = (body: MaintenanceDemandSearchInput, capture?: ContextRequestTransport) =>
+  domainApi(capture).post<MaintenanceDemandSearchResult>("/maintenance/demands/search", body);
 
 /**
  * 一键批量作废（#265）：单事务墓碑 + 停用挂靠 + 审计。
  * 409＝任一单版本变化整批零删除（响应带冲突单号）；404＝未知单整批零写入。
  */
-export const voidFastMaintenanceDemands = (body: MaintenanceDemandVoidFastInput) =>
-  api.post<MaintenanceDemandVoidFastResult>("/maintenance/demands/void-fast", body);
+export const voidFastMaintenanceDemands = (body: MaintenanceDemandVoidFastInput, capture?: ContextRequestTransport) =>
+  domainApi(capture).post<MaintenanceDemandVoidFastResult>("/maintenance/demands/void-fast", body);
 
 /** 恢复已作废单（ADR-0003：清派生成本 + 待重算，由后端负责）。后端强制 reason 非空 + admin。 */
-export const restoreMaintenanceDemand = (sourceOrderId: string, reason: string) =>
-  api.post(`/maintenance/demands/${encodeURIComponent(sourceOrderId)}/restore`, { reason });
+export const restoreMaintenanceDemand = (sourceOrderId: string, reason: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).post(`/maintenance/demands/${encodeURIComponent(sourceOrderId)}/restore`, { reason });
 
 export const createMaintenanceDemandDeleteIntent = (
-  body: MaintenanceDemandDeleteIntentInput,
-) => api.post<MaintenanceDemandDeleteIntent>(
+  body: MaintenanceDemandDeleteIntentInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceDemandDeleteIntent>(
   "/maintenance/demands/delete-intents",
   body,
 );
 
-export const armMaintenanceDemandDeleteIntent = (intentId: string, digest: string) =>
-  api.post<MaintenanceDemandDeleteIntent>(
+export const armMaintenanceDemandDeleteIntent = (intentId: string, digest: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).post<MaintenanceDemandDeleteIntent>(
     `/maintenance/demands/delete-intents/${intentId}/arm`,
     { digest },
   );
 
-export const executeMaintenanceDemandDeleteIntent = (intentId: string, digest: string) =>
-  api.post<MaintenanceDemandDeleteResult>(
+export const executeMaintenanceDemandDeleteIntent = (intentId: string, digest: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).post<MaintenanceDemandDeleteResult>(
     `/maintenance/demands/delete-intents/${intentId}/execute`,
     { digest },
   );
 
-export const cancelMaintenanceDemandDeleteIntent = (intentId: string, digest: string) =>
-  api.post<MaintenanceDemandDeleteIntent>(
+export const cancelMaintenanceDemandDeleteIntent = (intentId: string, digest: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).post<MaintenanceDemandDeleteIntent>(
     `/maintenance/demands/delete-intents/${intentId}/cancel`,
     { digest },
   );
@@ -170,8 +171,8 @@ export const patchDemandLine = (
   rawLineId: string,
   updates: Record<string, unknown>,
   reason: string,
-  expectedDigest: string,
-) => api.patch<DemandLineWriteResult>(
+  expectedDigest: string, capture?: ContextRequestTransport
+) => domainApi(capture).patch<DemandLineWriteResult>(
   `/maintenance/demands/lines/${encodeURIComponent(rawLineId)}`,
   { updates, reason, expected_digest: expectedDigest },
 );
@@ -193,8 +194,8 @@ export interface DemandLineCreateInput {
   idempotency_key: string;
 }
 
-export const createDemandLine = (input: DemandLineCreateInput) =>
-  api.post<DemandLineWriteResult>("/maintenance/demands/lines", input);
+export const createDemandLine = (input: DemandLineCreateInput, capture?: ContextRequestTransport) =>
+  domainApi(capture).post<DemandLineWriteResult>("/maintenance/demands/lines", input);
 
 export interface DemandLineRow {
   raw_line_id: string;
@@ -215,8 +216,8 @@ export interface DemandLineRow {
   digest: string;
 }
 
-export const listDemandLines = (sourceOrderId: string) =>
-  api.get<{ items: DemandLineRow[]; return_summary?: DemandReturnSummary | null; return_summary_error?: DemandReturnSummaryError }>(
+export const listDemandLines = (sourceOrderId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<{ items: DemandLineRow[]; return_summary?: DemandReturnSummary | null; return_summary_error?: DemandReturnSummaryError }>(
     `/maintenance/demands/orders/${encodeURIComponent(sourceOrderId)}/lines`,
   );
 
@@ -228,8 +229,8 @@ export const clearDemandLineOverride = (
   rawLineId: string,
   fieldName: string,
   reason: string,
-  expectedDigest: string,
-) => api.post<DemandLineWriteResult>(
+  expectedDigest: string, capture?: ContextRequestTransport
+) => domainApi(capture).post<DemandLineWriteResult>(
   `/maintenance/demands/lines/${encodeURIComponent(rawLineId)}/clear-override`,
   { field_name: fieldName, reason, expected_digest: expectedDigest },
 );

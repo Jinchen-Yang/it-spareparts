@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 import { cleanup, fireEvent, render, screen, waitFor } from "../../../test/antdRender";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -181,3 +182,8 @@ describe("维保主页 · 筛选 URL 化（v1.35）", () => {
     expect(screen.getByPlaceholderText("搜项目名 / XSDD 单号 / 销售姓名")).toHaveValue("");
   });
 });
+
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

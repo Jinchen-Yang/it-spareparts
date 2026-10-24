@@ -18,11 +18,12 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
+from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.date_validation import validate_from_to_query
 from app.api.maintenance_expense_collection_workbook import (
@@ -38,6 +39,14 @@ from app.api.maintenance_project_scope import (
     require_maintenance_project_access,
     resolve_visible_project_ids,
 )
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_master_workbook_access as master_access
+from app.services import maintenance_master_command_access as master_command
+from app.services import maintenance_global_lines_access as global_lines_access
+from app.services import maintenance_milestone_restore_access as restore_access
+from app.authz import runtime
+from app.services import maintenance_authorization as foundation
+
 from app import config
 from app.auth import current_identity, current_role, require_admin
 from app.config import get_settings
@@ -78,6 +87,7 @@ class MilestoneRestoreItem(BaseModel):
 
 
 class MilestoneRestoreRequest(BaseModel):
+    authorization_precondition: dict | None = None
     reason: str = Field(min_length=4, max_length=500)
     items: list[MilestoneRestoreItem] = Field(min_length=1, max_length=24)
 
@@ -105,6 +115,12 @@ def _require_master_edit(
         status.HTTP_403_FORBIDDEN,
         "项目总表编辑需要上传权限，或为本项目的负责人/销售",
     )
+
+
+def _legacy_master_validate_edit(project_id: str, db: Session = Depends(get_db),
+                                 ctx: UserContext = Depends(get_current_user_context)) -> None:
+    if not any(runtime.is_authoritative(db, resource) for resource in master_command.RESOURCES):
+        _require_master_edit(project_id, db, ctx)
 
 
 def _require_contract_amount_manage(
@@ -215,30 +231,11 @@ def _fail(exc: ec.WorkbookError):
 
 
 def _safe_filename_part(value: str) -> str:
-    """清洗导出文件名片段：去掉路径与非法字符，避免项目名破坏文件名（2026-08-17）。"""
-    cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", value).strip().strip(".")
-    return cleaned or "项目"
+    return master_access.safe_filename_part(value)
 
 
-def _workbook_filename(
-    db: Session, project_id: str, wanted: tuple[str, ...]
-) -> str:
-    """下载文件名 = XSDD 销售订单号（取第一个）+ 维保项目名 + 表单类型（2026-08-17）。"""
-    project = db.get(MaintenanceProject, project_id)
-    contracts = list(db.execute(
-        select(MaintenanceProjectContract)
-        .where(MaintenanceProjectContract.project_id == project_id)
-        .order_by(MaintenanceProjectContract.effective_from)
-    ).scalars())
-    project_xsdds = master.project_sales_order_nos(db, project_id)
-    xsdd = (contracts[0].contract_no if contracts else
-            project_xsdds[0] if project_xsdds else
-            project.project_code if project else project_id)
-    name = _safe_filename_part(project.display_name) if project else _safe_filename_part(project_id)
-    form = "总表" if len(wanted) == len(master.ALL_SHEETS) else (
-        wanted[0] if len(wanted) == 1 else "多表单"
-    )
-    return f"{_safe_filename_part(xsdd)}-{name}-{form}.xlsx"
+def _workbook_filename(db: Session, project_id: str, wanted: tuple[str, ...]) -> str:
+    return master_access.workbook_filename(db, project_id, wanted)
 
 
 # ---------------------------------------------------------- 主页全局备件行级表
@@ -250,11 +247,24 @@ def download_global_lines(
     date_to: date | None = Query(None, alias="to"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _data: None = Depends(_require_profit_visibility),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_global_workbook", "page_maintenance")),
+    _data: None = Depends(auth_transport.legacy_gate("maintenance_global_workbook", _require_profit_visibility)),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_global_workbook")),
+    view: Literal['authorization'] | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ):
     """全项目备件行级表（系统自动回填价之后）。时间预设见 #38。"""
+    if identity is not None:
+        try:
+            content = master_access.read_global_workbook(sessionmaker(bind=db.get_bind()), identity,
+                preset=range_preset, date_from=date_from, date_to=date_to, authorization_view=view == 'authorization',
+                authorization_precondition=foundation.decode_precondition(authorization_precondition) if view != 'authorization' else None)
+        except ec.WorkbookError as exc:
+            _fail(exc)
+        if view == 'authorization':
+            return content
+        return _xlsx(content, f"spare-part-lines-{range_preset}.xlsx")
     visible_project_ids = resolve_visible_project_ids(db, ctx)
     try:
         content = master.build_global_lines(
@@ -278,12 +288,20 @@ async def validate_global_lines(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_profit")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_global_workbook","page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_global_workbook",require_action(_ACTION_KEY,require_data="data_profit"))),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_global_workbook")),
+    view: Literal["authorization"] | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     data = await _read_upload(request)
+    if identity is not None:
+        try:
+            return global_lines_access.execute(db,identity,entry_id=global_lines_access.VALIDATE,data=data,view=view,
+                precondition=(await request.form()).get("authorization_precondition"))
+        except ec.WorkbookError as exc:
+            _fail(exc)
     visible_project_ids = resolve_visible_project_ids(db, ctx)
     try:
         plan = master.validate_global(
@@ -303,13 +321,21 @@ async def apply_global_lines(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_profit")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_global_workbook","page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_global_workbook",require_action(_ACTION_KEY,require_data="data_profit"))),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_global_workbook")),
+    view: Literal["authorization"] | None = Query(None),
 ) -> dict:
     """改价/补价上传覆盖＝真实源（#38）。整份事务，任何一行不合法则整份 422。"""
     response.headers["Cache-Control"] = "no-store"
     data = await _read_upload(request)
+    if identity is not None:
+        try:
+            return global_lines_access.execute(db,identity,entry_id=global_lines_access.APPLY,data=data,view=view,
+                precondition=(await request.form()).get("authorization_precondition"))
+        except ec.WorkbookError as exc:
+            _fail(exc)
     visible_project_ids = resolve_visible_project_ids(db, ctx)
     try:
         plan = master.validate_global(
@@ -342,10 +368,13 @@ def list_project_expense_rows(
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _data: None = Depends(_require_profit_visibility),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_expense", "page_maintenance")),
+    _data: None = Depends(auth_transport.legacy_gate("maintenance_expense", _require_profit_visibility)),
     ctx: UserContext = Depends(get_current_user_context),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(auth_transport.legacy_project_scope("maintenance_expense")),
+    identity=Depends(auth_transport.identity_for("maintenance_expense")),
+    view: Literal['authorization'] | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """项目面板「报销」tab 的只读行（含备注，#47）。
 
@@ -353,32 +382,11 @@ def list_project_expense_rows(
     页面只**展示**——改金额/备注仍只能走「下载 → 改 → 上传覆盖」（#40）。
     """
     response.headers["Cache-Control"] = "no-store"
-    rows = ec.project_expenses(db, project_id)
-    total = len(rows)
-    window = rows[(page - 1) * page_size: page * page_size]
-    return {
-        "rows": [
-            {
-                "raw_line_id": expense.raw_line_id,
-                "bxd_no": expense.bxd_no,
-                "expense_date": (expense.expense_date.isoformat()
-                                 if expense.expense_date else None),
-                "person": expense.person,
-                "expense_type": expense.expense_type,
-                "fee_category": expense.fee_category,
-                "reason": expense.reason,
-                "contract_no": expense.linked_sales_order_no,
-                "amount_ex_tax": (str(expense.amount_ex_tax)
-                                  if expense.amount_ex_tax is not None else None),
-                "amount_inc_tax": (str(expense.amount_inc_tax)
-                                   if expense.amount_inc_tax is not None else None),
-                "data_status": expense.data_status,
-                "remark": expense.remark,
-            }
-            for expense in window
-        ],
-        "total": total, "page": page, "page_size": page_size,
-    }
+    if identity is not None:
+        return master_access.read_project_data(sessionmaker(bind=db.get_bind()), identity,
+            entry_id=master_access.EXPENSE_ROWS, project_id=project_id, authorization_view=view == 'authorization', page=page, page_size=page_size,
+            authorization_precondition=foundation.decode_precondition(authorization_precondition) if view != 'authorization' else None)
+    return master_access.expense_rows(db, project_id, page, page_size)
 
 
 # ---------------------------------------------------------- 项目总表 / 单 sheet
@@ -389,10 +397,26 @@ def download_project_master(
     sheets: str | None = Query(None, description="逗号分隔的 sheet 名；缺省=全六张"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(master_access.RESOURCES, "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(auth_transport.legacy_project_scope(master_access.RESOURCES)),
+    identity=Depends(auth_transport.identity_for(*master_access.RESOURCES)),
+    view: Literal['authorization'] | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ):
+    if identity is not None:
+        try:
+            result = master_access.read_master_workbook(sessionmaker(bind=db.get_bind()), identity,
+                project_id=project_id, sheets=sheets, authorization_view=view == 'authorization',
+                authorization_precondition=foundation.decode_precondition(authorization_precondition) if view != 'authorization' else None)
+        except ec.WorkbookError as exc:
+            _fail(exc)
+        if view == 'authorization':
+            return result
+        content, filename = result
+        if content is None:
+            raise HTTPException(404, '项目不存在')
+        return _xlsx(content, filename)
     wanted = (tuple(s.strip() for s in sheets.split(",") if s.strip())
               if sheets else master.ALL_SHEETS)
     # D-03：负责人对本人项目全量可见（含成本列）；销售的成本仍受 data_profit
@@ -444,65 +468,20 @@ def get_collection_plan(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _data: None = Depends(_require_profit_visibility),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_collection", "page_maintenance")),
+    _data: None = Depends(auth_transport.legacy_gate("maintenance_collection", _require_profit_visibility)),
     ctx: UserContext = Depends(get_current_user_context),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(auth_transport.legacy_project_scope("maintenance_collection")),
+    identity=Depends(auth_transport.identity_for("maintenance_collection")),
+    view: Literal['authorization'] | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """回款计划（02）+ 到款状态：计划期次对比实收累计，供回款 tab 展示待回款。"""
-    from app.models.maintenance_manager import MaintenanceCollectionMilestone
-    from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
-    from app.business_time import business_today
-
-    contracts = master.ec._contracts(db, project_id)
-    contract_by_id = {c.project_contract_id: c.contract_no for c in contracts}
-    milestones = list(db.scalars(select(MaintenanceCollectionMilestone).where(
-        MaintenanceCollectionMilestone.project_id == project_id,
-        MaintenanceCollectionMilestone.is_active.is_(True),
-    ).order_by(
-        MaintenanceCollectionMilestone.project_contract_id,
-        MaintenanceCollectionMilestone.sequence,
-    )))
-    # 每份合同最新 confirmed 快照的累计实收（待回款判定基准）
-    actual: dict[str, Decimal] = {}
-    for c in contracts:
-        snap = db.scalar(select(MaintenanceCollectionSnapshot).where(
-            MaintenanceCollectionSnapshot.project_contract_id == c.project_contract_id,
-            MaintenanceCollectionSnapshot.status == "confirmed",
-        ).order_by(MaintenanceCollectionSnapshot.report_month.desc()))
-        actual[c.project_contract_id] = (
-            snap.cumulative_amount if snap and snap.cumulative_amount is not None
-            else Decimal("0"))
-    today = business_today()
-    rows = []
-    cum_planned: dict[str, Decimal] = {}
-    for m in milestones:
-        cid = m.project_contract_id
-        cum_planned[cid] = cum_planned.get(cid, Decimal("0")) + (m.planned_amount or Decimal("0"))
-        cum_actual = actual.get(cid, Decimal("0"))
-        if cum_actual >= cum_planned[cid] and cum_planned[cid] > 0:
-            state = "paid"
-        elif cum_actual > (cum_planned[cid] - (m.planned_amount or Decimal("0"))):
-            state = "partial"
-        else:
-            state = "pending"
-        if state != "paid" and m.planned_date is not None and m.planned_date < today:
-            state = "overdue"
-        rows.append({
-            "milestone_id": m.milestone_id,
-            "contract_no": contract_by_id.get(cid, ""),
-            "sequence": m.sequence,
-            "planned_date": m.planned_date.isoformat() if m.planned_date else None,
-            "date_precision": m.date_precision,
-            "planned_amount": str(m.planned_amount) if m.planned_amount is not None else None,
-            "cumulative_planned": str(cum_planned[cid]),
-            "cumulative_actual": str(actual.get(cid, Decimal("0"))),
-            "arrival_state": state,
-            "follow_up_status": m.follow_up_status,
-            "note": m.follow_up_note,
-            "version": m.version,
-        })
-    return {"total": len(rows), "rows": rows}
+    if identity is not None:
+        return master_access.read_project_data(sessionmaker(bind=db.get_bind()), identity,
+            entry_id=master_access.COLLECTION_PLAN, project_id=project_id, authorization_view=view == 'authorization',
+                authorization_precondition=foundation.decode_precondition(authorization_precondition) if view != 'authorization' else None)
+    return master_access.collection_plan(db, project_id)
 
 
 @router.post("/projects/stable/{project_id}/collection-milestones/restore")
@@ -512,19 +491,24 @@ def restore_collection_milestones(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _admin: str = Depends(require_admin),
-    _page: None = Depends(require_page("page_maintenance")),
+    _admin: str = Depends(auth_transport.legacy_gate("maintenance_collection",lambda ctx: require_admin(ctx.role))),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_collection","page_maintenance")),
     _action: None = Depends(
-        require_action(_ACTION_KEY, require_data="data_profit")
+        auth_transport.legacy_gate("maintenance_collection",require_action(_ACTION_KEY,require_data="data_profit"))
     ),
     ctx: UserContext = Depends(get_current_user_context),
-    _scope: None = Depends(require_maintenance_project_access),
+    identity=Depends(auth_transport.identity_for("maintenance_collection")),
+    view: Literal["authorization"] | None = Query(None),
+    _scope: None = Depends(auth_transport.legacy_project_scope("maintenance_collection")),
 ) -> dict:
     """实名管理员整批恢复已作废的回款计划；事实必须与 Excel 完全一致。"""
 
     response.headers["Cache-Control"] = "no-store"
-    _require_real_admin_restore(ctx, ident)
+    if identity is None:
+        _require_real_admin_restore(ctx, ident)
     try:
+        if identity is not None:
+            return restore_access.execute(db,identity,project_id=project_id,command=body.model_dump(exclude={"authorization_precondition"}),view=view,precondition=body.authorization_precondition)
         payload = milestone_restore.restore_collection_milestones(
             db,
             project_id=project_id,
@@ -592,169 +576,22 @@ def list_master_rows(
     _sort: None = Depends(reject_row_sort),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _data: None = Depends(_require_profit_visibility),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_row_workbench", "page_maintenance")),
+    _data: None = Depends(auth_transport.legacy_gate("maintenance_row_workbench", _require_profit_visibility)),
     ctx: UserContext = Depends(get_current_user_context),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(auth_transport.legacy_project_scope("maintenance_row_workbench")),
+    identity=Depends(auth_transport.identity_for("maintenance_row_workbench")),
+    view: Literal['authorization'] | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """备件成本 tab 的 web 呈现：03_备件订单 行级（PN）只读数据源（2026-08-17）。"""
-    row_filters = parse_filters(filters)
-    amount_allowed = row_workbench.can_view_amounts(db, ctx, project_id)
-    if (get_settings().maintenance_project_master_v2_enabled
-            and sheet in {master.V2_SHEET_PARTS, master.SHEET_PARTS}):
-        rows, total, page_size = row_workbench.project_page(
-            db, ctx, project_id=project_id, filters=row_filters,
-            order_no=order_no, contract_no=contract_no,
-            page=page, page_size=page_size)
-        line_ids = [line.id for line, _order, _pid in rows]
-        overrides = {
-            item.line_id: item for item in db.scalars(select(MaintenanceManualCostOverride).where(
-                MaintenanceManualCostOverride.line_id.in_(line_ids),
-                MaintenanceManualCostOverride.active.is_(True),
-            ))
-        } if line_ids else {}
-
-        def _v2_row(line, order):
-            override = overrides.get(line.id)
-            inc = master._line_cost_evidence(line, override, basis="inc")
-            ex = master._line_cost_evidence(line, override, basis="ex")
-            known = inc["tier"] != "missing"
-            resolved_source = inc["source"] if known else (line.cost_source or "none")
-            can_refill = (
-                not known
-                and line.cost_source in (None, "none")
-                and override is None
-            )
-            missing_kind = None
-            if not known:
-                missing_kind = (
-                    "out_of_scope"
-                    if line.cost_source is None
-                    else "none"
-                    if line.cost_source == "none"
-                    else "invalid_cost_fact"
-                )
-            return {
-                "line_id": line.id,
-                "part_id": line.part_id,
-                "order_no": order.order_no,
-                "order_date": order.order_date.isoformat() if order.order_date else None,
-                "sales_order_no": order.linked_sales_order_no or "",
-                "pn_std": line.pn_std or line.pn_raw or "",
-                "description": line.description or "",
-                "qty": str(line.qty) if line.qty is not None else None,
-                "return_qty": str(line.return_qty) if line.return_qty is not None else None,
-                "returned_qty": (
-                    str(line.returned_qty) if line.returned_qty is not None else None
-                ),
-                "pending_return_qty": (
-                    str(line.pending_return_qty)
-                    if line.pending_return_qty is not None else None
-                ),
-                "cost_amount_inc_tax": (
-                    str(inc["amount"]) if inc["amount"] is not None else None
-                ),
-                "warehouse": order.warehouse or "",
-                "cost_source": resolved_source,
-                "cost_source_label": maintenance_workbook_renderer.SOURCE_LABELS.get(
-                    resolved_source, "成本事实异常" if not known else "成本缺失"
-                ),
-                "confidence": (
-                    "high" if resolved_source == "manual"
-                    else line.confidence if known
-                    else "none"
-                ),
-                "unit_cost_ex_tax": (
-                    str(ex["unit_cost"]) if ex["unit_cost"] is not None else None
-                ),
-                "unit_cost_inc_tax": (
-                    str(inc["unit_cost"]) if inc["unit_cost"] is not None else None
-                ),
-                "missing_kind": missing_kind,
-                "can_refill": can_refill,
-                "manual_unit_cost_ex_tax": (
-                    str(override.unit_cost_ex_tax) if override else None
-                ),
-                "manual_reason": override.reason if override else None,
-            }
-
-        return {
-            "sheet": sheet,
-            "total": total,
-            "page": page,
-            "page_size": page_size,
-            "rows": row_workbench.redact_project_rows(
-                [_v2_row(line, order) for line, order, _pid in rows], allowed=amount_allowed),
-        }
-    if sheet not in {master.SHEET_PARTS}:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            {"code": "unsupported_sheet",
-             "message": "当前仅支持 03_备件订单 行级查询"},
-        )
-    rows, total, page_size = row_workbench.project_page(
-        db, ctx, project_id=project_id, filters=row_filters,
-        order_no=order_no, contract_no=contract_no,
-        page=page, page_size=page_size)
-    line_ids = [line.id for line, _order, _pid in rows]
-    overrides: dict[int, MaintenanceManualCostOverride] = {}
-    if line_ids:
-        for override in db.execute(
-            select(MaintenanceManualCostOverride)
-            .where(
-                MaintenanceManualCostOverride.line_id.in_(line_ids),
-                MaintenanceManualCostOverride.active.is_(True),
-            )
-        ).scalars():
-            overrides[override.line_id] = override
-    record_access_log(ctx, "download", "maintenance_project_master_rows",
-                      {"project_id": project_id, "sheet": sheet})
-
-    def _legacy_row(line, order):
-        override = overrides.get(line.id)
-        inc = master._line_cost_evidence(line, override, basis="inc")
-        ex = master._line_cost_evidence(line, override, basis="ex")
-        return {
-            "line_id": line.id,
-            "order_no": order.order_no,
-            "order_date": order.order_date.isoformat() if order.order_date else None,
-            "sales_order_no": order.linked_sales_order_no or "",
-            "project_raw": order.project_raw or "",
-            "pn_std": line.pn_std or line.pn_raw or "",
-            "description": line.description or "",
-            "qty": float(line.qty) if line.qty is not None else None,
-            "return_qty": float(line.return_qty) if line.return_qty is not None else None,
-            "returned_qty": (
-                float(line.returned_qty) if line.returned_qty is not None else None
-            ),
-            "pending_return_qty": (
-                float(line.pending_return_qty)
-                if line.pending_return_qty is not None else None
-            ),
-            "serial_numbers": line.serial_numbers or "",
-            "warehouse": order.warehouse or "",
-            "cost_source": inc["source"] if inc["tier"] != "missing" else "",
-            "unit_cost_ex_tax": (
-                float(ex["unit_cost"]) if ex["unit_cost"] is not None else None
-            ),
-            "unit_cost_inc_tax": (
-                float(inc["unit_cost"]) if inc["unit_cost"] is not None else None
-            ),
-            "cost_amount_inc_tax": (
-                float(inc["amount"]) if inc["amount"] is not None else None
-            ),
-            "cost_quality": inc["tier"],
-            "change_reason": override.reason or "" if override is not None else "",
-        }
-
-    return {
-        "sheet": sheet,
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "rows": row_workbench.redact_project_rows(
-            [_legacy_row(line, order) for line, order, _pid in rows], allowed=amount_allowed),
-    }
+    if identity is not None:
+        return master_access.read_master_rows(sessionmaker(bind=db.get_bind()), identity,
+            project_id=project_id, sheet=sheet, order_no=order_no, contract_no=contract_no,
+            page=page, page_size=page_size, filters=filters, authorization_view=view == 'authorization',
+            authorization_precondition=foundation.decode_precondition(authorization_precondition) if view != 'authorization' else None)
+    return master_access.build_master_rows(db, ctx, project_id=project_id, sheet=sheet,
+        order_no=order_no, contract_no=contract_no, page=page, page_size=page_size, filters=filters)
 
 
 @router.post(_MASTER + "/validate")
@@ -765,14 +602,29 @@ async def validate_project_master(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _edit: None = Depends(_require_master_edit),
+    _page: None = Depends(auth_transport.legacy_page(master_command.RESOURCES, "page_maintenance")),
+    _edit: None = Depends(_legacy_master_validate_edit),
     ctx: UserContext = Depends(get_current_user_context),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(auth_transport.legacy_project_scope(master_command.RESOURCES)),
+    identity=Depends(auth_transport.identity_for(*master_command.RESOURCES)),
+    view: Literal['authorization'] | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     data, force_takeover = await _read_upload_with_takeover(request)
     try:
+        if identity is not None:
+            precondition = foundation.decode_precondition((await request.form()).get('authorization_precondition'))
+            result = master_command.validate_upload(sessionmaker(bind=db.get_bind()), identity,
+                project_id=project_id, content=data, force_takeover=force_takeover,
+                authorization_view=view == 'authorization', authorization_precondition=precondition)
+            if view == 'authorization':
+                return result
+            plan, principal, authorization_context = result
+            if isinstance(plan, master.MasterV2Plan):
+                payload = master_command.validation_payload(plan, project_id, f'authz-user:{principal.id}')
+            else:
+                payload = {'project_id': project_id, 'valid': True, 'sheets': list(plan.sheets), **plan.summary}
+            return {**payload, 'authorization_context': authorization_context}
         if get_settings().maintenance_project_master_v2_enabled:
             # force_takeover 必须透传：接管预检要让用户在按下「强制接管」之前
             # 看到自己将要覆盖的具体值（plan.overridden）。不传则预检永远返回
@@ -789,39 +641,7 @@ async def validate_project_master(
                 ctx, "workbook_validate", "maintenance_project_master_workbook",
                 {"project_id": project_id, "conflicts": len(plan.conflicts),
                  "changes": len(plan.field_changes)})
-            return {
-                "valid": True,
-                "protocol_id": master.V2_PROTOCOL_ID,
-                "template_version": master.V2_TEMPLATE_VERSION,
-                "project_id": project_id,
-                "sheets": list(plan.sheets),
-                **plan.summary,
-                "summary": plan.summary,
-                "site_issue_merge_count": len(plan.site_issue_merges),
-                "site_issue_merges": [dict(item) for item in plan.site_issue_merges],
-                "site_issue_merge_token": (
-                    master.site_issue_merge_token(plan, operator)
-                    if plan.site_issue_merges else None
-                ),
-                # 2.7.0：字段级改动预览 + 行级冲突预览（前端据此提供接管入口）
-                "changes": [dict(item) for item in plan.field_changes],
-                "conflicts": [dict(item) for item in plan.conflicts],
-                "overridden": [dict(item) for item in plan.overridden],
-                # #265 契约：作废预览（03 显式 VOID + 04 显式 VOID/缺行），
-                # apply 前对用户可见（前端 WorkbookRoundTrip 两阶段确认）。
-                "will_void_rows": [dict(r) for r in plan.will_void_rows],
-                "will_reassign_orders": [{
-                    "source_order_id": change.source_order_id,
-                    "order_no": change.order_no,
-                    "from_project_id": change.previous_project_id,
-                    "from_project_name": change.previous_project_name,
-                    "to_project_id": project_id,
-                } for change in plan.assignment_changes],
-                "warnings": list(plan.warnings),
-                # D-02 作废优先：落在已作废行/单上的改动不生效、也不整本拒绝，
-                # 行级列明作废人/时间（apply 回执同字段）。
-                "voided_rows": [dict(item) for item in plan.voided_rows],
-            }
+            return master_command.validation_payload(plan, project_id, operator)
         plan = master.validate(db, project_id=project_id, data=data)
     except ec.WorkbookError as exc:
         try:
@@ -869,10 +689,12 @@ async def apply_project_master(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _edit: None = Depends(_require_master_edit),
+    _page: None = Depends(auth_transport.legacy_page(master_command.RESOURCES, "page_maintenance")),
+    _edit: None = Depends(_legacy_master_validate_edit),
     ctx: UserContext = Depends(get_current_user_context),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(auth_transport.legacy_project_scope(master_command.RESOURCES)),
+    identity=Depends(auth_transport.identity_for(*master_command.RESOURCES)),
+    view: Literal['authorization'] | None = Query(None),
 ) -> dict:
     """上传覆盖。文件里有哪张 sheet 就应用哪张——单 sheet 上传走同一入口。
 
@@ -882,6 +704,13 @@ async def apply_project_master(
     response.headers["Cache-Control"] = "no-store"
     data, force_takeover = await _read_upload_with_takeover(request)
     try:
+        if identity is not None:
+            from app.services.maintenance_master_apply_access import apply_upload
+            form = await request.form()
+            return apply_upload(db, identity, project_id=project_id, content=data,
+                force_takeover=force_takeover, merge_token=str(form.get('site_issue_merge_token') or ''),
+                authorization_view=view == 'authorization',
+                authorization_precondition=foundation.decode_precondition(form.get('authorization_precondition')) if view != 'authorization' else None)
         if get_settings().maintenance_project_master_v2_enabled:
             file_sha256 = hashlib.sha256(data).hexdigest()
             replay = _completed_v2_upload(

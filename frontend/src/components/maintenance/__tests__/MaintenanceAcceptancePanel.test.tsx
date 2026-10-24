@@ -1,3 +1,4 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -57,6 +58,7 @@ describe("MaintenanceAcceptancePanel", () => {
     localStorage.clear();
     localStorage.setItem("role", "admin");
     localStorage.setItem("permissions", "{}");
+    prepareLegacyPageFixture();
     mocks.getMaintenanceAcceptance.mockResolvedValue({ data: record });
   });
 
@@ -198,13 +200,14 @@ describe("MaintenanceAcceptancePanel", () => {
 
     await waitFor(() =>
       expect(mocks.deleteMaintenanceAcceptanceAttachment)
-        .toHaveBeenCalledWith("p1", "file-1"));
+        .toHaveBeenCalledWith("p1", "file-1", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await waitFor(() => expect(mocks.getMaintenanceAcceptance).toHaveBeenCalledTimes(2));
   });
 
   it("无提交权限：隐藏上传/提交按钮并提示联系管理员开通", async () => {
     localStorage.setItem("role", "sales");
     localStorage.setItem("permissions", "{}");
+    prepareLegacyPageFixture();
     render(<MaintenanceAcceptancePanel projectId="p1" />);
 
     expect(await screen.findByText(/请联系管理员开通/)).toBeInTheDocument();
@@ -219,3 +222,8 @@ describe("MaintenanceAcceptancePanel", () => {
     expect(screen.getByText("验收附件待上传")).toBeInTheDocument();
   });
 });
+
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

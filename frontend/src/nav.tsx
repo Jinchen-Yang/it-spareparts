@@ -26,7 +26,7 @@ import {
 } from "@ant-design/icons";
 import { readMaintenanceCapabilities } from "./components/maintenance/maintenancePermissions";
 import type { AuthzSnapshot } from "./api/authz";
-import { ruleAllowed, surfaceRule } from "./authz/rules";
+import { ruleAllowed, ruleState, surfaceRule } from "./authz/rules";
 
 // This only decides whether a visible page interprets monetary values. It never
 // grants a route, action, field or request; those use the generated rules.
@@ -54,6 +54,16 @@ function purchaseRecordsRequireTaxPolicy(snapshot: AuthzSnapshot | null): boolea
   const resource = snapshot?.resources.purchase_records;
   return resource?.runtime_state === "legacy" || resource?.runtime_state === "enabled" &&
     resource.field_permissions.includes("data_purchase_cost");
+}
+
+function maintenanceDashboardRequiresTaxPolicy(snapshot: AuthzSnapshot | null): boolean {
+  const resource = snapshot?.resources.maintenance_dashboard;
+  if (resource?.runtime_state === "legacy") return true;
+  if (resource?.runtime_state !== "enabled" || !resource.field_permissions.includes("data_profit")) return false;
+  return ["overview", "projects", "parts", "consumption"].some(id => {
+    const rule = surfaceRule(`maintenance_dashboard.${id}`);
+    return ruleState(snapshot, rule) !== "deny";
+  });
 }
 
 /** 读登录时写入的权限快照（与 App.tsx readPerms 同源），供 visibleWhen 判断动作键。 */
@@ -248,7 +258,7 @@ export const NAV_GROUPS: NavGroup[] = [
       {
         // 维保数据看板 MVP（D-0022/R33）：数量口径人人可见，金额随 data_profit。
         key: "maintenance-dashboard",
-        requiresTaxPolicy: true,
+        requiresTaxPolicy: maintenanceDashboardRequiresTaxPolicy,
         path: "/maintenance/dashboard",
         label: "数据看板",
         icon: <FundOutlined />,

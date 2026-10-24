@@ -26,7 +26,7 @@ from uuid import uuid4
 
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.config import get_settings
 from app.models.maintenance_manager import (
@@ -39,7 +39,7 @@ from app.models.maintenance_project import (
     MaintenanceProjectContract,
 )
 from app.models.system import SysUser
-from app.security import FULL_SCOPE_ROLES, UserContext
+from app.security import FULL_SCOPE_ROLES, UserContext, is_field_hidden
 from app.services import maintenance_collection_evidence as collection_evidence
 from app.services import maintenance_periods
 from app.services import maintenance_project_assignments as assignments
@@ -178,6 +178,8 @@ def _amount_visibility(user_ctx: UserContext) -> str:
     """计划金额继续服从利润/合同金额可见性（设计 §9）：无 data_profit → restricted。"""
     from app import permissions as _perm
 
+    if user_ctx.explicit_field_policy:
+        return "restricted" if is_field_hidden(user_ctx, "contract_amount") else "visible"
     perms = user_ctx.permissions
     if perms is None:
         perms = _perm.template_for(user_ctx.role)
@@ -351,6 +353,7 @@ def _milestone_row(
     contract_no_by_id: dict[str, str],
     followed_up_display: dict[int, str],
     last_operation_dict: dict | None,
+    strict_projection: bool = False,
 ) -> dict:
     state = derive_reminder_state(milestone, as_of=as_of)
     return {
@@ -379,7 +382,7 @@ def _milestone_row(
         "follow_up_note": milestone.follow_up_note,
         "last_operation": last_operation_dict,
         "version": milestone.version,
-        **_payment_fields(db, milestone, as_of=as_of),
+        **({} if strict_projection else _payment_fields(db, milestone, as_of=as_of)),
     }
 
 
@@ -390,6 +393,7 @@ def _actionable_dict(
     as_of: date,
     amount_visible: bool,
     contract_no_by_id: dict[str, str],
+    strict_projection: bool = False,
 ) -> dict:
     return {
         "milestone_id": milestone.milestone_id,
@@ -402,7 +406,7 @@ def _actionable_dict(
         ),
         "reminder_state": derive_reminder_state(milestone, as_of=as_of),
         "version": milestone.version,
-        **_payment_fields(db, milestone, as_of=as_of),
+        **({} if strict_projection else _payment_fields(db, milestone, as_of=as_of)),
     }
 
 
@@ -421,6 +425,21 @@ def _operation_dict(
     }
 
 
+def _contract_projection():
+    return load_only(MaintenanceProjectContract.project_contract_id,
+        MaintenanceProjectContract.project_id, MaintenanceProjectContract.contract_no,
+        MaintenanceProjectContract.effective_from, MaintenanceProjectContract.effective_to,
+        MaintenanceProjectContract.version, raiseload=True)
+
+
+def _milestone_projection(amount_visible):
+    names = ['milestone_id','project_id','project_contract_id','sequence','planned_date',
+        'date_precision','completeness_state','follow_up_status','follow_up_review_required',
+        'followed_up_by','followed_up_at','follow_up_note','version','is_active']
+    if amount_visible:names.append('planned_amount')
+    return load_only(*(getattr(MaintenanceCollectionMilestone,n) for n in names),raiseload=True)
+
+
 # ---------- 目录 ----------
 
 def search_collection_reminders(
@@ -433,25 +452,33 @@ def search_collection_reminders(
     reminder_state: str | None,
     page: int,
     page_size: int,
+    authorization_condition=None,
 ) -> dict:
     """项目回款提醒目录（设计 §7.1）。搜索只匹配项目编号/项目名称/合同编号。"""
     if page_size > 200:
         raise CollectionReminderInvalid("每页最多 200 条")
     if reminder_state is not None and reminder_state not in _ALLOWED_STATES:
         raise CollectionReminderInvalid("提醒状态筛选无效")
-    try:
-        scope = assignments.resolve_owner_scope(user_ctx, owner_scope)
-    except assignments.MaintenanceProjectAssignmentPermissionError as exc:
-        raise CollectionReminderPermissionError("当前账号只能查看本人负责的维保项目") from exc
-    except assignments.MaintenanceProjectAssignmentError as exc:
-        raise CollectionReminderInvalid(str(exc)) from exc
-
-    allowed_owner_scopes = ["me", "all"] if user_ctx.role in FULL_SCOPE_ROLES else ["me"]
+    strict_projection = authorization_condition is not None
+    if strict_projection:
+        scope = owner_scope or 'me'
+        if scope not in {'me','all'}:raise CollectionReminderInvalid('范围无效')
+        allowed_owner_scopes = ['me','all']
+    else:
+        try:
+            scope = assignments.resolve_owner_scope(user_ctx, owner_scope)
+        except assignments.MaintenanceProjectAssignmentPermissionError as exc:
+            raise CollectionReminderPermissionError("当前账号只能查看本人负责的维保项目") from exc
+        except assignments.MaintenanceProjectAssignmentError as exc:
+            raise CollectionReminderInvalid(str(exc)) from exc
+        allowed_owner_scopes = ["me", "all"] if user_ctx.role in FULL_SCOPE_ROLES else ["me"]
     amount_visible = _amount_visibility(user_ctx) == "visible"
 
     project_query = select(MaintenanceProject).where(
         MaintenanceProject.is_active.is_(True)
     )
+    if strict_projection:
+        project_query = project_query.where(authorization_condition)
     if scope == "me":
         project_query = project_query.where(assignments.owned_project_condition(user_ctx))
     search = (q_text or "").strip()
@@ -486,7 +513,7 @@ def search_collection_reminders(
         db.scalars(
             select(MaintenanceProjectContract).where(
                 MaintenanceProjectContract.project_id.in_(project_ids)
-            )
+            ).options(*([_contract_projection()] if strict_projection else []))
         )
     )
     contract_no_by_id = {c.project_contract_id: c.contract_no for c in contracts}
@@ -499,7 +526,7 @@ def search_collection_reminders(
             select(MaintenanceCollectionMilestone).where(
                 MaintenanceCollectionMilestone.project_id.in_(project_ids),
                 MaintenanceCollectionMilestone.is_active.is_(True),
-            )
+            ).options(*([_milestone_projection(amount_visible)] if strict_projection else []))
         )
     )
     milestones_by_project: dict[str, list[MaintenanceCollectionMilestone]] = {}
@@ -517,7 +544,8 @@ def search_collection_reminders(
             continue
         next_actionable = select_next_actionable_milestone(
             [milestone for milestone in project_milestones
-             if _payment_fields(db, milestone, as_of=as_of)["payment_state"] != "paid"],
+             if (strict_projection and not amount_visible) or
+                 _payment_fields(db, milestone, as_of=as_of)["payment_state"] != "paid"],
             as_of=as_of,
         )
         if next_actionable is None:
@@ -531,6 +559,7 @@ def search_collection_reminders(
                 as_of=as_of,
                 amount_visible=amount_visible,
                 contract_no_by_id=contract_no_by_id,
+                strict_projection=strict_projection,
             )
             sort_rank = _NEXT_ACTIONABLE_RANK[next_actionable_dict["reminder_state"]]
             sort_month = next_actionable.planned_date or date.max
@@ -600,6 +629,7 @@ def get_project_collection_milestones(
     project_id: str,
     as_of: date,
     user_ctx: UserContext,
+    authorization_access=None,
 ) -> dict | None:
     """项目全部计划节点详情（设计 §7.2）。项目不存在或归档 → None（404）；
     无项目权限 → 403，不泄漏不可见项目。
@@ -609,14 +639,15 @@ def get_project_collection_milestones(
     )
     if project is None or not project.is_active:
         return None
-    if not assignments.can_access_project(db, project_id=project_id, user_ctx=user_ctx):
+    if authorization_access is None and not assignments.can_access_project(db, project_id=project_id, user_ctx=user_ctx):
         raise CollectionReminderPermissionError("无权访问该维保项目")
-
+    strict_projection = authorization_access is not None
     amount_visible = _amount_visibility(user_ctx) == "visible"
     contracts = list(
         db.scalars(
             select(MaintenanceProjectContract)
             .where(MaintenanceProjectContract.project_id == project_id)
+            .options(*([_contract_projection()] if strict_projection else []))
             .order_by(
                 MaintenanceProjectContract.effective_from,
                 MaintenanceProjectContract.project_contract_id,
@@ -630,6 +661,7 @@ def get_project_collection_milestones(
             select(MaintenanceCollectionMilestone)
             .where(MaintenanceCollectionMilestone.project_id == project_id)
             .where(MaintenanceCollectionMilestone.is_active.is_(True))
+            .options(*([_milestone_projection(amount_visible)] if strict_projection else []))
             .order_by(
                 MaintenanceCollectionMilestone.planned_date.asc().nulls_last(),
                 MaintenanceCollectionMilestone.sequence,
@@ -648,6 +680,14 @@ def get_project_collection_milestones(
                 .where(
                     MaintenanceCollectionMilestoneOperation.milestone_id.in_(milestone_ids)
                 )
+                .options(*([load_only(MaintenanceCollectionMilestoneOperation.operation_id,
+                    MaintenanceCollectionMilestoneOperation.milestone_id,
+                    MaintenanceCollectionMilestoneOperation.actor_user_id,
+                    MaintenanceCollectionMilestoneOperation.action,
+                    MaintenanceCollectionMilestoneOperation.reason,
+                    MaintenanceCollectionMilestoneOperation.created_at,
+                    MaintenanceCollectionMilestoneOperation.result_version,raiseload=True)]
+                    if strict_projection else []))
                 .order_by(
                     MaintenanceCollectionMilestoneOperation.created_at.desc(),
                     MaintenanceCollectionMilestoneOperation.operation_id,
@@ -672,6 +712,7 @@ def get_project_collection_milestones(
             amount_visible=amount_visible,
             contract_no_by_id=contract_no_by_id,
             followed_up_display=followed_up_display,
+            strict_projection=strict_projection,
             last_operation_dict=(
                 _operation_dict(operations_by_milestone[milestone.milestone_id], actor_display=actor_display)
                 if milestone.milestone_id in operations_by_milestone
@@ -734,6 +775,7 @@ def _replay_or_conflict(
     actor: SysUser,
     payload_hash: str,
     user_ctx: UserContext,
+    authorization_validated: bool = False,
 ) -> dict:
     """幂等账本命中：沿其 milestone 重新校验项目 scope；actor、路径 milestone
     与 payload hash 全部相同才重放首次 ``result_json``，否则 409。"""
@@ -742,9 +784,9 @@ def _replay_or_conflict(
             MaintenanceCollectionMilestone.milestone_id == existing.milestone_id
         )
     )
-    if op_milestone is None or not assignments.can_access_project(
+    if op_milestone is None or (not authorization_validated and not assignments.can_access_project(
         db, project_id=op_milestone.project_id, user_ctx=user_ctx
-    ):
+    )):
         raise CollectionReminderPermissionError("无权访问该维保项目")
     if (
         existing.milestone_id != milestone_id
@@ -752,7 +794,10 @@ def _replay_or_conflict(
         or existing.payload_hash != payload_hash
     ):
         raise CollectionReminderConflict("同一幂等键已被不同请求使用，请刷新后重试")
-    return {**existing.result_json, "idempotent_replay": True}
+    result = {**existing.result_json, "row":dict(existing.result_json['row']), "idempotent_replay": True}
+    if authorization_validated and _amount_visibility(user_ctx) != 'visible':
+        result['row']['planned_amount'] = None
+    return result
 
 
 def follow_up_collection_milestone(
@@ -768,6 +813,7 @@ def follow_up_collection_milestone(
     operator: str,
     user_ctx: UserContext,
     as_of: date,
+    _authorize=None,
 ) -> dict | None:
     """标记已处理/改期/重新打开（设计 §7.3）。
 
@@ -796,7 +842,7 @@ def follow_up_collection_milestone(
     )
     if actor is None:
         raise CollectionReminderPermissionError("账号不存在或已停用")
-    if not assignments.can_access_project(db, project_id=project_id, user_ctx=user_ctx):
+    if _authorize is None and not assignments.can_access_project(db, project_id=project_id, user_ctx=user_ctx):
         raise CollectionReminderPermissionError("无权访问该维保项目")
 
     payload_hash = follow_up_payload_hash(
@@ -814,7 +860,7 @@ def follow_up_collection_milestone(
             MaintenanceCollectionMilestoneOperation.idempotency_key == idempotency_key
         )
     )
-    if existing is not None:
+    if existing is not None and _authorize is None:
         return _replay_or_conflict(
             db,
             existing,
@@ -836,7 +882,7 @@ def follow_up_collection_milestone(
     project = db.scalar(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == project_id)
-        .with_for_update()
+        .with_for_update().execution_options(populate_existing=True)
     )
     if project is None or not project.is_active:
         raise CollectionReminderNotFound("资源不存在或不可见")
@@ -846,7 +892,7 @@ def follow_up_collection_milestone(
             MaintenanceProjectContract.project_contract_id
             == milestone.project_contract_id
         )
-        .with_for_update()
+        .with_for_update().execution_options(populate_existing=True)
     )
     if contract is None or contract.project_id != project_id:
         raise CollectionReminderNotFound("资源不存在或不可见")
@@ -855,12 +901,18 @@ def follow_up_collection_milestone(
     milestone = db.scalar(
         select(MaintenanceCollectionMilestone)
         .where(MaintenanceCollectionMilestone.milestone_id == milestone_id)
-        .with_for_update()
+        .with_for_update().execution_options(populate_existing=True)
     )
     if milestone is None:
         return None
-    if milestone.project_id != project_id:
+    if milestone.project_id != project_id or milestone.project_contract_id != contract.project_contract_id:
         raise CollectionReminderNotFound("资源不存在或不可见")
+    if _authorize is not None:
+        actor, user_ctx = _authorize()
+        # Current actor/domain locks cover both first application and replay.
+        if existing is not None:
+            return _replay_or_conflict(db,existing,milestone_id=milestone_id,actor=actor,
+                payload_hash=payload_hash,user_ctx=user_ctx,authorization_validated=True)
     if milestone.version != expected_version:
         raise CollectionReminderConflict(
             "数据已变化，请刷新后重试",
@@ -922,6 +974,7 @@ def follow_up_collection_milestone(
         contract_no_by_id={milestone.project_contract_id: contract.contract_no},
         followed_up_display={actor.id: actor.display_name or actor.username},
         last_operation_dict=None,
+        strict_projection=_authorize is not None,
     )
     payload = {
         "row": row,
@@ -946,6 +999,9 @@ def follow_up_collection_milestone(
         db.add(operation)
         db.flush()
     except IntegrityError:
+        if _authorize is not None:
+            # Never replay after releasing the authorization lock observation.
+            raise
         # 并发相同幂等键：回滚本次写入，回读账本后重放或 409。
         db.rollback()
         existing = db.scalar(

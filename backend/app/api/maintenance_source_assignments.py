@@ -1,6 +1,8 @@
 """Manual source maintenance order assignment endpoints (#201)."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, Response, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
@@ -15,6 +17,9 @@ from app.security import (
     require_page,
 )
 from app.services import maintenance_source_assignments as assignments
+from app.services import maintenance_source_assignment_access as canonical
+from app.services import maintenance_authorization as foundation
+from app.api import maintenance_project_scope as auth_transport
 
 
 router = APIRouter(
@@ -43,6 +48,7 @@ class AssignSourceOrders(BaseModel):
     project_id: str = Field(min_length=1, max_length=36)
     items: list[AssignmentExpectation] = Field(min_length=1, max_length=100)
     reason: str = Field(min_length=1, max_length=1000)
+    authorization_precondition: dict | None = None
 
 
 class UnassignmentExpectation(BaseModel):
@@ -57,10 +63,12 @@ class UnassignSourceOrders(BaseModel):
 
     items: list[UnassignmentExpectation] = Field(min_length=1, max_length=100)
     reason: str = Field(min_length=1, max_length=1000)
+    authorization_precondition: dict | None = None
 
 
 @router.get("")
 def source_order_directory(
+    response: Response,
     q: str | None = Query(None, max_length=128),
     source_order_id: list[str] | None = Query(None),
     assignment_status: str = Query("unassigned"),
@@ -72,8 +80,11 @@ def source_order_directory(
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_source_assignment", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_source_assignment")),
+    view: Literal["authorization"] | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     if source_order_id:
         if len(source_order_id) > 100:
@@ -86,6 +97,13 @@ def source_order_directory(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "来源维保单 ID 必须为 1 至 64 个字符",
             )
+    if identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        return canonical.read_directory(db, identity, params={'q': q, 'source_order_id': source_order_id,
+            'assignment_status': assignment_status, 'project_id': project_id,
+            'include_candidates': include_candidates, 'xsdd_project_id': xsdd_project_id},
+            page=page, page_size=page_size, authorization_view=view == 'authorization',
+            precondition=foundation.decode_precondition(authorization_precondition))
     record_access_log(
         ctx,
         "source_order_assignment_directory",
@@ -117,15 +135,28 @@ def source_order_directory(
 
 @router.post("/assign")
 def assign_source_orders(
+    response: Response,
     body: AssignSourceOrders,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_source_assignment_write", "page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_profit")
+        auth_transport.legacy_gate("maintenance_source_assignment_write", require_action("action_maintenance_project_manage", require_data="data_profit"))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_source_assignment_write")),
+    view: Literal["authorization"] | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.write_command(db, identity, entry_id=canonical.ASSIGN,
+                params=body.model_dump(exclude={'authorization_precondition'}),
+                authorization_view=view == 'authorization', precondition=body.authorization_precondition)
+        except assignments.SourceAssignmentConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except assignments.SourceAssignmentError as exc:
+            raise HTTPException(400, str(exc)) from exc
     operated_by = _real_operator(db, ident)
     try:
         payload = assignments.assign_source_orders(
@@ -154,15 +185,28 @@ def assign_source_orders(
 
 @router.post("/unassign")
 def unassign_source_orders(
+    response: Response,
     body: UnassignSourceOrders,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_source_assignment_write", "page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_profit")
+        auth_transport.legacy_gate("maintenance_source_assignment_write", require_action("action_maintenance_project_manage", require_data="data_profit"))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_source_assignment_write")),
+    view: Literal["authorization"] | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.write_command(db, identity, entry_id=canonical.UNASSIGN,
+                params=body.model_dump(exclude={'authorization_precondition'}),
+                authorization_view=view == 'authorization', precondition=body.authorization_precondition)
+        except assignments.SourceAssignmentConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except assignments.SourceAssignmentError as exc:
+            raise HTTPException(400, str(exc)) from exc
     operated_by = _real_operator(db, ident)
     try:
         payload = assignments.unassign_source_orders(
@@ -190,15 +234,31 @@ def unassign_source_orders(
 
 @router.post("/auto-assign")
 def auto_assign_unassigned_orders(
+    response: Response,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_source_assignment_write", "page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_profit")
+        auth_transport.legacy_gate("maintenance_source_assignment_write", require_action("action_maintenance_project_manage", require_data="data_profit"))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for("maintenance_source_assignment_write")),
+    view: Literal["authorization"] | None = Query(None),
+    body: dict | None = Body(None),
 ) -> dict:
     """自动补挂靠：未归属维保订单按 project_std 精确匹配已有项目主档并挂靠。"""
+    if identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        from app.authz.errors import authz_error
+        if body is not None and set(body) - {'authorization_precondition'}:
+            raise authz_error(422, 'AUTHZ_INVALID_REQUEST', '自动归属不接受客户端目标列表')
+        try:
+            return canonical.auto_command(db, identity, authorization_view=view == 'authorization',
+                precondition=(body or {}).get('authorization_precondition'))
+        except assignments.SourceAssignmentConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except assignments.SourceAssignmentError as exc:
+            raise HTTPException(400, str(exc)) from exc
     operated_by = _real_operator(db, ident)
     try:
         payload = assignments.auto_assign_unassigned(

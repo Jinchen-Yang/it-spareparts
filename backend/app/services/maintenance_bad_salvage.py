@@ -184,6 +184,7 @@ def register_salvage(
     reason: str | None,
     idempotency_key: str | None,
     operated_by: str,
+    owner_user_id: int | None = None,
 ) -> dict | None:
     """登记一笔坏件变卖（冻结毛利 + 同事务 salvage_out）。"""
     project = db.get(MaintenanceProject, project_id)
@@ -214,6 +215,9 @@ def register_salvage(
             )
         ).scalar_one_or_none()
         if existing is not None:
+            if owner_user_id is not None and existing.owner_user_id != owner_user_id:
+                from app.authz.errors import authz_error
+                raise authz_error(403, "AUTHZ_FORBIDDEN", "当前账号不能认领其他账号或历史匿名回执")
             if existing.payload_digest != digest:
                 raise SalvageConflict("同一幂等键对应不同变卖内容，拒绝重放")
             return _dict(existing)
@@ -221,6 +225,7 @@ def register_salvage(
         db, project_id=project_id, part_id=part_id
     )
     row = MaintenanceBadSalvage(
+        owner_user_id=owner_user_id,
         salvage_id=str(uuid4()),
         project_id=project_id,
         part_id=part_id,

@@ -304,7 +304,7 @@ def _open_ambiguities_for_project(
                 "WHERE ambiguity.status = 'open' "
                 "  AND (document.document_date IS NULL "
                 "       OR document.document_date >= :cutover_date) "
-                "  AND (:ready_through IS NULL "
+                "  AND (CAST(:ready_through AS DATE) IS NULL "
                 "       OR document.document_date IS NULL "
                 "       OR document.document_date <= :ready_through) "
                 "ORDER BY ambiguity.ambiguity_id LIMIT :ambiguity_limit"
@@ -514,13 +514,20 @@ def load_project_inventory_movements(
     project_id: str,
     cutover_date: date,
     warehouse_ready_through: date | None = None,
+    *, read_snapshot=None,
 ) -> tuple[Sequence[Mapping[str, Any]], bool, Sequence[Mapping[str, Any]]]:
     """Load only exact, current, confirmed #209 facts for one active project."""
 
     clean_project_id = _required_text(project_id, "项目稳定编号", max_length=36)
     if not _contracts_available(db):
         return (), False, ()
-    _lock_warehouse_snapshot(db)
+    if read_snapshot is not None:
+        from app.authz.context import ReadSnapshotProof
+        if type(read_snapshot) is not ReadSnapshotProof:
+            raise ValueError("需要真实一致读证明")
+        read_snapshot.validate(db)
+    else:
+        _lock_warehouse_snapshot(db)
     active_project = db.scalar(
         text(
             "SELECT project_id FROM maintenance_project "

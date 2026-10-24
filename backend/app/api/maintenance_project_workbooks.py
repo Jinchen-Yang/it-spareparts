@@ -9,11 +9,11 @@ from pathlib import Path as FilePath
 import threading
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.maintenance import (
     _content_disposition,
@@ -28,6 +28,13 @@ from app.api.maintenance_project_scope import (
     require_maintenance_project_access,
 )
 from app.auth import current_identity, current_role
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_authorization as foundation
+from app.services import maintenance_workflow_authorization as authorization
+from app.services import authorization_artifacts as artifacts
+from app.services.maintenance_project_workbook_access import authorization_view
+from app.services.workbook_tasks import run_worker
+_RESOURCE = 'maintenance_project_roundtrip'
 from app.business_time import business_today
 from app.config import get_settings
 from app.db import SessionLocal, get_db
@@ -58,6 +65,7 @@ class WorkbookApplyRequest(BaseModel):
 
     validation_token: str = Field(min_length=1, max_length=64)
     data_version: str = Field(min_length=1, max_length=64)
+    authorization_precondition: dict | None = None
 
 
 def _hmac_key() -> bytes:
@@ -212,18 +220,26 @@ def export_project_workbook(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _scope: None = Depends(require_maintenance_project_access),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCE, "page_maintenance")),
+    _scope: None = Depends(auth_transport.legacy_project_scope(_RESOURCE)),
     ctx: UserContext = Depends(get_current_user_context),
-) -> Response:
-    _require_roundtrip_permissions(ctx)
+    identity=Depends(auth_transport.identity_for(_RESOURCE)),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+) -> object:
+    if identity is None:
+        _require_roundtrip_permissions(ctx)
     adapter = MaintenanceProjectWorkbookAdapter(
         db,
         user_ctx=ctx,
         operator=_safe_export_operator(ident),
         as_of=business_today(),
+        identity=identity,
+        authorization_precondition=foundation.decode_precondition(authorization_precondition) if identity is not None and view != "authorization" else None,
     )
     try:
+        if identity is not None and view == 'authorization':
+            return authorization_view(adapter, authorization.PROJECT_WORKBOOK_DOWNLOAD, {'project_id': project_id})
         artifact = adapter.export(project_id, hmac_key=_hmac_key())
         db.commit()
     except ProjectWorkbookV2Error as exc:
@@ -258,18 +274,22 @@ async def validate_project_workbook_upload(
     project_id: str = Path(..., min_length=1, max_length=36),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCE, "page_maintenance")),
     _action: None = Depends(
-        require_action(
+        auth_transport.legacy_gate(_RESOURCE, require_action(
             "action_maintenance_roundtrip_apply",
             require_data="data_profit",
-        )
+        ))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(auth_transport.legacy_project_scope(_RESOURCE)),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for(_RESOURCE)),
+    view: str | None = Query(None),
+    db: Session = Depends(get_db),
 ) -> dict:
     _no_store(response)
-    _require_roundtrip_permissions(ctx)
+    if identity is None:
+        _require_roundtrip_permissions(ctx)
     if not _PROJECT_WORKBOOK_VALIDATE_LIMITER.acquire(blocking=False):
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
@@ -278,6 +298,44 @@ async def validate_project_workbook_upload(
         )
     upload_path: str | None = None
     try:
+        if identity is not None:
+            from starlette.datastructures import UploadFile
+            from app.services import import_safety
+            form = await request.form()
+            file = form.get('file')
+            if not isinstance(file, UploadFile):
+                raise HTTPException(422, '缺少工作簿 file 上传字段')
+            content = await import_safety.read_limited(file, 64 * 1024 * 1024)
+            precondition = foundation.decode_precondition(form.get('authorization_precondition'))
+            factory = sessionmaker(bind=db.get_bind())
+            db.rollback()
+            if view != 'authorization':
+                artifacts.begin_artifact_protocol(db.get_bind())
+            def canonical_worker():
+                with factory() as worker_db:
+                    adapter = MaintenanceProjectWorkbookAdapter(worker_db, user_ctx=ctx,
+                        operator=identity.username, as_of=business_today(), identity=identity,
+                        authorization_precondition=precondition)
+                    if view == 'authorization':
+                        import hashlib
+                        return authorization_view(adapter, authorization.PROJECT_WORKBOOK_VALIDATE,
+                            {'project_id': project_id, 'file_sha256': hashlib.sha256(content).hexdigest()})
+                    try:
+                        validation, issues, bid = adapter.validate(project_id, content, hmac_key=_hmac_key())
+                        workspace = adapter.load_workspace(project_id)
+                        payload = {'validation_token': bid, 'project_id': project_id,
+                            'data_version': workspace['data_version'], 'filename': file.filename or '',
+                            'preview': workbook_preview(workspace, data_version=str(workspace['data_version']),
+                                exported_at=validation.metadata.get('exported_at') if validation else None),
+                            'changes': {'collection_append': len(validation.creates) if validation else 0},
+                            'warnings': ['未检测到新增回款；确认后将记录本月已更新'] if validation and validation.unchanged else [],
+                            'errors': [issue.message for issue in issues], 'can_apply': validation is not None}
+                        worker_db.commit()
+                        return payload
+                    except Exception:
+                        worker_db.rollback()
+                        raise
+            return await run_worker(canonical_worker)
         upload_path, original_name = await _parse_and_save_roundtrip_upload(request)
         return await _run_project_workbook_validation_worker(
             project_id=project_id,
@@ -309,27 +367,35 @@ def apply_project_workbook_plan(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCE, "page_maintenance")),
     _action: None = Depends(
-        require_action(
+        auth_transport.legacy_gate(_RESOURCE, require_action(
             "action_maintenance_roundtrip_apply",
             require_data="data_profit",
-        )
+        ))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(auth_transport.legacy_project_scope(_RESOURCE)),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for(_RESOURCE)),
+    view: str | None = Query(None),
 ) -> dict:
     _no_store(response)
-    _require_roundtrip_permissions(ctx)
-    operator = _real_operator(db, ident)
-    _run_validation_retention_cleanup(db)
+    if identity is None:
+        _require_roundtrip_permissions(ctx)
+    operator = identity.username if identity is not None else _real_operator(db, ident)
+    if identity is None:
+        _run_validation_retention_cleanup(db)
     adapter = MaintenanceProjectWorkbookAdapter(
         db,
         user_ctx=ctx,
         operator=operator,
         as_of=business_today(),
+        identity=identity, authorization_precondition=body.authorization_precondition,
     )
     try:
+        if identity is not None and view == 'authorization':
+            return authorization_view(adapter, authorization.PROJECT_WORKBOOK_APPLY,
+                {'project_id': project_id, 'validation_token': body.validation_token, 'data_version': body.data_version})
         result, state = adapter.apply_validation(
             project_id,
             body.validation_token,
@@ -363,32 +429,44 @@ def download_project_workbook_errors(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCE, "page_maintenance")),
     _action: None = Depends(
-        require_action(
+        auth_transport.legacy_gate(_RESOURCE, require_action(
             "action_maintenance_roundtrip_apply",
             require_data="data_profit",
-        )
+        ))
     ),
     ctx: UserContext = Depends(get_current_user_context),
-) -> Response:
-    _require_roundtrip_permissions(ctx)
-    project_id = db.scalar(
-        select(MaintenanceProjectWorkbookValidation.project_id).where(
-            MaintenanceProjectWorkbookValidation.validation_id == validation_id
+    identity=Depends(auth_transport.identity_for(_RESOURCE)),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+) -> object:
+    if identity is None:
+        _require_roundtrip_permissions(ctx)
+    if identity is not None:
+        adapter = MaintenanceProjectWorkbookAdapter(db, user_ctx=ctx, operator=identity.username,
+            as_of=business_today(), identity=identity,
+            authorization_precondition=foundation.decode_precondition(authorization_precondition) if view != "authorization" else None)
+        if view == 'authorization':
+            return authorization_view(adapter, authorization.PROJECT_WORKBOOK_ERRORS, {'validation_id': validation_id})
+        content = adapter.load_error_workbook(validation_id)
+    else:
+        project_id = db.scalar(
+            select(MaintenanceProjectWorkbookValidation.project_id).where(
+                MaintenanceProjectWorkbookValidation.validation_id == validation_id
+            )
         )
-    )
-    if project_id is not None:
-        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
-    operator = _real_operator(db, ident)
-    _run_validation_retention_cleanup(db)
-    adapter = MaintenanceProjectWorkbookAdapter(
-        db,
-        user_ctx=ctx,
-        operator=operator,
-        as_of=business_today(),
-    )
-    content = adapter.load_error_workbook(validation_id)
+        if project_id is not None:
+            enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
+        operator = _real_operator(db, ident)
+        _run_validation_retention_cleanup(db)
+        adapter = MaintenanceProjectWorkbookAdapter(
+            db,
+            user_ctx=ctx,
+            operator=operator,
+            as_of=business_today(),
+        )
+        content = adapter.load_error_workbook(validation_id)
     if content is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "错误工作簿不存在或已过期")
     record_access_log(

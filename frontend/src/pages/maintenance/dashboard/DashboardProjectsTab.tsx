@@ -1,3 +1,6 @@
+import { useModuleAccess } from "../../../authz/access";
+import { useContextQuery } from "../../../authz/contextQuery";
+import { surfaceRule } from "../../../authz/rules";
 /** T2 项目对比：范围内项目全量行（含零行）；免返领用单列不冲减；金额列随权限。
  *
  * R34：期间下单（M01）按 project_id 并入对比表（数量域，人人可见）；
@@ -76,54 +79,26 @@ function RateCell({ row }: { row: ProjectRow }) {
 }
 
 export default function DashboardProjectsTab({
-  params, amountsVisible, sorts, sort, page, pageSize, refreshKey,
+  params, amountsVisible: amountsEligible, sorts, sort, page, pageSize, refreshKey,
   onSortChange, onPageChange, maxExportRows, ownerToken, onSessionMismatch, onReceiptsDrill,
 }: DashboardTabProps & {
   /** M-AC09：行内「返件明细」→ 壳层 Drawer（原筛选 ∩ 该项目，DL-022）。 */
   onReceiptsDrill?: (drill: ReceiptsDrill) => void;
 }) {
-  const [data, setData] = useState<PagedRows<ProjectRow> | null>(null);
-  const [ordersByProject, setOrdersByProject] = useState<Map<string, OrderRow> | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const seqRef = useRef(0);
+  const projectQuery = useContextQuery({ entryId: "GET /api/maintenance/analytics/maintenance-dashboard/projects",
+    rule: surfaceRule("maintenance_dashboard.projects"), queryKey: [params, sort, page, pageSize, refreshKey], legacyAllowed: true,
+    onStale: onSessionMismatch, query: capture => fetchDashboardProjects({ ...params, sort, page, page_size: pageSize }, capture) });
+  const orderQuery = useContextQuery({ entryId: "GET /api/maintenance/analytics/maintenance-dashboard/orders",
+    rule: surfaceRule("maintenance_dashboard.orders"), queryKey: [qtyOnlyParams(params), refreshKey], legacyAllowed: true,
+    onStale: onSessionMismatch, query: capture => fetchDashboardOrders(qtyOnlyParams(params), capture) });
+  const data = projectQuery.data;
+  const ordersByProject = orderQuery.data ? new Map(orderQuery.data.rows.map(row => [row.project_id, row])) : null;
+  const loading = projectQuery.loading || orderQuery.loading;
+  const error = projectQuery.error || orderQuery.error ? apiErrorMessage(projectQuery.error || orderQuery.error) : null;
+  const load = () => { projectQuery.retry(); orderQuery.retry(); };
 
-  const load = useCallback(async () => {
-    // 请求前绑定组件所属会话（B-F03/04）：失配即上报壳层停用，不发旧会话请求。
-    if (!sessionUnchanged(ownerToken)) {
-      onSessionMismatch();
-      return;
-    }
-    const seq = seqRef.current + 1;
-    seqRef.current = seq;
-    const token = sessionToken();
-    setLoading(true);
-    setError(null);
-    try {
-      // M01 下单按 project_id 并入对比（orders 端点不收 q/ratio，显式剥离）。
-      const [resp, ordersResp] = await Promise.all([
-        fetchDashboardProjects({ ...params, sort, page, page_size: pageSize }),
-        fetchDashboardOrders(qtyOnlyParams(params)),
-      ]);
-      if (seqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      setData(resp);
-      setOrdersByProject(new Map(ordersResp.rows.map((row) => [row.project_id, row])));
-    } catch (err) {
-      if (seqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      setData(null);
-      setOrdersByProject(null);
-      setError(apiErrorMessage(err));
-    } finally {
-      if (seqRef.current === seq && sessionUnchanged(token)) setLoading(false);
-    }
-  }, [params, sort, page, pageSize, ownerToken, onSessionMismatch]);
-
-  useEffect(() => {
-    void load();
-    return () => { seqRef.current += 1; };
-  }, [load, refreshKey]);
+  const fieldAccess = useModuleAccess("maintenance_dashboard", projectQuery.context);
+  const amountsVisible = amountsEligible && fieldAccess.field("data_profit", amountsEligible);
 
   const onTableChange: TableProps<ProjectRow>["onChange"] = (pg) => {
     if (pg.pageSize && pg.pageSize !== pageSize) onPageChange(1, pg.pageSize);
@@ -258,8 +233,8 @@ export default function DashboardProjectsTab({
         },
       );
     }
-    return base;
-  }, [amountsVisible, ordersByProject, onReceiptsDrill, params]);
+    return orderQuery.entryState === "deny" ? base.filter(column => !["order_qty", "order_count"].includes(String(column.key))) : base;
+  }, [amountsVisible, orderQuery.entryState, ordersByProject, onReceiptsDrill, params]);
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>

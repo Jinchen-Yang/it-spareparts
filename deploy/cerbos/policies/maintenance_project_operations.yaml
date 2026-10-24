@@ -1,0 +1,89 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_project_operations",
+    "rules": [
+      {
+        "name": "explicit-read-tasks",
+        "actions": [
+          "read_tasks"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_tasks\" in P.attr.grants.maintenance_project_operations.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_project_operations.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_project_operations.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_project_operations\", \"scope\": P.attr.grants.maintenance_project_operations.scope, \"version\": P.attr.grants.maintenance_project_operations.version, \"field_permissions\": P.attr.grants.maintenance_project_operations.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-workspace",
+        "actions": [
+          "read_workspace"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_workspace\" in P.attr.grants.maintenance_project_operations.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_project_operations.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_project_operations.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_project_operations\", \"scope\": P.attr.grants.maintenance_project_operations.scope, \"version\": P.attr.grants.maintenance_project_operations.version, \"field_permissions\": P.attr.grants.maintenance_project_operations.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-project-health",
+        "actions": [
+          "show_project_health"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_project_health\" in P.attr.grants.maintenance_project_operations.actions && \"read_workspace\" in P.attr.grants.maintenance_project_operations.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_project_operations.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_project_operations.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_project_operations\", \"scope\": P.attr.grants.maintenance_project_operations.scope, \"version\": P.attr.grants.maintenance_project_operations.version, \"field_permissions\": P.attr.grants.maintenance_project_operations.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-workspace",
+        "actions": [
+          "show_workspace"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_workspace\" in P.attr.grants.maintenance_project_operations.actions && \"read_workspace\" in P.attr.grants.maintenance_project_operations.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_project_operations.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_project_operations.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_project_operations\", \"scope\": P.attr.grants.maintenance_project_operations.scope, \"version\": P.attr.grants.maintenance_project_operations.version, \"field_permissions\": P.attr.grants.maintenance_project_operations.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

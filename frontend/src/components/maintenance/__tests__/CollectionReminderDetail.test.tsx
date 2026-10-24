@@ -1,6 +1,7 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import type { CollectionProjectDetailResponse } from "../../../api/maintenanceCollectionReminders";
 import CollectionReminderDetail from "../CollectionReminderDetail";
@@ -62,3 +63,8 @@ it("查看完整项目使用正式详情路由并安全编码 project_id", () =>
   expect(screen.getByRole("link", { name: "查看完整项目" }))
     .toHaveAttribute("href", "/maintenance/projects/project%2F%E5%90%AB%E7%A9%BA%E6%A0%BC");
 });
+
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

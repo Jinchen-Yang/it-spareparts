@@ -12,6 +12,7 @@ import type {
   WorkbookSiteReplayRow,
   WorkbookValidateResult,
 } from "../../api/maintenanceWorkbooks";
+import type { ContextRequestTransport } from "../../authz/domainTransport";
 import { saveBlob } from "../../api/maintenanceWorkbooks";
 
 const { Text } = Typography;
@@ -51,6 +52,10 @@ export interface WorkbookRoundTripProps {
   onValidate?: (file: File) => Promise<WorkbookValidateResult>;
   /** 无上传动作键时只给下载（只读对账的人也该能把表拉下来核对）。 */
   canUpload: boolean;
+  canDownload?: boolean;
+  canApply?: boolean;
+  /** Captured object/query lifetime; stale results and portal confirmations cannot commit. */
+  capture?: ContextRequestTransport;
   size?: "small" | "middle";
 }
 
@@ -119,6 +124,9 @@ export function WorkbookRoundTrip({
   onAfterApply,
   onValidate,
   canUpload,
+  canDownload = true,
+  canApply = canUpload,
+  capture,
   size = "middle",
 }: WorkbookRoundTripProps) {
   const { message } = App.useApp();
@@ -128,8 +136,14 @@ export function WorkbookRoundTrip({
   const [uploadInputVersion, setUploadInputVersion] = useState(0);
   const [retainedDraft, setRetainedDraft] = useState<{ file: File; session: string | null } | null>(null);
   const uploadSession = localStorage.getItem("token");
+  const captureRef = useRef(capture);
+  captureRef.current = capture;
+  const downloadAllowed = useRef(canDownload);
+  downloadAllowed.current = canDownload;
   const uploadAllowed = useRef(canUpload);
   uploadAllowed.current = canUpload;
+  const applyAllowed = useRef(canApply);
+  applyAllowed.current = canApply;
   const mounted = useRef(false);
   const downloadEpoch = useRef(0);
   const uploadEpoch = useRef(0);
@@ -140,7 +154,7 @@ export function WorkbookRoundTrip({
     // 新账号可立即下载；即使 token 切回原值，也不能接收旧会话的响应。
     downloadEpoch.current += 1;
     setDownloading(false);
-  }, [uploadSession]);
+  }, [uploadSession, capture, canDownload]);
 
   useEffect(() => {
     // 文件仅留在当前页面内存；账号或权限变化后不能复用上个操作上下文的草稿。
@@ -149,7 +163,7 @@ export function WorkbookRoundTrip({
     setRetainedDraft(null);
     setApplying(false);
     setFeedback(null);
-  }, [canUpload, uploadSession]);
+  }, [canUpload, canApply, uploadSession, capture]);
 
   useEffect(() => {
     mounted.current = true;
@@ -164,10 +178,13 @@ export function WorkbookRoundTrip({
 
   const handleDownload = async () => {
     // 与上传同口径：请求返回时页面已卸载或已切换账号，就不再落文件、不再写反馈。
+    if (!downloadAllowed.current || (capture && !capture.isCurrent())) return;
+    const requestCapture = capture;
     const requestSession = localStorage.getItem("token");
     const requestEpoch = ++downloadEpoch.current;
     const isCurrent = () => mounted.current
-      && downloadEpoch.current === requestEpoch
+      && downloadEpoch.current === requestEpoch && downloadAllowed.current
+      && requestCapture === captureRef.current && (!requestCapture || requestCapture.isCurrent())
       && localStorage.getItem("token") === requestSession;
     setDownloading(true);
     setFeedback(null);
@@ -188,7 +205,7 @@ export function WorkbookRoundTrip({
     isCurrent: () => boolean,
     opts?: WorkbookApplyOptions,
   ) => {
-    if (!isCurrent()) return;
+    if (!isCurrent() || !applyAllowed.current) return;
     const result = await onApply(file, opts);
     if (!isCurrent()) return;
     setRetainedDraft(null);
@@ -237,6 +254,7 @@ export function WorkbookRoundTrip({
         content: (
         <Space direction="vertical" size={12} style={{ width: "100%", maxHeight: "65vh", overflowY: "auto", overflowWrap: "anywhere" }}>
           <Text>{describe(preview)}</Text>
+          {!canApply && <Alert type="info" message="预检已完成；当前没有确认回传权限" />}
           {mergeRows.length ? <SiteIssueMerges merges={mergeRows} /> : null}
           {voidedRows.length ? (
             // D-02 作废优先：这些行的改动不会写入，其余行照常回传
@@ -297,6 +315,7 @@ export function WorkbookRoundTrip({
         </Space>
         ),
         okText: "确认回传",
+        okButtonProps: { disabled: !canApply },
         cancelText: "取消",
         onCancel: finish,
         onOk: async () => {
@@ -335,10 +354,12 @@ export function WorkbookRoundTrip({
   };
 
   const handleUpload = async (file: File) => {
-    if (!uploadAllowed.current) return false;
+    if (!uploadAllowed.current || (capture && !capture.isCurrent())) return false;
+    const requestCapture = capture;
     const requestSession = localStorage.getItem("token");
     const requestEpoch = uploadEpoch.current;
     const isCurrent = () => mounted.current && uploadAllowed.current
+      && requestCapture === captureRef.current && (!requestCapture || requestCapture.isCurrent())
       && uploadEpoch.current === requestEpoch && localStorage.getItem("token") === requestSession;
     setRetainedDraft(null);
     setApplying(true);
@@ -396,7 +417,7 @@ export function WorkbookRoundTrip({
               </Space>
             ),
             okText: "强制接管并上传",
-            okButtonProps: { danger: true },
+            okButtonProps: { danger: true, disabled: !canApply },
             cancelText: "取消（重新下载处理）",
             onOk: async () => {
               try {
@@ -443,14 +464,14 @@ export function WorkbookRoundTrip({
   return (
     <Space direction="vertical" size={2}>
       <Space size={8}>
-        <Button
+        {canDownload ? <Button
           size={size}
           icon={<DownloadOutlined />}
           loading={downloading}
           onClick={handleDownload}
         >
           下载{title}
-        </Button>
+        </Button> : null}
         {canUpload ? (
           <Upload
             key={`workbook-upload-${uploadInputVersion}`}

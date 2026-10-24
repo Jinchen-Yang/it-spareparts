@@ -446,6 +446,7 @@ def create_manual_demand_line(
     description: str | None = None,
     reason: str,
     operated_by: str,
+    owner_user_id: int | None = None,
 ) -> dict:
     """页面直建一条手工需求行：建头（专用前缀）+ 建行（manual-line: 前缀，
     edited_source='page_manual'）+ 合成 SysImportBatch。复用总表 v2 的先例。
@@ -483,7 +484,8 @@ def create_manual_demand_line(
     digest_key = None
     if idempotency_key:
         digest_key = _sha1(
-            f"demand-create:{operated_by}:{idempotency_key}".encode("utf-8")
+            (f"authz-v1:demand-create:{owner_user_id}:{idempotency_key}" if owner_user_id is not None
+             else f"demand-create:{operated_by}:{idempotency_key}").encode("utf-8")
         ).hexdigest()
         existing = db.execute(
             select(FMaintenanceOrder).where(
@@ -509,6 +511,9 @@ def create_manual_demand_line(
             # 完整 payload 指纹比对：只允许"完全相同的原始请求"重放命中。
             # 行此后被人工编辑不影响判定（指纹存 batch 元数据，不看行现值）。
             existing_batch = db.get(SysImportBatch, existing.import_batch_id)
+            if owner_user_id is not None and (not existing_batch or
+                    (existing_batch.report_json or {}).get("authorization_owner_user_id") != owner_user_id):
+                raise DemandManualError("不能认领其他账号或历史手工需求行")
             recorded = ((existing_batch.report_json or {}) if existing_batch else {}) \
                 .get("request_fingerprint")
             if recorded is None or recorded != _create_fingerprint():
@@ -543,6 +548,7 @@ def create_manual_demand_line(
         rows_inserted=1,
         status="success",
         report_json={
+            **({"authorization_owner_user_id": owner_user_id} if owner_user_id is not None else {}),
             "source": "page_manual_create",
             "project_id": project_id,
             # 幂等重放的完整请求指纹（同 key 同 payload 才命中；见上文比对）

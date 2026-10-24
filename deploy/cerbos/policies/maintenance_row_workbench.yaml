@@ -1,0 +1,109 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_row_workbench",
+    "rules": [
+      {
+        "name": "explicit-export",
+        "actions": [
+          "export"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"export\" in P.attr.grants.maintenance_row_workbench.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_row_workbench.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_row_workbench.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_row_workbench\", \"scope\": P.attr.grants.maintenance_row_workbench.scope, \"version\": P.attr.grants.maintenance_row_workbench.version, \"field_permissions\": P.attr.grants.maintenance_row_workbench.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-cost-rows",
+        "actions": [
+          "read_cost_rows"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_cost_rows\" in P.attr.grants.maintenance_row_workbench.actions && \"data_purchase_cost\" in P.attr.grants.maintenance_row_workbench.field_permissions && (R.attr.module_probe || ((P.attr.grants.maintenance_row_workbench.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_row_workbench.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_row_workbench\", \"scope\": P.attr.grants.maintenance_row_workbench.scope, \"version\": P.attr.grants.maintenance_row_workbench.version, \"field_permissions\": P.attr.grants.maintenance_row_workbench.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read-fields",
+        "actions": [
+          "read_fields"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read_fields\" in P.attr.grants.maintenance_row_workbench.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_row_workbench.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_row_workbench.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_row_workbench\", \"scope\": P.attr.grants.maintenance_row_workbench.scope, \"version\": P.attr.grants.maintenance_row_workbench.version, \"field_permissions\": P.attr.grants.maintenance_row_workbench.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-cost-rows",
+        "actions": [
+          "show_cost_rows"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_cost_rows\" in P.attr.grants.maintenance_row_workbench.actions && \"read_cost_rows\" in P.attr.grants.maintenance_row_workbench.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_row_workbench.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_row_workbench.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_row_workbench\", \"scope\": P.attr.grants.maintenance_row_workbench.scope, \"version\": P.attr.grants.maintenance_row_workbench.version, \"field_permissions\": P.attr.grants.maintenance_row_workbench.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-project-rows",
+        "actions": [
+          "show_project_rows"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_project_rows\" in P.attr.grants.maintenance_row_workbench.actions && \"read_fields\" in P.attr.grants.maintenance_row_workbench.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_row_workbench.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_row_workbench.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_row_workbench\", \"scope\": P.attr.grants.maintenance_row_workbench.scope, \"version\": P.attr.grants.maintenance_row_workbench.version, \"field_permissions\": P.attr.grants.maintenance_row_workbench.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

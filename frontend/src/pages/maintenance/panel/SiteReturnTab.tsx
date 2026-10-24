@@ -1,3 +1,9 @@
+import { useContextQuery } from "../../../authz/contextQuery";
+import { useContextTransport } from "../../../authz/domainTransport";
+import { useContextAdmission } from "../../../authz/access";
+import { surfaceRule, actionRule, allRule } from "../../../authz/rules";
+import { ContextChanged } from "../../../authz/contextProtocol";
+import type { AuthorizationContext } from "../../../authz/contextTypes";
 import { formatBusinessDateTime } from "../../../utils/date";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { App, Alert, Button, Descriptions, Input, Modal, Space, Table, Tag, Typography } from "antd";
@@ -12,14 +18,11 @@ import {
 } from "../../../api/maintenanceOperations";
 import {
   SHEETS,
-  applyProjectMaster,
-  downloadProjectMaster,
-  validateProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
 import SiteIssueWorkflowPanel from "../../../components/maintenance/SiteIssueWorkflowPanel";
 import SiteIssueAddress from "../../../components/maintenance/SiteIssueAddress";
 import MaintenanceCategoryFilter from "../../../components/maintenance/MaintenanceCategoryFilter";
-import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
+import ProjectWorkbookRoundTrip from "../../../components/maintenance/ProjectWorkbookRoundTrip";
 import PanelActionBar from "./PanelActionBar";
 import ReturnReceiptsSection from "./ReturnReceiptsSection";
 import SiteIssueReturnBatch from "./SiteIssueReturnBatch";
@@ -47,25 +50,6 @@ interface SiteReturnRow {
    * 没有这一行用户就无从核对「作废成功了没有」。
    */
   line: SiteIssueLine | null;
-}
-
-async function fetchAllRows<T>(
-  loadPage: (page: number) => Promise<{ data: { rows: T[]; total: number } }>,
-  isCurrent: () => boolean,
-): Promise<T[]> {
-  const rows: T[] = [];
-  let page = 1;
-  let total = 0;
-  do {
-    const response = await loadPage(page);
-    if (!isCurrent()) return [];
-    total = response.data.total;
-    const nextRows = response.data.rows;
-    if (!nextRows.length) break;
-    rows.push(...nextRows);
-    page += 1;
-  } while (rows.length < total);
-  return rows;
 }
 
 function returnRequirement(row: SiteReturnRow): { label: string; color: string } {
@@ -101,80 +85,50 @@ export function SiteReturnTab({
   registerRefresh: RegisterPanelRefresh;
 }) {
   const { message } = App.useApp();
-  const [rows, setRows] = useState<SiteReturnRow[]>([]);
   const [linesPage, setLinesPage] = useState(1);
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedLineIds, setSelectedLineIds] = useState<React.Key[]>([]);
   const [editTarget, setEditTarget] = useState<SiteReturnRow | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [editingPending, setEditingPending] = useState(false);
-  const requestSeq = useRef(0);
   const [categoryFilter, setCategoryFilter] = useState<MaintenanceCategoryFilterInput>({});
-  const categoryFilterRef = useRef<MaintenanceCategoryFilterInput>({});
-
-  const load = useCallback(async () => {
-    const seq = ++requestSeq.current;
-    setLoading(true);
-    const appliedFilter = { ...categoryFilterRef.current };
-    try {
-      setLoadError(null);
-      const issues = await fetchAllRows<SiteIssueDocument>((page) => searchSiteIssues({
-        project_id: projectId, page, page_size: 100, ...appliedFilter,
-      }), () => seq === requestSeq.current);
-      if (seq !== requestSeq.current) return false;
-      setSelectedLineIds([]);
-      setRows(issues.flatMap((issue): SiteReturnRow[] => {
-        if (issue.workflow_status === "void" && !issue.lines.length) {
-          // 整单作废后没有活行：给一行摘要（单号/日期/作废时间），不参与任何合计
-          return [{
-            issueLineId: `void:${issue.issue_id}`,
-            issue,
-            line: null,
-          }];
-        }
-        return issue.lines.map((line) => {
-          return {
-            issueLineId: line.issue_line_id,
-            issue,
-            line,
-          };
-        });
-      }));
-      return true;
-    } catch (err) {
-      if (seq === requestSeq.current) {
-        setRows([]);
-        setLoadError(readError(err, "领用记录加载失败，不代表没有领用记录"));
-      }
-      return false;
-    } finally {
-      if (seq === requestSeq.current) setLoading(false);
-    }
-  }, [projectId]);
-
+  const query = useContextQuery({ entryId: "POST /api/maintenance/site-issues/search",
+    rule: surfaceRule("maintenance_issue.facts"), queryKey: [projectId, categoryFilter], legacyAllowed: true,
+    query: async capture => {
+      const issues: SiteIssueDocument[] = [];
+      let page = 1, total = 0, authorization_context: AuthorizationContext | undefined;
+      do {
+        if (!capture.isCurrent()) throw new Error("领用查询已失效");
+        const response = await searchSiteIssues({ project_id: projectId, page, page_size: 100, ...categoryFilter }, capture);
+        if (!capture.isCurrent()) throw new Error("领用查询已失效");
+        if (authorization_context && JSON.stringify(authorization_context) !== JSON.stringify(response.data.authorization_context)) throw new ContextChanged();
+        authorization_context = response.data.authorization_context;
+        total = response.data.total;
+        issues.push(...response.data.rows);
+        if (!response.data.rows.length) break;
+        page += 1;
+      } while (issues.length < total);
+      return { issues, authorization_context };
+    },
+  });
+  const rows = useMemo(() => (query.data?.issues ?? []).flatMap((issue): SiteReturnRow[] => {
+    if (issue.workflow_status === "void" && !issue.lines.length) return [{ issueLineId: `void:${issue.issue_id}`, issue, line: null }];
+    return issue.lines.map(line => ({ issueLineId: line.issue_line_id, issue, line }));
+  }), [query.data]);
+  const loading = query.loading, loadError = query.error ? readError(query.error, "领用记录加载失败，不代表没有领用记录") : null;
+  const load = query.retry;
   useEffect(() => {
-    categoryFilterRef.current = {};
-    setCategoryFilter({});
-    setLinesPage(1);
-    setSelectedLineIds([]);
-    setEditTarget(null);
-    setEditOpen(false);
-    setEditingPending(false);
-    registerRefresh("site", load);
-    void load();
-    return () => {
-      requestSeq.current += 1;
-      registerRefresh("site", null);
-    };
-  }, [load, registerRefresh]);
+    registerRefresh("site", query.entryState === "deny" ? null : load);
+    return () => registerRefresh("site", null);
+  }, [load, query.entryState, registerRefresh]);
+  useEffect(() => { setSelectedLineIds([]); }, [query.data]);
 
   // 2026-08-23：做错的领用单可整单作废（软作废，历史与审计保留）。
   // 门禁与后端一致：site_issue_manage 动作 + 成本可见（页面权限天然具备）。
   const perms = readPermissionMap();
-  const canManageIssues = !!perms.action_maintenance_site_issue_manage
-    && !!perms.data_purchase_cost;
-  const canVoidIssues = canManageIssues;
+  const legacyManage = !!perms.action_maintenance_site_issue_manage && !!perms.data_purchase_cost;
+  const admission = useContextAdmission();
+  const canManageIssues = admission.surface("maintenance_issue.correction", legacyManage) !== "deny";
+  const canVoidIssues = admission.state(allRule(surfaceRule("maintenance_issue.facts"), actionRule("maintenance_issue", "void")), legacyManage) !== "deny";
   const canCorrectLine = (row: SiteReturnRow) => !!row.line
     && row.issue.project_id === projectId
     && ["legacy", "workbook", "page_manual"].includes(row.issue.source ?? "")
@@ -190,6 +144,7 @@ export function SiteReturnTab({
   const [voidTarget, setVoidTarget] = useState<SiteIssueDocument | null>(null);
   const [voidReason, setVoidReason] = useState("");
   const [voiding, setVoiding] = useState(false);
+  const commandCapture = useContextTransport(JSON.stringify([projectId, voidTarget?.issue_id, voidTarget?.version, voidReason]), legacyManage);
   const voidAttempt = useRef<{ content: string; key: string } | null>(null);
   // 2026-08-23 体验修正：作废是整单语义，同单每一行都给按钮（用户看到
   // 空白列会以为该单不能作废）；弹窗里写清该单共几行一起作废
@@ -203,7 +158,7 @@ export function SiteReturnTab({
   }, [rows]);
 
   const confirmVoid = async () => {
-    if (!voidTarget || !voidReason.trim()) return;
+    if (!canVoidIssues || !commandCapture.isCurrent() || !voidTarget || !voidReason.trim()) return;
     setVoiding(true);
     const content = JSON.stringify([voidTarget.issue_id, voidTarget.version, voidReason.trim()]);
     if (voidAttempt.current?.content !== content) voidAttempt.current = { content, key: idempotencyKey() };
@@ -213,7 +168,8 @@ export function SiteReturnTab({
         version: voidTarget.version,
         idempotency_key: voidAttempt.current.key,
         reason: voidReason.trim(),
-      });
+      }, commandCapture);
+      if (!commandCapture.isCurrent()) return;
       const issueNo = voidTarget.display_no || voidTarget.issue_no;
       setVoidTarget(null);
       setVoidReason("");
@@ -223,9 +179,9 @@ export function SiteReturnTab({
         message.warning(`领用单 ${issueNo} 已作废，但页面刷新失败；旧数据已失效，请重试。`);
       }
     } catch (err) {
-      message.error(readError(err, "作废失败，请刷新后重试"));
+      if (commandCapture.isCurrent()) message.error(readError(err, "作废失败，请刷新后重试"));
     } finally {
-      setVoiding(false);
+      if (commandCapture.isCurrent()) setVoiding(false);
     }
   };
 
@@ -255,7 +211,7 @@ export function SiteReturnTab({
           <SiteIssueWorkflowPanel
             key={`workflow-${projectId}`}
             projectId={projectId}
-            canManage={canManageIssues}
+            canManage={legacyManage}
             onChanged={onChanged}
             registerRefresh={registerRefresh}
           />
@@ -269,25 +225,19 @@ export function SiteReturnTab({
           </Typography.Title>
           <PanelActionBar
             workbook={(
-              <WorkbookRoundTrip
-                size="small"
+              <ProjectWorkbookRoundTrip projectId={projectId} surface="site_roundtrip" sheets={[SHEETS.site]}
                 title="维保领用与返还"
                 filename={`${exportBase}-${SHEETS.site}.xlsx`}
                 canUpload={canUpload}
-                onDownload={() => downloadProjectMaster(projectId, [SHEETS.site])}
-                onValidate={(file) => validateProjectMaster(projectId, file)}
-                onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
                 onAfterApply={onChanged}
               />
             )}
             hint="Excel 批量维护：下载后回填领用事实、领用地址和是否应返还，再在此上传；地址留空保留原值，清空请在地址操作列填写“清空”"
           />
-          <MaintenanceCategoryFilter labelPrefix="领用" value={categoryFilter} onChange={(next) => {
+          {query.entryState !== "deny" && <><MaintenanceCategoryFilter labelPrefix="领用" value={categoryFilter} onChange={(next) => {
             setSelectedLineIds([]);
-            categoryFilterRef.current = next;
             setCategoryFilter(next);
             setLinesPage(1);
-            void load();
           }} />
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             按当前主数据库品类筛选领用明细；作废操作仍影响整张领用单。
@@ -362,7 +312,7 @@ export function SiteReturnTab({
             },
           },
           { title: "现场备注", width: 200, render: (_value, item) => raw(item.line?.remark) },
-          ...(canVoidIssues
+          ...((canVoidIssues || canManageIssues)
             ? [{
                 title: "操作",
                 key: "ops",
@@ -372,23 +322,23 @@ export function SiteReturnTab({
                     <Tag>已作废</Tag>
                   ) : (
                     <Space>
-                    {canCorrectLine(item) ? <Button size="small" aria-label="编辑领用行"
+                    {canManageIssues && canCorrectLine(item) ? <Button size="small" aria-label="编辑领用行"
                       disabled={loading || editingPending}
                       onClick={() => { setEditTarget(item); setEditOpen(true); }}>编辑</Button> : null}
-                    <Button
+                    {canVoidIssues && <Button
                       size="small"
                       danger
                       disabled={editingPending}
-                      onClick={() => { setVoidTarget(item.issue); setVoidReason(""); }}
+                      onClick={() => { setVoidTarget(item.issue); setVoidReason(""); setVoiding(false); }}
                     >
                       作废
-                    </Button>
+                    </Button>}
                     </Space>
                   ),
               }]
             : []),
         ]}
-          />
+          /></>}
         </Space>
       </section>
       {canManageIssues && editTarget?.line ? <SiteIssueEditDrawer key={`${projectId}-${editTarget.issueLineId}`}
@@ -403,7 +353,7 @@ export function SiteReturnTab({
         okText="确认作废"
         okButtonProps={{ danger: true, disabled: !voidReason.trim() }}
         cancelText="取消"
-        onCancel={() => { setVoidTarget(null); setVoidReason(""); }}
+        onCancel={() => { setVoidTarget(null); setVoidReason(""); setVoiding(false); }}
         onOk={() => { void confirmVoid(); }}
       >
         <Space direction="vertical" style={{ width: "100%" }}>

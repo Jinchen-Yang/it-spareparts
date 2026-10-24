@@ -1,4 +1,8 @@
 import PageHeader from "../../components/PageHeader";
+import { useContextTransport } from "../../authz/domainTransport";
+import { useContextAdmission } from "../../authz/access";
+import { withContextSurface, contextSurfaces } from "../../authz/ContextSurface";
+import { actionRule, allRule, surfaceRule } from "../../authz/rules";
 import { useCallback, useEffect, useRef, useState } from "react";
 import ReturnStatusColumn from "../../components/maintenance/ReturnStatusColumn";
 import { App, Alert, Button, Card, Input, Modal, Space, Switch, Table, Tag, Typography, Upload } from "antd";
@@ -42,16 +46,22 @@ function idempotencyKey(prefix: string): string {
  *
  * 确认同步同时需要上传与作废动作权限；页面可见性由 page_maintenance 控制。
  */
-export function MaintenanceDemandsPage() {
+function MaintenanceDemandsPageContent() {
   const { message } = App.useApp();
+  const transport = useContextTransport("demand-page", true);
+  const admission = useContextAdmission();
   const permissions = readPermissionMap();
-  const canVoid = !!permissions.action_maintenance_demand_delete;
-  const canImport = !!permissions.action_maintenance_wbdd_import;
-  // 恢复接口后端硬性要求 admin（require_admin），非 admin 给了按钮也只会吃 403
-  const isAdmin = localStorage.getItem("role") === "admin";
-  const canRestore = canVoid && isAdmin;
-  // v1.36：需求单行页面直改（override 保护）
-  const canEditLines = !!permissions.action_maintenance_demand_manage;
+  // Admission only opens a resolution shell; transport checks the complete actual input.
+  const canVoid = admission.state(allRule(surfaceRule("maintenance_demand.lifecycle"), actionRule("maintenance_demand", "void")), !!permissions.action_maintenance_demand_delete) !== "deny";
+  const canRestore = admission.state(allRule(surfaceRule("maintenance_demand.lifecycle"), actionRule("maintenance_demand", "restore")), !!permissions.action_maintenance_demand_delete && localStorage.getItem("role") === "admin") !== "deny";
+  const canImport = admission.state(allRule(surfaceRule("maintenance_wbdd_snapshot.upload"), actionRule("maintenance_wbdd_snapshot", "submit")), !!permissions.action_maintenance_wbdd_import) !== "deny";
+  const canEditLines = admission.state(allRule(surfaceRule("maintenance_demand.lines"), actionRule("maintenance_demand", "edit_line")), !!permissions.action_maintenance_demand_manage) !== "deny";
+  const canCreate = admission.surface("maintenance_demand.create", !!permissions.action_maintenance_demand_manage) !== "deny";
+  const canRead = admission.surface("maintenance_demand.list", true) !== "deny";
+  const canReconcile = admission.surface("maintenance_wbdd_reconciliation.reconcile", true) !== "deny";
+  const canApplyReconciliation = admission.state(actionRule("maintenance_wbdd_reconciliation", "reconcile"), !!permissions.action_maintenance_demand_delete && !!permissions.action_maintenance_wbdd_import) !== "deny";
+  const canViewSummary = admission.surface("maintenance_demand.return_summary", true) !== "deny";
+  const canViewLines = admission.surface("maintenance_demand.lines", true) !== "deny";
   const [linesEditorFor, setLinesEditorFor] = useState<MaintenanceDemandSummary | null>(null);
   // v1.36 Phase E：页面直建手工需求行（独立新单）
   const [creatingLine, setCreatingLine] = useState(false);
@@ -66,6 +76,7 @@ export function MaintenanceDemandsPage() {
   const addressReport = uploadReport?.address_report ?? null;
   const [uploadInputVersion, setUploadInputVersion] = useState(0);
   const uploadAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
+  const uploadInFlight = useRef(false);
   const missingRequestSeq = useRef(0);
 
   // ---- 区块二：需求单查询 ----
@@ -87,20 +98,26 @@ export function MaintenanceDemandsPage() {
   const [restoreTarget, setRestoreTarget] = useState<MaintenanceDemandSummary | null>(null);
   const [restoreReason, setRestoreReason] = useState("");
   const [restoring, setRestoring] = useState(false);
+  const voidTransport = useContextTransport(JSON.stringify([voidTarget, voidReason]), true);
+  const restoreTransport = useContextTransport(JSON.stringify([restoreTarget?.source_order_id, restoreReason]), true);
+  useEffect(() => { setVoiding(false); }, [voidTransport]);
+  useEffect(() => { setRestoring(false); }, [restoreTransport]);
 
   const loadMissing = useCallback(async (
     notifyFailure = true,
     acceptNotFound = true,
   ) => {
+    if (!canReconcile || !transport.isCurrent()) return false;
     const seq = ++missingRequestSeq.current;
+    setMissing(null);
     setMissingLoading(true);
     try {
-      const resp = await getWbddMissing();
-      if (seq !== missingRequestSeq.current) return false;
+      const resp = await getWbddMissing(transport);
+      if ((seq !== missingRequestSeq.current || !transport.isCurrent())) return false;
       setMissing(resp.data);
       return true;
     } catch (error) {
-      if (seq !== missingRequestSeq.current) return false;
+      if ((seq !== missingRequestSeq.current || !transport.isCurrent())) return false;
       // 还没传过快照（404）是合法空态；其他失败也必须失效旧差异清单。
       setMissing(null);
       const status = (error as { response?: { status?: number } })?.response?.status;
@@ -109,13 +126,16 @@ export function MaintenanceDemandsPage() {
       }
       return status === 404 && acceptNotFound;
     } finally {
-      if (seq === missingRequestSeq.current) setMissingLoading(false);
+      if ((seq === missingRequestSeq.current && transport.isCurrent())) setMissingLoading(false);
     }
-  }, []);
+  }, [transport, canReconcile]);
 
   const loadDemands = useCallback(
     async (page: number, q: string, withVoided: boolean, notifyFailure = true) => {
+      if (!canRead || !transport.isCurrent()) return false;
       const seq = ++demandRequestSeq.current;
+      setDemands([]);
+      setDemandsTotal(0);
       latestDemandQuery.current = { page, keyword: q, includeVoided: withVoided };
       setDemandsLoading(true);
       try {
@@ -124,15 +144,15 @@ export function MaintenanceDemandsPage() {
           page_size: DEMAND_PAGE_SIZE,
           ...(q.trim() ? { q: q.trim() } : {}),
           ...(withVoided ? { include_voided: true } : {}),
-        });
-        if (seq === demandRequestSeq.current) {
+        }, transport);
+        if ((seq === demandRequestSeq.current && transport.isCurrent())) {
           setDemands(resp.data.items);
           setDemandsTotal(resp.data.total);
           setDemandPage(resp.data.page ?? page);
         }
-        return seq === demandRequestSeq.current;
+        return (seq === demandRequestSeq.current && transport.isCurrent());
       } catch (error) {
-        if (seq === demandRequestSeq.current) {
+        if ((seq === demandRequestSeq.current && transport.isCurrent())) {
           setDemands([]);
           setDemandsTotal(0);
           setDemandPage(page);
@@ -140,10 +160,10 @@ export function MaintenanceDemandsPage() {
         }
         return false;
       } finally {
-        if (seq === demandRequestSeq.current) setDemandsLoading(false);
+        if ((seq === demandRequestSeq.current && transport.isCurrent())) setDemandsLoading(false);
       }
     },
-    [],
+    [transport, canRead],
   );
 
   const refreshLatestDemands = useCallback((notifyFailure = true) => {
@@ -155,12 +175,12 @@ export function MaintenanceDemandsPage() {
     includeMissing: boolean,
     requireMissingSnapshot = false,
   ) => {
-    const refreshes = [refreshLatestDemands(false)];
-    if (includeMissing) refreshes.push(loadMissing(false, !requireMissingSnapshot));
+    const refreshes = canRead ? [refreshLatestDemands(false)] : [];
+    if (includeMissing && canReconcile) refreshes.push(loadMissing(false, !requireMissingSnapshot));
     const results = await Promise.allSettled(refreshes);
     return results.every((result) =>
       result.status === "fulfilled" && result.value !== false);
-  }, [loadMissing, refreshLatestDemands]);
+  }, [loadMissing, refreshLatestDemands, canRead, canReconcile]);
 
   useEffect(() => {
     void loadMissing();
@@ -172,6 +192,8 @@ export function MaintenanceDemandsPage() {
   }, [loadMissing, loadDemands]);
 
   const handleWbddUpload = async (file: File) => {
+    if (!canImport || !transport.isCurrent() || uploadInFlight.current) return false;
+    uploadInFlight.current = true;
     setUploading(true);
     setUploadReport(null);
     setUploadFeedback(null);
@@ -183,7 +205,8 @@ export function MaintenanceDemandsPage() {
       };
     }
     try {
-      const resp = await uploadWbdd(file, uploadAttempt.current.key);
+      const resp = await uploadWbdd(file, uploadAttempt.current.key, transport);
+      if (!transport.isCurrent()) return false;
       setUploadReport(resp.data);
       const missingOrders = resp.data.snapshot_diff?.missing_orders ?? 0;
       const missingLines = resp.data.snapshot_diff?.missing_lines ?? 0;
@@ -195,18 +218,24 @@ export function MaintenanceDemandsPage() {
         (differences.length ? `，发现 ${differences.join("、")}，请核对下方差异清单` : "");
       uploadAttempt.current = null;
       // 上传接口刚返回 batch_id，此时 missing 读回 404 不能当合法空态。
-      if (await refreshAfterCommit(true, true)) {
+      const refreshed = await refreshAfterCommit(true, true);
+      if (!transport.isCurrent()) return false;
+      if (refreshed) {
         message.success(`${summary}，页面已刷新`);
       } else {
         setUploadFeedback({ type: "warning", text: `${summary}，但页面刷新失败；旧列表已失效，请重试。` });
       }
     } catch (error) {
+      if (!transport.isCurrent()) return false;
       setUploadFeedback({ type: "error", text: readError(error, "快照上传失败") });
     } finally {
+      uploadInFlight.current = false;
+      if (transport.isCurrent()) {
       setUploading(false);
       // antd Upload 会保留原生 input 的 value；失败后若用户重选同一文件，浏览器
       // 不再触发 change。重建 input，同时保留上面的幂等键供安全重放。
       setUploadInputVersion((current) => current + 1);
+      }
     }
     return false;
   };
@@ -217,14 +246,15 @@ export function MaintenanceDemandsPage() {
   };
 
   const confirmVoid = async () => {
-    if (!voidTarget) return;
+    if (!voidTarget || !canVoid || !voidTransport.isCurrent()) return;
     setVoiding(true);
     try {
       const resp = await voidFastMaintenanceDemands({
         source_order_ids: voidTarget,
         reason: voidReason.trim(),
         idempotency_key: idempotencyKey("wbdd-void"),
-      });
+      }, voidTransport);
+      if (!voidTransport.isCurrent()) return;
       const already = resp.data.results.filter(
         (r) => r.status === "already_voided",
       ).length;
@@ -232,15 +262,18 @@ export function MaintenanceDemandsPage() {
         (already ? `（其中 ${already} 张此前已是作废状态）` : "");
       setVoidTarget(null);
       // 从差异清单发起作废时，提交前已有快照；读回 404 同样属于刷新失败。
-      if (await refreshAfterCommit(true, missing !== null)) {
+      const refreshed = await refreshAfterCommit(true, missing !== null);
+      if (!transport.isCurrent()) return;
+      if (refreshed) {
         message.success(`${summary}，页面已刷新`);
       } else {
         message.warning(`${summary}，但页面刷新失败；旧列表已失效，请重试。`);
       }
     } catch (error) {
+      if (!voidTransport.isCurrent()) return;
       message.error(readVoidError(error));
     } finally {
-      setVoiding(false);
+      if (voidTransport.isCurrent()) setVoiding(false);
     }
   };
 
@@ -250,21 +283,25 @@ export function MaintenanceDemandsPage() {
   };
 
   const confirmRestore = async () => {
-    if (!restoreTarget) return;
+    if (!restoreTarget || !canRestore || !restoreTransport.isCurrent()) return;
     setRestoring(true);
     try {
       const orderNo = restoreTarget.order_no;
-      await restoreMaintenanceDemand(restoreTarget.source_order_id, restoreReason.trim());
+      await restoreMaintenanceDemand(restoreTarget.source_order_id, restoreReason.trim(), restoreTransport);
+      if (!restoreTransport.isCurrent()) return;
       setRestoreTarget(null);
-      if (await refreshAfterCommit(false)) {
+      const refreshed = await refreshAfterCommit(false);
+      if (!transport.isCurrent()) return;
+      if (refreshed) {
         message.success(`已恢复需求单 ${orderNo}，页面已刷新`);
       } else {
         message.warning(`已恢复需求单 ${orderNo}，但页面刷新失败；旧列表已失效，请重试。`);
       }
     } catch (error) {
+      if (!restoreTransport.isCurrent()) return;
       message.error(readError(error, "恢复失败"));
     } finally {
-      setRestoring(false);
+      if (restoreTransport.isCurrent()) setRestoring(false);
     }
   };
 
@@ -292,8 +329,8 @@ export function MaintenanceDemandsPage() {
     },
     { title: "明细行数", dataIndex: "line_count", width: 90, align: "right" },
     { title: "数量核对（当前累计）", key: "return_summary", width: 215, render: (_, row) => <Space direction="vertical" size={0}>
-      <ReturnStatusColumn summary={row.return_summary} error={row.return_summary_error} />
-      {!canEditLines && !isVoided(row) ? <Button type="link" size="small" onClick={() => setLinesEditorFor(row)}>查看明细</Button> : null}
+      {canViewSummary && <ReturnStatusColumn summary={row.return_summary} error={row.return_summary_error} />}
+      {canViewLines && !canEditLines && !isVoided(row) ? <Button type="link" size="small" onClick={() => setLinesEditorFor(row)}>查看明细</Button> : null}
     </Space> },
     {
       title: "联系信息",
@@ -346,10 +383,10 @@ export function MaintenanceDemandsPage() {
       <PageHeader title="需求单与数据同步"
         subtitle="上传氚云需求单原件，更新已有资料，并核对本次上传范围内的缺失单据和明细。" />
 
-      <Card title="氚云快照同步">
+      {(canImport || canCreate || canReconcile) && <Card title="氚云快照同步">
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Space wrap size={12} align="center">
-            {canEditLines ? (
+            {canCreate ? (
               <>
                 <Button type="primary" onClick={() => setCreatingLine(true)}>
                   新增手工需求
@@ -407,17 +444,17 @@ export function MaintenanceDemandsPage() {
             />
           ) : null}
 
-          <WbddReconciliation
+          {canReconcile && <WbddReconciliation
             data={missing}
             loading={missingLoading}
-            canReconcile={canVoid && canImport}
+            canReconcile={canApplyReconciliation}
             onRefresh={loadMissing}
             onCommitted={() => refreshAfterCommit(true, true)}
-          />
+          />}
         </Space>
-      </Card>
+      </Card>}
 
-      <Card title="需求单">
+      {canRead && <Card title="需求单">
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Space wrap size={12} align="center">
             <Input.Search
@@ -459,7 +496,7 @@ export function MaintenanceDemandsPage() {
             }}
           />
         </Space>
-      </Card>
+      </Card>}
 
       <Modal
         title={voidTarget && voidTarget.length > 1 ? `批量作废 ${voidTarget.length} 张需求单` : "作废需求单"}
@@ -582,4 +619,7 @@ function readError(error: unknown, fallback: string): string {
   return fallback;
 }
 
+export const MaintenanceDemandsPage = withContextSurface(MaintenanceDemandsPageContent, contextSurfaces(
+  "maintenance_demand.list", "maintenance_wbdd_snapshot.upload", "maintenance_wbdd_reconciliation.reconcile",
+));
 export default MaintenanceDemandsPage;

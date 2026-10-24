@@ -9,8 +9,8 @@
   reopen 必填 reason 且禁 planned_month+note；
 - idempotency_key 8–128 字符、expected_version >= 1。
 
-被测模块 `backend/app/schemas/maintenance_collection_reminders.py` 尚不存在，
-本文件 import 即收集失败——这是预期的红测；实现后必须提供同名模块与下列类名。
+S3 请求新增可选 authorization_precondition；它仅用于授权观察的并发校验，
+必须在传入业务查询/命令及幂等摘要前移除，原业务 DTO 字段保持精确不变。
 source-file 端点是二进制附件响应（Content-Type: application/vnd.ms-excel），无 JSON DTO。
 """
 
@@ -161,12 +161,86 @@ def test_request_schemas_forbid_extra_fields():
 def test_search_request_defaults():
     payload = SearchRequest().model_dump(mode="json")
     assert payload == {
+        "authorization_precondition": None,
         "q": "",
         "owner_scope": "me",
         "reminder_state": None,
         "page": 1,
         "page_size": 24,
     }
+
+
+@pytest.mark.parametrize("provided", [False, True], ids=["omitted", "provided"])
+@pytest.mark.parametrize("operation", ["search", "follow_up", "apply"])
+def test_authorization_precondition_is_preserved_and_separated_from_business_command(
+    monkeypatch, operation, provided,
+):
+    """Exercise actual HTTP adapters, without claiming to test their PDP facades.
+
+    The same business command must reach the protected facade with or without
+    an OCC observation; neither a query nor an idempotency hash may absorb it.
+    """
+    from fastapi import Response
+    from app.api import maintenance_collection_reminders as reminder_api
+    from app.api import maintenance_collection_plan_imports as plan_api
+
+    precondition = {
+        "catalog_version": "synthetic-catalog",
+        "authorization_epoch": 7,
+        "context": {
+            "kind": "project", "id": "p-1",
+            "authorization_revision": "synthetic-revision",
+        },
+    } if provided else None
+    extra = {"authorization_precondition": precondition} if provided else {}
+    expected = {
+        "search": {"q": "项目", "owner_scope": "me", "reminder_state": None,
+                   "page": 1, "page_size": 24},
+        "follow_up": {"expected_version": 1, "idempotency_key": "key-12345678",
+                      "action": "handle", "planned_month": None,
+                      "note": "已电话确认", "reason": None},
+        "apply": {"expected_batch_version": 1,
+                  "expected_data_version": "synthetic-version-1",
+                  "bindings": [{"row_key": "row-1", "external_order_no": "ORDER-001",
+                                "project_id": "p-1", "project_version": 1,
+                                "project_contract_id": "pc-1", "project_contract_version": 1,
+                                "existing_binding_version": None, "reason": None}]},
+    }[operation]
+    model = {"search": SearchRequest, "follow_up": FollowUpRequest,
+             "apply": ApplyRequest}[operation]
+    request = model(**expected, **extra)
+    assert request.model_dump(mode="json") == {
+        **expected, "authorization_precondition": precondition,
+    }
+    calls = []
+    result = object()
+
+    def capture(*args, **kwargs):
+        calls.append(kwargs)
+        return result
+
+    monkeypatch.setattr(reminder_api.runtime, "is_authoritative", lambda *args: True)
+    response = Response()
+    identity, db, legacy_context = object(), object(), object()
+    if operation == "search":
+        monkeypatch.setattr(reminder_api.protected, "read", capture)
+        actual = reminder_api.search_collection_reminders(
+            request, response, db=db, ctx=legacy_context, typed_identity=identity, view=None)
+    elif operation == "follow_up":
+        monkeypatch.setattr(reminder_api.protected, "record", capture)
+        actual = reminder_api.follow_up_collection_milestone(
+            request, response, milestone_id="m-1", db=db, ctx=legacy_context,
+            typed_identity=identity, view=None)
+    else:
+        monkeypatch.setattr(plan_api.protected, "apply", capture)
+        actual = plan_api.apply_collection_plan_import(
+            request, response, batch_id="batch-1", db=db, ctx=legacy_context,
+            identity=identity, view=None)
+    assert actual is result
+    assert response.headers["Cache-Control"] == "no-store"
+    assert len(calls) == 1
+    assert calls[0]["params" if operation == "search" else "command"] == expected
+    assert calls[0]["precondition"] == precondition
 
 
 # ---------- 2. search → directory_response ----------
@@ -272,7 +346,8 @@ def test_follow_up_request_and_response_serialize_with_exact_keys():
     )
     payload = request.model_dump()
     assert set(payload) == {"expected_version", "idempotency_key", "action",
-                            "planned_month", "note", "reason"}
+                            "planned_month", "note", "reason", "authorization_precondition"}
+    assert payload["authorization_precondition"] is None
     assert payload["planned_month"] is None
     assert payload["reason"] is None
 
@@ -482,7 +557,9 @@ def test_apply_request_and_response_serialize_with_exact_keys():
         bindings=[binding],
     )
     payload = request.model_dump()
-    assert set(payload) == {"expected_batch_version", "expected_data_version", "bindings"}
+    assert set(payload) == {"expected_batch_version", "expected_data_version", "bindings",
+                            "authorization_precondition"}
+    assert payload["authorization_precondition"] is None
     assert set(payload["bindings"][0]) == {
         "row_key", "external_order_no", "project_id", "project_version",
         "project_contract_id", "project_contract_version",

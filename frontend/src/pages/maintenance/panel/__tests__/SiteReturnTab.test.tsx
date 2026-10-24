@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ search: vi.fn(), categories: vi.fn() }));
@@ -38,7 +39,9 @@ describe("领用行要求以服务端快照为准", () => {
     expect(await screen.findByText("NEW-PN-0")).toBeInTheDocument();
     fireEvent.click(screen.getByTitle("3"));
     await screen.findByText("NEW-PN-20");
-    await act(async () => { await refresh(); });
+    let readback!: Promise<boolean>;
+    act(() => { readback = refresh(); });
+    await act(async () => { await readback; });
     expect(screen.getByText("NEW-PN-20")).toBeInTheDocument();
     expect(screen.queryByText("NEW-PN-0")).not.toBeInTheDocument();
   });
@@ -65,9 +68,11 @@ describe("领用行要求以服务端快照为准", () => {
     await screen.findByText("PN-1");
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "领用一级品类" }));
     fireEvent.click(await screen.findByText("硬盘", { exact: true, selector: ".ant-select-item-option-content" }));
-    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith(expect.objectContaining({ category_major: "硬盘", page: 1 })));
-    await act(async () => { await refresh(); });
-    expect(mocks.search).toHaveBeenLastCalledWith(expect.objectContaining({ category_major: "硬盘" }));
+    await waitFor(() => expect(mocks.search).toHaveBeenLastCalledWith(expect.objectContaining({ category_major: "硬盘", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
+    let readback!: Promise<boolean>;
+    act(() => { readback = refresh(); });
+    await act(async () => { await readback; });
+    expect(mocks.search).toHaveBeenLastCalledWith(expect.objectContaining({ category_major: "硬盘" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     fireEvent.click(screen.getByRole("button", { name: /^作\s*废$/ }));
     expect(await screen.findByText("作废领用单 ISSUE-1（共 4 行）")).toBeInTheDocument();
   });
@@ -97,3 +102,8 @@ describe("领用行要求以服务端快照为准", () => {
     expect(screen.queryByText(absent)).not.toBeInTheDocument();
   });
 });
+
+vi.mock("../../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

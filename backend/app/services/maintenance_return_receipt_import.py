@@ -103,7 +103,7 @@ def _lock(db: Session, value: str) -> None:
     db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
 
 
-def parse_standard(data: bytes) -> dict:
+def parse_standard(data: bytes, *, _authorization_all_rows=False) -> dict:
     """Stream real double headers without trusting worksheet dimensions.
 
     Blank parent cells inherit every parent field only inside a stable block.
@@ -166,7 +166,7 @@ def parse_standard(data: bytes) -> dict:
             else:
                 current = {"row_no": row_no, "raw": h, "lines": [], "seen_lines": False}
                 head_count += 1
-                if h["入库类别"] in CATEGORIES:
+                if h["入库类别"] in CATEGORIES or _authorization_all_rows:
                     heads.append(current)
                 else:
                     excluded[h["入库类别"] or "类别缺失"] += 1
@@ -187,7 +187,7 @@ def parse_standard(data: bytes) -> dict:
                     "invalid_doc", "明细序号重新从 1 开始但缺少主单身份", 422
                 )
             current["seen_lines"] = True
-            if current["raw"]["入库类别"] in CATEGORIES:
+            if current["raw"]["入库类别"] in CATEGORIES or _authorization_all_rows:
                 current["lines"].append({"row_no": row_no, "raw": l})
     return {
         "heads": heads,
@@ -197,13 +197,25 @@ def parse_standard(data: bytes) -> dict:
     }
 
 
+def _check_authorization_type(value):
+    if value is not None:
+        from app.services.maintenance_return_import_authorization import ReturnImportAuthorization
+        if type(value) is not ReturnImportAuthorization:
+            from app.authz.errors import authz_error
+            raise authz_error(403, 'AUTHZ_CONTEXT_REQUIRED', '需要当前任务的类型化许可')
+
+
 def enqueue(
-    db: Session, data: bytes, filename: str, operator: str, key: str
+    db: Session, data: bytes, filename: str, operator: str, key: str, *, _authorization=None
 ) -> tuple[Batch, bool]:
+    _check_authorization_type(_authorization)
     digest = hashlib.sha256(data).hexdigest()
-    _lock(db, f"doc-key:{operator}:{key}")
+    owner_id = _authorization.check(db, 'enqueue', digest) if _authorization is not None else None
+    actor_key=f'authz-user:{owner_id}' if owner_id is not None else operator
+    _lock(db, f"doc-key:{actor_key}:{key}")
     existing = db.scalar(
-        select(Batch).where(Batch.uploaded_by == operator, Batch.idempotency_key == key)
+        select(Batch).where((Batch.owner_user_id==owner_id if owner_id is not None else
+            (Batch.owner_user_id.is_(None)&(Batch.uploaded_by==operator))),Batch.idempotency_key==key)
     )
     if existing:
         if (
@@ -213,6 +225,7 @@ def enqueue(
             raise ImportError(
                 "idempotency_conflict", "同一幂等键对应不同文件或导入协议"
             )
+        if _authorization is not None:_authorization.finish_enqueue(db,existing,replayed=True)
         return existing, False
     path = archive_bytes(data, digest)
     _lock(db, "return-archive:" + digest)
@@ -229,6 +242,7 @@ def enqueue(
             file_type="return_receipts",
             file_hash=digest,
             uploaded_by=operator,
+            owner_user_id=owner_id,
             status="success",
         )
         db.add(archive_batch)
@@ -247,6 +261,7 @@ def enqueue(
         file_hash=digest,
         filename=filename[:255],
         idempotency_key=key,
+        owner_user_id=owner_id,
         uploaded_by=operator,
         status="pending",
         report_json={
@@ -258,7 +273,9 @@ def enqueue(
         },
     )
     db.add(batch)
-    db.commit()
+    if _authorization is not None:
+        db.flush();_authorization.finish_enqueue(db,batch,replayed=False)
+    else:db.commit()
     return batch, True
 
 
@@ -273,8 +290,10 @@ def _state(batch: Batch, **changes) -> None:
     batch.report_json = {**batch.report_json, **changes}
 
 
-def control(db: Session, batch_id: str, action: str) -> Batch:
+def control(db: Session, batch_id: str, action: str, *, _authorization=None) -> Batch:
+    _check_authorization_type(_authorization)
     batch = _load(db, batch_id, lock=True)
+    if _authorization is not None:_authorization.check(db,action,batch.file_hash)
     report = batch.report_json
     if report["status"] == "applied":
         raise ImportError(
@@ -304,7 +323,7 @@ def control(db: Session, batch_id: str, action: str) -> Batch:
             generation=report["generation"] + 1,
             preview_token=None,
         )
-    db.commit()
+    if _authorization is None:db.commit()
     return batch
 
 
@@ -437,18 +456,25 @@ def _check_plan_capacity(db: Session, rows: list[dict], *, locked: bool) -> None
 
 
 def build_plan(
-    db: Session, batch: Batch, *, locked=False, allowed_project_ids=None
+    db: Session, batch: Batch, *, locked=False, allowed_project_ids=None, _parsed=None
 ) -> dict:
-    heads = list(
-        db.scalars(
-            select(Head).where(Head.batch_id == batch.batch_id).order_by(Head.row_no)
-        )
-    )
-    details = list(
-        db.scalars(
-            select(Line).where(Line.batch_id == batch.batch_id).order_by(Line.row_no)
-        )
-    )
+    if _parsed is None:
+        heads = list(db.scalars(select(Head).where(Head.batch_id == batch.batch_id).order_by(Head.row_no)))
+        details = list(db.scalars(select(Line).where(Line.batch_id == batch.batch_id).order_by(Line.row_no)))
+    else:
+        # Server-only pure parse adapter: discover current actual targets before
+        # a new batch/raw staging row exists. Never attach these objects to db.
+        heads, details = [], []
+        for index, item in enumerate(_parsed['heads']):
+            raw=item['raw'];hid=f'parsed-head-{index}'
+            day,_=parse_date_loose(raw['入库日期'])
+            heads.append(Head(row_id=hid,batch_id=batch.batch_id,row_no=item['row_no'],raw_json=raw,
+                head_no=raw['入库单号'] or None,head_date=day,category=raw['入库类别'],
+                wbdd_no=_clean(raw['维保需求单'],_WBDD_RE),project_name=raw['项目名称'] or None,
+                data_status=raw['数据状态'],issues=[]))
+            for j,detail in enumerate(item['lines']):
+                details.append(Line(row_id=f'parsed-line-{index}-{j}',batch_id=batch.batch_id,
+                    head_row_id=hid,row_no=detail['row_no'],raw_json=detail['raw'],issues=[]))
     by_head = {}
     for line in details:
         by_head.setdefault(line.head_row_id, []).append(line)
@@ -848,6 +874,13 @@ def build_plan(
 
 def run_job(batch_id: str, generation: int) -> None:
     """Generation CAS discards cancelled/retried workers, including after restart."""
+    from app.authz import runtime
+    with SessionLocal() as probe:
+        row = _load(probe, batch_id)
+        canonical = row.owner_user_id is not None or runtime.is_authoritative(probe, 'maintenance_return_import')
+    if canonical:
+        from app.services.maintenance_return_import_authorization import run_job as protected_run
+        return protected_run(batch_id, generation, session_factory=SessionLocal)
     with SessionLocal() as db:
         batch = _load(db, batch_id, lock=True)
         if (
@@ -975,7 +1008,10 @@ def apply(
     reason=None,
     allowed_project_ids=None,
     scope_provider=None,
+    _authorization=None,
 ) -> dict:
+    _check_authorization_type(_authorization)
+    if _authorization is not None:_authorization.check(db,"apply",None)
     ledger.lock_receipt_context(db)
     _lock(db, "return-receipt-import-apply")
     batch = _load(db, batch_id)
@@ -1068,6 +1104,7 @@ def apply(
             .with_for_update(read=True)
         )
     }
+    if _authorization is not None:_authorization.capture(db)
     now = datetime.now(UTC)
     applied = 0
     for item in plan["rows"]:
@@ -1090,6 +1127,7 @@ def apply(
                 source_ref=item["source_ref"],
                 head_no=item["head_no"],
                 created_by=operator,
+                owner_user_id=_authorization.principal.id if _authorization is not None else None,
                 created_at=now,
                 version=1,
             )
@@ -1148,7 +1186,8 @@ def apply(
     db.flush()
     batch.status, batch.applied_by, batch.applied_at = "applied", operator, now
     _state(batch, status="applied", preview_token=None, applied_lines=applied)
-    db.commit()
+    if _authorization is not None:_authorization.finish_apply(db)
+    else:db.commit()
     return {
         "batch_id": batch_id,
         "status": "applied",

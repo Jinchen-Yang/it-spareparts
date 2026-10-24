@@ -392,6 +392,10 @@ class BusinessFile(Base):
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
 
+    owner_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sys_user.id", ondelete="RESTRICT", name="fk_business_file_owner_user_id"), nullable=True
+    )
+
     __table_args__ = (
         CheckConstraint(
             "storage_provider IN ('local', 'object_storage')",
@@ -506,6 +510,10 @@ class MaintenanceAcceptanceOperation(Base):
     operated_by: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
+    )
+
+    owner_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sys_user.id", ondelete="RESTRICT", name="fk_maintenance_acceptance_operation_owner_user_id"), nullable=True
     )
 
     __table_args__ = (

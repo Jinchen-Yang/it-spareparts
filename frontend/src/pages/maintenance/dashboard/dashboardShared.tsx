@@ -1,3 +1,5 @@
+import { useSurface } from "../../../authz/access";
+import { useContextTransport } from "../../../authz/domainTransport";
 /** 维保数据看板各页签的共享展示件（R33 / D-0022 + R34 / D-0024）。
  *
  * 铁律：无金额权时金额卡片/列/图不渲染（不是 CSS 隐藏、不是 ¥0 冒充）；
@@ -487,7 +489,10 @@ export function DashboardExportButtons({
 }) {
   const { message } = App.useApp();
   const [busy, setBusy] = useState<string | null>(null);
+  const access = useSurface("maintenance_dashboard.export", { legacy: { maintenance_dashboard: true } });
+  const transport = useContextTransport(JSON.stringify([params, kind, ownerToken]), true);
   const download = async (format: "csv" | "xlsx") => {
+    if (access.entryState === "deny") return;
     // 请求前：绑定所属会话（不是点击时才读新 token 然后当作所属）
     if (!sessionUnchanged(ownerToken)) {
       onSessionMismatch?.();
@@ -497,7 +502,8 @@ export function DashboardExportButtons({
     setBusy(format);
     const token = ownerToken;
     try {
-      const { blob, filename } = await downloadDashboardExport({ ...params, kind, format });
+      const { blob, filename } = await downloadDashboardExport({ ...params, kind, format }, transport);
+      if (!transport.isCurrent()) return;
       if (!sessionUnchanged(token)) {
         onSessionMismatch?.();
         message.warning("会话已变更，已取消下载；请重新登录后重试");
@@ -506,12 +512,13 @@ export function DashboardExportButtons({
       saveBlob(blob, filename);
       message.success(`已导出 ${filename}`);
     } catch (err) {
-      if (sessionUnchanged(token)) message.error(apiErrorMessage(err));
+      if (sessionUnchanged(token) && transport.isCurrent()) message.error(apiErrorMessage(err));
       else onSessionMismatch?.();
     } finally {
-      if (sessionUnchanged(token)) setBusy(null);
+      if (sessionUnchanged(token) && transport.isCurrent()) setBusy(null);
     }
   };
+  if (access.entryState === "deny") return null;
   return (
     <Space size={8}>
       <Button size="small" loading={busy === "csv"} onClick={() => void download("csv")}>

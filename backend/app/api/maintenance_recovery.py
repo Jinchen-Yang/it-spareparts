@@ -4,14 +4,16 @@
 未收回结存含单位成本与估值 → 无 data_purchase_cost 的账号脱敏（round-5 Blocker 2）。
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import permissions as _perm
-from app.api.maintenance_project_scope import enforce_maintenance_project_access
+from app.api.maintenance_project_scope import enforce_maintenance_project_access, identity_for, legacy_page
 from app.auth import current_role
 from app.db import get_db
+from app.authz import runtime
+from app.services import maintenance_project_read_access as protected_reads
 from app.models.maintenance_project import MaintenanceProject
 from app.models.system import SysUser
 from app.security import UserContext, get_current_user_context, require_page
@@ -41,8 +43,11 @@ def get_recovery_summary(
     response: Response = None,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_recovery", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_recovery")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """项目结束收回清单：好件收回（返库单）/ 坏件返还（入库单）/ 未收回结存。
 
@@ -50,6 +55,9 @@ def get_recovery_summary(
     成本门：无 data_purchase_cost 的账号只看到数量，成本/估值字段脱敏。
     """
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db, "maintenance_recovery"):
+        return protected_reads.read_recovery(db, typed_identity, project_id,
+            view=view, precondition=authorization_precondition)
     project = db.get(MaintenanceProject, project_id)
     if project is None:
         raise HTTPException(

@@ -1,0 +1,29 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "maintenance_acceptance_directory",
+    "rules": [
+      {
+        "name": "explicit-search",
+        "actions": [
+          "search"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"search\" in P.attr.grants.maintenance_acceptance_directory.actions && (R.attr.module_probe || ((P.attr.grants.maintenance_acceptance_directory.scope == \"all_projects\" && (true)) || (P.attr.grants.maintenance_acceptance_directory.scope == \"assigned_or_sales_projects\" && ((R.attr.is_manager || R.attr.is_viewer || R.attr.is_sales))) || (P.attr.grants.maintenance_acceptance_directory.scope == \"assigned_projects\" && ((R.attr.is_manager || R.attr.is_viewer)))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"maintenance_acceptance_directory\", \"scope\": P.attr.grants.maintenance_acceptance_directory.scope, \"version\": P.attr.grants.maintenance_acceptance_directory.version, \"field_permissions\": P.attr.grants.maintenance_acceptance_directory.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

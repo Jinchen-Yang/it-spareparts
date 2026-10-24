@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 /** 维保数据分析看板 API 客户端（2026-08-21，#pn-ranking 契约）。 */
 import { api } from "../api";
 
@@ -198,23 +199,23 @@ export interface AnalyticsFilterOptions {
   warehouses: string[];
 }
 
-export const fetchPnRanking = async (params: PnRankingParams) => {
-  const resp = await api.get<PnRanking>("/maintenance/analytics/pn-ranking", {
+export const fetchPnRanking = async (params: PnRankingParams, capture?: ContextRequestTransport) => {
+  const resp = await domainApi(capture).get<PnRanking>("/maintenance/analytics/pn-ranking", {
     params,
   });
   return resp.data;
 };
 
-export const fetchSpendTrend = async (params: SpendTrendParams) => {
-  const resp = await api.get<SpendTrendResponse>(
+export const fetchSpendTrend = async (params: SpendTrendParams, capture?: ContextRequestTransport) => {
+  const resp = await domainApi(capture).get<SpendTrendResponse>(
     "/maintenance/analytics/spend-trend",
     { params },
   );
   return resp.data;
 };
 
-export const fetchAnalyticsFilterOptions = async () => {
-  const resp = await api.get<AnalyticsFilterOptions>(
+export const fetchAnalyticsFilterOptions = async ( capture?: ContextRequestTransport) => {
+  const resp = await domainApi(capture).get<AnalyticsFilterOptions>(
     "/maintenance/analytics/filter-options",
   );
   return resp.data;
@@ -295,7 +296,7 @@ export interface MaintenanceExplorerResponse {
     unknown_count: number;
   };
 }
-export const fetchMaintenanceExplorer = async (params: MaintenanceExplorerParams, signal?: AbortSignal) => {
-  const resp = await api.get<MaintenanceExplorerResponse>("/maintenance/analytics/explorer", { params, signal });
+export const fetchMaintenanceExplorer = async (params: MaintenanceExplorerParams, signal?: AbortSignal, capture?: ContextRequestTransport) => {
+  const resp = await domainApi(capture).get<MaintenanceExplorerResponse>("/maintenance/analytics/explorer", { params, signal });
   return resp.data;
 };

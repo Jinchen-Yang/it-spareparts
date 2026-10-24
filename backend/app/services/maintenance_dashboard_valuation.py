@@ -22,6 +22,7 @@ from typing import Literal
 
 from sqlalchemy import and_, case, false, func, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.selectable import SelectBase
 
 from app.config import Settings
 from app.models.dimensions import DimPart
@@ -314,7 +315,7 @@ def _cost_reference(
     ]
     if scope is not None:
         conditions.append(
-            MaintenanceSiteIssue.project_id.in_(scope) if scope else false()
+            MaintenanceSiteIssue.project_id.in_(scope) if isinstance(scope, SelectBase) or scope else false()
         )
     costed = MaintenanceSiteIssueLine.cost_amount_inc_tax.is_not(None)
     statement = (

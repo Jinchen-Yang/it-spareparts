@@ -271,6 +271,12 @@ def _hidden_fields(user_ctx: UserContext) -> set[str]:
     """
     from app import permissions as perm
     perms = user_ctx.permissions
+    if user_ctx.explicit_field_policy:
+        # Canonical resource grants already enforce their own field dependencies.
+        # Legacy global dependencies must not add an unrelated resource's gate.
+        return {field for key, groups in perm.DATA_GROUPS.items()
+                if (perms or {}).get(key) is not True
+                for group in groups for field in config.FIELD_GROUPS.get(group, [])}
     if perms is None:
         perms = perm.template_for(user_ctx.role)
     hidden: set[str] = set()
