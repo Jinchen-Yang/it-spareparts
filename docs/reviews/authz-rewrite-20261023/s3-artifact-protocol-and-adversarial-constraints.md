@@ -244,3 +244,17 @@ Root migration/attachment/roundtrip 三个真实 bootstrap 反例，连同三个
 旧 roundtrip busy/cancel 回归的独立复核：原测试在创建 busy 请求后固定 50ms 释放 worker，无法证明第二请求已到互斥锁；root 保留 100ms 人为请求延迟作为复现向量，改成等待实际 busy 请求完成后在 finally 释放 worker。原 worker 2s 上限、429、零 body 消费、Retry-After、取消异常、临时文件清理与锁可重新获取断言全部保留。连同真实 UserContext 适配两条原测试独立 **2 passed**（`/tmp/itsp-s3-roundtrip-fixtures-independent-final.log`），接受这两项仅测试修订。
 
 工作簿最终闭合：backend 独立审查者原样执行 bootstrap4 + 自增 checklist immutable-row tamper3 + master/master 独审/monthly/project/checklist 组合 **48 passed**（`/tmp/itsp-s3-workbook-metadata-independent-final.log`），并静态确认完整 SQL 摘要与 producer 一致、master 授权后完整 schema/result/manifest 校验未削弱。清单摘要纳入实际 batch 稳定身份/父项目、原件信息和所有 item 原始/归一化列，排除合法状态流转字段。上述四入口覆盖账恢复 verified；这只证明本地及跨模型复核完成，最终提交 CI 和统一验收仍独立。
+
+## S3 CI 四项旧 schema 断言适配的独立复核
+
+`test_maintenance_collection_reminder_schemas.py` 的三个精确请求字段断言补入可选 `authorization_precondition=None`，原业务字段、响应字段和拒绝额外字段断言保持。另六例分别在提供/省略 precondition 时调用实际 API adapter，核对受保护 facade 收到的 params/command 完全相同而 precondition 单独传递；这是 adapter 参数分离证据，不是 PDP/真实 HTTP 全链测试。静态跟踪三个 canonical 入口均先 `model_dump(exclude={'authorization_precondition'})`，旧分支继续逐业务参数调用；未发现授权观察进入业务查询或幂等摘要。
+
+`test_maintenance_wbdd_display_columns_migration.py` 按当前 S3 schema 精确增加 nullable Integer `owner_user_id`、指向 `sys_user.id` 的 RESTRICT 外键，并把旧用户名唯一约束改为精确验证 stable-owner/legacy-only 两个 partial unique index 的列与谓词。仍要求 batch 唯一及原非空业务列，未降低幂等或显示列保证。两文件没有对应生产修改；作者原四失败之后，独立完整复跑 **29 passed**（`/tmp/itsp-s3-reminder-wbdd-schema-independent.log`）。接受最小测试修订，S3 exact CI 仍须重新通过。
+
+后续 CI 三类旧测试适配也已独立闭合，无生产文件修改：
+
+- `test_contract_amount_remediation.py` 将辅助源码顺序检查指向真正事务实现 `_apply_batch`；公开 `apply_batch` 仅新增委派与异常回滚。实读锁链仍为 batch → XSDD/contract advisory → 全部 workbook states → projects，原 PostgreSQL 双连接交错、等待事件、超时、state 锁可取得和最终金额/version 断言 AST 保持一致。原单例独立 **1 passed**（`/tmp/itsp-s3-ledger-lock-independent.log`）；源码辅助不被当成并发行为证明。
+- `test_maintenance_project_management_api.py` 两个精确字典增加 `manager_assignment=None`，符合真实 primary_manager 关联查询；旧 project_manager_id 字符串不代表账号关系。原所有业务字段、OCC 与 audit 断言未变。完整文件独立 **12 passed**（`/tmp/itsp-s3-project-management-independent.log`）。
+- `test_beta_account_whitelist.py` 不再要求所有路由直接挂同一个旧 Depends 函数，改为真实 main 的全部 23 个补库 method/path 在 RBAC 开/关两种情况下均返回原白名单 403 原因，包含旧退役路径。同时用真实 PostgreSQL/PDP 验证仅 catalog 已迁移且旧 bool 为 false 的 readonly 用户可按 Grant 访问；未迁 project 仍拒绝、撤 Grant 返回 403、发布开关关闭返回 404、已切换后撤配置返回 503。没有按闭包名字猜测依赖有效性，也未放宽旧 deny 或 canonical fault 断言。白名单文件与补库 Beta 回归组合独立 **22 passed**（`/tmp/itsp-s3-beta-composed-gate-independent.log`）。
+
+上述五个旧测试文件及本报告可组成最小 CI 修订；它们的本地通过不代替新精确提交的完整 CI，S4 仍保持设计阶段。

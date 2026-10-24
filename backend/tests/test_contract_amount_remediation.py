@@ -922,7 +922,10 @@ def test_execute_waits_on_ledger_batch_before_taking_workbook_state(db):
     workbook state, and then complete after the ledger-side transaction exits.
     """
 
-    apply_source = inspect.getsource(maintenance_ledger.apply_batch)
+    # The public entry adds rollback-on-failure; the lock sequence belongs to
+    # its transactional implementation.  The PostgreSQL interleave below is
+    # still the behavioral check that remediation cannot invert that order.
+    apply_source = inspect.getsource(maintenance_ledger._apply_batch)
     assert apply_source.index("_lock_contract_evidence_identities") < apply_source.index(
         "_lock_target_projects"
     )
