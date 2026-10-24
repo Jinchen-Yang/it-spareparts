@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "../../test/antdRender";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AuthzProvider, useAuthz } from "../AuthzProvider";
@@ -91,4 +92,23 @@ it("late download after owner switch cannot commit a browser side effect", async
   await act(async () => pending.resolve("blob"));
   expect(download).not.toHaveBeenCalled();
   expect(errors[0]).toBeInstanceOf(AuthorizationCancelled);
+});
+
+it("StrictMode query remount after an already-ready Provider dispatches once and still cancels stale work", async () => {
+  const pending = deferred<string>(), calls: AuthorizedRequest[] = [];
+  const query = vi.fn((capture: AuthorizedRequest) => { calls.push(capture); return pending.promise; });
+  function ReadyGate({ shown }: { shown: boolean }) {
+    const authz = useAuthz();
+    return <><div>owner:{authz.status}</div>{shown && authz.status === "ready" && <StrictMode><Probe query={query} /></StrictMode>}</>;
+  }
+  const view = render(<AuthzProvider token="A"><ReadyGate shown={false} /></AuthzProvider>);
+  expect(await screen.findByText("owner:ready")).toBeVisible();
+  view.rerender(<AuthzProvider token="A"><ReadyGate shown /></AuthzProvider>);
+  await waitFor(() => expect(query).toHaveBeenCalledTimes(1));
+  expect(calls[0].signal.aborted).toBe(false);
+  await act(async () => pending.resolve("strict-current"));
+  expect(screen.getByText("strict-current")).toBeVisible();
+  view.rerender(<AuthzProvider token="A"><ReadyGate shown={false} /></AuthzProvider>);
+  expect(calls[0].signal.aborted).toBe(true);
+  expect(screen.queryByText("strict-current")).toBeNull();
 });

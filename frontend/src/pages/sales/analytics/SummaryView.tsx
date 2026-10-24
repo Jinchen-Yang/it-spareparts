@@ -162,7 +162,7 @@ export default function SummaryView({ summary, amounts, profitRestricted = false
           <KpiCard
             label="销售人数"
             value={String(kpi.salespeople)}
-            sub={kpi.orders && kpi.amount_ex_tax_total != null
+            sub={showAmounts && kpi.orders && kpi.amount_ex_tax_total != null
               ? `单均（不含税）${fmtMoney(kpi.amount_ex_tax_total / kpi.orders)}` : "区间内有成交"}
           />
         )}

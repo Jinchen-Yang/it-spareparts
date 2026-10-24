@@ -139,7 +139,8 @@ TOOLS: list[dict] = [
                 "两种用法：①回填客户模板：传 base_file_id，在其副本上写（如在右侧空列追加"
                 "'最近采购价/库存/备注'列头和数据，原格式保留）；②新建报价单：不传 base_file_id，"
                 "自己规划表头和数据行。cells 用 1-based 行号 + 列字母(如 'G')或数字。"
-                "完成后把返回的 download_url 告诉用户。"
+                "完成后用实际返回的 file_id 给出 [结果文件](/api/agent/files/<file_id>) 定位链接；"
+                "预览与下载分别检查权限，生成成功不代表可读取原件。旧兼容返回 download_url 时使用其实际值。"
             ),
             "parameters": {
                 "type": "object",
@@ -191,7 +192,9 @@ TOOLS: list[dict] = [
                 "冻结表头、斑马纹；备注含'需确认'/'未找到'的行自动标橙/红）。"
                 "整机拆解报价单、批量查价结果等用它（比 write_excel 好看）。"
                 "headers=列名数组；rows=与列对齐的二维数组（每行一个数组）；money_cols=金额列的"
-                "0基下标数组（会按千分位+两位小数格式化）。完成后把 download_url 告诉用户。"
+                "0基下标数组（会按千分位+两位小数格式化）。完成后用实际返回的 file_id 给出"
+                " [结果文件](/api/agent/files/<file_id>) 定位链接；预览与下载分别检查权限。"
+                "旧兼容返回 download_url 时使用其实际值。"
             ),
             "parameters": {
                 "type": "object",
@@ -716,6 +719,8 @@ def _dispatch_authoritative(db, name, args, ctx, access):
         "get_profit_ranking": "profit_analysis", "list_recent_purchases": "purchase_records",
         "get_purchase_analysis": "purchase_records", "get_cancellation_stats": "purchase_records",
         "get_inventory": "inventory",
+        "get_maintenance_board": "maintenance_contract_cost",
+        "get_maintenance_projects": "maintenance_cost", "get_maintenance_lines": "maintenance_cost",
     }
     if name in business_resources:
         state = authz_runtime.runtime_states(db)[business_resources[name]]
@@ -723,7 +728,22 @@ def _dispatch_authoritative(db, name, args, ctx, access):
             # Never enter a facade's genuine legacy adapter from a unified Agent run.
             raise authz_error(503, "AUTHZ_RESOURCE_UNAVAILABLE", "该工具的授权模块尚未启用或已暂停")
     if name in {"get_maintenance_board", "get_maintenance_projects", "get_maintenance_lines"}:
-        return {"error": "该维保工具尚未迁移到统一授权", "kind": "unavailable", "code": "MODULE_NOT_MIGRATED"}
+        from app.services import maintenance_cost_access
+        if name == 'get_maintenance_board':
+            entry = maintenance_cost_access.BOARD
+            params = {'date_from': args.get('date_from'), 'date_to': args.get('date_to'),
+                      'status': args.get('status'), 'lifecycle': 'ongoing', 'q': args.get('q')}
+        elif name == 'get_maintenance_projects':
+            entry = maintenance_cost_access.PROJECTS
+            params = {'date_from': None, 'date_to': None, 'q': args.get('q'), 'lifecycle': 'ongoing'}
+        else:
+            project = str(args.get('project', '')).strip()
+            if not project:
+                return {'error': 'project 不能为空'}
+            entry = maintenance_cost_access.LINES
+            params = {'project': project, 'month': args.get('month'), 'date_from': None, 'date_to': None,
+                      'page': max(int(args.get('page') or 1), 1), 'page_size': 50, 'filters': None}
+        return maintenance_cost_access.read(db, identity, entry_id=entry, params=params, legacy_context=ctx)
     if name in {"inspect_file", "read_file_rows", "read_document", "write_excel", "write_report",
                 "list_skills", "get_skill"}:
         return _REGISTRY[name](db, args, ctx)
@@ -812,7 +832,8 @@ def dispatch(db: Session, name: str, args: dict, ctx: security.UserContext, *, i
             recorded_before = access.collector.record_count
             result = _jsonable(_dispatch_authoritative(db, name, args, ctx, access))
             business_tools = {"search_parts", "get_part_overview", "lookup_prices_bulk", "get_profit_ranking",
-                              "list_recent_purchases", "get_purchase_analysis", "get_inventory", "get_cancellation_stats"}
+                              "list_recent_purchases", "get_purchase_analysis", "get_inventory", "get_cancellation_stats",
+                              "get_maintenance_board", "get_maintenance_projects", "get_maintenance_lines"}
             if name in business_tools and not (isinstance(result, dict) and result.get("error")) and access.collector.record_count == recorded_before:
                 raise unavailable()
             db.rollback()  # All Agent business tools are reads; release actor SHARE before revalidation/network.

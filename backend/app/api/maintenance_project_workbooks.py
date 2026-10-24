@@ -28,6 +28,7 @@ from app.api.maintenance_project_scope import (
     require_maintenance_project_access,
 )
 from app.auth import current_identity, current_role
+from app.authz.runtime import guard_legacy_execution
 from app.api import maintenance_project_scope as auth_transport
 from app.services import maintenance_authorization as foundation
 from app.services import maintenance_workflow_authorization as authorization
@@ -133,7 +134,11 @@ def _validate_project_workbook_in_worker(
     db: Session | None = None
     try:
         db = SessionLocal()
+        guard_legacy_execution(db, (_RESOURCE,))
         _run_validation_retention_cleanup(db)
+        # Cleanup ends its own transaction to release validation-row locks.
+        # Reacquire and recheck before any identity, input or business access.
+        guard_legacy_execution(db, (_RESOURCE,))
         operator = _real_operator(db, ident)
         content = FilePath(upload_path).read_bytes()
         adapter = MaintenanceProjectWorkbookAdapter(

@@ -1,0 +1,5699 @@
+{
+  "baseline_main_sha": "7a9fd2098acb6be0009a59a84e7d7330bb960d6b",
+  "comparison": "cumulative staged S0-S4 candidate; excludes this generated cost JSON and its accompanying comparison report by definition; numbers are diff not SLOC",
+  "groups": {
+    "tooling_configuration_other": {
+      "files": 20,
+      "added": 2358,
+      "deleted": 83
+    },
+    "generated_policy_catalog_seed": {
+      "files": 112,
+      "added": 75838,
+      "deleted": 0
+    },
+    "database_migrations": {
+      "files": 5,
+      "added": 1214,
+      "deleted": 0
+    },
+    "backend_domain_and_adapter": {
+      "files": 220,
+      "added": 22230,
+      "deleted": 3948
+    },
+    "backend_authorization_core": {
+      "files": 21,
+      "added": 6430,
+      "deleted": 0
+    },
+    "tests_and_test_fixtures": {
+      "files": 264,
+      "added": 25362,
+      "deleted": 694
+    },
+    "review_and_documentation": {
+      "files": 125,
+      "added": 241619,
+      "deleted": 0
+    },
+    "frontend_runtime": {
+      "files": 174,
+      "added": 13886,
+      "deleted": 5132
+    }
+  },
+  "totals": {
+    "files": 941,
+    "added": 388937,
+    "deleted": 9857
+  },
+  "files": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "group": "tooling_configuration_other",
+      "added": 119,
+      "deleted": 20
+    },
+    {
+      "path": "AGENTS.md",
+      "group": "tooling_configuration_other",
+      "added": 2,
+      "deleted": 0
+    },
+    {
+      "path": "CONTEXT.md",
+      "group": "tooling_configuration_other",
+      "added": 15,
+      "deleted": 1
+    },
+    {
+      "path": "backend/alembic/seed_data/authz_s2.json",
+      "group": "generated_policy_catalog_seed",
+      "added": 6065,
+      "deleted": 0
+    },
+    {
+      "path": "backend/alembic/seed_data/authz_s3.json",
+      "group": "generated_policy_catalog_seed",
+      "added": 20381,
+      "deleted": 0
+    },
+    {
+      "path": "backend/alembic/seed_data/authz_s4.json",
+      "group": "generated_policy_catalog_seed",
+      "added": 11229,
+      "deleted": 0
+    },
+    {
+      "path": "backend/alembic/versions/a7c2e9f4b6d1_canonical_authorization_profiles.py",
+      "group": "database_migrations",
+      "added": 74,
+      "deleted": 0
+    },
+    {
+      "path": "backend/alembic/versions/c9d4e8f2a6b1_business_authorization.py",
+      "group": "database_migrations",
+      "added": 310,
+      "deleted": 0
+    },
+    {
+      "path": "backend/alembic/versions/d6e9f2a4b7c1_maintenance_authorization.py",
+      "group": "database_migrations",
+      "added": 426,
+      "deleted": 0
+    },
+    {
+      "path": "backend/alembic/versions/e4a7c9f2b6d8_platform_import_authorization.py",
+      "group": "database_migrations",
+      "added": 306,
+      "deleted": 0
+    },
+    {
+      "path": "backend/alembic/versions/f1a3c5e7b9d2_authorization_sales_customers.py",
+      "group": "database_migrations",
+      "added": 98,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/agent/prompts.py",
+      "group": "backend_domain_and_adapter",
+      "added": 2,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/agent/runtime.py",
+      "group": "backend_domain_and_adapter",
+      "added": 37,
+      "deleted": 7
+    },
+    {
+      "path": "backend/app/agent/stream_protocol.py",
+      "group": "backend_domain_and_adapter",
+      "added": 121,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/agent/tools.py",
+      "group": "backend_domain_and_adapter",
+      "added": 134,
+      "deleted": 3
+    },
+    {
+      "path": "backend/app/api/accounts.py",
+      "group": "backend_domain_and_adapter",
+      "added": 104,
+      "deleted": 45
+    },
+    {
+      "path": "backend/app/api/agent.py",
+      "group": "backend_domain_and_adapter",
+      "added": 136,
+      "deleted": 38
+    },
+    {
+      "path": "backend/app/api/agent_route.py",
+      "group": "backend_domain_and_adapter",
+      "added": 23,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/api/authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 94,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/api/authz_route.py",
+      "group": "backend_domain_and_adapter",
+      "added": 35,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/api/chat_sessions.py",
+      "group": "backend_domain_and_adapter",
+      "added": 214,
+      "deleted": 61
+    },
+    {
+      "path": "backend/app/api/dashboard.py",
+      "group": "backend_domain_and_adapter",
+      "added": 47,
+      "deleted": 91
+    },
+    {
+      "path": "backend/app/api/data_quality.py",
+      "group": "backend_domain_and_adapter",
+      "added": 20,
+      "deleted": 64
+    },
+    {
+      "path": "backend/app/api/data_quality_calibration.py",
+      "group": "backend_domain_and_adapter",
+      "added": 11,
+      "deleted": 19
+    },
+    {
+      "path": "backend/app/api/governance.py",
+      "group": "backend_domain_and_adapter",
+      "added": 152,
+      "deleted": 198
+    },
+    {
+      "path": "backend/app/api/imports.py",
+      "group": "backend_domain_and_adapter",
+      "added": 167,
+      "deleted": 21
+    },
+    {
+      "path": "backend/app/api/inventory.py",
+      "group": "backend_domain_and_adapter",
+      "added": 18,
+      "deleted": 15
+    },
+    {
+      "path": "backend/app/api/maintenance.py",
+      "group": "backend_domain_and_adapter",
+      "added": 181,
+      "deleted": 36
+    },
+    {
+      "path": "backend/app/api/maintenance_acceptance.py",
+      "group": "backend_domain_and_adapter",
+      "added": 111,
+      "deleted": 28
+    },
+    {
+      "path": "backend/app/api/maintenance_acceptance_checklist.py",
+      "group": "backend_domain_and_adapter",
+      "added": 76,
+      "deleted": 10
+    },
+    {
+      "path": "backend/app/api/maintenance_ai_fallback.py",
+      "group": "backend_domain_and_adapter",
+      "added": 61,
+      "deleted": 29
+    },
+    {
+      "path": "backend/app/api/maintenance_analytics.py",
+      "group": "backend_domain_and_adapter",
+      "added": 35,
+      "deleted": 4
+    },
+    {
+      "path": "backend/app/api/maintenance_audit.py",
+      "group": "backend_domain_and_adapter",
+      "added": 12,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/api/maintenance_bad_returns.py",
+      "group": "backend_domain_and_adapter",
+      "added": 160,
+      "deleted": 22
+    },
+    {
+      "path": "backend/app/api/maintenance_bad_salvage.py",
+      "group": "backend_domain_and_adapter",
+      "added": 51,
+      "deleted": 9
+    },
+    {
+      "path": "backend/app/api/maintenance_boss_board.py",
+      "group": "backend_domain_and_adapter",
+      "added": 106,
+      "deleted": 24
+    },
+    {
+      "path": "backend/app/api/maintenance_ckd_import.py",
+      "group": "backend_domain_and_adapter",
+      "added": 44,
+      "deleted": 8
+    },
+    {
+      "path": "backend/app/api/maintenance_collection_evidence.py",
+      "group": "backend_domain_and_adapter",
+      "added": 30,
+      "deleted": 4
+    },
+    {
+      "path": "backend/app/api/maintenance_collection_plan_imports.py",
+      "group": "backend_domain_and_adapter",
+      "added": 60,
+      "deleted": 8
+    },
+    {
+      "path": "backend/app/api/maintenance_collection_reminders.py",
+      "group": "backend_domain_and_adapter",
+      "added": 35,
+      "deleted": 7
+    },
+    {
+      "path": "backend/app/api/maintenance_dashboard.py",
+      "group": "backend_domain_and_adapter",
+      "added": 140,
+      "deleted": 491
+    },
+    {
+      "path": "backend/app/api/maintenance_demands.py",
+      "group": "backend_domain_and_adapter",
+      "added": 250,
+      "deleted": 26
+    },
+    {
+      "path": "backend/app/api/maintenance_doc_import.py",
+      "group": "backend_domain_and_adapter",
+      "added": 54,
+      "deleted": 10
+    },
+    {
+      "path": "backend/app/api/maintenance_expense_collection_workbook.py",
+      "group": "backend_domain_and_adapter",
+      "added": 64,
+      "deleted": 14
+    },
+    {
+      "path": "backend/app/api/maintenance_expense_reconcile.py",
+      "group": "backend_domain_and_adapter",
+      "added": 10,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/api/maintenance_front_stock.py",
+      "group": "backend_domain_and_adapter",
+      "added": 11,
+      "deleted": 48
+    },
+    {
+      "path": "backend/app/api/maintenance_ledger.py",
+      "group": "backend_domain_and_adapter",
+      "added": 56,
+      "deleted": 12
+    },
+    {
+      "path": "backend/app/api/maintenance_manager_directory.py",
+      "group": "backend_domain_and_adapter",
+      "added": 17,
+      "deleted": 3
+    },
+    {
+      "path": "backend/app/api/maintenance_manager_workbooks.py",
+      "group": "backend_domain_and_adapter",
+      "added": 75,
+      "deleted": 16
+    },
+    {
+      "path": "backend/app/api/maintenance_migration.py",
+      "group": "backend_domain_and_adapter",
+      "added": 119,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/api/maintenance_project_assignments.py",
+      "group": "backend_domain_and_adapter",
+      "added": 27,
+      "deleted": 9
+    },
+    {
+      "path": "backend/app/api/maintenance_project_batch_transfer.py",
+      "group": "backend_domain_and_adapter",
+      "added": 65,
+      "deleted": 143
+    },
+    {
+      "path": "backend/app/api/maintenance_project_master_workbook.py",
+      "group": "backend_domain_and_adapter",
+      "added": 151,
+      "deleted": 322
+    },
+    {
+      "path": "backend/app/api/maintenance_project_operations.py",
+      "group": "backend_domain_and_adapter",
+      "added": 387,
+      "deleted": 85
+    },
+    {
+      "path": "backend/app/api/maintenance_project_scope.py",
+      "group": "backend_domain_and_adapter",
+      "added": 36,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/api/maintenance_project_workbook_v3.py",
+      "group": "backend_domain_and_adapter",
+      "added": 23,
+      "deleted": 11
+    },
+    {
+      "path": "backend/app/api/maintenance_project_workbooks.py",
+      "group": "backend_domain_and_adapter",
+      "added": 121,
+      "deleted": 38
+    },
+    {
+      "path": "backend/app/api/maintenance_projects.py",
+      "group": "backend_domain_and_adapter",
+      "added": 102,
+      "deleted": 21
+    },
+    {
+      "path": "backend/app/api/maintenance_recovery.py",
+      "group": "backend_domain_and_adapter",
+      "added": 11,
+      "deleted": 3
+    },
+    {
+      "path": "backend/app/api/maintenance_return_receipt_import.py",
+      "group": "backend_domain_and_adapter",
+      "added": 86,
+      "deleted": 4
+    },
+    {
+      "path": "backend/app/api/maintenance_return_receipts.py",
+      "group": "backend_domain_and_adapter",
+      "added": 110,
+      "deleted": 12
+    },
+    {
+      "path": "backend/app/api/maintenance_row_workbench.py",
+      "group": "backend_domain_and_adapter",
+      "added": 42,
+      "deleted": 4
+    },
+    {
+      "path": "backend/app/api/maintenance_source_assignments.py",
+      "group": "backend_domain_and_adapter",
+      "added": 68,
+      "deleted": 8
+    },
+    {
+      "path": "backend/app/api/maintenance_source_cancel_cascade.py",
+      "group": "backend_domain_and_adapter",
+      "added": 55,
+      "deleted": 5
+    },
+    {
+      "path": "backend/app/api/maintenance_warehouse.py",
+      "group": "backend_domain_and_adapter",
+      "added": 69,
+      "deleted": 16
+    },
+    {
+      "path": "backend/app/api/maintenance_wbdd_import.py",
+      "group": "backend_domain_and_adapter",
+      "added": 43,
+      "deleted": 10
+    },
+    {
+      "path": "backend/app/api/parts.py",
+      "group": "backend_domain_and_adapter",
+      "added": 115,
+      "deleted": 166
+    },
+    {
+      "path": "backend/app/api/pool_analysis.py",
+      "group": "backend_domain_and_adapter",
+      "added": 27,
+      "deleted": 58
+    },
+    {
+      "path": "backend/app/api/pools.py",
+      "group": "backend_domain_and_adapter",
+      "added": 40,
+      "deleted": 111
+    },
+    {
+      "path": "backend/app/api/profit.py",
+      "group": "backend_domain_and_adapter",
+      "added": 14,
+      "deleted": 84
+    },
+    {
+      "path": "backend/app/api/purchases.py",
+      "group": "backend_domain_and_adapter",
+      "added": 36,
+      "deleted": 30
+    },
+    {
+      "path": "backend/app/api/replenishment.py",
+      "group": "backend_domain_and_adapter",
+      "added": 167,
+      "deleted": 26
+    },
+    {
+      "path": "backend/app/api/resale_catalog_export.py",
+      "group": "backend_domain_and_adapter",
+      "added": 34,
+      "deleted": 37
+    },
+    {
+      "path": "backend/app/api/resale_export.py",
+      "group": "backend_domain_and_adapter",
+      "added": 3,
+      "deleted": 13
+    },
+    {
+      "path": "backend/app/api/role_templates.py",
+      "group": "backend_domain_and_adapter",
+      "added": 60,
+      "deleted": 16
+    },
+    {
+      "path": "backend/app/api/sales_analytics.py",
+      "group": "backend_domain_and_adapter",
+      "added": 54,
+      "deleted": 23
+    },
+    {
+      "path": "backend/app/api/substitutes.py",
+      "group": "backend_domain_and_adapter",
+      "added": 16,
+      "deleted": 10
+    },
+    {
+      "path": "backend/app/api/system_settings.py",
+      "group": "backend_domain_and_adapter",
+      "added": 26,
+      "deleted": 6
+    },
+    {
+      "path": "backend/app/auth.py",
+      "group": "backend_domain_and_adapter",
+      "added": 28,
+      "deleted": 4
+    },
+    {
+      "path": "backend/app/authz/__init__.py",
+      "group": "backend_authorization_core",
+      "added": 1,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/boundaries.py",
+      "group": "backend_authorization_core",
+      "added": 134,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/business_definitions.py",
+      "group": "backend_authorization_core",
+      "added": 349,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/catalog.py",
+      "group": "backend_authorization_core",
+      "added": 222,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/catalog_manifest.json",
+      "group": "generated_policy_catalog_seed",
+      "added": 114,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/context.py",
+      "group": "backend_authorization_core",
+      "added": 201,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/context_registry.py",
+      "group": "backend_authorization_core",
+      "added": 491,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/control_access.py",
+      "group": "backend_authorization_core",
+      "added": 105,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/domain_contexts.py",
+      "group": "backend_authorization_core",
+      "added": 342,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/engine.py",
+      "group": "backend_authorization_core",
+      "added": 384,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/errors.py",
+      "group": "backend_authorization_core",
+      "added": 9,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/import_context_registry.py",
+      "group": "backend_authorization_core",
+      "added": 73,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/import_contract.py",
+      "group": "backend_authorization_core",
+      "added": 26,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/machine_access.py",
+      "group": "backend_authorization_core",
+      "added": 62,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/maintenance_definitions.py",
+      "group": "backend_authorization_core",
+      "added": 1371,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/management.py",
+      "group": "backend_authorization_core",
+      "added": 719,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/platform_context_registry.py",
+      "group": "backend_authorization_core",
+      "added": 290,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/platform_definitions.py",
+      "group": "backend_authorization_core",
+      "added": 333,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/principal.py",
+      "group": "backend_authorization_core",
+      "added": 124,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/provenance.py",
+      "group": "backend_authorization_core",
+      "added": 342,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/runtime.py",
+      "group": "backend_authorization_core",
+      "added": 194,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/authz/service.py",
+      "group": "backend_authorization_core",
+      "added": 658,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/config.py",
+      "group": "backend_domain_and_adapter",
+      "added": 21,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/etl/expense_void.py",
+      "group": "backend_domain_and_adapter",
+      "added": 25,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/etl/pipeline.py",
+      "group": "backend_domain_and_adapter",
+      "added": 15,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/main.py",
+      "group": "backend_domain_and_adapter",
+      "added": 34,
+      "deleted": 25
+    },
+    {
+      "path": "backend/app/maintenance_beta.py",
+      "group": "backend_domain_and_adapter",
+      "added": 35,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/models/__init__.py",
+      "group": "backend_domain_and_adapter",
+      "added": 5,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/models/authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 86,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/models/chat.py",
+      "group": "backend_domain_and_adapter",
+      "added": 7,
+      "deleted": 5
+    },
+    {
+      "path": "backend/app/models/maintenance.py",
+      "group": "backend_domain_and_adapter",
+      "added": 2,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/models/maintenance_acceptance_checklist.py",
+      "group": "backend_domain_and_adapter",
+      "added": 6,
+      "deleted": 5
+    },
+    {
+      "path": "backend/app/models/maintenance_ai_fallback.py",
+      "group": "backend_domain_and_adapter",
+      "added": 4,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/models/maintenance_bad_return.py",
+      "group": "backend_domain_and_adapter",
+      "added": 3,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/models/maintenance_bad_salvage.py",
+      "group": "backend_domain_and_adapter",
+      "added": 3,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/models/maintenance_ckd_import.py",
+      "group": "backend_domain_and_adapter",
+      "added": 6,
+      "deleted": 5
+    },
+    {
+      "path": "backend/app/models/maintenance_doc_import.py",
+      "group": "backend_domain_and_adapter",
+      "added": 8,
+      "deleted": 5
+    },
+    {
+      "path": "backend/app/models/maintenance_ledger.py",
+      "group": "backend_domain_and_adapter",
+      "added": 6,
+      "deleted": 5
+    },
+    {
+      "path": "backend/app/models/maintenance_manager.py",
+      "group": "backend_domain_and_adapter",
+      "added": 8,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/models/maintenance_migration.py",
+      "group": "backend_domain_and_adapter",
+      "added": 17,
+      "deleted": 3
+    },
+    {
+      "path": "backend/app/models/maintenance_project_operations.py",
+      "group": "backend_domain_and_adapter",
+      "added": 4,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/models/maintenance_warehouse.py",
+      "group": "backend_domain_and_adapter",
+      "added": 1,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/models/maintenance_wbdd_import.py",
+      "group": "backend_domain_and_adapter",
+      "added": 6,
+      "deleted": 5
+    },
+    {
+      "path": "backend/app/models/replenishment.py",
+      "group": "backend_domain_and_adapter",
+      "added": 7,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/models/system.py",
+      "group": "backend_domain_and_adapter",
+      "added": 58,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/schemas/maintenance_collection_reminders.py",
+      "group": "backend_domain_and_adapter",
+      "added": 3,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/security.py",
+      "group": "backend_domain_and_adapter",
+      "added": 21,
+      "deleted": 5
+    },
+    {
+      "path": "backend/app/seed_users.py",
+      "group": "backend_domain_and_adapter",
+      "added": 5,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/services/agent_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 203,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/agent_file_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 174,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/agent_files.py",
+      "group": "backend_domain_and_adapter",
+      "added": 146,
+      "deleted": 9
+    },
+    {
+      "path": "backend/app/services/authorization_artifacts.py",
+      "group": "backend_domain_and_adapter",
+      "added": 499,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/authorization_downloads.py",
+      "group": "backend_domain_and_adapter",
+      "added": 78,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/batch_normalize.py",
+      "group": "backend_domain_and_adapter",
+      "added": 22,
+      "deleted": 12
+    },
+    {
+      "path": "backend/app/services/business_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 14,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/chat_store.py",
+      "group": "backend_domain_and_adapter",
+      "added": 162,
+      "deleted": 25
+    },
+    {
+      "path": "backend/app/services/company_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 111,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/dashboard.py",
+      "group": "backend_domain_and_adapter",
+      "added": 3,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/services/data_quality.py",
+      "group": "backend_domain_and_adapter",
+      "added": 28,
+      "deleted": 13
+    },
+    {
+      "path": "backend/app/services/governance.py",
+      "group": "backend_domain_and_adapter",
+      "added": 5,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/services/governance_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 324,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/import_void_preview.py",
+      "group": "backend_domain_and_adapter",
+      "added": 6,
+      "deleted": 4
+    },
+    {
+      "path": "backend/app/services/inventory.py",
+      "group": "backend_domain_and_adapter",
+      "added": 49,
+      "deleted": 3
+    },
+    {
+      "path": "backend/app/services/maintenance_acceptance.py",
+      "group": "backend_domain_and_adapter",
+      "added": 52,
+      "deleted": 22
+    },
+    {
+      "path": "backend/app/services/maintenance_acceptance_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 212,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_acceptance_checklist.py",
+      "group": "backend_domain_and_adapter",
+      "added": 55,
+      "deleted": 7
+    },
+    {
+      "path": "backend/app/services/maintenance_ai_fallback.py",
+      "group": "backend_domain_and_adapter",
+      "added": 17,
+      "deleted": 8
+    },
+    {
+      "path": "backend/app/services/maintenance_ai_fallback_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 333,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_analysis_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 75,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_analytics.py",
+      "group": "backend_domain_and_adapter",
+      "added": 25,
+      "deleted": 3
+    },
+    {
+      "path": "backend/app/services/maintenance_analytics_explorer.py",
+      "group": "backend_domain_and_adapter",
+      "added": 4,
+      "deleted": 4
+    },
+    {
+      "path": "backend/app/services/maintenance_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 522,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_authorization_relations.py",
+      "group": "backend_domain_and_adapter",
+      "added": 85,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_bad_returns.py",
+      "group": "backend_domain_and_adapter",
+      "added": 26,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/services/maintenance_bad_salvage.py",
+      "group": "backend_domain_and_adapter",
+      "added": 5,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_batch_transfer_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 535,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_board_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 154,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_boss_board.py",
+      "group": "backend_domain_and_adapter",
+      "added": 144,
+      "deleted": 67
+    },
+    {
+      "path": "backend/app/services/maintenance_bulk_import.py",
+      "group": "backend_domain_and_adapter",
+      "added": 77,
+      "deleted": 27
+    },
+    {
+      "path": "backend/app/services/maintenance_business_type_backfill.py",
+      "group": "backend_domain_and_adapter",
+      "added": 4,
+      "deleted": 3
+    },
+    {
+      "path": "backend/app/services/maintenance_ckd_import.py",
+      "group": "backend_domain_and_adapter",
+      "added": 35,
+      "deleted": 6
+    },
+    {
+      "path": "backend/app/services/maintenance_collection_evidence.py",
+      "group": "backend_domain_and_adapter",
+      "added": 9,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_collection_followup_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 193,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_collection_milestone_restore.py",
+      "group": "backend_domain_and_adapter",
+      "added": 10,
+      "deleted": 3
+    },
+    {
+      "path": "backend/app/services/maintenance_collection_plan_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 256,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_collection_plan_imports.py",
+      "group": "backend_domain_and_adapter",
+      "added": 96,
+      "deleted": 52
+    },
+    {
+      "path": "backend/app/services/maintenance_collection_reminders.py",
+      "group": "backend_domain_and_adapter",
+      "added": 82,
+      "deleted": 26
+    },
+    {
+      "path": "backend/app/services/maintenance_cost.py",
+      "group": "backend_domain_and_adapter",
+      "added": 105,
+      "deleted": 37
+    },
+    {
+      "path": "backend/app/services/maintenance_cost_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 119,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_dashboard.py",
+      "group": "backend_domain_and_adapter",
+      "added": 13,
+      "deleted": 7
+    },
+    {
+      "path": "backend/app/services/maintenance_dashboard_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 254,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_dashboard_export.py",
+      "group": "backend_domain_and_adapter",
+      "added": 490,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_dashboard_valuation.py",
+      "group": "backend_domain_and_adapter",
+      "added": 2,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/services/maintenance_demand_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 428,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_demand_manual.py",
+      "group": "backend_domain_and_adapter",
+      "added": 7,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/services/maintenance_demands.py",
+      "group": "backend_domain_and_adapter",
+      "added": 63,
+      "deleted": 10
+    },
+    {
+      "path": "backend/app/services/maintenance_diagnostics_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 42,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_doc_import.py",
+      "group": "backend_domain_and_adapter",
+      "added": 72,
+      "deleted": 12
+    },
+    {
+      "path": "backend/app/services/maintenance_expense_collection_workbook.py",
+      "group": "backend_domain_and_adapter",
+      "added": 13,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/services/maintenance_export.py",
+      "group": "backend_domain_and_adapter",
+      "added": 44,
+      "deleted": 17
+    },
+    {
+      "path": "backend/app/services/maintenance_finance_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 148,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_global_lines_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 102,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_global_workbook_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 202,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_import_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 439,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_ledger.py",
+      "group": "backend_domain_and_adapter",
+      "added": 137,
+      "deleted": 7
+    },
+    {
+      "path": "backend/app/services/maintenance_manager_workbook_adapter.py",
+      "group": "backend_domain_and_adapter",
+      "added": 167,
+      "deleted": 21
+    },
+    {
+      "path": "backend/app/services/maintenance_manager_workbook_v3.py",
+      "group": "backend_domain_and_adapter",
+      "added": 2,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/services/maintenance_master_apply_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 435,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_master_command_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 258,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_master_workbook_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 422,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_migration_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 257,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_migration_legacy.py",
+      "group": "backend_domain_and_adapter",
+      "added": 23,
+      "deleted": 8
+    },
+    {
+      "path": "backend/app/services/maintenance_migration_runs.py",
+      "group": "backend_domain_and_adapter",
+      "added": 181,
+      "deleted": 86
+    },
+    {
+      "path": "backend/app/services/maintenance_migration_source.py",
+      "group": "backend_domain_and_adapter",
+      "added": 18,
+      "deleted": 8
+    },
+    {
+      "path": "backend/app/services/maintenance_migration_warehouse.py",
+      "group": "backend_domain_and_adapter",
+      "added": 9,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/services/maintenance_milestone_restore_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 67,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_operation_backfill_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 121,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_project.py",
+      "group": "backend_domain_and_adapter",
+      "added": 35,
+      "deleted": 11
+    },
+    {
+      "path": "backend/app/services/maintenance_project_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 210,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_project_assignments.py",
+      "group": "backend_domain_and_adapter",
+      "added": 137,
+      "deleted": 6
+    },
+    {
+      "path": "backend/app/services/maintenance_project_backfill_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 94,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_project_catalog.py",
+      "group": "backend_domain_and_adapter",
+      "added": 6,
+      "deleted": 3
+    },
+    {
+      "path": "backend/app/services/maintenance_project_export.py",
+      "group": "backend_domain_and_adapter",
+      "added": 7,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/services/maintenance_project_master_workbook.py",
+      "group": "backend_domain_and_adapter",
+      "added": 73,
+      "deleted": 16
+    },
+    {
+      "path": "backend/app/services/maintenance_project_operations.py",
+      "group": "backend_domain_and_adapter",
+      "added": 526,
+      "deleted": 319
+    },
+    {
+      "path": "backend/app/services/maintenance_project_read_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 136,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_project_workbook_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 123,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_project_workbook_adapter.py",
+      "group": "backend_domain_and_adapter",
+      "added": 72,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/services/maintenance_project_workbook_v3.py",
+      "group": "backend_domain_and_adapter",
+      "added": 21,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/services/maintenance_return_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 374,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_return_import_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 376,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_return_metrics.py",
+      "group": "backend_domain_and_adapter",
+      "added": 6,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_return_receipt_import.py",
+      "group": "backend_domain_and_adapter",
+      "added": 74,
+      "deleted": 21
+    },
+    {
+      "path": "backend/app/services/maintenance_return_receipts.py",
+      "group": "backend_domain_and_adapter",
+      "added": 5,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_roundtrip.py",
+      "group": "backend_domain_and_adapter",
+      "added": 27,
+      "deleted": 4
+    },
+    {
+      "path": "backend/app/services/maintenance_roundtrip_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 250,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_row_workbench.py",
+      "group": "backend_domain_and_adapter",
+      "added": 43,
+      "deleted": 14
+    },
+    {
+      "path": "backend/app/services/maintenance_row_workbench_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 67,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_site_issue_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 186,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_source_assignment_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 289,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_source_assignments.py",
+      "group": "backend_domain_and_adapter",
+      "added": 178,
+      "deleted": 86
+    },
+    {
+      "path": "backend/app/services/maintenance_source_cancel_cascade.py",
+      "group": "backend_domain_and_adapter",
+      "added": 27,
+      "deleted": 6
+    },
+    {
+      "path": "backend/app/services/maintenance_source_cancellation_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 173,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_source_health.py",
+      "group": "backend_domain_and_adapter",
+      "added": 31,
+      "deleted": 1
+    },
+    {
+      "path": "backend/app/services/maintenance_transfer_options.py",
+      "group": "backend_domain_and_adapter",
+      "added": 145,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_warehouse.py",
+      "group": "backend_domain_and_adapter",
+      "added": 19,
+      "deleted": 6
+    },
+    {
+      "path": "backend/app/services/maintenance_warehouse_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 495,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_wbdd_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 273,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/maintenance_wbdd_import.py",
+      "group": "backend_domain_and_adapter",
+      "added": 25,
+      "deleted": 6
+    },
+    {
+      "path": "backend/app/services/maintenance_wbdd_sync.py",
+      "group": "backend_domain_and_adapter",
+      "added": 23,
+      "deleted": 4
+    },
+    {
+      "path": "backend/app/services/maintenance_workflow_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 487,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/master_data.py",
+      "group": "backend_domain_and_adapter",
+      "added": 20,
+      "deleted": 8
+    },
+    {
+      "path": "backend/app/services/master_edit.py",
+      "group": "backend_domain_and_adapter",
+      "added": 6,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/services/match_candidates.py",
+      "group": "backend_domain_and_adapter",
+      "added": 11,
+      "deleted": 5
+    },
+    {
+      "path": "backend/app/services/merge.py",
+      "group": "backend_domain_and_adapter",
+      "added": 10,
+      "deleted": 4
+    },
+    {
+      "path": "backend/app/services/part_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 271,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/part_overview.py",
+      "group": "backend_domain_and_adapter",
+      "added": 55,
+      "deleted": 31
+    },
+    {
+      "path": "backend/app/services/part_rename.py",
+      "group": "backend_domain_and_adapter",
+      "added": 9,
+      "deleted": 3
+    },
+    {
+      "path": "backend/app/services/pool.py",
+      "group": "backend_domain_and_adapter",
+      "added": 39,
+      "deleted": 7
+    },
+    {
+      "path": "backend/app/services/pool_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 264,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/pool_catalog.py",
+      "group": "backend_domain_and_adapter",
+      "added": 95,
+      "deleted": 36
+    },
+    {
+      "path": "backend/app/services/pool_price_analysis.py",
+      "group": "backend_domain_and_adapter",
+      "added": 72,
+      "deleted": 54
+    },
+    {
+      "path": "backend/app/services/profit.py",
+      "group": "backend_domain_and_adapter",
+      "added": 115,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/services/purchase_analysis.py",
+      "group": "backend_domain_and_adapter",
+      "added": 41,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/purchase_query.py",
+      "group": "backend_domain_and_adapter",
+      "added": 12,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/replenishment.py",
+      "group": "backend_domain_and_adapter",
+      "added": 99,
+      "deleted": 27
+    },
+    {
+      "path": "backend/app/services/replenishment_authorization.py",
+      "group": "backend_domain_and_adapter",
+      "added": 338,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/replenishment_cart.py",
+      "group": "backend_domain_and_adapter",
+      "added": 17,
+      "deleted": 10
+    },
+    {
+      "path": "backend/app/services/sales_analytics.py",
+      "group": "backend_domain_and_adapter",
+      "added": 15,
+      "deleted": 5
+    },
+    {
+      "path": "backend/app/services/sales_dashboard.py",
+      "group": "backend_domain_and_adapter",
+      "added": 8,
+      "deleted": 2
+    },
+    {
+      "path": "backend/app/services/source_import_access.py",
+      "group": "backend_domain_and_adapter",
+      "added": 663,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/source_import_permit.py",
+      "group": "backend_domain_and_adapter",
+      "added": 52,
+      "deleted": 0
+    },
+    {
+      "path": "backend/app/services/substitute.py",
+      "group": "backend_domain_and_adapter",
+      "added": 10,
+      "deleted": 4
+    },
+    {
+      "path": "backend/app/services/workbook_tasks.py",
+      "group": "backend_domain_and_adapter",
+      "added": 40,
+      "deleted": 0
+    },
+    {
+      "path": "backend/dependency-sbom.cdx.json",
+      "group": "tooling_configuration_other",
+      "added": 862,
+      "deleted": 59
+    },
+    {
+      "path": "backend/pyproject.toml",
+      "group": "tooling_configuration_other",
+      "added": 2,
+      "deleted": 0
+    },
+    {
+      "path": "backend/requirements.lock",
+      "group": "tooling_configuration_other",
+      "added": 219,
+      "deleted": 2
+    },
+    {
+      "path": "backend/scripts/generate_authz_frontend.py",
+      "group": "tooling_configuration_other",
+      "added": 142,
+      "deleted": 0
+    },
+    {
+      "path": "backend/scripts/generate_authz_policies.py",
+      "group": "tooling_configuration_other",
+      "added": 67,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/authz_pdp_helpers.py",
+      "group": "tests_and_test_fixtures",
+      "added": 74,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/conftest.py",
+      "group": "tests_and_test_fixtures",
+      "added": 12,
+      "deleted": 4
+    },
+    {
+      "path": "backend/tests/fixtures/authz_noncontext_http_inventory.json",
+      "group": "tests_and_test_fixtures",
+      "added": 707,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_agent_harden.py",
+      "group": "tests_and_test_fixtures",
+      "added": 13,
+      "deleted": 10
+    },
+    {
+      "path": "backend/tests/test_agent_runtime.py",
+      "group": "tests_and_test_fixtures",
+      "added": 6,
+      "deleted": 6
+    },
+    {
+      "path": "backend/tests/test_authorization_management.py",
+      "group": "tests_and_test_fixtures",
+      "added": 441,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_engine.py",
+      "group": "tests_and_test_fixtures",
+      "added": 130,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_legacy_seed_origin.py",
+      "group": "tests_and_test_fixtures",
+      "added": 205,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s1_adversarial.py",
+      "group": "tests_and_test_fixtures",
+      "added": 934,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s1_business_cutover_review.py",
+      "group": "tests_and_test_fixtures",
+      "added": 210,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s1_password_race.py",
+      "group": "tests_and_test_fixtures",
+      "added": 51,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s2_agent_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 115,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s2_agent_provenance.py",
+      "group": "tests_and_test_fixtures",
+      "added": 432,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s2_b1_adversarial.py",
+      "group": "tests_and_test_fixtures",
+      "added": 222,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s2_b1_entrypoints.py",
+      "group": "tests_and_test_fixtures",
+      "added": 56,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s2_b2b3_entries.py",
+      "group": "tests_and_test_fixtures",
+      "added": 116,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s2_governance_access.py",
+      "group": "tests_and_test_fixtures",
+      "added": 149,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s2_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 139,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s2_part_access.py",
+      "group": "tests_and_test_fixtures",
+      "added": 208,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s2_pool_access.py",
+      "group": "tests_and_test_fixtures",
+      "added": 287,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s2_read_set.py",
+      "group": "tests_and_test_fixtures",
+      "added": 93,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s2_seed_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 78,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_acceptance.py",
+      "group": "tests_and_test_fixtures",
+      "added": 292,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_ai_fallback.py",
+      "group": "tests_and_test_fixtures",
+      "added": 329,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_analysis.py",
+      "group": "tests_and_test_fixtures",
+      "added": 92,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_artifacts.py",
+      "group": "tests_and_test_fixtures",
+      "added": 362,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_assignment_commands.py",
+      "group": "tests_and_test_fixtures",
+      "added": 174,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_batch_transfer.py",
+      "group": "tests_and_test_fixtures",
+      "added": 242,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_batch_transfer_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 143,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_board.py",
+      "group": "tests_and_test_fixtures",
+      "added": 206,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_bootstrap_metadata.py",
+      "group": "tests_and_test_fixtures",
+      "added": 73,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_checklist.py",
+      "group": "tests_and_test_fixtures",
+      "added": 128,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_collection_followup.py",
+      "group": "tests_and_test_fixtures",
+      "added": 198,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_collection_plan.py",
+      "group": "tests_and_test_fixtures",
+      "added": 215,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_collection_plan_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 26,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_collection_relations.py",
+      "group": "tests_and_test_fixtures",
+      "added": 141,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_core.py",
+      "group": "tests_and_test_fixtures",
+      "added": 125,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_dashboard.py",
+      "group": "tests_and_test_fixtures",
+      "added": 123,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_demand_field_seed.py",
+      "group": "tests_and_test_fixtures",
+      "added": 19,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_demands.py",
+      "group": "tests_and_test_fixtures",
+      "added": 391,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_diagnostics.py",
+      "group": "tests_and_test_fixtures",
+      "added": 40,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_document_imports.py",
+      "group": "tests_and_test_fixtures",
+      "added": 202,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_finance.py",
+      "group": "tests_and_test_fixtures",
+      "added": 295,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_frontend_protocol.py",
+      "group": "tests_and_test_fixtures",
+      "added": 270,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_global_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 33,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_global_workbooks.py",
+      "group": "tests_and_test_fixtures",
+      "added": 155,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_import_projection.py",
+      "group": "tests_and_test_fixtures",
+      "added": 67,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 260,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_ledger.py",
+      "group": "tests_and_test_fixtures",
+      "added": 183,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_main_mounts.py",
+      "group": "tests_and_test_fixtures",
+      "added": 38,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_master_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 99,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_master_remaining.py",
+      "group": "tests_and_test_fixtures",
+      "added": 125,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_master_workbooks.py",
+      "group": "tests_and_test_fixtures",
+      "added": 584,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 170,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_migration_runs.py",
+      "group": "tests_and_test_fixtures",
+      "added": 300,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_monthly_workbooks.py",
+      "group": "tests_and_test_fixtures",
+      "added": 241,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_mount_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 65,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_operation_backfills.py",
+      "group": "tests_and_test_fixtures",
+      "added": 91,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_project_backfill.py",
+      "group": "tests_and_test_fixtures",
+      "added": 66,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_project_foundation.py",
+      "group": "tests_and_test_fixtures",
+      "added": 162,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_project_workbooks.py",
+      "group": "tests_and_test_fixtures",
+      "added": 196,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_projects.py",
+      "group": "tests_and_test_fixtures",
+      "added": 335,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_replenishment.py",
+      "group": "tests_and_test_fixtures",
+      "added": 331,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_return_import.py",
+      "group": "tests_and_test_fixtures",
+      "added": 193,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_return_import_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 80,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_returns.py",
+      "group": "tests_and_test_fixtures",
+      "added": 383,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_roundtrip.py",
+      "group": "tests_and_test_fixtures",
+      "added": 211,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_roundtrip_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 73,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_row_workbench.py",
+      "group": "tests_and_test_fixtures",
+      "added": 172,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_site_issue.py",
+      "group": "tests_and_test_fixtures",
+      "added": 210,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_source_assignments.py",
+      "group": "tests_and_test_fixtures",
+      "added": 235,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_source_cancellation.py",
+      "group": "tests_and_test_fixtures",
+      "added": 110,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_source_cost.py",
+      "group": "tests_and_test_fixtures",
+      "added": 142,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_tail_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 131,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_warehouse.py",
+      "group": "tests_and_test_fixtures",
+      "added": 421,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_wbdd.py",
+      "group": "tests_and_test_fixtures",
+      "added": 213,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_workbook_bootstrap.py",
+      "group": "tests_and_test_fixtures",
+      "added": 88,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_workbook_metadata_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 31,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_workbooks.py",
+      "group": "tests_and_test_fixtures",
+      "added": 136,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_workflow_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 74,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s3_workspace.py",
+      "group": "tests_and_test_fixtures",
+      "added": 256,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_agent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 237,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_agent_cutover_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 104,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_agent_files.py",
+      "group": "tests_and_test_fixtures",
+      "added": 108,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_agent_lifecycle.py",
+      "group": "tests_and_test_fixtures",
+      "added": 177,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_agent_maintenance_tools.py",
+      "group": "tests_and_test_fixtures",
+      "added": 51,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_artifact_protocol.py",
+      "group": "tests_and_test_fixtures",
+      "added": 31,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_complete_inventory.py",
+      "group": "tests_and_test_fixtures",
+      "added": 61,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_context_dispatch_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 36,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_domain_contexts.py",
+      "group": "tests_and_test_fixtures",
+      "added": 64,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_import.py",
+      "group": "tests_and_test_fixtures",
+      "added": 583,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_legacy_file_publication_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 113,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_legacy_worker_cutover.py",
+      "group": "tests_and_test_fixtures",
+      "added": 129,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_machine_boundaries.py",
+      "group": "tests_and_test_fixtures",
+      "added": 146,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 85,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_platform.py",
+      "group": "tests_and_test_fixtures",
+      "added": 224,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_platform_astra_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 51,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_platform_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 77,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_project_monthly_worker_cutover.py",
+      "group": "tests_and_test_fixtures",
+      "added": 166,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_return_transition.py",
+      "group": "tests_and_test_fixtures",
+      "added": 38,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_return_worker_independent.py",
+      "group": "tests_and_test_fixtures",
+      "added": 61,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_roundtrip_worker_cutover.py",
+      "group": "tests_and_test_fixtures",
+      "added": 39,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_stream_protocol.py",
+      "group": "tests_and_test_fixtures",
+      "added": 37,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_s4_warehouse_worker_cutover.py",
+      "group": "tests_and_test_fixtures",
+      "added": 129,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_sales_integration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 221,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_authz_service.py",
+      "group": "tests_and_test_fixtures",
+      "added": 247,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_beta_account_whitelist.py",
+      "group": "tests_and_test_fixtures",
+      "added": 89,
+      "deleted": 4
+    },
+    {
+      "path": "backend/tests/test_bom.py",
+      "group": "tests_and_test_fixtures",
+      "added": 3,
+      "deleted": 9
+    },
+    {
+      "path": "backend/tests/test_ci_pytest_shards.py",
+      "group": "tests_and_test_fixtures",
+      "added": 346,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_contract_amount_remediation.py",
+      "group": "tests_and_test_fixtures",
+      "added": 6,
+      "deleted": 3
+    },
+    {
+      "path": "backend/tests/test_dashboard_order_safety.py",
+      "group": "tests_and_test_fixtures",
+      "added": 12,
+      "deleted": 4
+    },
+    {
+      "path": "backend/tests/test_dashboard_price_discipline.py",
+      "group": "tests_and_test_fixtures",
+      "added": 11,
+      "deleted": 3
+    },
+    {
+      "path": "backend/tests/test_data_quality_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 3,
+      "deleted": 3
+    },
+    {
+      "path": "backend/tests/test_financial_identity_rounding.py",
+      "group": "tests_and_test_fixtures",
+      "added": 6,
+      "deleted": 4
+    },
+    {
+      "path": "backend/tests/test_import_error_download.py",
+      "group": "tests_and_test_fixtures",
+      "added": 1,
+      "deleted": 1
+    },
+    {
+      "path": "backend/tests/test_maintenance_beta_access_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 2,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_maintenance_beta_gate.py",
+      "group": "tests_and_test_fixtures",
+      "added": 1,
+      "deleted": 1
+    },
+    {
+      "path": "backend/tests/test_maintenance_boss_permissions_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 2,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_maintenance_collection_evidence.py",
+      "group": "tests_and_test_fixtures",
+      "added": 3,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_maintenance_collection_reminder_schemas.py",
+      "group": "tests_and_test_fixtures",
+      "added": 81,
+      "deleted": 4
+    },
+    {
+      "path": "backend/tests/test_maintenance_collection_reminders_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 2,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_maintenance_manager_workbook_v3_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 3,
+      "deleted": 2
+    },
+    {
+      "path": "backend/tests/test_maintenance_migration_source.py",
+      "group": "tests_and_test_fixtures",
+      "added": 16,
+      "deleted": 5
+    },
+    {
+      "path": "backend/tests/test_maintenance_project_management_api.py",
+      "group": "tests_and_test_fixtures",
+      "added": 4,
+      "deleted": 2
+    },
+    {
+      "path": "backend/tests/test_maintenance_project_no_return_note.py",
+      "group": "tests_and_test_fixtures",
+      "added": 13,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_maintenance_project_note.py",
+      "group": "tests_and_test_fixtures",
+      "added": 10,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_maintenance_project_workbooks_api.py",
+      "group": "tests_and_test_fixtures",
+      "added": 12,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_maintenance_roundtrip_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 8,
+      "deleted": 8
+    },
+    {
+      "path": "backend/tests/test_maintenance_roundtrip_security.py",
+      "group": "tests_and_test_fixtures",
+      "added": 25,
+      "deleted": 12
+    },
+    {
+      "path": "backend/tests/test_maintenance_wbdd_display_columns_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 24,
+      "deleted": 6
+    },
+    {
+      "path": "backend/tests/test_master_edit.py",
+      "group": "tests_and_test_fixtures",
+      "added": 4,
+      "deleted": 1
+    },
+    {
+      "path": "backend/tests/test_master_edit_http.py",
+      "group": "tests_and_test_fixtures",
+      "added": 1,
+      "deleted": 1
+    },
+    {
+      "path": "backend/tests/test_master_edit_refresh_lock.py",
+      "group": "tests_and_test_fixtures",
+      "added": 1,
+      "deleted": 1
+    },
+    {
+      "path": "backend/tests/test_migration_manual_pool.py",
+      "group": "tests_and_test_fixtures",
+      "added": 3,
+      "deleted": 1
+    },
+    {
+      "path": "backend/tests/test_migration_pool_seq.py",
+      "group": "tests_and_test_fixtures",
+      "added": 4,
+      "deleted": 2
+    },
+    {
+      "path": "backend/tests/test_page_permission_contracts.py",
+      "group": "tests_and_test_fixtures",
+      "added": 4,
+      "deleted": 4
+    },
+    {
+      "path": "backend/tests/test_permission_center.py",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 6
+    },
+    {
+      "path": "backend/tests/test_pool_analysis_api.py",
+      "group": "tests_and_test_fixtures",
+      "added": 20,
+      "deleted": 10
+    },
+    {
+      "path": "backend/tests/test_pool_analyze.py",
+      "group": "tests_and_test_fixtures",
+      "added": 6,
+      "deleted": 3
+    },
+    {
+      "path": "backend/tests/test_purchase_analytics_permissions_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 19,
+      "deleted": 15
+    },
+    {
+      "path": "backend/tests/test_replenishment_atomic_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 5,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_replenishment_beta_permission_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 2,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_resolver.py",
+      "group": "tests_and_test_fixtures",
+      "added": 23,
+      "deleted": 29
+    },
+    {
+      "path": "backend/tests/test_sales_analytics_permissions_migration.py",
+      "group": "tests_and_test_fixtures",
+      "added": 2,
+      "deleted": 0
+    },
+    {
+      "path": "backend/tests/test_token_revocation.py",
+      "group": "tests_and_test_fixtures",
+      "added": 20,
+      "deleted": 14
+    },
+    {
+      "path": "backend/tests/test_workbook_tasks.py",
+      "group": "tests_and_test_fixtures",
+      "added": 54,
+      "deleted": 0
+    },
+    {
+      "path": "backend/uv.lock",
+      "group": "tooling_configuration_other",
+      "added": 372,
+      "deleted": 0
+    },
+    {
+      "path": "compose.authz.yml",
+      "group": "tooling_configuration_other",
+      "added": 35,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/README.md",
+      "group": "tooling_configuration_other",
+      "added": 17,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/config.yaml",
+      "group": "tooling_configuration_other",
+      "added": 19,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/account_directory.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/account_profile.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/agent_chat.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/agent_file.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 149,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/company_pool_analysis.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/company_pool_order_facts.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/company_purchase_orders.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/company_sales_orders.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/company_summary.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 149,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/data_quality.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/data_quality_calibration.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/display_policy.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 109,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/governance.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 169,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/import_expense.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 249,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/import_expense_void.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/import_inventory.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 249,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/import_maintenance.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 249,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/import_purchase.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 249,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/import_sales.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 249,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/inventory.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_acceptance.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 269,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_acceptance_directory.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_ai_document.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_ai_ledger.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_ai_proposals.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_analysis.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 209,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_assignments.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 69,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_audit.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_business_date.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_collection.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 169,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_collection_followup.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_collection_followup_directory.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_collection_plan_import.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_collection_plan_import_read.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_contract.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_contract_amount_write.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_contract_cost.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_cost.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 149,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_cost_fill.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_cost_roundtrip.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_dashboard.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 529,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_demand.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 349,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_document_import.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 69,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_document_import_targets.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_document_relink.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_expense.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 149,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_expense_reconcile.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_finance_workbook.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 69,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_front_stock.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_general_workbook.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 129,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_general_workbook_write.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 169,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_global_rows.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_global_workbook.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_issue.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 389,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_ledger_import.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_managed_rows.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 109,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_managed_workbook.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 189,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_manager_directory.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_manager_workbook.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_migration.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 129,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_operation_directory.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_project.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 129,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_project_backfill.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_project_cards.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_project_directory.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_project_operations.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_project_purchase.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_project_roundtrip.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 109,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_project_transfer.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_project_transfer_export.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 69,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_recovery.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_return_categories.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_return_import.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 169,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_return_obligation.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 149,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_return_receipt.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 249,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_row_workbench.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 109,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_salvage.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 69,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_shipment_import.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 69,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_shipment_import_targets.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_source_assignment.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_source_assignment_write.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_source_cancellation.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_source_health.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_summary.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 209,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_warehouse.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 69,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_warehouse_import.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 69,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_wbdd_reconciliation.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 69,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/maintenance_wbdd_snapshot.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 69,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/part_identity.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 189,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/part_lookup.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 229,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/part_master.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 209,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/part_substitute.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/pool_catalog.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 209,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/pool_order_facts.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/pool_price_analysis.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 109,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/pool_price_policy.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/price_discipline.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/private_chat_session.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 269,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/profit_analysis.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 169,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/purchase_analysis.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 129,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/purchase_records.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 109,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/replenishment_capabilities.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/replenishment_catalog.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/replenishment_project_commands.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 149,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/replenishment_project_directory.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/replenishment_request.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 109,
+      "deleted": 0
+    },
+    {
+      "path": "deploy/cerbos/policies/sales_analysis.yaml",
+      "group": "generated_policy_catalog_seed",
+      "added": 409,
+      "deleted": 0
+    },
+    {
+      "path": "docs/checkbox-multiselect.md",
+      "group": "review_and_documentation",
+      "added": 55,
+      "deleted": 0
+    },
+    {
+      "path": "\"docs/decisions/0025-\\347\\255\\233\\351\\200\\211\\344\\270\\213\\346\\213\\211\\345\\244\\232\\351\\200\\211\\347\\241\\256\\350\\256\\244\\344\\272\\244\\344\\272\\222.md\"",
+      "group": "tooling_configuration_other",
+      "added": 19,
+      "deleted": 0
+    },
+    {
+      "path": "\"docs/decisions/0026-\\346\\250\\241\\345\\235\\227\\346\\235\\203\\351\\231\\220\\345\\274\\225\\346\\223\\216\\344\\270\\216\\345\\256\\242\\346\\210\\267\\345\\275\\222\\345\\261\\236.md\"",
+      "group": "tooling_configuration_other",
+      "added": 28,
+      "deleted": 0
+    },
+    {
+      "path": "\"docs/decisions/0027-\\345\\205\\250\\346\\250\\241\\345\\235\\227\\346\\235\\203\\351\\231\\220\\350\\277\\201\\347\\247\\273\\344\\270\\216\\347\\273\\237\\344\\270\\200\\346\\216\\210\\346\\235\\203\\347\\274\\226\\346\\216\\222.md\"",
+      "group": "tooling_configuration_other",
+      "added": 53,
+      "deleted": 0
+    },
+    {
+      "path": "docs/plans/2026-10-23-authz-full-migration-contract.md",
+      "group": "review_and_documentation",
+      "added": 95,
+      "deleted": 0
+    },
+    {
+      "path": "docs/plans/2026-10-23-authz-full-migration-execution.md",
+      "group": "review_and_documentation",
+      "added": 150,
+      "deleted": 0
+    },
+    {
+      "path": "docs/plans/2026-10-23-authz-implementation-contract.md",
+      "group": "review_and_documentation",
+      "added": 21,
+      "deleted": 0
+    },
+    {
+      "path": "docs/plans/2026-10-23-authz-selection-and-implementation.md",
+      "group": "review_and_documentation",
+      "added": 80,
+      "deleted": 0
+    },
+    {
+      "path": "docs/releases/authz-sales-candidate-20261023.md",
+      "group": "review_and_documentation",
+      "added": 136,
+      "deleted": 0
+    },
+    {
+      "path": "docs/releases/authz-unified-candidate.md",
+      "group": "review_and_documentation",
+      "added": 21,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/backend-next-stage-map.md",
+      "group": "review_and_documentation",
+      "added": 815,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/backend-route-summary.json",
+      "group": "review_and_documentation",
+      "added": 42,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/build_s3_context_registry.py",
+      "group": "review_and_documentation",
+      "added": 105,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/ci-sharding-independent-review.md",
+      "group": "review_and_documentation",
+      "added": 137,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/ci-sharding-root-review.md",
+      "group": "review_and_documentation",
+      "added": 30,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/data-scope-field-audit.md",
+      "group": "review_and_documentation",
+      "added": 192,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/data-scope-field-probes.json",
+      "group": "review_and_documentation",
+      "added": 115,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/data-scope-field-probes.py",
+      "group": "review_and_documentation",
+      "added": 215,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/engine-feasibility/casbin-probe.json",
+      "group": "review_and_documentation",
+      "added": 40,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/engine-feasibility/casbin-project-with-current-lock.txt",
+      "group": "review_and_documentation",
+      "added": 248,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/engine-feasibility/casbin-requirements-frozen.txt",
+      "group": "review_and_documentation",
+      "added": 5,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/engine-feasibility/casbin_probe.py",
+      "group": "review_and_documentation",
+      "added": 37,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/engine-feasibility/cerbos-probe.json",
+      "group": "review_and_documentation",
+      "added": 174,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/engine-feasibility/cerbos-project-with-current-lock.txt",
+      "group": "review_and_documentation",
+      "added": 312,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/engine-feasibility/cerbos-requirements-frozen.txt",
+      "group": "review_and_documentation",
+      "added": 33,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/engine-feasibility/probe.py",
+      "group": "review_and_documentation",
+      "added": 87,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/engine-feasibility/shutdown-check.json",
+      "group": "review_and_documentation",
+      "added": 14,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/engine-feasibility/size-and-versions.json",
+      "group": "review_and_documentation",
+      "added": 122,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/final-browser-acceptance-plan.md",
+      "group": "review_and_documentation",
+      "added": 60,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/frontend-next-stage-map.md",
+      "group": "review_and_documentation",
+      "added": 407,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/full-migration-adversarial-plan.md",
+      "group": "review_and_documentation",
+      "added": 150,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/implementation-feasibility.md",
+      "group": "review_and_documentation",
+      "added": 86,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/implementation-scope-review.md",
+      "group": "review_and_documentation",
+      "added": 59,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/implementation-tradeoffs.md",
+      "group": "review_and_documentation",
+      "added": 74,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/independent-implementation-review.md",
+      "group": "review_and_documentation",
+      "added": 88,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/midnight-fixture-independent-review.md",
+      "group": "review_and_documentation",
+      "added": 13,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/open-source-repository-snapshot.json",
+      "group": "review_and_documentation",
+      "added": 46,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/platform-solution-followup.md",
+      "group": "review_and_documentation",
+      "added": 80,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s1-contract-independent-review.md",
+      "group": "review_and_documentation",
+      "added": 67,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s1-core-business-cutover-review.md",
+      "group": "review_and_documentation",
+      "added": 65,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s1-implementation-independent-review.md",
+      "group": "review_and_documentation",
+      "added": 121,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s1-management-implementation-report.md",
+      "group": "review_and_documentation",
+      "added": 97,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s1-root-control-plane-review.md",
+      "group": "review_and_documentation",
+      "added": 46,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s1-shared-interfaces.md",
+      "group": "review_and_documentation",
+      "added": 91,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s1-wire-contract.md",
+      "group": "review_and_documentation",
+      "added": 277,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/01-catalog-me.json",
+      "group": "review_and_documentation",
+      "added": 482,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/02-account-modules.json",
+      "group": "review_and_documentation",
+      "added": 919,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/03-template-commands.json",
+      "group": "review_and_documentation",
+      "added": 775,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/04-account-commands.json",
+      "group": "review_and_documentation",
+      "added": 808,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s1-wire-fixtures/05-errors.json",
+      "group": "review_and_documentation",
+      "added": 682,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s1-wire-independent-review.md",
+      "group": "review_and_documentation",
+      "added": 51,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s2-agent-lineage-implementation.md",
+      "group": "review_and_documentation",
+      "added": 38,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s2-b2-b3-implementation-review.md",
+      "group": "review_and_documentation",
+      "added": 63,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s2-backend-execution-seams.md",
+      "group": "review_and_documentation",
+      "added": 154,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s2-f3-implementation-and-cross-review.md",
+      "group": "review_and_documentation",
+      "added": 35,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s2-frontend-implementation-review.md",
+      "group": "review_and_documentation",
+      "added": 63,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s2-legacy-origin-seed-review.md",
+      "group": "review_and_documentation",
+      "added": 70,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s2-root-cross-review.md",
+      "group": "review_and_documentation",
+      "added": 47,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s2-seed-no-expansion-review.md",
+      "group": "review_and_documentation",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-artifact-protocol-and-adversarial-constraints.md",
+      "group": "review_and_documentation",
+      "added": 260,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-artifact-sidecar-schema.md",
+      "group": "review_and_documentation",
+      "added": 163,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-artifact-task-execution-seams.md",
+      "group": "review_and_documentation",
+      "added": 57,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-batch-transfer-implementation-review.md",
+      "group": "review_and_documentation",
+      "added": 23,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-batch-transfer-independent-review.md",
+      "group": "review_and_documentation",
+      "added": 18,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-bootstrap-metadata-cross-review.md",
+      "group": "review_and_documentation",
+      "added": 28,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-ci-repair.md",
+      "group": "review_and_documentation",
+      "added": 17,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-core-context-boundary-design.md",
+      "group": "review_and_documentation",
+      "added": 49,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-demand-implementation-review.md",
+      "group": "review_and_documentation",
+      "added": 48,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-design-implementation-verification.md",
+      "group": "review_and_documentation",
+      "added": 13,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-execution-contract-delta.json",
+      "group": "review_and_documentation",
+      "added": 2400,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-execution-design-validation.md",
+      "group": "review_and_documentation",
+      "added": 53,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-execution-spec.json",
+      "group": "review_and_documentation",
+      "added": 63742,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-execution-static-negative-checks.json",
+      "group": "review_and_documentation",
+      "added": 19,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-execution-static-validation.json",
+      "group": "review_and_documentation",
+      "added": 29,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-frontend-context-protocol.md",
+      "group": "review_and_documentation",
+      "added": 192,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-frontend-implementation-review.md",
+      "group": "review_and_documentation",
+      "added": 53,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-frontend-manifest-surfaces-fragment.json",
+      "group": "review_and_documentation",
+      "added": 6633,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-frontend-protocol-integration-review.md",
+      "group": "review_and_documentation",
+      "added": 37,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-global-independent-review.md",
+      "group": "review_and_documentation",
+      "added": 11,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-implementation-inventory.json",
+      "group": "review_and_documentation",
+      "added": 56662,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-master-independent-review.md",
+      "group": "review_and_documentation",
+      "added": 14,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-parallel-implementation-seams.md",
+      "group": "review_and_documentation",
+      "added": 94,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-project-authorization-contract.md",
+      "group": "review_and_documentation",
+      "added": 290,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-project-read-finance-implementation-coverage.json",
+      "group": "review_and_documentation",
+      "added": 1693,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-project-read-finance-progress.md",
+      "group": "review_and_documentation",
+      "added": 40,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-project-scope-foundation-design.md",
+      "group": "review_and_documentation",
+      "added": 10,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-resource-seed-gaps.json",
+      "group": "review_and_documentation",
+      "added": 12141,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-return-import-independent-review.md",
+      "group": "review_and_documentation",
+      "added": 16,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-return-workflow-implementation-review.md",
+      "group": "review_and_documentation",
+      "added": 20,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-root-bootstrap-metadata-review.md",
+      "group": "review_and_documentation",
+      "added": 17,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-root-implementation-progress.md",
+      "group": "review_and_documentation",
+      "added": 69,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-roundtrip-independent-review.md",
+      "group": "review_and_documentation",
+      "added": 17,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-warehouse-implementation-review.md",
+      "group": "review_and_documentation",
+      "added": 39,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-workflow-implementation-coverage.json",
+      "group": "review_and_documentation",
+      "added": 1183,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-workflow-implementation-coverage.md",
+      "group": "review_and_documentation",
+      "added": 151,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s3-workflow-independent-review.md",
+      "group": "review_and_documentation",
+      "added": 21,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-agent-boundary-readonly.md",
+      "group": "review_and_documentation",
+      "added": 43,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-agent-generated-file-wire.json",
+      "group": "review_and_documentation",
+      "added": 5,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-agent-http-wire-golden.json",
+      "group": "review_and_documentation",
+      "added": 22515,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-agent-implementation-review.md",
+      "group": "review_and_documentation",
+      "added": 48,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-agent-sse-wire-contract.md",
+      "group": "review_and_documentation",
+      "added": 146,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-astra-platform-frontend-cross-review.md",
+      "group": "review_and_documentation",
+      "added": 39,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-background-entry-reconciliation.json",
+      "group": "review_and_documentation",
+      "added": 272,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-context-extraction-baseline.json",
+      "group": "review_and_documentation",
+      "added": 285,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-frontend-implementation-review.md",
+      "group": "review_and_documentation",
+      "added": 59,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-frontend-manifest-surfaces-fragment.json",
+      "group": "review_and_documentation",
+      "added": 2478,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-frontend-protocol-proposal.md",
+      "group": "review_and_documentation",
+      "added": 110,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-frontend-readonly-gap-list.md",
+      "group": "review_and_documentation",
+      "added": 64,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-full-coverage-reconciliation.json",
+      "group": "review_and_documentation",
+      "added": 45698,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-full-coverage-reconciliation.md",
+      "group": "review_and_documentation",
+      "added": 59,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-http-entry-baseline.json",
+      "group": "review_and_documentation",
+      "added": 4003,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-import-execution-contract.md",
+      "group": "review_and_documentation",
+      "added": 126,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-import-implementation-review.md",
+      "group": "review_and_documentation",
+      "added": 64,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-import-wire-contract.md",
+      "group": "review_and_documentation",
+      "added": 211,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-import-wire-golden.json",
+      "group": "review_and_documentation",
+      "added": 762,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-import-wire-real-http.json",
+      "group": "review_and_documentation",
+      "added": 5768,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-platform-and-context-contract.md",
+      "group": "review_and_documentation",
+      "added": 68,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-platform-control-independent-review.md",
+      "group": "review_and_documentation",
+      "added": 84,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-platform-implementation-independent-review.md",
+      "group": "review_and_documentation",
+      "added": 19,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-project-monthly-worker-cutover-review.md",
+      "group": "review_and_documentation",
+      "added": 21,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-root-platform-implementation.md",
+      "group": "review_and_documentation",
+      "added": 44,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-shared-declarations.json",
+      "group": "review_and_documentation",
+      "added": 1909,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/s4-warehouse-legacy-worker-cutover-review.md",
+      "group": "review_and_documentation",
+      "added": 11,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/scope-field-inventory.csv",
+      "group": "review_and_documentation",
+      "added": 75,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/update_s3_project_coverage.py",
+      "group": "review_and_documentation",
+      "added": 71,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/verify_s3_execution_spec.py",
+      "group": "review_and_documentation",
+      "added": 467,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/verify_s3_implementation_inventory.py",
+      "group": "review_and_documentation",
+      "added": 131,
+      "deleted": 0
+    },
+    {
+      "path": "docs/reviews/authz-rewrite-20261023/verify_s4_full_coverage.py",
+      "group": "review_and_documentation",
+      "added": 258,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/App.tsx",
+      "group": "frontend_runtime",
+      "added": 53,
+      "deleted": 23
+    },
+    {
+      "path": "frontend/src/AppShell.tsx",
+      "group": "frontend_runtime",
+      "added": 6,
+      "deleted": 8
+    },
+    {
+      "path": "frontend/src/__tests__/App.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 38,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/__tests__/AppAuthorizationDependencies.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 179,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/__tests__/AppMaintenanceContext.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 132,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/api.ts",
+      "group": "frontend_runtime",
+      "added": 72,
+      "deleted": 78
+    },
+    {
+      "path": "frontend/src/api/__tests__/authzProtocol.test.ts",
+      "group": "tests_and_test_fixtures",
+      "added": 136,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/api/__tests__/chatStream.test.ts",
+      "group": "tests_and_test_fixtures",
+      "added": 109,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/api/__tests__/dataQuality.test.ts",
+      "group": "tests_and_test_fixtures",
+      "added": 15,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/api/__tests__/importProtocol.test.ts",
+      "group": "tests_and_test_fixtures",
+      "added": 25,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/api/__tests__/maintenanceOperations.test.ts",
+      "group": "tests_and_test_fixtures",
+      "added": 16,
+      "deleted": 16
+    },
+    {
+      "path": "frontend/src/api/__tests__/poolAnalysis.test.ts",
+      "group": "tests_and_test_fixtures",
+      "added": 22,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/api/__tests__/s4AgentWire.test.ts",
+      "group": "tests_and_test_fixtures",
+      "added": 25,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/api/__tests__/s4ImportWire.test.ts",
+      "group": "tests_and_test_fixtures",
+      "added": 24,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/api/__tests__/systemSettings.test.ts",
+      "group": "tests_and_test_fixtures",
+      "added": 2,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/api/accounts.ts",
+      "group": "frontend_runtime",
+      "added": 38,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/api/authz.ts",
+      "group": "frontend_runtime",
+      "added": 731,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/api/chatStream.ts",
+      "group": "frontend_runtime",
+      "added": 151,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/api/dataQuality.ts",
+      "group": "frontend_runtime",
+      "added": 71,
+      "deleted": 26
+    },
+    {
+      "path": "frontend/src/api/importProtocol.ts",
+      "group": "frontend_runtime",
+      "added": 74,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/api/imports.ts",
+      "group": "frontend_runtime",
+      "added": 31,
+      "deleted": 11
+    },
+    {
+      "path": "frontend/src/api/maintenanceAnalytics.ts",
+      "group": "frontend_runtime",
+      "added": 9,
+      "deleted": 8
+    },
+    {
+      "path": "frontend/src/api/maintenanceBatchTransfer.ts",
+      "group": "frontend_runtime",
+      "added": 11,
+      "deleted": 10
+    },
+    {
+      "path": "frontend/src/api/maintenanceBossBoard.ts",
+      "group": "frontend_runtime",
+      "added": 21,
+      "deleted": 20
+    },
+    {
+      "path": "frontend/src/api/maintenanceCollectionReminders.ts",
+      "group": "frontend_runtime",
+      "added": 19,
+      "deleted": 17
+    },
+    {
+      "path": "frontend/src/api/maintenanceDashboard.ts",
+      "group": "frontend_runtime",
+      "added": 23,
+      "deleted": 22
+    },
+    {
+      "path": "frontend/src/api/maintenanceDemands.ts",
+      "group": "frontend_runtime",
+      "added": 23,
+      "deleted": 22
+    },
+    {
+      "path": "frontend/src/api/maintenanceMigration.ts",
+      "group": "frontend_runtime",
+      "added": 14,
+      "deleted": 13
+    },
+    {
+      "path": "frontend/src/api/maintenanceOperations.ts",
+      "group": "frontend_runtime",
+      "added": 158,
+      "deleted": 140
+    },
+    {
+      "path": "frontend/src/api/maintenanceProjectProcurement.ts",
+      "group": "frontend_runtime",
+      "added": 3,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/api/maintenanceProjects.ts",
+      "group": "frontend_runtime",
+      "added": 18,
+      "deleted": 14
+    },
+    {
+      "path": "frontend/src/api/maintenanceReturnReceiptImports.ts",
+      "group": "frontend_runtime",
+      "added": 10,
+      "deleted": 9
+    },
+    {
+      "path": "frontend/src/api/maintenanceRowFilters.ts",
+      "group": "frontend_runtime",
+      "added": 9,
+      "deleted": 8
+    },
+    {
+      "path": "frontend/src/api/maintenanceSourceAssignments.ts",
+      "group": "frontend_runtime",
+      "added": 6,
+      "deleted": 5
+    },
+    {
+      "path": "frontend/src/api/maintenanceSourceCancelCascade.ts",
+      "group": "frontend_runtime",
+      "added": 8,
+      "deleted": 7
+    },
+    {
+      "path": "frontend/src/api/maintenanceWarehouse.ts",
+      "group": "frontend_runtime",
+      "added": 9,
+      "deleted": 8
+    },
+    {
+      "path": "frontend/src/api/maintenanceWbddImport.ts",
+      "group": "frontend_runtime",
+      "added": 11,
+      "deleted": 10
+    },
+    {
+      "path": "frontend/src/api/maintenanceWorkbooks.ts",
+      "group": "frontend_runtime",
+      "added": 28,
+      "deleted": 22
+    },
+    {
+      "path": "frontend/src/api/poolAnalysis.ts",
+      "group": "frontend_runtime",
+      "added": 17,
+      "deleted": 14
+    },
+    {
+      "path": "frontend/src/api/pools.ts",
+      "group": "frontend_runtime",
+      "added": 15,
+      "deleted": 11
+    },
+    {
+      "path": "frontend/src/api/purchaseAnalytics.ts",
+      "group": "frontend_runtime",
+      "added": 10,
+      "deleted": 6
+    },
+    {
+      "path": "frontend/src/api/replenishment.ts",
+      "group": "frontend_runtime",
+      "added": 23,
+      "deleted": 22
+    },
+    {
+      "path": "frontend/src/api/salesAnalytics.ts",
+      "group": "frontend_runtime",
+      "added": 17,
+      "deleted": 5
+    },
+    {
+      "path": "frontend/src/api/search.ts",
+      "group": "frontend_runtime",
+      "added": 105,
+      "deleted": 39
+    },
+    {
+      "path": "frontend/src/api/systemSettings.ts",
+      "group": "frontend_runtime",
+      "added": 5,
+      "deleted": 4
+    },
+    {
+      "path": "frontend/src/authz/AuthzProvider.tsx",
+      "group": "frontend_runtime",
+      "added": 243,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/ContextSurface.tsx",
+      "group": "frontend_runtime",
+      "added": 27,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/__tests__/AuthzProvider.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 75,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/__tests__/access.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 114,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/__tests__/context.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 351,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/access.tsx",
+      "group": "frontend_runtime",
+      "added": 144,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/accountAccess.ts",
+      "group": "frontend_runtime",
+      "added": 18,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/context.tsx",
+      "group": "frontend_runtime",
+      "added": 152,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/contextProtocol.ts",
+      "group": "frontend_runtime",
+      "added": 166,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/contextQuery.ts",
+      "group": "frontend_runtime",
+      "added": 46,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/contextTypes.ts",
+      "group": "frontend_runtime",
+      "added": 43,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/domainApi.ts",
+      "group": "frontend_runtime",
+      "added": 25,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/domainTransport.ts",
+      "group": "frontend_runtime",
+      "added": 111,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/events.ts",
+      "group": "frontend_runtime",
+      "added": 5,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/generated.ts",
+      "group": "generated_policy_catalog_seed",
+      "added": 26026,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/requestLifecycle.ts",
+      "group": "frontend_runtime",
+      "added": 150,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/rules.ts",
+      "group": "frontend_runtime",
+      "added": 138,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/authz/transport.ts",
+      "group": "frontend_runtime",
+      "added": 5,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/components/BatchNormalizeModal.tsx",
+      "group": "frontend_runtime",
+      "added": 195,
+      "deleted": 61
+    },
+    {
+      "path": "frontend/src/components/CheckboxMultiSelect.css",
+      "group": "frontend_runtime",
+      "added": 125,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/components/CheckboxMultiSelect.tsx",
+      "group": "frontend_runtime",
+      "added": 223,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/components/PartPicker.tsx",
+      "group": "frontend_runtime",
+      "added": 96,
+      "deleted": 50
+    },
+    {
+      "path": "frontend/src/components/__tests__/CheckboxMultiSelect.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 205,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/components/__tests__/PartPicker.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/components/maintenance/BadReturnPanel.tsx",
+      "group": "frontend_runtime",
+      "added": 106,
+      "deleted": 61
+    },
+    {
+      "path": "frontend/src/components/maintenance/CollectionMilestoneFollowUpModal.tsx",
+      "group": "frontend_runtime",
+      "added": 35,
+      "deleted": 6
+    },
+    {
+      "path": "frontend/src/components/maintenance/CollectionPlanImportModal.tsx",
+      "group": "frontend_runtime",
+      "added": 43,
+      "deleted": 21
+    },
+    {
+      "path": "frontend/src/components/maintenance/CollectionReminderDetail.tsx",
+      "group": "frontend_runtime",
+      "added": 36,
+      "deleted": 8
+    },
+    {
+      "path": "frontend/src/components/maintenance/FrontStockPanel.tsx",
+      "group": "frontend_runtime",
+      "added": 18,
+      "deleted": 27
+    },
+    {
+      "path": "frontend/src/components/maintenance/GlobalMaintenanceRowWorkbench.tsx",
+      "group": "frontend_runtime",
+      "added": 67,
+      "deleted": 113
+    },
+    {
+      "path": "frontend/src/components/maintenance/MaintenanceAcceptancePanel.tsx",
+      "group": "frontend_runtime",
+      "added": 75,
+      "deleted": 32
+    },
+    {
+      "path": "frontend/src/components/maintenance/MaintenanceBatchTransferButton.tsx",
+      "group": "frontend_runtime",
+      "added": 62,
+      "deleted": 52
+    },
+    {
+      "path": "frontend/src/components/maintenance/MaintenanceCategoryFilter.tsx",
+      "group": "frontend_runtime",
+      "added": 12,
+      "deleted": 23
+    },
+    {
+      "path": "frontend/src/components/maintenance/MaintenanceProjectExportButton.tsx",
+      "group": "frontend_runtime",
+      "added": 21,
+      "deleted": 8
+    },
+    {
+      "path": "frontend/src/components/maintenance/ManualSiteIssueSection.tsx",
+      "group": "frontend_runtime",
+      "added": 54,
+      "deleted": 35
+    },
+    {
+      "path": "frontend/src/components/maintenance/ProjectCard.tsx",
+      "group": "frontend_runtime",
+      "added": 12,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/components/maintenance/ProjectMaintenanceRowFilters.tsx",
+      "group": "frontend_runtime",
+      "added": 22,
+      "deleted": 26
+    },
+    {
+      "path": "frontend/src/components/maintenance/ProjectManagerAssignmentControl.tsx",
+      "group": "frontend_runtime",
+      "added": 38,
+      "deleted": 19
+    },
+    {
+      "path": "frontend/src/components/maintenance/ProjectProcurementPanel.tsx",
+      "group": "frontend_runtime",
+      "added": 19,
+      "deleted": 40
+    },
+    {
+      "path": "frontend/src/components/maintenance/ProjectWorkbookActions.tsx",
+      "group": "frontend_runtime",
+      "added": 45,
+      "deleted": 23
+    },
+    {
+      "path": "frontend/src/components/maintenance/ProjectWorkbookRoundTrip.tsx",
+      "group": "frontend_runtime",
+      "added": 34,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/components/maintenance/RecoverySummaryPanel.tsx",
+      "group": "frontend_runtime",
+      "added": 16,
+      "deleted": 24
+    },
+    {
+      "path": "frontend/src/components/maintenance/SalvagePanel.tsx",
+      "group": "frontend_runtime",
+      "added": 16,
+      "deleted": 29
+    },
+    {
+      "path": "frontend/src/components/maintenance/SiteIssueWorkflowPanel.tsx",
+      "group": "frontend_runtime",
+      "added": 86,
+      "deleted": 42
+    },
+    {
+      "path": "frontend/src/components/maintenance/SourceCancelImpactPanel.tsx",
+      "group": "frontend_runtime",
+      "added": 26,
+      "deleted": 14
+    },
+    {
+      "path": "frontend/src/components/maintenance/WbddReconciliation.tsx",
+      "group": "frontend_runtime",
+      "added": 20,
+      "deleted": 8
+    },
+    {
+      "path": "frontend/src/components/maintenance/WbddUploadFeedback.tsx",
+      "group": "frontend_runtime",
+      "added": 5,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/components/maintenance/WorkbookRoundTrip.tsx",
+      "group": "frontend_runtime",
+      "added": 29,
+      "deleted": 8
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/BadReturnPanel.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 18,
+      "deleted": 11
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/CollectionMilestoneFollowUpModal.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 6,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/CollectionPlanImportModal.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 6,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/CollectionReminderDetail.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 7,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/FinancialAuthorization.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 154,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/GlobalMaintenanceRowWorkbench.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 12,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/MaintenanceAcceptancePanel.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/MaintenanceBatchTransferButton.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 15,
+      "deleted": 5
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/MaintenanceCategoryFilter.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 6,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/MaintenanceProjectExportButton.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 12,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/ManualSiteIssueSection.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 11,
+      "deleted": 5
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/ProjectManagerAssignmentControl.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/ProjectProcurementPanel.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 16,
+      "deleted": 11
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/ProjectWorkbookActions.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 11,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/SiteIssueWorkflowPanel.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 13,
+      "deleted": 7
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/SourceCancelImpactPanel.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 20,
+      "deleted": 10
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/WbddReconciliation.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/WbddUploadFeedback.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/components/maintenance/__tests__/WorkbookRoundTrip.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 14,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/components/parts/InlinePartEditModal.tsx",
+      "group": "frontend_runtime",
+      "added": 266,
+      "deleted": 75
+    },
+    {
+      "path": "frontend/src/components/parts/__tests__/InlinePartEditModal.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 8,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/components/pools/PoolIdentityLink.tsx",
+      "group": "frontend_runtime",
+      "added": 6,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/components/pools/PoolOrderDetailModal.tsx",
+      "group": "frontend_runtime",
+      "added": 21,
+      "deleted": 26
+    },
+    {
+      "path": "frontend/src/components/pools/PoolReferenceCard.tsx",
+      "group": "frontend_runtime",
+      "added": 7,
+      "deleted": 4
+    },
+    {
+      "path": "frontend/src/components/pools/PoolReferencePanel.tsx",
+      "group": "frontend_runtime",
+      "added": 19,
+      "deleted": 27
+    },
+    {
+      "path": "frontend/src/components/pools/__tests__/PoolReferenceCard.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 2,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/context/TaxBasis.tsx",
+      "group": "frontend_runtime",
+      "added": 43,
+      "deleted": 12
+    },
+    {
+      "path": "frontend/src/context/__tests__/TaxBasis.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/context/__tests__/TaxBasisAuthorization.independent.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/nav.tsx",
+      "group": "frontend_runtime",
+      "added": 54,
+      "deleted": 7
+    },
+    {
+      "path": "frontend/src/pages/BossBoardPage.tsx",
+      "group": "frontend_runtime",
+      "added": 22,
+      "deleted": 15
+    },
+    {
+      "path": "frontend/src/pages/ChatPage.tsx",
+      "group": "frontend_runtime",
+      "added": 192,
+      "deleted": 248
+    },
+    {
+      "path": "frontend/src/pages/GovernancePage.tsx",
+      "group": "frontend_runtime",
+      "added": 977,
+      "deleted": 225
+    },
+    {
+      "path": "frontend/src/pages/ImportPage.tsx",
+      "group": "frontend_runtime",
+      "added": 17,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/InventoryPage.tsx",
+      "group": "frontend_runtime",
+      "added": 37,
+      "deleted": 64
+    },
+    {
+      "path": "frontend/src/pages/LoginPage.tsx",
+      "group": "frontend_runtime",
+      "added": 4,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/pages/MasterDataPage.tsx",
+      "group": "frontend_runtime",
+      "added": 678,
+      "deleted": 207
+    },
+    {
+      "path": "frontend/src/pages/PartSearchPage.tsx",
+      "group": "frontend_runtime",
+      "added": 1280,
+      "deleted": 349
+    },
+    {
+      "path": "frontend/src/pages/PoolAnalysisPage.tsx",
+      "group": "frontend_runtime",
+      "added": 49,
+      "deleted": 28
+    },
+    {
+      "path": "frontend/src/pages/PoolManagementPage.tsx",
+      "group": "frontend_runtime",
+      "added": 96,
+      "deleted": 62
+    },
+    {
+      "path": "frontend/src/pages/PoolsPage.tsx",
+      "group": "frontend_runtime",
+      "added": 22,
+      "deleted": 34
+    },
+    {
+      "path": "frontend/src/pages/ProfitPage.tsx",
+      "group": "frontend_runtime",
+      "added": 36,
+      "deleted": 51
+    },
+    {
+      "path": "frontend/src/pages/ReplenishmentBetaPage.tsx",
+      "group": "frontend_runtime",
+      "added": 160,
+      "deleted": 194
+    },
+    {
+      "path": "frontend/src/pages/SystemSettingsPage.tsx",
+      "group": "frontend_runtime",
+      "added": 23,
+      "deleted": 13
+    },
+    {
+      "path": "frontend/src/pages/__tests__/AdminOnlyActions.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 4,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/__tests__/BossBoardPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 24,
+      "deleted": 15
+    },
+    {
+      "path": "frontend/src/pages/__tests__/BusinessTimestampSites.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 13,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/pages/__tests__/ChatPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 10,
+      "deleted": 4
+    },
+    {
+      "path": "frontend/src/pages/__tests__/DataQualityCalibrationPanel.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 8,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/__tests__/DataQualityIssuesPanel.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 11,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/pages/__tests__/F3Authorization.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 479,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/__tests__/GovernancePage.confirm.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/__tests__/GovernancePage.keyboard.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 10,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/pages/__tests__/GovernancePage.url.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/__tests__/ImportPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 63,
+      "deleted": 56
+    },
+    {
+      "path": "frontend/src/pages/__tests__/InventoryPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 10,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/pages/__tests__/InventoryPage.url.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 10,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/pages/__tests__/LoginPage.test.ts",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/__tests__/MasterDataPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 13,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/pages/__tests__/MasterDataPage.url.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/__tests__/PartSearchPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 29,
+      "deleted": 17
+    },
+    {
+      "path": "frontend/src/pages/__tests__/PartSearchQuery.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 15,
+      "deleted": 11
+    },
+    {
+      "path": "frontend/src/pages/__tests__/PoolAnalysisPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 21,
+      "deleted": 11
+    },
+    {
+      "path": "frontend/src/pages/__tests__/PoolManagementPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 18,
+      "deleted": 9
+    },
+    {
+      "path": "frontend/src/pages/__tests__/PoolsPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 17,
+      "deleted": 8
+    },
+    {
+      "path": "frontend/src/pages/__tests__/ProfitPage.url.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/__tests__/PurchaseExceptionsPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/__tests__/PurchasePoolReference.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/__tests__/ReplenishmentBetaPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 13,
+      "deleted": 6
+    },
+    {
+      "path": "frontend/src/pages/__tests__/S2BusinessAccess.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 174,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/__tests__/S4ChatAuthorization.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 87,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/__tests__/S4ChatLifecycle.independent.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 90,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/__tests__/S4ImportAuthorization.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 118,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/__tests__/SystemSettingsPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 11,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/pages/accounts/AccountActivityDrawer.tsx",
+      "group": "frontend_runtime",
+      "added": 46,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/AccountCommandModal.tsx",
+      "group": "frontend_runtime",
+      "added": 411,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/AccountProfileModal.tsx",
+      "group": "frontend_runtime",
+      "added": 38,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/AccountsTab.tsx",
+      "group": "frontend_runtime",
+      "added": 13,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/AuthorizationDiff.tsx",
+      "group": "frontend_runtime",
+      "added": 176,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/CustomerAssignmentEditor.tsx",
+      "group": "frontend_runtime",
+      "added": 110,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/ModuleAccountDrawer.tsx",
+      "group": "frontend_runtime",
+      "added": 214,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/ModuleBulkModal.tsx",
+      "group": "frontend_runtime",
+      "added": 245,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/ModuleGrantEditor.tsx",
+      "group": "frontend_runtime",
+      "added": 143,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/ModuleTemplateDrawer.tsx",
+      "group": "frontend_runtime",
+      "added": 204,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/PermissionCenterPage.tsx",
+      "group": "frontend_runtime",
+      "added": 16,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/pages/accounts/SalesAuthorizationDrawer.tsx",
+      "group": "frontend_runtime",
+      "added": 173,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/UnifiedPermissionCenter.tsx",
+      "group": "frontend_runtime",
+      "added": 491,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/__tests__/ModuleControlPlane.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 463,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/__tests__/S1ControlPlane.independent.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 130,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/__tests__/S4AccountAccess.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 89,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/__tests__/SalesAuthorizationDrawer.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 118,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/__tests__/UnifiedPermissionCenter.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 133,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/accounts/useAuthorizationTask.ts",
+      "group": "frontend_runtime",
+      "added": 73,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/boss/FilterBar.tsx",
+      "group": "frontend_runtime",
+      "added": 3,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/boss/MorningDisciplineSummary.tsx",
+      "group": "frontend_runtime",
+      "added": 10,
+      "deleted": 5
+    },
+    {
+      "path": "frontend/src/pages/boss/OrderDetailModal.tsx",
+      "group": "frontend_runtime",
+      "added": 8,
+      "deleted": 4
+    },
+    {
+      "path": "frontend/src/pages/boss/OrdersBlock.tsx",
+      "group": "frontend_runtime",
+      "added": 10,
+      "deleted": 6
+    },
+    {
+      "path": "frontend/src/pages/boss/PartsTable.tsx",
+      "group": "frontend_runtime",
+      "added": 4,
+      "deleted": 5
+    },
+    {
+      "path": "frontend/src/pages/boss/PoolsBlock.tsx",
+      "group": "frontend_runtime",
+      "added": 22,
+      "deleted": 13
+    },
+    {
+      "path": "frontend/src/pages/boss/RankingBlock.tsx",
+      "group": "frontend_runtime",
+      "added": 7,
+      "deleted": 4
+    },
+    {
+      "path": "frontend/src/pages/boss/__tests__/MorningDisciplineSummary.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 8,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/pages/boss/__tests__/shared.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/pages/boss/shared.tsx",
+      "group": "frontend_runtime",
+      "added": 18,
+      "deleted": 47
+    },
+    {
+      "path": "frontend/src/pages/chat/useChatStream.ts",
+      "group": "frontend_runtime",
+      "added": 62,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/f3/useModuleApi.ts",
+      "group": "frontend_runtime",
+      "added": 71,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/governance/DataQualityCalibrationPanel.tsx",
+      "group": "frontend_runtime",
+      "added": 320,
+      "deleted": 76
+    },
+    {
+      "path": "frontend/src/pages/governance/DataQualityIssuesPanel.tsx",
+      "group": "frontend_runtime",
+      "added": 558,
+      "deleted": 157
+    },
+    {
+      "path": "frontend/src/pages/import/CanonicalImportPage.tsx",
+      "group": "frontend_runtime",
+      "added": 190,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/maintenance/DemandLineBatchCreate.tsx",
+      "group": "frontend_runtime",
+      "added": 27,
+      "deleted": 17
+    },
+    {
+      "path": "frontend/src/pages/maintenance/DemandLineBatchEdit.tsx",
+      "group": "frontend_runtime",
+      "added": 19,
+      "deleted": 13
+    },
+    {
+      "path": "frontend/src/pages/maintenance/DemandLineCreate.tsx",
+      "group": "frontend_runtime",
+      "added": 26,
+      "deleted": 14
+    },
+    {
+      "path": "frontend/src/pages/maintenance/DemandLinesEditor.tsx",
+      "group": "frontend_runtime",
+      "added": 48,
+      "deleted": 30
+    },
+    {
+      "path": "frontend/src/pages/maintenance/MaintenanceAnalyticsPage.tsx",
+      "group": "frontend_runtime",
+      "added": 75,
+      "deleted": 30
+    },
+    {
+      "path": "frontend/src/pages/maintenance/MaintenanceDashboardPage.tsx",
+      "group": "frontend_runtime",
+      "added": 48,
+      "deleted": 86
+    },
+    {
+      "path": "frontend/src/pages/maintenance/MaintenanceDemandsPage.tsx",
+      "group": "frontend_runtime",
+      "added": 82,
+      "deleted": 42
+    },
+    {
+      "path": "frontend/src/pages/maintenance/MaintenanceHomePage.tsx",
+      "group": "frontend_runtime",
+      "added": 68,
+      "deleted": 31
+    },
+    {
+      "path": "frontend/src/pages/maintenance/MaintenancePnCompactView.tsx",
+      "group": "frontend_runtime",
+      "added": 5,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/pages/maintenance/MaintenanceProjectPanelPage.tsx",
+      "group": "frontend_runtime",
+      "added": 110,
+      "deleted": 64
+    },
+    {
+      "path": "frontend/src/pages/maintenance/MaintenanceRankingsExplorer.tsx",
+      "group": "frontend_runtime",
+      "added": 6,
+      "deleted": 4
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/DemandAuthorization.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 232,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/DemandLineBatchCreate.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 8,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/DemandLineBatchEdit.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 11,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/DemandLineCreate.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 10,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/DemandLinesEditor.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 11,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/MaintenanceAnalyticsPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 39,
+      "deleted": 32
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/MaintenanceDashboardPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 49,
+      "deleted": 36
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/MaintenanceDemandsPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 10,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/MaintenanceHomePage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 11,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/MaintenanceHomePageBusinessType.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 6,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/MaintenanceHomePageUrlState.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 6,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/MaintenancePnCompactView.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/MaintenanceProjectPanelPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 26,
+      "deleted": 19
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/MaintenanceRankingsExplorer.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 14,
+      "deleted": 7
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/S3MaintenanceSurfaces.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 79,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/maintenance/__tests__/S3ProjectContext.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 138,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/maintenance/analyticsExplorerModel.ts",
+      "group": "frontend_runtime",
+      "added": 10,
+      "deleted": 19
+    },
+    {
+      "path": "frontend/src/pages/maintenance/dashboard/DashboardConsumptionTab.tsx",
+      "group": "frontend_runtime",
+      "added": 31,
+      "deleted": 96
+    },
+    {
+      "path": "frontend/src/pages/maintenance/dashboard/DashboardOverviewTab.tsx",
+      "group": "frontend_runtime",
+      "added": 22,
+      "deleted": 46
+    },
+    {
+      "path": "frontend/src/pages/maintenance/dashboard/DashboardPartsTab.tsx",
+      "group": "frontend_runtime",
+      "added": 20,
+      "deleted": 46
+    },
+    {
+      "path": "frontend/src/pages/maintenance/dashboard/DashboardProjectsTab.tsx",
+      "group": "frontend_runtime",
+      "added": 19,
+      "deleted": 44
+    },
+    {
+      "path": "frontend/src/pages/maintenance/dashboard/DashboardQuantityChecksTab.tsx",
+      "group": "frontend_runtime",
+      "added": 8,
+      "deleted": 37
+    },
+    {
+      "path": "frontend/src/pages/maintenance/dashboard/ReceiptsDrillDrawer.tsx",
+      "group": "frontend_runtime",
+      "added": 14,
+      "deleted": 48
+    },
+    {
+      "path": "frontend/src/pages/maintenance/dashboard/dashboardShared.tsx",
+      "group": "frontend_runtime",
+      "added": 10,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/AcceptanceTab.tsx",
+      "group": "frontend_runtime",
+      "added": 68,
+      "deleted": 28
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/CollectionBatchMaintenance.tsx",
+      "group": "frontend_runtime",
+      "added": 39,
+      "deleted": 15
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/CollectionTab.tsx",
+      "group": "frontend_runtime",
+      "added": 66,
+      "deleted": 43
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/ExpenseTab.tsx",
+      "group": "frontend_runtime",
+      "added": 20,
+      "deleted": 45
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/MaintenanceProjectAnalyticsContext.tsx",
+      "group": "frontend_runtime",
+      "added": 1,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/OverviewTab.tsx",
+      "group": "frontend_runtime",
+      "added": 37,
+      "deleted": 23
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/PartsOrdersTab.tsx",
+      "group": "frontend_runtime",
+      "added": 63,
+      "deleted": 103
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/ReturnReceiptBatchEntry.tsx",
+      "group": "frontend_runtime",
+      "added": 25,
+      "deleted": 7
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/ReturnReceiptBatchMaintenance.tsx",
+      "group": "frontend_runtime",
+      "added": 38,
+      "deleted": 15
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/ReturnReceiptImport.tsx",
+      "group": "frontend_runtime",
+      "added": 66,
+      "deleted": 44
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/ReturnReceiptsSection.tsx",
+      "group": "frontend_runtime",
+      "added": 97,
+      "deleted": 73
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/SiteIssueEditDrawer.tsx",
+      "group": "frontend_runtime",
+      "added": 34,
+      "deleted": 19
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/SiteIssueReturnBatch.tsx",
+      "group": "frontend_runtime",
+      "added": 18,
+      "deleted": 12
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/SiteReturnTab.tsx",
+      "group": "frontend_runtime",
+      "added": 56,
+      "deleted": 106
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/AcceptanceAuthorization.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 123,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/AcceptanceTab.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 8,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/CollectionAuthorization.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 120,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/CollectionBatchMaintenance.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 9,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/CollectionTab.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 14,
+      "deleted": 8
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/PartsOrdersTab.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 55,
+      "deleted": 38
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/ReturnReceiptBatchEntry.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 6,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/ReturnReceiptBatchMaintenance.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 14,
+      "deleted": 8
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/ReturnReceiptImport.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 13,
+      "deleted": 7
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/ReturnReceiptSNInput.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 6,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/ReturnReceiptsSection.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 25,
+      "deleted": 16
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/ReturnReceiptsSectionBatchMaintenance.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 7,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/S3ReceiptAuthorization.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 140,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/SiteIssueEditDrawer.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 17,
+      "deleted": 9
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/SiteIssueReturnBatch.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 15,
+      "deleted": 8
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/SiteReturnTab.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 14,
+      "deleted": 4
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/__tests__/SiteReturnTabRefresh.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 7,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/maintenance/panel/collectionAuthorization.ts",
+      "group": "frontend_runtime",
+      "added": 19,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/purchases/PurchaseAnalysisPage.tsx",
+      "group": "frontend_runtime",
+      "added": 47,
+      "deleted": 48
+    },
+    {
+      "path": "frontend/src/pages/purchases/PurchaseExceptionsPage.tsx",
+      "group": "frontend_runtime",
+      "added": 18,
+      "deleted": 16
+    },
+    {
+      "path": "frontend/src/pages/purchases/PurchaseRecordsPage.tsx",
+      "group": "frontend_runtime",
+      "added": 20,
+      "deleted": 28
+    },
+    {
+      "path": "frontend/src/pages/purchases/analytics/FilterBar.tsx",
+      "group": "frontend_runtime",
+      "added": 15,
+      "deleted": 5
+    },
+    {
+      "path": "frontend/src/pages/purchases/analytics/OrderDetailDrawer.tsx",
+      "group": "frontend_runtime",
+      "added": 11,
+      "deleted": 45
+    },
+    {
+      "path": "frontend/src/pages/purchases/analytics/PurchaseAnalyticsPage.tsx",
+      "group": "frontend_runtime",
+      "added": 41,
+      "deleted": 155
+    },
+    {
+      "path": "frontend/src/pages/purchases/analytics/SummaryView.tsx",
+      "group": "frontend_runtime",
+      "added": 7,
+      "deleted": 5
+    },
+    {
+      "path": "frontend/src/pages/purchases/analytics/__tests__/OrderDetailDrawer.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 6,
+      "deleted": 3
+    },
+    {
+      "path": "frontend/src/pages/purchases/analytics/__tests__/PurchaseAnalyticsPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 97,
+      "deleted": 15
+    },
+    {
+      "path": "frontend/src/pages/sales/analytics/AmountHistogram.tsx",
+      "group": "frontend_runtime",
+      "added": 2,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/sales/analytics/CompactTab.tsx",
+      "group": "frontend_runtime",
+      "added": 2,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/sales/analytics/DetailDrawer.tsx",
+      "group": "frontend_runtime",
+      "added": 18,
+      "deleted": 63
+    },
+    {
+      "path": "frontend/src/pages/sales/analytics/FilterBar.tsx",
+      "group": "frontend_runtime",
+      "added": 31,
+      "deleted": 40
+    },
+    {
+      "path": "frontend/src/pages/sales/analytics/GroupsTab.tsx",
+      "group": "frontend_runtime",
+      "added": 3,
+      "deleted": 2
+    },
+    {
+      "path": "frontend/src/pages/sales/analytics/OverviewTab.tsx",
+      "group": "frontend_runtime",
+      "added": 11,
+      "deleted": 5
+    },
+    {
+      "path": "frontend/src/pages/sales/analytics/SalesAnalyticsPage.tsx",
+      "group": "frontend_runtime",
+      "added": 84,
+      "deleted": 153
+    },
+    {
+      "path": "frontend/src/pages/sales/analytics/SummaryView.tsx",
+      "group": "frontend_runtime",
+      "added": 10,
+      "deleted": 8
+    },
+    {
+      "path": "frontend/src/pages/sales/analytics/TrendTab.tsx",
+      "group": "frontend_runtime",
+      "added": 2,
+      "deleted": 1
+    },
+    {
+      "path": "frontend/src/pages/sales/analytics/__tests__/SalesAnalyticsPage.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 142,
+      "deleted": 25
+    },
+    {
+      "path": "frontend/src/pages/sales/analytics/__tests__/SalesDashboardTabs.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 12,
+      "deleted": 4
+    },
+    {
+      "path": "frontend/src/pages/sales/analytics/__tests__/controlsContrastScope.test.tsx",
+      "group": "tests_and_test_fixtures",
+      "added": 8,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/pages/sales/analytics/useAsyncData.ts",
+      "group": "frontend_runtime",
+      "added": 16,
+      "deleted": 68
+    },
+    {
+      "path": "frontend/src/test/authzFixtures.ts",
+      "group": "tests_and_test_fixtures",
+      "added": 86,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/test/legacyAuthorization.ts",
+      "group": "tests_and_test_fixtures",
+      "added": 19,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/src/test/s2WireFixtures.ts",
+      "group": "tests_and_test_fixtures",
+      "added": 38,
+      "deleted": 0
+    },
+    {
+      "path": "frontend/tests/color-baseline.json",
+      "group": "tooling_configuration_other",
+      "added": 1,
+      "deleted": 1
+    },
+    {
+      "path": "scripts/install_test_cerbos.sh",
+      "group": "tooling_configuration_other",
+      "added": 12,
+      "deleted": 0
+    },
+    {
+      "path": "scripts/pytest_shard.py",
+      "group": "tooling_configuration_other",
+      "added": 211,
+      "deleted": 0
+    },
+    {
+      "path": "scripts/pytest_shard_plugin.py",
+      "group": "tooling_configuration_other",
+      "added": 154,
+      "deleted": 0
+    },
+    {
+      "path": "scripts/pytest_shard_skips.json",
+      "group": "tooling_configuration_other",
+      "added": 9,
+      "deleted": 0
+    }
+  ]
+}

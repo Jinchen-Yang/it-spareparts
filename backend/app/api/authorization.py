@@ -30,6 +30,17 @@ def authorization_catalog(identity: principal.VerifiedIdentity = Depends(princip
     return service.catalog_snapshot(db)
 
 
+@router.get('/accounts')
+def authorization_accounts(identity: principal.VerifiedIdentity = Depends(principal.current_verified_identity),
+                           db: Session = Depends(get_db)):
+    from app.authz.context import read_snapshot
+    from app.authz.control_access import account_rows
+    with read_snapshot(lambda: Session(db.get_bind())) as (reader, proof):
+        proof.validate(reader)
+        management.actor(reader, identity)
+        return {**management.envelope(), 'items': account_rows(reader)}
+
+
 @router.get('/customers')
 def search_customers(q: str = Query('', max_length=256), limit: int = Query(50, ge=1, le=100),
                      identity: principal.VerifiedIdentity = Depends(principal.current_verified_identity), db: Session = Depends(get_db)):

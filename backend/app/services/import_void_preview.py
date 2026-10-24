@@ -37,16 +37,18 @@ def _sign(payload: bytes, hmac_key: bytes) -> bytes:
 
 
 def issue(*, file_hash: str, mode: str, fingerprint: str, contract: str | None,
-          issued_at: int, hmac_key: bytes) -> str:
+          issued_at: int, hmac_key: bytes, version: int = TOKEN_VERSION) -> str:
+    if version not in (1, 2):
+        raise ValueError('Unknown void preview protocol')
     payload = json.dumps(
-        {"v": TOKEN_VERSION, "h": file_hash, "m": mode, "f": fingerprint,
+        {"v": version, "h": file_hash, "m": mode, "f": fingerprint,
          "c": contract, "t": int(issued_at)},
         sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
     return f"{_b64(payload)}.{_b64(_sign(payload, hmac_key))}"
 
 
-def verify(token: str, *, hmac_key: bytes, now: int, mode: str) -> dict:
+def verify(token: str, *, hmac_key: bytes, now: int, mode: str, version: int = TOKEN_VERSION) -> dict:
     """返回 {file_hash, fingerprint, contract, issued_at}；任何不合法都抛错，绝不降级。"""
     try:
         body, sig = token.split(".", 1)
@@ -57,7 +59,7 @@ def verify(token: str, *, hmac_key: bytes, now: int, mode: str) -> dict:
     if not hmac.compare_digest(given, _sign(payload, hmac_key)):
         raise VoidPreviewTokenError("void_preview_invalid", "预演令牌签名无效")
     data = json.loads(payload.decode("utf-8"))
-    if data.get("v") != TOKEN_VERSION:
+    if data.get("v") != version:
         raise VoidPreviewTokenError("void_preview_invalid", "预演令牌版本不受支持")
     if data.get("m") != mode:
         raise VoidPreviewTokenError("void_preview_mode_mismatch",

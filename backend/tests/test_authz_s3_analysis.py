@@ -67,6 +67,8 @@ def test_analysis_scope_before_facts_and_all_preserves_unassigned(db,analysis_cl
     assert view.json()['locator']=={'collection_ref':'maintenance_analysis_projects'}
 
 @pytest.mark.parametrize('endpoint,action,params',[
+ ('pn-ranking','read_pn_ranking',{'sort':'cost_inc'}),('pn-ranking','read_pn_ranking',{'sort':'cost_ex'}),
+ ('pn-ranking','read_pn_ranking',{'sort':'cost_share'}),
  ('pn-ranking','read_pn_ranking',{'sort':'missing_lines'}),('pn-ranking','read_pn_ranking',{'cost_source':'missing','sort':'pn'}),
  ('explorer','read_explorer',{'metric':'missing'}),('explorer','read_explorer',{'dimension':'customer'}),
  ('spend-trend','read_spend_trend',{'customer':'customer-other'}),

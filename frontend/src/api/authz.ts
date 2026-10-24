@@ -1,5 +1,6 @@
 import { api } from "../api";
 import { knownModules, vocabulary, surfaces as generatedSurfaces, type Rule } from "../authz/rules";
+import { KNOWN_BOUNDARIES } from "../authz/generated";
 
 export const AUTHZ_FIELDS = [
   { id: "data_supplier", label: "供应商信息" },
@@ -223,6 +224,12 @@ export interface ResourceDescriptor extends ResourceState {
 }
 export interface AuthzCatalog extends AuthzEnvelope {
   modules: ResourceDescriptor[];
+  boundaries: BoundaryDescriptor[];
+}
+export interface BoundaryDescriptor {
+  id: string; label: string; principal_kind: string; authority: string;
+  actions: { id: string; label: string; kind: "data" | "display" | "mutation" }[];
+  scope: string; notice: string;
 }
 export interface AuthorizationSubject {
   id: number;
@@ -419,6 +426,19 @@ function ruleSignature(rule: Rule): string {
 const sameStrings = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every(x => b.includes(x));
 export function validateCatalog(v: AuthzCatalog): AuthzCatalog {
   validateEnvelope(v);
+  if (!Array.isArray(v.boundaries) || v.boundaries.length !== KNOWN_BOUNDARIES.length ||
+      new Set(v.boundaries.map(b => b?.id)).size !== v.boundaries.length) protocolError();
+  for (const b of v.boundaries) {
+    const expected = KNOWN_BOUNDARIES.find(item => item.id === b?.id);
+    if (!expected || !record(b) || !sameStrings(Object.keys(b), Object.keys(expected)) ||
+        ["id", "label", "principal_kind", "authority", "scope", "notice"].some(k => b[k as keyof BoundaryDescriptor] !== expected[k as keyof typeof expected]) ||
+        !Array.isArray(b.actions) || b.actions.length !== expected.actions.length ||
+        new Set(b.actions.map(a => a?.id)).size !== b.actions.length ||
+        b.actions.some(a => {
+          const action = expected.actions.find(item => item.id === a?.id);
+          return !action || !record(a) || !sameStrings(Object.keys(a), ["id", "label", "kind"]) || a.label !== action.label || a.kind !== action.kind;
+        }) || v.modules.some(m => m.id === b.id)) protocolError();
+  }
   if (
     !Array.isArray(v.modules) ||
     new Set(v.modules.map((m) => m.id)).size !== v.modules.length

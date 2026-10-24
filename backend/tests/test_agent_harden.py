@@ -15,7 +15,7 @@ from tests import factories as f
 
 
 # ---------- TOOLS-1：内部异常不外泄 ----------
-def test_dispatch_sanitizes_internal_exception(monkeypatch):
+def test_dispatch_sanitizes_internal_exception(db, monkeypatch):
     """工具内部抛异常(如 SQLAlchemyError 带 SQL+表名) → dispatch 只回固定脱敏文案，
     原始 SQL/表名/异常类型一律不进回灌结果。"""
     def boom(db, args, ctx):
@@ -62,15 +62,18 @@ def test_chat_routes_require_page_chat(db):
     assert c.get("/api/agent/sessions", headers=H(yes_chat)).status_code == 200
 
 
-def test_every_agent_route_carries_page_chat_gate():
-    """结构红线：挂在 /api/agent* 下的每条路由都必须带 require_page 依赖。
-    防将来有人新加 agent 端点(或挪到别的 router)漏掉后端准入——stream/attach/cancel/
-    upload/download/preview 等都靠 router 级依赖覆盖，这里把"无端点逃逸"钉死。"""
-    routes = [r for r in app.routes if getattr(r, "path", "").startswith("/api/agent")]
-    assert routes, "未发现 /api/agent* 路由"
-    for r in routes:
-        quals = [getattr(d.call, "__qualname__", "") for d in r.dependant.dependencies]
-        assert any("require_page" in q for q in quals), f"{r.path} 缺 page_chat 后端准入"
+def test_every_agent_route_carries_page_chat_gate(db):
+    """Exercise the composed legacy gate on each actual mounted HTTP route."""
+    client = TestClient(app)
+    token = _login(client, db, 'all-agent-routes-denied', {'page_chat': False})
+    routes = [r for r in app.routes if getattr(r, 'path', '').startswith('/api/agent')]
+    assert len(routes) == 13
+    for route in routes:
+        path = route.path.replace('{session_id}', '1').replace('{file_id}', 'abcdef123456')
+        for method in route.methods:
+            response = client.request(method, path, headers={'Authorization': 'Bearer ' + token},
+                json={'messages': [{'role': 'user', 'content': 'hello'}], 'message': 'hello'})
+            assert response.status_code == 403, (method, path, response.text)
 
 
 # ---------- TOOLS-2：敏感派生键必须已在 FIELD_GROUPS 登记（脱敏才生效）----------

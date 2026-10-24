@@ -111,12 +111,11 @@ def require_named_admin(principal: Principal | None) -> Principal:
     return principal
 
 
-def actor_capabilities(principal: Principal | None) -> dict:
+def actor_capabilities(principal: Principal | None, *, read_accounts=False, edit_account_profiles=False) -> dict:
     named_admin = type(principal) is Principal and principal.role == "admin"
-    page = named_admin or bool(principal and "page_accounts" in principal.legacy_permissions)
-    edit = named_admin or bool(page and principal and "action_account_manage" in principal.legacy_permissions)
     allowed = {
-        "read_accounts": page, "edit_account_profiles": edit,
+        "read_accounts": type(principal) is Principal and read_accounts is True,
+        "edit_account_profiles": type(principal) is Principal and edit_account_profiles is True,
         **{key: named_admin for key in ("manage_authorization", "manage_templates", "create_accounts",
                                        "reset_account_passwords", "manage_account_lifecycle")},
     }

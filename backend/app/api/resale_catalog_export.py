@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
-import hmac
 import logging
 import re
 from datetime import datetime, timezone
@@ -50,18 +48,13 @@ _PG_BIGINT_MAX = 2**63 - 1
 _logger = logging.getLogger(__name__)
 
 
-def _catalog_key(authorization: Annotated[str | None, Header()] = None) -> None:
-    expected = get_settings().resale_catalog_token_sha256.get_secret_value()
-    if not expected:
-        raise HTTPException(404, "PN 只读导出尚未启用")
-    scheme, separator, token = (authorization or "").partition(" ")
-    if not separator or scheme.lower() != "bearer" or not 32 <= len(token) <= 256:
-        raise HTTPException(401, "PN 只读凭据无效")
-    if not hmac.compare_digest(hashlib.sha256(token.encode()).hexdigest(), expected):
-        raise HTTPException(401, "PN 只读凭据无效")
+from app.authz.machine_access import ServiceAccess, require_service
 
-
-CatalogKey = Annotated[None, Depends(_catalog_key)]
+ResolveKey = Annotated[ServiceAccess, Depends(require_service('resale_catalog', 'resale_catalog', 'resolve'))]
+SnapshotKey = Annotated[ServiceAccess, Depends(require_service('resale_catalog', 'resale_catalog', 'snapshots'))]
+ListKey = Annotated[ServiceAccess, Depends(require_service('resale_catalog', 'resale_catalog', 'list'))]
+EvidenceKey = Annotated[ServiceAccess, Depends(require_service('resale_catalog', 'resale_catalog', 'price_evidence'))]
+PriceReferenceKey = Annotated[ServiceAccess, Depends(require_service('resale_catalog', 'resale_price_reference', 'read'))]
 DbSession = Annotated[Session, Depends(get_db)]
 
 
@@ -140,7 +133,7 @@ def _sales_record_counts(
 
 @router.post("/resolve")
 def resolve_parts(
-    body: ResolveRequest, response: Response, _key: CatalogKey, db: DbSession
+    body: ResolveRequest, response: Response, _key: ResolveKey, db: DbSession
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     items = []
@@ -179,7 +172,7 @@ def resolve_parts(
 
 @router.post("/snapshots")
 def part_snapshots(
-    body: SnapshotRequest, response: Response, _key: CatalogKey, db: DbSession
+    body: SnapshotRequest, response: Response, _key: SnapshotKey, db: DbSession
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     rows: list[tuple[int, DimPart | None, bool]] = []
@@ -258,7 +251,7 @@ def _decode_list_cursor(token: str) -> tuple[datetime, int]:
 
 @router.post("/list")
 def list_parts(
-    body: ListRequest, response: Response, _key: CatalogKey, db: DbSession
+    body: ListRequest, response: Response, _key: ListKey, db: DbSession
 ) -> dict:
     """D-36 PR1: full-catalog keyset listing — a live read, not a v2 snapshot."""
     response.headers["Cache-Control"] = "no-store"
@@ -321,7 +314,7 @@ def _money(value: object) -> str | None:
 
 @router.post("/price-evidence")
 def price_evidence(
-    body: EvidenceRequest, response: Response, _key: CatalogKey, db: DbSession
+    body: EvidenceRequest, response: Response, _key: EvidenceKey, db: DbSession
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     if any(part_id < 1 for part_id in body.partIds):
@@ -332,8 +325,12 @@ def price_evidence(
         if body.side == "sales"
         else (FPurchaseLine, FPurchaseOrder)
     )
+    columns = [line_type.id, line_type.part_id, line_type.raw_line_id, line_type.unit_price, line_type.qty,
+               order_type.raw_order_id, order_type.order_date, order_type.data_status]
+    columns += ([order_type.tax_rate, order_type.business_type, line_type.counts_revenue]
+                if body.side == 'sales' else [order_type.is_tax_inclusive, order_type.source_type])
     statement = (
-        select(line_type, order_type)
+        select(*columns)
         .join(order_type, line_type.order_id == order_type.id)
         .where(line_type.part_id.in_(part_ids))
     )
@@ -342,17 +339,17 @@ def price_evidence(
     fetched = db.execute(statement.order_by(line_type.id).limit(body.limit + 1)).all()
     has_more = len(fetched) > body.limit
     items = []
-    for line, order in fetched[: body.limit]:
+    for row in fetched[: body.limit]:
         common = {
-            "partId": line.part_id,
-            "sourceLineId": line.raw_line_id,
-            "sourceOrderId": order.raw_order_id,
-            "orderDate": order.order_date.isoformat() if order.order_date else None,
-            "dataStatus": order.data_status
-            if order.data_status in _ORDER_STATES
+            "partId": row.part_id,
+            "sourceLineId": row.raw_line_id,
+            "sourceOrderId": row.raw_order_id,
+            "orderDate": row.order_date.isoformat() if row.order_date else None,
+            "dataStatus": row.data_status
+            if row.data_status in _ORDER_STATES
             else "unknown",
-            "unitPrice": _money(line.unit_price),
-            "qty": _money(line.qty),
+            "unitPrice": _money(row.unit_price),
+            "qty": _money(row.qty),
             "itemKind": "unknown",
             "channel": "unknown",
         }
@@ -361,20 +358,20 @@ def price_evidence(
                 {
                     "side": "sale",
                     "unitPriceBasis": "inc_tax_assumed",
-                    "taxRate": _money(order.tax_rate),
-                    "businessType": order.business_type
-                    if order.business_type in _SALES_TYPES
+                    "taxRate": _money(row.tax_rate),
+                    "businessType": row.business_type
+                    if row.business_type in _SALES_TYPES
                     else "other",
-                    "countsRevenue": bool(line.counts_revenue),
+                    "countsRevenue": bool(row.counts_revenue),
                 }
             )
         else:
             common.update(
                 {
                     "side": "purchase",
-                    "isTaxInclusive": order.is_tax_inclusive,
-                    "sourceType": order.source_type
-                    if order.source_type in _PURCHASE_TYPES
+                    "isTaxInclusive": row.is_tax_inclusive,
+                    "sourceType": row.source_type
+                    if row.source_type in _PURCHASE_TYPES
                     else "other",
                 }
             )
@@ -383,7 +380,7 @@ def price_evidence(
         "schemaVersion": 1,
         "items": items,
         "hasMore": has_more,
-        "nextCursor": fetched[body.limit - 1][0].id if has_more else None,
+        "nextCursor": fetched[body.limit - 1].id if has_more else None,
     }
 
 
@@ -395,7 +392,7 @@ def price_evidence(
 def price_reference(
     pn: Annotated[str, Query(min_length=1, max_length=256)],
     response: Response,
-    _key: CatalogKey,
+    _key: PriceReferenceKey,
     db: DbSession,
 ) -> ResalePriceReferenceResponse:
     """商城详情页按 PN 点击查询销售参考均价；只读，不写任何业务状态。"""
@@ -422,4 +419,4 @@ def price_reference(
 
 
 from app.api.resale_catalog_search import register_search
-register_search(router, _catalog_key)
+register_search(router, require_service('resale_catalog', 'resale_catalog', 'search'))

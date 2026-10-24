@@ -2,6 +2,7 @@ import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../test/l
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "../../test/antdRender";
 
+import { MemoryRouter } from "react-router-dom";
 import { StrictMode } from "react";
 import type { ImportPrecheckResult } from "../../api/imports";
 
@@ -115,13 +116,13 @@ afterEach(() => {
 
 describe("批量文件数量提示", () => {
   it("明确提示每批最多 20 个文件", () => {
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
 
     expect(screen.getByText(/每批最多 20 个文件/)).toBeInTheDocument();
   });
 
   it("保留同名同大小但内容不同的文件并按选择顺序预检", async () => {
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     const first = stage(new File([Uint8Array.of(1)], "同名.xlsx"));
     const second = stage(new File([Uint8Array.of(2)], "同名.xlsx"));
 
@@ -145,7 +146,7 @@ describe("批量文件数量提示", () => {
         response: { status: 400, data: { detail: "一次最多导入 20 个文件，请分批处理" } },
       })
       .mockResolvedValueOnce(cleanResult);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
 
     files.forEach((file) => stage(file));
     expect(await screen.findByText("待导入 21 个文件")).toBeInTheDocument();
@@ -180,7 +181,7 @@ describe("完整导入问题明细下载", () => {
       ...cleanResult,
       files: [{ ...cleanResult.files[0], filename: "需求单.xlsx", file_type: "maintenance" }],
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage(new File(["xlsx"], "需求单.xlsx"));
     fireEvent.click(screen.getByRole("button", { name: /预检文件/ }));
 
@@ -197,7 +198,7 @@ describe("完整导入问题明细下载", () => {
   });
 
   it("采购预检仍按默认跳过模式处理，不出现 WBDD 专用提示", async () => {
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(screen.getByRole("button", { name: /预检文件/ }));
 
@@ -225,7 +226,7 @@ describe("完整导入问题明细下载", () => {
       } });
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     expect(await screen.findByText("2026-07-28 00:05")).toBeInTheDocument();
     fireEvent.click(await screen.findByText("详情"));
 
@@ -255,7 +256,7 @@ describe("完整导入问题明细下载", () => {
       } });
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     expect(await screen.findByText("2026-07-28 00:05")).toBeInTheDocument();
     fireEvent.click(await screen.findByText("详情"));
     expect(await screen.findByText("地址处理")).toBeInTheDocument();
@@ -280,7 +281,7 @@ describe("完整导入问题明细下载", () => {
       } });
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
 
     fireEvent.click(await screen.findByText("详情"));
 
@@ -305,7 +306,7 @@ describe("完整导入问题明细下载", () => {
       } });
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
 
     fireEvent.click(await screen.findByText("详情"));
     await screen.findByText("批次 #8 · 正常.xlsx");
@@ -329,7 +330,7 @@ describe("完整导入问题明细下载", () => {
       } });
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     fireEvent.click(await screen.findByText("详情"));
     const button = await screen.findByRole("button", {
       name: "下载完整导入问题明细（3 条）",
@@ -359,7 +360,7 @@ describe("完整导入问题明细下载", () => {
       const batch = batches.find((item) => url === `/import/batches/${item.id}`);
       return Promise.resolve({ data: { ...batch, report: {}, errors: [], issue_count: 1 } });
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     const details = await screen.findAllByRole("button", { name: "详情" });
     fireEvent.click(details[0]);
     fireEvent.click(await screen.findByRole("button", { name: "下载完整导入问题明细（1 条）" }));
@@ -384,7 +385,7 @@ describe("完整导入问题明细下载", () => {
       if (url === "/import/batches/11") return first.promise;
       return Promise.resolve({ data: batches[1] });
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     const details = await screen.findAllByRole("button", { name: "详情" });
     fireEvent.click(details[0]);
     fireEvent.click(details[1]);
@@ -416,7 +417,7 @@ describe("完整导入问题明细下载", () => {
       } });
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     fireEvent.click(await screen.findByText("详情"));
 
     fireEvent.click(await screen.findByRole("button", {
@@ -438,7 +439,7 @@ describe("导入预检状态机", () => {
       } });
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
 
@@ -468,7 +469,7 @@ describe("导入预检状态机", () => {
         },
       ],
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
 
@@ -484,7 +485,7 @@ describe("导入预检状态机", () => {
       mode: "upsert",
       files: [{ ...cleanResult.files[0], exact_success_match: { batch_id: 42 } }],
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("switch"));
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
@@ -507,7 +508,7 @@ describe("导入预检状态机", () => {
       if (url === "/import/batches/42") return detailRequest.promise;
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     const link = await screen.findByRole("button", { name: "查看原批次 #42" });
@@ -534,7 +535,7 @@ describe("导入预检状态机", () => {
       }
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     const link = await screen.findByRole("button", { name: "查看原批次 #42" });
@@ -579,7 +580,7 @@ describe("导入预检状态机", () => {
       }
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     fireEvent.click(await screen.findByRole("button", { name: "查看原批次 #42" }));
@@ -602,7 +603,7 @@ describe("导入预检状态机", () => {
       if (url === "/import/batches/42") return detailRequest.promise;
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     fireEvent.click(await screen.findByRole("button", { name: "查看原批次 #42" }));
@@ -629,7 +630,7 @@ describe("导入预检状态机", () => {
       if (url === "/import/batches/42") return Promise.reject(error);
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     fireEvent.click(await screen.findByRole("button", { name: "查看原批次 #42" }));
@@ -640,7 +641,7 @@ describe("导入预检状态机", () => {
   });
 
   it("正常文件也必须先展示预检结果，不能在预检 handler 中自动上传", async () => {
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     const file = stage();
     expect(await screen.findByText("采购.xlsx")).toBeInTheDocument();
 
@@ -662,7 +663,7 @@ describe("导入预检状态机", () => {
     ["row_limit_exceeded", "数据行超过限制"],
   ])("%s 致命问题会保留文件和详情但绝不上传", async (code, issueText) => {
     precheckImportFiles.mockResolvedValueOnce(blockedResult(code, issueText));
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
 
@@ -674,7 +675,7 @@ describe("导入预检状态机", () => {
 
   it("重复表头问题提示删除或重命名表头后重新预检", async () => {
     precheckImportFiles.mockResolvedValueOnce(blockedResult("duplicate_headers", "存在重复表头"));
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
 
@@ -686,7 +687,7 @@ describe("导入预检状态机", () => {
     precheckImportFiles.mockResolvedValueOnce(blockedResult(
       "no_recognized_sheet", "无法识别可导入工作表",
     ));
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
 
@@ -696,7 +697,7 @@ describe("导入预检状态机", () => {
 
   it("未知问题使用不声称自动修复的安全通用建议", async () => {
     precheckImportFiles.mockResolvedValueOnce(blockedResult("future_issue", "发现未知文件问题"));
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
 
@@ -707,7 +708,7 @@ describe("导入预检状态机", () => {
 
   it("缺价格警告未确认或返回修改时都不会上传", async () => {
     precheckImportFiles.mockResolvedValueOnce(warningResult);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
 
@@ -721,7 +722,7 @@ describe("导入预检状态机", () => {
 
   it("缺价格问题提示重新导出含价格字段的视图，并仅在确认无需金额时继续", async () => {
     precheckImportFiles.mockResolvedValueOnce(warningResult);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
 
@@ -735,7 +736,7 @@ describe("导入预检状态机", () => {
     const upload = deferred<{ job_id: number; total_files: number }>();
     precheckImportFiles.mockResolvedValueOnce(warningResult);
     uploadImportBatch.mockReturnValueOnce(upload.promise);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     const file = stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     await screen.findByText("导入后将没有金额");
@@ -773,7 +774,7 @@ describe("导入预检状态机", () => {
         ],
       }],
     } satisfies ImportPrecheckResult);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
 
@@ -799,7 +800,7 @@ describe("导入预检状态机", () => {
         }],
       }],
     } satisfies ImportPrecheckResult);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
 
@@ -820,7 +821,7 @@ describe("导入预检状态机", () => {
         blocked_reason: null, issues: [], sheets: [],
       }],
     } satisfies ImportPrecheckResult);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage(new File(["old"], "旧版.xlsx"));
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
 
@@ -834,7 +835,7 @@ describe("导入预检状态机", () => {
   it.each(["add", "delete", "clear", "mode"] as const)(
     "%s 会立即使旧预检结果失效",
     async (action) => {
-      render(<ImportPage />);
+      render(<MemoryRouter><ImportPage /></MemoryRouter>);
       const oldFile = stage();
       let addedFile: File | undefined;
       fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
@@ -867,7 +868,7 @@ describe("导入预检状态机", () => {
   it("预检按钮同步双击只发送一次请求", async () => {
     const request = deferred<ImportPrecheckResult>();
     precheckImportFiles.mockReturnValueOnce(request.promise);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     const button = await screen.findByRole("button", { name: /预检文件/ });
     fireEvent.click(button);
@@ -880,7 +881,7 @@ describe("导入预检状态机", () => {
   it("输入 revision 改变后丢弃迟到的预检响应", async () => {
     const request = deferred<ImportPrecheckResult>();
     precheckImportFiles.mockReturnValueOnce(request.promise);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     expect(document.querySelector(".ant-upload-disabled")).toBeInTheDocument();
@@ -895,7 +896,7 @@ describe("导入预检状态机", () => {
   it("输入失效时 abort 正在进行的预检请求", async () => {
     const request = deferred<ImportPrecheckResult>();
     precheckImportFiles.mockReturnValueOnce(request.promise);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     const signal = precheckImportFiles.mock.calls[0][2] as AbortSignal;
@@ -912,7 +913,7 @@ describe("导入预检状态机", () => {
   it("页面卸载时 abort 正在进行的预检请求", async () => {
     const request = deferred<ImportPrecheckResult>();
     precheckImportFiles.mockReturnValueOnce(request.promise);
-    const view = render(<ImportPage />);
+    const view = render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     const signal = precheckImportFiles.mock.calls[0][2] as AbortSignal;
@@ -931,7 +932,7 @@ describe("导入预检状态机", () => {
     ["detail", { response: { status: 400, data: { detail: "文件数量超过限制" } } }, "文件数量超过限制"],
   ])("预检 %s 失败显示持久明确 Alert 且不显示成功", async (_label, error, expected) => {
     precheckImportFiles.mockRejectedValueOnce(error);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
 
@@ -943,7 +944,7 @@ describe("导入预检状态机", () => {
 
   it("正式提交失败不伪造 job、不重试，并提示先查导入历史", async () => {
     uploadImportBatch.mockRejectedValueOnce({ response: { data: { detail: "服务拒绝提交" } } });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     fireEvent.click(await screen.findByRole("button", { name: "开始导入" }));
@@ -963,7 +964,7 @@ describe("导入预检状态机", () => {
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
     uploadImportBatch.mockResolvedValueOnce({ job_id: 42, total_files: 1 });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("switch"));
     const file = stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
@@ -988,7 +989,7 @@ describe("导入预检状态机", () => {
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
     uploadImportBatch.mockReturnValueOnce(upload.promise);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     fireEvent.click(await screen.findByRole("button", { name: "开始导入" }));
@@ -1007,7 +1008,7 @@ describe("导入预检状态机", () => {
   it("旧 upload 失败不覆盖 revision 变化后的新输入状态", async () => {
     const upload = deferred<{ job_id: number; total_files: number }>();
     uploadImportBatch.mockReturnValueOnce(upload.promise);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     fireEvent.click(await screen.findByRole("button", { name: "开始导入" }));
@@ -1024,7 +1025,7 @@ describe("导入预检状态机", () => {
   it("StrictMode 页面卸载后迟到的 upload 成功不启动 job 查询或 timer", async () => {
     const upload = deferred<{ job_id: number; total_files: number }>();
     uploadImportBatch.mockReturnValueOnce(upload.promise);
-    const view = render(<StrictMode><ImportPage /></StrictMode>);
+    const view = render(<StrictMode><MemoryRouter><ImportPage /></MemoryRouter></StrictMode>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     fireEvent.click(await screen.findByRole("button", { name: "开始导入" }));
@@ -1049,7 +1050,7 @@ describe("导入预检状态机", () => {
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
     uploadImportBatch.mockResolvedValueOnce({ job_id: 83, total_files: 1 });
-    const view = render(<ImportPage />);
+    const view = render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     fireEvent.click(await screen.findByRole("button", { name: "开始导入" }));
@@ -1081,7 +1082,7 @@ describe("导入预检状态机", () => {
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
     uploadImportBatch.mockResolvedValueOnce({ job_id: 81, total_files: 1 });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     const submit = await screen.findByRole("button", { name: "开始导入" });
@@ -1104,7 +1105,7 @@ describe("导入预检状态机", () => {
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
     uploadImportBatch.mockResolvedValueOnce({ job_id: 82, total_files: 1 });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     const submit = await screen.findByRole("button", { name: "开始导入" });
@@ -1136,7 +1137,7 @@ describe("导入预检状态机", () => {
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
     uploadImportBatch.mockResolvedValueOnce({ job_id: 86, total_files: 1 });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     const submit = await screen.findByRole("button", { name: "开始导入" });
@@ -1168,7 +1169,7 @@ describe("导入预检状态机", () => {
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
     uploadImportBatch.mockResolvedValueOnce({ job_id: 84, total_files: 1 });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     const submit = await screen.findByRole("button", { name: "开始导入" });
@@ -1198,7 +1199,7 @@ describe("导入预检状态机", () => {
       return Promise.reject(new Error(`unexpected GET ${url}`));
     });
     uploadImportBatch.mockResolvedValueOnce({ job_id: 87, total_files: 1 });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
     const submit = await screen.findByRole("button", { name: "开始导入" });
@@ -1248,7 +1249,7 @@ describe("作废预演（修复模式）", () => {
       ? Promise.resolve({ data: { id: 7, status: "done", mode: "upsert", total_files: 1,
         done_files: 1, error_files: 0, note: null, batches: [] } })
       : Promise.resolve({ data: [] }));
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("switch"));
     const file = stage(new File(["xlsx"], "报销.xlsx"));
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
@@ -1269,7 +1270,7 @@ describe("作废预演（修复模式）", () => {
       ...readyPreview, status: "will_be_rejected", void: null, void_rows: [],
       preview_token: null, blocking_error_types: ["duplicate_key"],
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("switch"));
     stage(new File(["xlsx"], "报销.xlsx"));
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
@@ -1287,7 +1288,7 @@ describe("作废预演（修复模式）", () => {
       status: 409, headers: { "x-error-code": "void_plan_drift" },
       data: { detail: "作废预演已失效：预演之后相关报销行发生变化，本批未导入，请重新预演" },
     } });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("switch"));
     stage(new File(["xlsx"], "报销.xlsx"));
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
@@ -1318,7 +1319,7 @@ describe("作废预演（Codex 复审：预算跳过 / 同名文件 / 清单上�
       ? Promise.resolve({ data: { id: 8, status: "done", mode: "upsert", total_files: 1,
         done_files: 1, error_files: 0, note: null, batches: [] } })
       : Promise.resolve({ data: [] }));
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("switch"));
     const file = stage(new File(["xlsx"], "报销.xlsx"));
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
@@ -1342,7 +1343,7 @@ describe("作废预演（Codex 复审：预算跳过 / 同名文件 / 清单上�
       ? Promise.resolve({ data: { id: 9, status: "done", mode: "upsert", total_files: 1,
         done_files: 1, error_files: 0, note: null, batches: [] } })
       : Promise.resolve({ data: [] }));
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("switch"));
     const file = stage(new File(["xlsx"], "报销.xlsx"));
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
@@ -1364,7 +1365,7 @@ describe("作废预演（Codex 复审：预算跳过 / 同名文件 / 清单上�
     };
     precheckImportFiles.mockResolvedValueOnce(twoFiles);
     previewExpenseVoid.mockResolvedValueOnce(readyPreview);
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("switch"));
     const first = stage(new File([Uint8Array.of(1)], "报销.xlsx"));
     const second = stage(new File([Uint8Array.of(2)], "报销.xlsx"));
@@ -1382,7 +1383,7 @@ describe("作废预演（Codex 复审：预算跳过 / 同名文件 / 清单上�
       ...readyPreview, status: "too_large", row_cap: 5000,
       void: { rows: 6000, amount: "1.00", already_void_rows: 0 }, void_rows: [], preview_token: null,
     });
-    render(<ImportPage />);
+    render(<MemoryRouter><ImportPage /></MemoryRouter>);
     fireEvent.click(screen.getByRole("switch"));
     stage(new File(["xlsx"], "报销.xlsx"));
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
@@ -1396,4 +1397,4 @@ describe("作废预演（Codex 复审：预算跳过 / 同名文件 / 清单上�
 vi.mock("../../authz/AuthzProvider", async original => ({
   ...await original<typeof import("../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
 }));
-beforeEach(() => prepareLegacyPageFixture());
+beforeEach(() => prepareLegacyPageFixture({ page_import: true }));

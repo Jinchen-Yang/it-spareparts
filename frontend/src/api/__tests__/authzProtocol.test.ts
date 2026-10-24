@@ -30,7 +30,23 @@ const me = catalogCases.cases[1].response.json as unknown as AuthzSnapshot;
 const account = accountCases.cases[0].response
   .json as unknown as AccountModules;
 describe("S1 documented wire after explicit S2 migration", () => {
-  it("accepts the full real backend catalog, with all 96 S2/S3 resources executable", () => {
+  it("keeps platform boundaries closed and separate from employee grants", () => {
+    expect(catalog.boundaries).toHaveLength(10);
+    expect(catalog.boundaries.every(b => !catalog.modules.some(m => m.id === b.id))).toBe(true);
+    const bad = clone(catalog);
+    bad.boundaries[0].authority = "employee_grant";
+    expect(() => validateCatalog(bad)).toThrow();
+    const grant = clone(catalog);
+    (grant.boundaries[0] as any).configurable = true;
+    expect(() => validateCatalog(grant)).toThrow();
+    const missing = clone(catalog);
+    missing.boundaries.pop();
+    expect(() => validateCatalog(missing)).toThrow();
+    const duplicate = clone(catalog);
+    duplicate.boundaries[1] = duplicate.boundaries[0];
+    expect(() => validateCatalog(duplicate)).toThrow();
+  });
+  it("accepts the full real backend catalog, with all 107 S2/S3/S4 resources executable", () => {
     const real = {
       ...catalog,
       modules: manifest.map((module) => ({
@@ -40,9 +56,9 @@ describe("S1 documented wire after explicit S2 migration", () => {
         configurable: module.migration_state === "implemented",
       })),
     } as AuthzCatalog;
-    expect(real.modules).toHaveLength(115);
+    expect(real.modules).toHaveLength(112);
     expect(validateCatalog(real)).toEqual(real);
-    expect(real.modules.filter(m => m.configurable)).toHaveLength(96);
+    expect(real.modules.filter(m => m.configurable)).toHaveLength(107);
     expect(real.modules.find(m => m.id === "sales_analysis")!.actions.map(a => a.id)).not.toContain("read");
     const missingSource = clone(real);
     delete (missingSource.modules.find(m => m.id === "maintenance_project") as any).legacy_sources;

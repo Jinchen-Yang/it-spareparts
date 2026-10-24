@@ -1,4 +1,5 @@
 import { useCallback, useRef, type ReactNode } from "react";
+import type { AxiosRequestConfig } from "axios";
 import { Alert, Button, Spin } from "antd";
 import { api } from "../api";
 import type { AuthzSnapshot } from "../api/authz";
@@ -19,6 +20,7 @@ export interface ContextInput {
   pathParams?: Readonly<Record<string, string | number>>;
   query?: Readonly<Record<string, unknown>>;
   body?: unknown;
+  headers?: AxiosRequestConfig["headers"];
   locator?: ContextExpectation["locator"];
 }
 const fileIds = new WeakMap<Blob, number>();
@@ -56,7 +58,7 @@ export async function requestAuthorizationView(entryId: string, input: ContextIn
   const view = authorizationViews[entryId];
   const url = authorizationPath(entryId, input.pathParams);
   return api.request<unknown>({
-    ...transportConfig(capture), method: view.method, url,
+    ...transportConfig(capture, input.headers), method: view.method, url,
     params: { ...input.query, view: "authorization" }, data: input.body,
   });
 }
@@ -127,7 +129,7 @@ export function useAuthorizedOperation({ entryId, input, rule = entryRule(entryI
             if (options.execute) return options.execute(captured, precondition);
             const view = authorizationViews[entryId];
             const result = await api.request<T>({
-              ...transportConfig(captured), method: view.method, url: authorizationPath(entryId, input.pathParams),
+              ...transportConfig(captured, input.headers), method: view.method, url: authorizationPath(entryId, input.pathParams),
               params: view.method === "GET" ? { ...input.query, authorization_precondition: JSON.stringify(precondition) } : input.query,
               data: view.method === "GET" ? undefined : commandBody(input.body, precondition), responseType: options.responseType ?? "json",
             });

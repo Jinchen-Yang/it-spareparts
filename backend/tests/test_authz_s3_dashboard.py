@@ -121,3 +121,19 @@ def test_export_rechecks_each_chunk_and_closes_file(db,dashboard,projects):
         with pytest.raises(HTTPException):await anext(response.body_iterator)
     asyncio.run(consume())
     assert stream.closed
+
+
+@pytest.mark.parametrize('endpoint,action', [('valuation', 'read_valuation'), ('summary', 'read_summary')])
+def test_dashboard_finance_read_without_adjustment_uses_server_policy_but_rejects_overrides(db, dashboard, endpoint, action):
+    client, headers, actor = dashboard
+    path = '/api/maintenance/analytics/maintenance-dashboard/' + endpoint
+    grant(db, actor, 'maintenance_dashboard', [action], ['data_profit'])
+    view = client.get(path, headers=headers, params={'range': 'all', 'view': 'authorization'})
+    assert view.status_code == 200, view.text
+    assert set(view.json()) == {'locator', 'authorization_context'}
+    response = client.get(path, headers=headers, params={'range': 'all'})
+    assert response.status_code == 200, response.text
+    # A field grant authorizes reading finance; it never grants parameter adjustment.
+    for ratio in ('0', '0.3', '0.5'):
+        forbidden = client.get(path, headers=headers, params={'range': 'all', 'value_retention_ratio': ratio})
+        assert forbidden.status_code == 403, forbidden.text

@@ -12,11 +12,11 @@ vi.mock("../../../api/authz", async original => ({ ...await original<typeof impo
 vi.mock("../../../components/charts/EChartContainer", () => ({ default: () => <div>chart</div> }));
 const request = vi.spyOn(api, "request");
 const path = "/maintenance/analytics/maintenance-dashboard";
-function actor(actions = ["show_checks", "read_quantity_checks"]) {
+function actor(actions = ["show_checks", "read_quantity_checks"], fields: string[] = []) {
   const value = authzSnapshot({ enabled: true, read: false, export: false, scope: "none", customer_count: 0,
     reason: "", field_permissions: [] }, { mode: "unified_modules", version: "v1" });
   value.resources.maintenance_dashboard = { migration_state: "implemented", runtime_state: "enabled", configurable: true,
-    grant_version: 1, scope_kind: "all_projects", field_permissions: [],
+    grant_version: 1, scope_kind: "all_projects", field_permissions: fields,
     decisions: Object.fromEntries(Object.entries(vocabulary.maintenance_dashboard.actions).map(([action, descriptor]) => [action,
       { effect: !actions.includes(action) ? "deny" : descriptor.kind === "display" ? "allow" : "requires_context", reason: null }])) };
   return value;
@@ -76,4 +76,37 @@ it("orders-only enters its shared tab without checks, consumption or options", a
   await waitFor(() => expect(request).toHaveBeenCalledTimes(2));
   expect(request.mock.calls.every(([config]) => config.url === `${path}/orders`)).toBe(true);
   expect(screen.queryByText("每日实际领用与已计成本")).not.toBeInTheDocument();
+});
+
+function valuationSetup(adjust = false) {
+  const actions = ["show_valuation", "read_valuation", ...(adjust ? ["adjust_valuation_parameters", "show_valuation_parameters"] : [])];
+  const value = actor(actions, ["data_profit"]);
+  getAuthzSnapshot.mockResolvedValue({ data: value });
+  const ctx = context("read_valuation");
+  ctx.resources.maintenance_dashboard.field_permissions = ["data_profit"];
+  if (adjust) ctx.resources.maintenance_dashboard.decisions.adjust_valuation_parameters = { effect: "allow", reason: null };
+  request.mockImplementation(async config => {
+    expect(config.url).toBe(`${path}/valuation`);
+    const params = config.params as Record<string, unknown>;
+    if (params.view) return { data: resolution(ctx) };
+    if (!adjust && params.value_retention_ratio !== undefined) throw { response: { status: 403, data: { detail: "调整比例未授权" } } };
+    return { data: { authorization_context: ctx, rows: [], pagination: { page: 1, page_size: 20, total: 0 },
+      policy: { retention_ratio: params.value_retention_ratio ?? "0.5", quick_options: ["0.5", "0.3"],
+        notes: "minimal valuation read", retention_rule: "server valuation policy", window_rule: "fixture", weighting: "fixture",
+        three_domain_rule: "separate", unknown_condition_rule: "pending", finished_goods_rule: "separate", policy_version: "fixture" },
+    } };
+  });
+}
+it.each(["", "&ratio=0.3"])("valuation read without adjustment never sends a ratio override (%s)", async query => {
+  valuationSetup(); mount(`/maintenance/dashboard?tab=parts${query}`);
+  expect(await screen.findByTestId("valuation-policy-note")).toHaveTextContent("当前试算比例 50%");
+  expect(screen.queryByTestId("retention-ratio-control")).toBeNull();
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(request.mock.calls[1][0].params).not.toHaveProperty("value_retention_ratio");
+});
+it.each([["", "0.5"], ["&ratio=0", "0"], ["&ratio=0.3", "0.3"]])("authorized adjustment retains default and explicit ratios (%s)", async (query, ratio) => {
+  valuationSetup(true); mount(`/maintenance/dashboard?tab=parts${query}`);
+  expect(await screen.findByTestId("valuation-policy-note")).toHaveTextContent("当前试算比例");
+  expect(screen.getByTestId("retention-ratio-control")).toBeVisible();
+  expect(request.mock.calls[1][0].params).toMatchObject({ value_retention_ratio: ratio });
 });

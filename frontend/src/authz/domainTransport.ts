@@ -4,19 +4,16 @@ import { api } from "../api";
 import { useAuthz } from "./AuthzProvider";
 import { AuthorizationCancelled, useCapturedRunner } from "./requestLifecycle";
 import { authorizationPath, authorizationViews, contextEntries, entryRule,
-  validateContextualPayload, ContextProtocolError } from "./contextProtocol";
+  validateContextualPayload, ContextDenied, ContextProtocolError } from "./contextProtocol";
 import { commandBody, contextInputKey, executeContextRequest, type ContextInput } from "./context";
-import { ruleState, vocabulary } from "./rules";
+import { ruleAllowed, ruleState, vocabulary, type Rule } from "./rules";
 import type { AuthorizationContext } from "./contextTypes";
 import { transportConfig } from "./transport";
 
-export interface ContextRequestTransport {
-  readonly signal?: AbortSignal;
-  request<T>(config: AxiosRequestConfig): Promise<AxiosResponse<T>>;
-  isCurrent(): boolean;
-}
+import { createDomainApi, type ContextRequestTransport } from "./domainApi";
+export type { ContextRequestTransport, ContextualPayload } from "./domainApi";
 /** This index comes from backend entry contracts; it is not a resource-to-URL authorization table. */
-function registeredEntry(method: string, url: string) {
+export function registeredEntry(method: string, url: string) {
   const path = `/api${url.replace(/^\/api(?=\/)/, "").split("?")[0]}`;
   const candidates = Object.entries(authorizationViews).filter(([, view]) => view.method === method)
     .sort(([, a], [, b]) => (a.path.match(/\{/g)?.length ?? 0) - (b.path.match(/\{/g)?.length ?? 0));
@@ -32,7 +29,7 @@ function registeredEntry(method: string, url: string) {
   throw new ContextProtocolError();
 }
 /** Captured at the component lifecycle; late callbacks cannot acquire a newer identity. */
-export function useContextTransport(lifetimeKey: string, legacyAllowed = false): ContextRequestTransport {
+export function useContextTransport(lifetimeKey: string, legacyAllowed = false, resolvedRule?: (entryId: string, context: AuthorizationContext) => Rule): ContextRequestTransport {
   const authz = useAuthz();
   const run = useCapturedRunner(lifetimeKey);
   const lifetime = useRef<string | null>(lifetimeKey);
@@ -63,12 +60,13 @@ export function useContextTransport(lifetimeKey: string, legacyAllowed = false):
           urlQuery[key] = previous === undefined ? value : Array.isArray(previous) ? [...previous, value] : [previous, value];
         }
         const query = { ...urlQuery, ...config.params };
-        const input: ContextInput = { pathParams: registered.pathParams, query, body: config.data };
+        const currentInput = (): ContextInput => ({ pathParams: registered.pathParams, query, body: config.data, headers: config.headers });
+        const input = currentInput();
         const inputKey = contextInputKey(input);
         return run({
           admit: snapshot => ruleState(snapshot, rule, legacy) !== "deny",
           queryKey: `${registered.entryId}:${inputKey}`,
-          isInputCurrent: () => lifetime.current === lifetimeKey && authz.isCurrent(owner) && !config.signal?.aborted && contextInputKey(input) === inputKey,
+          isInputCurrent: () => lifetime.current === lifetimeKey && authz.isCurrent(owner) && !config.signal?.aborted && contextInputKey(currentInput()) === inputKey,
           request: async (capture, current) => {
             const child = new AbortController();
             const abort = () => child.abort();
@@ -77,10 +75,12 @@ export function useContextTransport(lifetimeKey: string, legacyAllowed = false):
             if (capture.signal.aborted || config.signal?.aborted) child.abort();
             const captured = { ...capture, signal: child.signal };
             try {
-              if (allLegacy) return await api.request<T>({ ...config, ...transportConfig(captured) });
+              if (allLegacy) return await api.request<T>({ ...config, auth: undefined, ...transportConfig(captured, input.headers) });
               return await executeContextRequest({ entryId: registered.entryId, input, snapshot: authz.snapshot!,
                 capture: captured, current, execute: async (authorized, precondition) => {
-                  const response = await api.request<T>({ ...config, ...transportConfig(authorized),
+                  if (resolvedRule && !ruleAllowed(authz.snapshot, resolvedRule(registered.entryId, authorized.authorizationContext!), legacy, authorized.authorizationContext))
+                    throw new ContextDenied();
+                  const response = await api.request<T>({ ...config, auth: undefined, ...transportConfig(authorized, input.headers),
                     url: authorizationPath(registered.entryId, registered.pathParams),
                     params: method === "GET" ? { ...query, authorization_precondition: JSON.stringify(precondition) } : query,
                     data: method === "GET" ? undefined : commandBody(config.data, precondition),
@@ -101,25 +101,9 @@ export function useContextTransport(lifetimeKey: string, legacyAllowed = false):
         });
       },
     };
-  }, [authz.token, authz.snapshot, authz.generation, authz.isCurrent, run, legacyAllowed, lifetimeKey]);
+  }, [authz.token, authz.snapshot, authz.generation, authz.isCurrent, run, legacyAllowed, lifetimeKey, resolvedRule]);
 }
-export interface ContextualPayload { authorization_context?: AuthorizationContext }
-
-/** Legacy callers retain their original transport until their resource is explicitly migrated. */
-export function domainApi(capture?: ContextRequestTransport) {
-  return {
-    get: <T = unknown,>(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T & ContextualPayload>> => capture
-      ? capture.request<T & ContextualPayload>({ ...config, method: "GET", url }) : config === undefined ? api.get<T & ContextualPayload>(url) : api.get<T & ContextualPayload>(url, config),
-    post: <T = unknown,>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<AxiosResponse<T & ContextualPayload>> => capture
-      ? capture.request<T & ContextualPayload>({ ...config, method: "POST", url, data }) : config === undefined ? (data === undefined ? api.post<T & ContextualPayload>(url) : api.post<T & ContextualPayload>(url, data)) : api.post<T & ContextualPayload>(url, data, config),
-    put: <T = unknown,>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<AxiosResponse<T & ContextualPayload>> => capture
-      ? capture.request<T & ContextualPayload>({ ...config, method: "PUT", url, data }) : config === undefined ? api.put<T & ContextualPayload>(url, data) : api.put<T & ContextualPayload>(url, data, config),
-    patch: <T = unknown,>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<AxiosResponse<T & ContextualPayload>> => capture
-      ? capture.request<T & ContextualPayload>({ ...config, method: "PATCH", url, data }) : config === undefined ? api.patch<T & ContextualPayload>(url, data) : api.patch<T & ContextualPayload>(url, data, config),
-    delete: <T = unknown,>(url: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T & ContextualPayload>> => capture
-      ? capture.request<T & ContextualPayload>({ ...config, method: "DELETE", url }) : config === undefined ? api.delete<T & ContextualPayload>(url) : api.delete<T & ContextualPayload>(url, config),
-  };
-}
+export const domainApi = (capture?: ContextRequestTransport) => createDomainApi(api, capture);
 
 /** Add a per-query abort lifetime without replacing the captured actor or snapshot. */
 export function withTransportSignal(capture: ContextRequestTransport, signal: AbortSignal): ContextRequestTransport {

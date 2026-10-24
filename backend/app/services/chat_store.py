@@ -8,11 +8,11 @@ import re
 from datetime import datetime, timezone
 
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.models.chat import ChatMessage, ChatSession
-from app.authz.provenance import AgentAccess, unavailable, validate_provenance
-from app.authz import service
+from app.authz.provenance import AgentAccess, unavailable, validate_agent_provenance as validate_provenance
+from app.authz import service, runtime
 
 
 def _access(db, access):
@@ -21,8 +21,19 @@ def _access(db, access):
     return access
 
 
+def _contract(access, entries, session_id=None):
+    if access is None or not access.authoritative:
+        return
+    from app.authz.errors import authz_error
+    if (not access.execution_contracts or access.execution_contracts[0].entry_id not in entries
+            or (session_id is not None and access.execution_contracts[0].params.get('session_id') != session_id)):
+        raise authz_error(403, 'AUTHZ_CONTEXT_REQUIRED', '会话原语缺少同一目标的具名执行合同')
+
+
 def _owned_access(db, session_id, access, *, write=False):
     access = _access(db, access)
+    if write and not access.authoritative:
+        runtime.guard_legacy_management_execution(db)
     if access.authoritative:
         row = (db.scalar(select(ChatSession).where(ChatSession.id == session_id)
                .with_for_update().execution_options(populate_existing=True)) if write
@@ -30,8 +41,8 @@ def _owned_access(db, session_id, access, *, write=False):
         if row is None or row.archived or row.owner_user_id != access.snapshot()["principal_id"]:
             raise unavailable()
         if write:
-            service.lock_actor(db, access.identity)
-            validate_provenance(db, access.identity, access.snapshot())
+            actor = service.lock_actor(db, access.identity)
+            access.check_locked(db, actor)
     return access
 
 MAX_SESSIONS_LISTED = 100
@@ -43,6 +54,23 @@ _FILE_PREFIX = re.compile(r"^\[已上传文件[^\]]*\]\n*")
 
 def list_sessions(db: Session, sub: str, *, access=None) -> list[dict]:
     access = _access(db, access)
+    from app.services import agent_authorization as authorization
+    _contract(access, {authorization.LIST})
+    if access.authoritative:
+        from app.authz.context import read_snapshot
+        with read_snapshot(lambda: Session(db.get_bind())) as (snapshot, proof):
+            with service.access_recorder(lambda _: None):
+                accesses, ref = access.execution_contracts[0].authorize_in(snapshot, access.identity, read_snapshot=proof)
+            grant = accesses.require(ref, 'private_chat_session', 'read')
+            from sqlalchemy.sql import visitors
+            table = next(column.table for column in visitors.iterate(grant.predicate)
+                if getattr(getattr(column, 'table', None), 'name', None) == 'agent_owned_sessions')
+            rows = snapshot.execute(select(ChatSession.id, ChatSession.title, ChatSession.updated_at).where(
+                ChatSession.id.in_(select(table.c.session_id).where(grant.predicate)), ChatSession.owner_user_id == access.snapshot()['principal_id'],
+                ChatSession.archived.is_(False)).order_by(ChatSession.updated_at.desc()).limit(MAX_SESSIONS_LISTED))
+            result = [dict(row._mapping) for row in rows]
+            access.execution_wire = accesses.wire(ref)
+            return result
     rows = db.scalars(
         select(ChatSession)
         .where(ChatSession.owner_user_id == access.snapshot()["principal_id"] if access.authoritative else ChatSession.owner_sub == sub, ChatSession.archived.is_(False))
@@ -51,36 +79,46 @@ def list_sessions(db: Session, sub: str, *, access=None) -> list[dict]:
     ).all()
     return [{"id": s.id, "title": s.title, "updated_at": s.updated_at} for s in rows]
 
-
 def create_session(db: Session, sub: str, title: str | None = None, *, access=None) -> ChatSession:
     access = _access(db, access)
+    if not access.authoritative:
+        runtime.guard_legacy_management_execution(db)
+    from app.services import agent_authorization as authorization
+    _contract(access, {authorization.CREATE})
     access.mark_used()
     if access.authoritative:
-        service.lock_actor(db, access.identity)
+        actor = service.lock_actor(db, access.identity)
+        access.check_locked(db, actor)
     s = ChatSession(owner_sub=access.identity.username if access.authoritative else sub, owner_user_id=access.snapshot()["principal_id"] if access.authoritative else None, title=(title or "新对话")[:80])
     db.add(s)
     db.commit()
     db.refresh(s)
     return s
 
-
 def get_owned(db: Session, sub: str, session_id: int, *, access=None) -> ChatSession | None:
     access = _access(db, access)
-    s = db.get(ChatSession, session_id, populate_existing=True)
+    from app.services import agent_authorization as authorization
+    _contract(access, {authorization.RENAME, authorization.DELETE, authorization.HISTORY, authorization.RUN, authorization.ATTACH, authorization.CANCEL}, session_id)
+    s = db.scalar(select(ChatSession).where(ChatSession.id == session_id).options(
+        load_only(ChatSession.id, ChatSession.owner_sub, ChatSession.owner_user_id,
+                  ChatSession.archived, ChatSession.created_at)).execution_options(populate_existing=True))
     if s is None or s.archived:
         return None
     if access.authoritative:
         return s if s.owner_user_id == access.snapshot()["principal_id"] else None
     return s if s.owner_sub == sub else None
 
-
 def rename_session(db: Session, session: ChatSession, title: str, *, access=None) -> None:
+    from app.services import agent_authorization as authorization
+    _contract(access, {authorization.RENAME}, session.id)
     _owned_access(db, session.id, access, write=True)
     session.title = title.strip()[:80] or session.title
     db.commit()
 
 
 def delete_session(db: Session, session: ChatSession, *, access=None) -> None:
+    from app.services import agent_authorization as authorization
+    _contract(access, {authorization.DELETE}, session.id)
     _owned_access(db, session.id, access, write=True)
     # 显式删消息：ondelete=CASCADE 在库层兜底，但 ORM 级 delete 不触发关系级联
     db.execute(delete(ChatMessage).where(ChatMessage.session_id == session.id))
@@ -90,6 +128,10 @@ def delete_session(db: Session, session: ChatSession, *, access=None) -> None:
 
 def list_messages(db: Session, session_id: int, *, access=None) -> list[dict]:
     access = _owned_access(db, session_id, access)
+    from app.services import agent_authorization as authorization
+    _contract(access, {authorization.HISTORY}, session_id)
+    if access.authoritative:
+        return _canonical_history(db, session_id, access)["items"]
     rows = db.scalars(
         select(ChatMessage)
         .where(ChatMessage.session_id == session_id)
@@ -106,10 +148,13 @@ def list_messages(db: Session, session_id: int, *, access=None) -> list[dict]:
         for m in rows
     ]
 
-
 def append_message(db: Session, session: ChatSession, role: str, content: str,
                    tools: list | None = None, stopped: bool = False, *, access=None) -> ChatMessage:
     access = _access(db, access)
+    from app.services import agent_authorization as authorization
+    _contract(access, {authorization.RUN}, session.id)
+    if role not in ('user', 'assistant'):
+        raise unavailable()
     access.mark_used()
     access = _owned_access(db, session.id, access, write=True)
     m = ChatMessage(session_id=session.id, role=role, content=content,
@@ -138,6 +183,8 @@ def save_assistant_progress(session_id: int, msg_id: int | None, content: str,
 
     with SessionLocal() as db:
         access = _access(db, access)
+        from app.services import agent_authorization as authorization
+        _contract(access, {authorization.RUN}, session_id)
         access.mark_used()
         access = _owned_access(db, session_id, access, write=True)
         provenance = access.snapshot()
@@ -167,6 +214,10 @@ def save_assistant_progress(session_id: int, msg_id: int | None, content: str,
 def history_for_llm(db: Session, session_id: int, *, access=None) -> list[dict]:
     """取最近 HISTORY_WINDOW 条 user/assistant 消息，按时间正序回灌模型。"""
     access = _owned_access(db, session_id, access)
+    from app.services import agent_authorization as authorization
+    _contract(access, {authorization.RUN}, session_id)
+    if access.authoritative:
+        return _canonical_history(db, session_id, access, for_llm=True)["items"]
     rows = db.scalars(
         select(ChatMessage)
         .where(ChatMessage.session_id == session_id,
@@ -183,3 +234,35 @@ def history_for_llm(db: Session, session_id: int, *, access=None) -> list[dict]:
         {"role": m.role, "content": m.content[:HISTORY_CHAR_CAP]}
         for m in reversed(rows)
     ]
+
+def _canonical_history(db, session_id, access, *, for_llm=False):
+    """Same observation: metadata -> complete lineage -> exact selected message facts."""
+    from app.authz.context import read_snapshot
+    with read_snapshot(lambda: Session(db.get_bind())) as (snapshot, proof):
+        with service.access_recorder(lambda _: None):
+            for contract in access.execution_contracts:
+                contract.authorize_in(snapshot, access.identity, read_snapshot=proof)
+        query = select(ChatMessage.id, ChatMessage.role, ChatMessage.authorization_provenance).where(
+            ChatMessage.session_id == session_id)
+        query = query.order_by(ChatMessage.id.desc()).limit(HISTORY_WINDOW) if for_llm else query.order_by(ChatMessage.id)
+        metadata = list(snapshot.execute(query))
+        for row in metadata:
+            if row.role not in ('user', 'assistant'):
+                raise unavailable()
+            if row.role == 'assistant':
+                validate_provenance(snapshot, access.identity, row.authorization_provenance, read_snapshot=proof)
+        ids = [row.id for row in metadata]
+        rows = list(snapshot.execute(select(ChatMessage.id, ChatMessage.role, ChatMessage.content,
+            ChatMessage.tools, ChatMessage.stopped, ChatMessage.created_at).where(
+                ChatMessage.session_id == session_id, ChatMessage.id.in_(ids)).order_by(ChatMessage.id))) if ids else []
+        if len(rows) != len(ids):
+            raise unavailable()
+        title = snapshot.scalar(select(ChatSession.title).where(ChatSession.id == session_id))
+        for row in metadata:
+            if row.role == 'assistant':
+                access.collector.inherit(row.authorization_provenance)
+        items = ([{'role': row.role, 'content': row.content[:HISTORY_CHAR_CAP]} for row in rows] if for_llm else
+                 [{'id': row.id, 'role': row.role, 'content': row.content, 'tools': row.tools or [],
+                   'stopped': row.stopped, 'created_at': row.created_at} for row in rows])
+    access.check()
+    return {'id': session_id, 'title': title, 'items': items}

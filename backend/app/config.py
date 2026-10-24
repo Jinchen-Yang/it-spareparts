@@ -56,6 +56,18 @@ class Settings(BaseSettings):
     # Dedicated, default-off server-to-server export for the independent resale app.
     resale_export_token_sha256: SecretStr = SecretStr("")
     resale_catalog_token_sha256: SecretStr = SecretStr("")
+    resale_export_allowed_actions: list[str] = ["resale_return_feed.read"]
+    resale_catalog_allowed_actions: list[str] = [
+        "resale_catalog.resolve", "resale_catalog.snapshots", "resale_catalog.list",
+        "resale_catalog.search", "resale_catalog.price_evidence", "resale_price_reference.read",
+    ]
+
+    @field_validator("resale_export_allowed_actions", "resale_catalog_allowed_actions", mode="before")
+    @classmethod
+    def validate_resale_allowed_actions(cls, value, info: ValidationInfo):
+        from app.authz.machine_access import validate_service_actions
+        return validate_service_actions(info.field_name.removesuffix("_allowed_actions"), value)
+
 
     # ---- 商城销售参考价（2026-10-19 金臣口径：30 天窗口 + 时间衰减）----
     # 只作用于新 GET /integrations/resale/parts/price-reference，不改变任何既有分析口径。

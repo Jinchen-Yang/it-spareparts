@@ -1,0 +1,149 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "agent_file",
+    "rules": [
+      {
+        "name": "explicit-download",
+        "actions": [
+          "download"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"download\" in P.attr.grants.agent_file.actions && (R.attr.module_probe || ((P.attr.grants.agent_file.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"agent_file\", \"scope\": P.attr.grants.agent_file.scope, \"version\": P.attr.grants.agent_file.version, \"field_permissions\": P.attr.grants.agent_file.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-generate",
+        "actions": [
+          "generate"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"generate\" in P.attr.grants.agent_file.actions && (R.attr.module_probe || ((P.attr.grants.agent_file.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"agent_file\", \"scope\": P.attr.grants.agent_file.scope, \"version\": P.attr.grants.agent_file.version, \"field_permissions\": P.attr.grants.agent_file.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-preview",
+        "actions": [
+          "preview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"preview\" in P.attr.grants.agent_file.actions && (R.attr.module_probe || ((P.attr.grants.agent_file.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"agent_file\", \"scope\": P.attr.grants.agent_file.scope, \"version\": P.attr.grants.agent_file.version, \"field_permissions\": P.attr.grants.agent_file.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-download",
+        "actions": [
+          "show_download"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_download\" in P.attr.grants.agent_file.actions && \"download\" in P.attr.grants.agent_file.actions && (R.attr.module_probe || ((P.attr.grants.agent_file.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"agent_file\", \"scope\": P.attr.grants.agent_file.scope, \"version\": P.attr.grants.agent_file.version, \"field_permissions\": P.attr.grants.agent_file.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-preview",
+        "actions": [
+          "show_preview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_preview\" in P.attr.grants.agent_file.actions && \"preview\" in P.attr.grants.agent_file.actions && (R.attr.module_probe || ((P.attr.grants.agent_file.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"agent_file\", \"scope\": P.attr.grants.agent_file.scope, \"version\": P.attr.grants.agent_file.version, \"field_permissions\": P.attr.grants.agent_file.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-upload",
+        "actions": [
+          "show_upload"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_upload\" in P.attr.grants.agent_file.actions && \"upload\" in P.attr.grants.agent_file.actions && (R.attr.module_probe || ((P.attr.grants.agent_file.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"agent_file\", \"scope\": P.attr.grants.agent_file.scope, \"version\": P.attr.grants.agent_file.version, \"field_permissions\": P.attr.grants.agent_file.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-upload",
+        "actions": [
+          "upload"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"upload\" in P.attr.grants.agent_file.actions && (R.attr.module_probe || ((P.attr.grants.agent_file.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"agent_file\", \"scope\": P.attr.grants.agent_file.scope, \"version\": P.attr.grants.agent_file.version, \"field_permissions\": P.attr.grants.agent_file.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

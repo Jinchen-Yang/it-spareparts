@@ -460,12 +460,17 @@ def run_import(session: Session, file_path: str, original_name: str,
                uploaded_by: str | None = None, mode: str = "skip",
                import_job_id: int | None = None,
                auto_assign_maintenance_projects: bool = False, expected_void_fingerprint: str | None = None,
-               require_void_preview: bool = False) -> SysImportBatch:
+               require_void_preview: bool = False, _authorization=None) -> SysImportBatch:
     """对单个 .xlsx 执行完整导入。返回 batch（含 report_json）。
 
     校验在 API 层（扩展名/大小）；此处做 hash 去重 + 锁 + 入库。
     import_job_id：批量作业归组（单文件上传为 None）；成功/失败批次都带上，便于作业详情聚合。
     """
+    if _authorization is not None:
+        from app.services.source_import_permit import SourceImportPermit
+        if type(_authorization) is not SourceImportPermit:
+            raise ValueError('通用导入需要实际来源写许可')
+        _authorization.check(session)
     file_hash = sha256_file(file_path)
 
     # 1) 应用级导入锁先行（同一时间仅一个导入；顺带消除"去重检查在加锁前"的并发竞态）
@@ -475,7 +480,7 @@ def run_import(session: Session, file_path: str, original_name: str,
     )
 
     def new_batch(status: str) -> SysImportBatch:
-        return SysImportBatch(
+        batch = SysImportBatch(
             filename=original_name,
             file_type="unknown",
             file_hash=file_hash,
@@ -483,6 +488,8 @@ def run_import(session: Session, file_path: str, original_name: str,
             import_job_id=import_job_id,
             status=status,
         )
+        if _authorization is not None:_authorization.bind_batch(session,batch)
+        return batch
 
     # 2) 固定维保回填工作簿必须先于通用 hash 去重分流，否则历史同 hash
     # 成功批次会把“入口错误”误报成“重复文件”。同时，损坏/超限等 ReaderError
@@ -511,6 +518,7 @@ def run_import(session: Session, file_path: str, original_name: str,
 
     try:
         loaded = load_workbook(file_path)
+        if _authorization is not None:_authorization.bind_loaded(session,loaded,file_hash,mode)
         batch.file_type = loaded.file_type
         require_clean_workbook(loaded)
         selection, expense_sheets = loaded.selection, loaded.expense_sheets
@@ -543,6 +551,7 @@ def run_import(session: Session, file_path: str, original_name: str,
         transformed = transform_workbook(loaded)
         result, extra_report, src_cols = (
             transformed.result, transformed.extra_report, transformed.src_cols)
+        if _authorization is not None:_authorization.bind_plan(session,result)
         if wbdd_source_snapshot is not None:
             wbdd_source_snapshot = maintenance_wbdd_source_snapshot.block_snapshot_errors(
                 wbdd_source_snapshot, result.errors)
@@ -619,6 +628,7 @@ def run_import(session: Session, file_path: str, original_name: str,
                 target_project_ids=set(target_project_ids)
             )
 
+        if _authorization is not None:_authorization.require_source(session,result.file_type,result)
         counts = loader.load(
             session,
             result,
@@ -630,6 +640,7 @@ def run_import(session: Session, file_path: str, original_name: str,
             maintenance_lock_envelope=maintenance_lock_envelope, expected_void_fingerprint=expected_void_fingerprint)
         sales_project_sync = None
         if auto_assign_maintenance_projects and result.file_type == mapping.SALES:
+            if _authorization is not None:_authorization.require_source(session,mapping.SALES,result)
             from app.services import maintenance_bulk_import
 
             # 复用 loader 已解析的 TransformResult，不重开 XLSX：_detect 走
@@ -659,6 +670,7 @@ def run_import(session: Session, file_path: str, original_name: str,
                 ) from exc
         auto_assignment = None
         if maintenance_lock_envelope is not None and assignment_service is not None:
+            if _authorization is not None:_authorization.require_source(session,mapping.MAINTENANCE,result)
             try:
                 auto_assignment = assignment_service.auto_assign_imported_orders(
                     session,
@@ -721,6 +733,7 @@ def run_import(session: Session, file_path: str, original_name: str,
                 update(SysImportBatch).where(SysImportBatch.id == duplicate_batch_id)
                 .values(status="superseded")
             )
+        if _authorization is not None:_authorization.require_source(session,result.file_type,result)
         batch.status = "success"
         session.flush()
         return batch

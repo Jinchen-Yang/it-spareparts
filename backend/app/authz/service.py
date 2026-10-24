@@ -19,7 +19,7 @@ from app.authz import engine, runtime
 from app.authz.catalog import CATALOG_VERSION, SALES_FIELD_PERMISSIONS, SALES_RESOURCE, get_resource_definition, resource_descriptors
 from app.authz.errors import authz_error
 from app.authz.context import ContextBatch, ObjectRef, ReadSnapshotProof, ResolvedContext
-from app.authz.principal import Principal, VerifiedIdentity, actor_capabilities, load_principal
+from app.authz.principal import Principal, VerifiedIdentity, load_principal
 from app.models.authorization import SysAuthorizationGrant, SysCustomerAssignment
 from app.models.sales import FSalesOrder
 from app.models.system import SysUser
@@ -366,7 +366,10 @@ def my_snapshot(db: Session, identity: VerifiedIdentity) -> dict:
     sales_reason = (next((d['reason'] for d in sales['decisions'].values()
                           if d['effect'] == 'allow' and d['reason']), None)
                     if read else sales['decisions']['read_orders']['reason'])
+    from app.authz.control_access import capabilities_from_snapshot
+    capabilities = capabilities_from_snapshot(principal, states, decisions)
     version = hashlib.sha256(json.dumps({
+        "actor_capabilities": capabilities,
         "catalog": CATALOG_VERSION, "mode": runtime.authorization_mode(),
         "user": principal.id if principal else None, "epoch": principal.authorization_epoch if principal else None,
         "resources": resources,
@@ -374,7 +377,7 @@ def my_snapshot(db: Session, identity: VerifiedIdentity) -> dict:
     return {**envelope(), "version": version, "username": principal.username if principal else None,
             "principal": {"id": principal.id, "username": principal.username, "display_name": principal.display_name} if principal else None,
             "authorization_epoch": principal.authorization_epoch if principal else None,
-            "actor_capabilities": actor_capabilities(principal), "can_manage": bool(principal and principal.role == "admin"),
+            "actor_capabilities": capabilities, "can_manage": bool(principal and principal.role == "admin"),
             "resources": resources, "sales_analysis": {
                 "enabled": sales["runtime_state"] != "legacy", "read": read,
                 "export": sales["decisions"]["export"]["effect"] == "allow",
@@ -390,7 +393,8 @@ def catalog_snapshot(db: Session) -> dict:
     for descriptor in descriptors:
         state = states[descriptor["id"]]
         descriptor.update(runtime_state=state.runtime_state, configurable=state.configurable)
-    return {**envelope(), "modules": descriptors}
+    from app.authz.boundaries import boundary_descriptors
+    return {**envelope(), "modules": descriptors, "boundaries": boundary_descriptors()}
 
 
 def _validate_domain_context(context: ResolvedContext) -> None:

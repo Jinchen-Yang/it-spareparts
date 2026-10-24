@@ -169,7 +169,7 @@ function ReturnReceiptsSectionBody({ projectId, canImport = true, onChanged, reg
   const canCreate = admission.surface("maintenance_return_receipt.batch_create", legacyManage) !== "deny";
   const canAudit = admission.surface("maintenance_return_receipt.audit_history", true) !== "deny";
   const canDemands = admission.state(actionRule("maintenance_return_receipt", "read_demands"), true) !== "deny";
-  const canProjects = admission.state(actionRule("maintenance_project_directory", "read"), legacyManage) !== "deny";
+  const canProjects = admission.surface("maintenance_project_directory.project_selectors", legacyManage) !== "deny";
   // 冻结勾选快照交给批量组件；列表刷新后选中集清空，旧请求不会污染新数据
   const selectedReceipts = useMemo(
     () => receipts.filter((item) => selectedIds.includes(item.receipt_id) && item.line_status === "active"),
@@ -864,12 +864,15 @@ function ReturnReceiptsSectionBody({ projectId, canImport = true, onChanged, reg
           setModalOpen(false); void load(page, includeVoided);
         }}>加载最新记录</Button> : undefined} /> : null}
         <Form form={form} layout="vertical" disabled={submitting}>
-          <Form.Item name="project_id" label={editing ? "项目（转移需同时具备原项目和目标项目修改权限）" : "项目（当前项目）"} rules={[{ required: true, message: "请选择项目" }]}>
+          {editing && canProjects ? <Form.Item name="project_id" label={editing ? "项目（转移需同时具备原项目和目标项目修改权限）" : "项目（当前项目）"} rules={[{ required: true, message: "请选择项目" }]}>
             <Select disabled={!editing} showSearch optionFilterProp="label" options={projects.some((item) => item.value === projectId) ? projects : [{ value: projectId, label: "当前项目" }, ...projects]} onChange={(value: string) => {
               form.setFieldValue("wbdd_no", null); switchTargetProject(value); void loadDemands(value); void loadPnMatchedDemands(value, pickedPart?.part_id ?? null);
             }} />
-          </Form.Item>
-          {editing && projectError ? <Alert type="error" message={projectError} action={<Button size="small" onClick={() => { void loadProjects(); }}>重试加载项目</Button>} /> : null}
+          </Form.Item> : <>
+            <Form.Item name="project_id" hidden><Input /></Form.Item>
+            <Form.Item label="项目（当前项目）"><Text>当前项目</Text></Form.Item>
+          </>}
+          {editing && canProjects && projectError ? <Alert type="error" message={projectError} action={<Button size="small" onClick={() => { void loadProjects(); }}>重试加载项目</Button>} /> : null}
           {demandError ? <Alert type="warning" message={demandError} action={<Button size="small" onClick={() => { void loadDemands(targetProject); }}>重试加载需求单</Button>} /> : null}
           <Form.Item
             name="wbdd_no"

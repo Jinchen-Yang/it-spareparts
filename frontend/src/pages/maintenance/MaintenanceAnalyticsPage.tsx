@@ -47,7 +47,7 @@ import { useVisibleMaintenanceRefresh } from "../../utils/maintenanceRefresh";
 import { useAccess, useContextAdmission, useModuleAccess } from "../../authz/access";
 import { useContextTransport } from "../../authz/domainTransport";
 import { withContextSurface } from "../../authz/ContextSurface";
-import { actionRule, routeRule } from "../../authz/rules";
+import { actionRule, routeRule, surfaceRule } from "../../authz/rules";
 
 const { Text } = Typography;
 
@@ -199,12 +199,16 @@ function MaintenanceAnalyticsPageBody() {
   const [sp, setSp] = useSearchParams();
   const admission = useContextAdmission();
   const module = useModuleAccess("maintenance_analysis");
+  const perms = readPermissionMap();
+  const canCost = module.field("data_purchase_cost", !!perms.data_purchase_cost);
+  const canCustomer = module.field("data_customer", !!perms.data_customer);
   const shellTransport = useContextTransport("analytics-filter-options", true);
-  const directoryAccess = useAccess(actionRule("maintenance_project_directory", "read"), { legacy: { maintenance_project_directory: true } });
+  const directoryAccess = useAccess(surfaceRule("maintenance_project_directory.project_selectors"), { legacy: { maintenance_project_directory: true } });
   const projectAccess = useAccess(actionRule("maintenance_project", "read"), { legacy: { maintenance_project: true } });
   const permittedViews = ["rankings", "pn-compact", "pn", "spend"].filter(key => admission.surface(`maintenance_analysis.${({ "pn-compact": "pn_compact", pn: "pn_detail" } as Record<string,string>)[key] ?? key}`, true) !== "deny");
   const rangeKey = sp.get("range") ?? "ytd";
-  const sortSpec = sp.get("sort") ?? "cost_inc";
+  // Only the default follows field access; explicit URL sorts remain subject to the server's field gate.
+  const sortSpec = sp.get("sort") ?? (canCost ? "cost_inc" : "effective_qty");
   const sort = sortSpec === "bad_qty" ? "receipt_qty" : sortSpec === "bad_rate" ? "receipt_rate" : sortSpec;
   const q = sp.get("q") ?? "";
   const [searchDraft, setSearchDraft] = useState(q);
@@ -254,10 +258,6 @@ function MaintenanceAnalyticsPageBody() {
   const [orderNoDraft, setOrderNoDraft] = useState(orderNo);
   useEffect(() => { setOrderNoDraft(orderNo); }, [orderNo]);
 
-  const perms = readPermissionMap();
-  const canCost = module.field("data_purchase_cost", !!perms.data_purchase_cost);
-  const canCustomer = module.field("data_customer", !!perms.data_customer);
-
   const patch = useCallback((next: Record<string, string | null>) => {
     setSp((prev) => {
       const merged = new URLSearchParams(prev);
@@ -300,7 +300,7 @@ function MaintenanceAnalyticsPageBody() {
 
   // URL 已选项目回填标签：并发取详情，失败退回短 id（页面照常可用）。
   useEffect(() => {
-    if (projectAccess.entryState === "deny") return;
+    if (directoryAccess.entryState === "deny" || projectAccess.entryState === "deny") return;
     const missing = projectIds.filter((id) => !projectLabels[id]);
     if (!missing.length) return;
     let cancelled = false;
@@ -314,7 +314,7 @@ function MaintenanceAnalyticsPageBody() {
       })));
     });
     return () => { cancelled = true; };
-  }, [projectIds, projectLabels, cacheProjectLabels]);
+  }, [projectIds, projectLabels, cacheProjectLabels, directoryAccess.entryState, projectAccess.entryState, shellTransport]);
 
   const onProjectSearch = useCallback((keyword: string) => {
     if (projectSearchTimer.current) clearTimeout(projectSearchTimer.current);
@@ -343,7 +343,7 @@ function MaintenanceAnalyticsPageBody() {
           if (gen === projectSearchGen.current && shellTransport.isCurrent()) setProjectSearching(false);
         });
     }, 300);
-  }, [cacheProjectLabels]);
+  }, [cacheProjectLabels, directoryAccess.entryState, shellTransport]);
 
   useEffect(() => () => {
     if (projectSearchTimer.current) clearTimeout(projectSearchTimer.current);
@@ -534,7 +534,7 @@ function MaintenanceAnalyticsPageBody() {
 
   const pnCostVisible = module.legacy || rawData?.authorization_context?.resources.maintenance_analysis?.field_permissions.includes("data_purchase_cost") === true;
   const spendCostVisible = module.legacy || rawSpendData?.authorization_context?.resources.maintenance_analysis?.field_permissions.includes("data_purchase_cost") === true;
-  const columns: ColumnsType<PnRankingRow> = useMemoColumns(sort).filter(column => pnCostVisible || !("dataIndex" in column && column.dataIndex === "missing_lines"));
+  const columns: ColumnsType<PnRankingRow> = useMemoColumns(canCost && pnCostVisible).filter(column => pnCostVisible || !("dataIndex" in column && column.dataIndex === "missing_lines"));
 
   const summary = data?.summary;
   const activeError = view === "spend" ? spendError : view === "pn" ? error : null;
@@ -670,7 +670,7 @@ function MaintenanceAnalyticsPageBody() {
             }))}
             onChange={(values) => patch({ business_type: boardBusinessTypeParam(values), page: null })}
           />
-          {view === "pn" && <Select options={SORT_OPTIONS} value={sort} style={{ width: 140 }}
+          {view === "pn" && <Select aria-label="PN 排序" options={SORT_OPTIONS.filter(option => canCost || !option.value.startsWith("cost_"))} value={sort} style={{ width: 140 }}
             onChange={(v) => patch({ sort: v, page: null })} />}
           <Input.Search allowClear value={searchDraft} placeholder={view === "rankings" || view === "pn-compact" ? "搜 PN / 描述 / 项目" : "搜 PN / 描述"} style={{ width: 220 }}
             onChange={(event) => setSearchDraft(event.target.value)}
@@ -684,7 +684,7 @@ function MaintenanceAnalyticsPageBody() {
           </Text>
         </Space>
         <Space wrap size={12} style={{ marginTop: 12 }}>
-          <Select<string[]>
+          {directoryAccess.entryState !== "deny" && <Select<string[]>
             mode="multiple"
             showSearch
             filterOption={false}
@@ -699,7 +699,7 @@ function MaintenanceAnalyticsPageBody() {
             loading={projectSearching}
             notFoundContent={projectSearching ? "搜索中…" : "输入至少 2 个字搜索项目"}
             onChange={(values) => patch({ project: values.length ? values.join(",") : null, page: null })}
-          />
+          />}
           {canCustomer && <Input.Search allowClear value={customerDraft} placeholder="客户" style={{ width: 180 }}
             onChange={(event) => setCustomerDraft(event.target.value)}
             onSearch={(v) => patch({ customer: v || null, page: null })} />}
@@ -918,7 +918,7 @@ function MaintenanceAnalyticsPageBody() {
 }
 
 /** 列定义工厂：memo 化，避免每次渲染重建列。 */
-function useMemoColumns(_sort: string): ColumnsType<PnRankingRow> {
+function useMemoColumns(canSortCost: boolean): ColumnsType<PnRankingRow> {
   return useMemo<ColumnsType<PnRankingRow>>(() => [
     { title: "#", dataIndex: "rank", width: 60, fixed: "left" as const },
     {
@@ -945,11 +945,11 @@ function useMemoColumns(_sort: string): ColumnsType<PnRankingRow> {
       render: (v: string | null) => qtyFmt(v === null ? null : Number(v)) },
     { title: "月均", dataIndex: "monthly_avg_qty", sorter: true, width: 80,
       render: (v: number | null) => (v === null ? "—" : qtyFmt(v)) },
-    { title: "含税成本", dataIndex: "cost_inc", sorter: true, width: 140,
+    { title: "含税成本", dataIndex: "cost_inc", sorter: canSortCost, width: 140,
       render: (_: unknown, r: PnRankingRow) => statMoney(r.cost_inc) },
-    { title: "未税成本", dataIndex: "cost_ex", sorter: true, width: 140,
+    { title: "未税成本", dataIndex: "cost_ex", sorter: canSortCost, width: 140,
       render: (_: unknown, r: PnRankingRow) => statMoney(r.cost_ex) },
-    { title: "成本占比", dataIndex: "cost_share_pct", sorter: true, width: 100,
+    { title: "成本占比", dataIndex: "cost_share_pct", sorter: canSortCost, width: 100,
       render: (v: number | null) => (v === null ? "—" : `${v}%`) },
     { title: "实际领用", dataIndex: "issued_qty", sorter: true, width: 100,
       render: (v: string | null) => qtyFmt(v === null ? null : Number(v)) },
@@ -957,10 +957,9 @@ function useMemoColumns(_sort: string): ColumnsType<PnRankingRow> {
       render: (v: string | null) => qtyFmt(v === null ? null : Number(v)) },
     { title: "返还率", dataIndex: "receipt_return_rate_pct", sorter: true, width: 90,
       render: (v: number | null) => v == null ? "—" : `${v}%` },
-    { title: "缺价行", dataIndex: "missing_lines", sorter: true, width: 80,
+    { title: "缺价行", dataIndex: "missing_lines", sorter: canSortCost, width: 80,
       render: (v: number) => qtyFmt(v) },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], []);
+  ], [canSortCost]);
 }
 
 export const MaintenanceAnalyticsPage = withContextSurface(MaintenanceAnalyticsPageBody, routeRule("/maintenance/analytics"));

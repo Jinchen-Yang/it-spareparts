@@ -876,12 +876,19 @@ def run_job(batch_id: str, generation: int) -> None:
     """Generation CAS discards cancelled/retried workers, including after restart."""
     from app.authz import runtime
     with SessionLocal() as probe:
-        row = _load(probe, batch_id)
+        # Dispatch needs only stable identity/protocol metadata. The protected
+        # worker authorizes before materializing the report or archived bytes.
+        row = probe.execute(select(Batch.batch_id, Batch.owner_user_id,
+            Batch.report_json["protocol"].astext.label("protocol"))
+            .where(Batch.batch_id == batch_id)).one_or_none()
+        if row is None or row.protocol != PROTOCOL:
+            raise ImportError("not_found", "返件导入任务不存在", 404)
         canonical = row.owner_user_id is not None or runtime.is_authoritative(probe, 'maintenance_return_import')
     if canonical:
         from app.services.maintenance_return_import_authorization import run_job as protected_run
         return protected_run(batch_id, generation, session_factory=SessionLocal)
     with SessionLocal() as db:
+        runtime.guard_legacy_execution(db, ('maintenance_return_import',))
         batch = _load(db, batch_id, lock=True)
         if (
             batch.report_json["generation"] != generation
@@ -895,6 +902,7 @@ def run_job(batch_id: str, generation: int) -> None:
         verify_archive(path, digest)
         parsed = parse_standard(Path(path).read_bytes())
         with SessionLocal() as db:
+            runtime.guard_legacy_execution(db, ('maintenance_return_import',))
             batch = _load(db, batch_id, lock=True)
             if (
                 batch.report_json["generation"] != generation
@@ -915,6 +923,12 @@ def run_job(batch_id: str, generation: int) -> None:
             db.commit()
     except Exception as exc:
         with SessionLocal() as db:
+            try:
+                runtime.guard_legacy_execution(db, ('maintenance_return_import',))
+            except Exception:
+                # A completed cutover retires this old worker, including its
+                # failure-publication transaction. Resubmission needs current authority.
+                return
             batch = _load(db, batch_id, lock=True)
             if (
                 batch.report_json["generation"] != generation

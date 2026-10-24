@@ -1,0 +1,49 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "import_expense_void",
+    "rules": [
+      {
+        "name": "explicit-preview",
+        "actions": [
+          "preview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"preview\" in P.attr.grants.import_expense_void.actions && (R.attr.module_probe || ((P.attr.grants.import_expense_void.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense_void\", \"scope\": P.attr.grants.import_expense_void.scope, \"version\": P.attr.grants.import_expense_void.version, \"field_permissions\": P.attr.grants.import_expense_void.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-preview",
+        "actions": [
+          "show_preview"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_preview\" in P.attr.grants.import_expense_void.actions && \"preview\" in P.attr.grants.import_expense_void.actions && (R.attr.module_probe || ((P.attr.grants.import_expense_void.scope == \"all\" && (true))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"import_expense_void\", \"scope\": P.attr.grants.import_expense_void.scope, \"version\": P.attr.grants.import_expense_void.version, \"field_permissions\": P.attr.grants.import_expense_void.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

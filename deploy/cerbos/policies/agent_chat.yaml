@@ -1,0 +1,49 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "agent_chat",
+    "rules": [
+      {
+        "name": "explicit-show-conversation",
+        "actions": [
+          "show_conversation"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_conversation\" in P.attr.grants.agent_chat.actions && \"use\" in P.attr.grants.agent_chat.actions && (R.attr.module_probe || ((P.attr.grants.agent_chat.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"agent_chat\", \"scope\": P.attr.grants.agent_chat.scope, \"version\": P.attr.grants.agent_chat.version, \"field_permissions\": P.attr.grants.agent_chat.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-use",
+        "actions": [
+          "use"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"use\" in P.attr.grants.agent_chat.actions && (R.attr.module_probe || ((P.attr.grants.agent_chat.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"agent_chat\", \"scope\": P.attr.grants.agent_chat.scope, \"version\": P.attr.grants.agent_chat.version, \"field_permissions\": P.attr.grants.agent_chat.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

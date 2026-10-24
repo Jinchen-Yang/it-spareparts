@@ -1,3 +1,6 @@
+import { MemoryRouter } from "react-router-dom";
+import { useState } from "react";
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../test/legacyAuthorization";
 import { COLORS } from "../../theme";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -13,7 +16,9 @@ const api = vi.hoisted(() => ({
   agentDownload: vi.fn(), agentFileBlobUrl: vi.fn(), agentPreview: vi.fn(),
   agentUpload: vi.fn(), attachChatStream: vi.fn(), cancelChatStream: vi.fn(),
 }));
-vi.mock("../../api", () => api);
+vi.mock("../../api", async original => ({ ...await original<typeof import("../../api")>(), ...api }));
+vi.mock("../../authz/AuthzProvider", async original => ({ ...await original<typeof import("../../authz/AuthzProvider")>(),
+  useAuthz: () => useState(legacyAuthorizationState)[0] }));
 
 function viewport(width: number) {
   vi.spyOn(window, "matchMedia").mockImplementation((query) => ({
@@ -27,11 +32,12 @@ function viewport(width: number) {
 }
 
 function setup() {
-  return render(<ConfigProvider theme={{ token: { motion: false } }}><App><ChatPage /></App></ConfigProvider>);
+  return render(<ConfigProvider theme={{ token: { motion: false } }}><App><MemoryRouter><ChatPage /></MemoryRouter></App></ConfigProvider>);
 }
 
 beforeEach(() => {
   localStorage.clear();
+  prepareLegacyPageFixture({ page_chat: true });
   vi.clearAllMocks();
   api.listChatSessions.mockResolvedValue({ data: { items: [
     { id: 7, title: "上次报价", generating: false },
@@ -71,7 +77,7 @@ describe("AI 助手的响应式会话入口", () => {
     fireEvent.click(within(drawer).getByRole("button", { name: "上次报价" }));
     expect(await screen.findByText("上次报价记录")).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    const input = screen.getByRole("textbox");
+    const input = screen.getByRole("textbox", { name: "聊天消息" });
     fireEvent.change(input, { target: { value: "继续询价" } });
     expect(input).toHaveValue("继续询价");
   });
@@ -98,7 +104,7 @@ describe("AI 助手的响应式会话入口", () => {
     expect(api.getChatMessages).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "OK" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "上次报价" })).toBeNull());
-    expect(api.deleteChatSession).toHaveBeenCalledWith(7);
+    expect(api.deleteChatSession).toHaveBeenCalledWith(7, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it("工具轨迹折叠头可聚焦并公开展开状态", async () => {

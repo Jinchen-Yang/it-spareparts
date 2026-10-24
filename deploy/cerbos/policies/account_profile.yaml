@@ -1,0 +1,49 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "account_profile",
+    "rules": [
+      {
+        "name": "explicit-show-edit",
+        "actions": [
+          "show_edit"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_edit\" in P.attr.grants.account_profile.actions && \"update\" in P.attr.grants.account_profile.actions && P.attr.grants.account_profile.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"account_profile\", \"scope\": P.attr.grants.account_profile.scope, \"version\": P.attr.grants.account_profile.version, \"field_permissions\": P.attr.grants.account_profile.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-update",
+        "actions": [
+          "update"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"update\" in P.attr.grants.account_profile.actions && P.attr.grants.account_profile.scope == \"all\""
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"account_profile\", \"scope\": P.attr.grants.account_profile.scope, \"version\": P.attr.grants.account_profile.version, \"field_permissions\": P.attr.grants.account_profile.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

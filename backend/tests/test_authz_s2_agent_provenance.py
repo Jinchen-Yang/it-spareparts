@@ -20,6 +20,19 @@ from app.models.chat import ChatMessage
 from app.models.system import SysUser
 from app.security import UserContext
 from app.services import agent_files, chat_store
+from app.services import agent_authorization as contracts
+
+AGENT_RESOURCES = ["agent_chat", "private_chat_session", "agent_file"]
+
+def bind(access, entry=contracts.CHAT, **params):
+    if not params and entry == contracts.CHAT:
+        params = {"messages": [{"role": "user", "content": "fixture command"}]}
+    access.bind_execution(contracts.ExecutionContract(entry, params))
+    return access
+
+def command_access(db, identity, entry=contracts.CHAT, **params):
+    return bind(AgentAccess(db.get_bind(), identity), entry, **params)
+
 from tests.authz_pdp_helpers import cerbos_url  # noqa: F401
 
 
@@ -27,7 +40,7 @@ from tests.authz_pdp_helpers import cerbos_url  # noqa: F401
 def setup_agent(db, monkeypatch, tmp_path, cerbos_url):
     settings = get_settings()
     for name, value in {
-        'authorization_mode': 'unified_modules', 'authz_enabled_resources': ['inventory'],
+        'authorization_mode': 'unified_modules', 'authz_enabled_resources': ['inventory', *AGENT_RESOURCES],
         'authz_suspended_resources': [], 'authz_sales_analysis_enabled': False,
         'authz_sales_analysis_suspended': False, 'cerbos_url': cerbos_url,
         'cerbos_timeout_seconds': 2.0, 'raw_file_dir': str(tmp_path), 'enable_agent': True,
@@ -41,9 +54,14 @@ def setup_agent(db, monkeypatch, tmp_path, cerbos_url):
     db.flush()
     db.add(SysAuthorizationGrant(user_id=user.id, resource='inventory', actions=['read'],
                                 scope='all', field_permissions=[], version=1))
+    for resource, actions in {'agent_chat': ['use'], 'private_chat_session':
+            ['read', 'create', 'run', 'attach', 'cancel', 'rename', 'delete'],
+            'agent_file': ['upload', 'generate', 'preview', 'download']}.items():
+        db.add(SysAuthorizationGrant(user_id=user.id, resource=resource, actions=actions,
+            scope='self', field_permissions=[], version=1))
     db.commit()
     identity = VerifiedIdentity(user.username, user.token_version, False, 'sys_user', MappingProxyType({}))
-    access = AgentAccess(db.get_bind(), identity)
+    access = command_access(db, identity)
     ctx = UserContext(user_id=user.username, role='readonly')
     yield user, identity, access, ctx
 
@@ -79,7 +97,7 @@ def test_grant_version_and_malformed_lineage_rejected(db, setup_agent):
     for value in [None, {}, {**original, 'resources': [{}]}, {**original, 'principal_id': True}]:
         with pytest.raises(HTTPException):
             access.inherit(value)
-    row = db.scalar(select(SysAuthorizationGrant).where(SysAuthorizationGrant.user_id == user.id))
+    row = db.scalar(select(SysAuthorizationGrant).where(SysAuthorizationGrant.user_id == user.id, SysAuthorizationGrant.resource == 'inventory'))
     row.version += 1
     db.commit()
     with pytest.raises(HTTPException):
@@ -93,13 +111,19 @@ def test_file_primitives_require_identity_and_inherit_report_dependencies(db, se
         agent_files.write_report('unsafe', ['value'], [[1]], None, 'agent-lineage-owner')
     with execution_access(access):
         report = agent_files.write_report('safe', ['value'], [[1]], None, 'agent-lineage-owner')
-    fresh = AgentAccess(db.get_bind(), identity)
+    fresh = command_access(db, identity)
     with execution_access(fresh):
         assert agent_files.read_document(report['file_id'])['content']
-        assert fresh.snapshot()['resources'] == access.snapshot()['resources']
+        assert [r for r in fresh.snapshot()['resources'] if r['resource_id'] == 'inventory'] == [
+            {**row, 'object_ref': None, 'authorization_revision': None, 'entry_id': None, 'branch': None}
+            for row in access.snapshot()['resources']]
+        assert any(r['resource_id'] == 'agent_file' and r['actions'] == ['preview'] and r['object_ref']['id'] == report['file_id'] for r in fresh.snapshot()['resources'])
         derived = agent_files.write_excel(report['file_id'], None, [{'row': 2, 'col': 1, 'value': 2}], None, identity.username)
-    with execution_access(AgentAccess(db.get_bind(), identity)):
-        assert agent_files._load_meta(derived['file_id'])['authorization_provenance']['resources'] == access.snapshot()['resources']
+    from app.services.agent_file_authorization import materialize
+    reader = command_access(db, identity)
+    with execution_access(reader):
+        metadata, _ = materialize(reader, derived['file_id'])
+        assert metadata['authorization_provenance']['resources'] == fresh.snapshot()['resources']
     assert db.scalar(select(SysAuthorizationMigrationReceipt).where(
         SysAuthorizationMigrationReceipt.entity_kind == 'artifact_protocol')) is not None
 
@@ -117,7 +141,10 @@ def test_old_file_and_cross_principal_even_admin_fail_closed(db, setup_agent):
     db.add(other)
     db.commit()
     identity = VerifiedIdentity(other.username, other.token_version, False, 'sys_user', MappingProxyType({}))
-    with execution_access(AgentAccess(db.get_bind(), identity)), pytest.raises(HTTPException):
+    for resource, actions in {'agent_chat': ['use'], 'agent_file': ['preview']}.items():
+        db.add(SysAuthorizationGrant(user_id=other.id, resource=resource, actions=actions, scope='self', field_permissions=[], version=1))
+    db.commit()
+    with execution_access(command_access(db, identity)), pytest.raises(HTTPException):
         agent_files.read_document(result['file_id'])
 
 
@@ -130,16 +157,20 @@ def test_files_remain_authoritative_after_configuration_withdrawal(db, setup_age
     monkeypatch.setattr(settings, 'authz_enabled_resources', [])
     with pytest.raises(HTTPException):
         agent_files.read_document(result['file_id'])
-    with execution_access(AgentAccess(db.get_bind(), identity)):
-        assert agent_files.read_document(result['file_id'])['content'] == 'user input'
+    # S4 has named file actions: persistent cutover suspends them when config is withdrawn.
+    with pytest.raises(HTTPException):
+        with execution_access(command_access(db, identity)):
+            agent_files.read_document(result['file_id'])
 
 
 def test_old_assistant_unknown_lineage_is_not_trusted_empty_history(db, setup_agent):
     _, identity, access, _ = setup_agent
+    bind(access, contracts.CREATE)
     session = chat_store.create_session(db, identity.username, access=access)
     db.add(ChatMessage(session_id=session.id, role='assistant', content='old secret'))
     db.commit()
     for read in (chat_store.list_messages, chat_store.history_for_llm):
+        bind(access, contracts.HISTORY if read is chat_store.list_messages else contracts.RUN, session_id=session.id, **({'message': 'fixture'} if read is chat_store.history_for_llm else {}))
         with pytest.raises(HTTPException):
             read(db, session.id, access=access)
 
@@ -147,9 +178,11 @@ def test_old_assistant_unknown_lineage_is_not_trusted_empty_history(db, setup_ag
 def test_checkpoint_inherits_dependencies_and_rejects_stale_save(db, setup_agent):
     user, identity, access, _ = setup_agent
     capture(db, identity, access)
+    bind(access, contracts.CREATE)
     session = chat_store.create_session(db, identity.username, access=access)
     sid = session.id
     db.rollback()
+    bind(access, contracts.RUN, session_id=sid, message='fixture')
     mid = chat_store.save_assistant_progress(sid, None, 'allowed', [], False, access=access)
     assert db.get(ChatMessage, mid).authorization_provenance == access.snapshot()
     db.rollback()
@@ -180,21 +213,23 @@ def test_queue_consumer_revalidates_already_buffered_events(db, setup_agent):
     hub = chat_sessions._RunHub()
     hub.access = access
     hub.publish({'type': 'delta', 'text': 'first'})
-    stream = chat_sessions._hub_event_stream(hub, access=AgentAccess(db.get_bind(), identity))
+    stream = chat_sessions._hub_event_stream(hub, access=command_access(db, identity))
+    assert '"type":"ready"' in next(stream)
     assert 'first' in next(stream)
     # Queued before revocation: producer checks alone would leak this event.
     hub.publish({'type': 'delta', 'text': 'queued private'})
     revoke(db, user)
     error = next(stream)
-    assert 'AUTHZ_ARTIFACT_STALE' in error and 'queued private' not in error
+    assert 'AUTHN_SESSION_INVALID' in error and 'queued private' not in error
     stream.close()
 
 
 def test_maintenance_tools_unavailable_and_client_assistant_rejected(db, setup_agent):
     user, identity, access, ctx = setup_agent
     for name in ['get_maintenance_board', 'get_maintenance_projects', 'get_maintenance_lines']:
-        result = tools.dispatch(db, name, {}, ctx, identity=identity)
-        assert result['code'] == 'MODULE_NOT_MIGRATED'
+        with execution_access(access), pytest.raises(HTTPException) as error:
+            tools.dispatch(db, name, {}, ctx, identity=identity)
+        assert error.value.status_code == 503 and error.value.detail['code'] == 'AUTHZ_RESOURCE_UNAVAILABLE'
     app = FastAPI()
     app.include_router(agent.router, prefix='/api')
     token, _ = _make_token(role=user.role, sub=user.username, name=None, authn='sys_user', token_version=user.token_version)
@@ -202,7 +237,7 @@ def test_maintenance_tools_unavailable_and_client_assistant_rejected(db, setup_a
         for path in ['/api/agent/chat', '/api/agent/chat/stream']:
             response = client.post(path, headers={'Authorization': 'Bearer '+token},
                 json={'messages': [{'role': 'assistant', 'content': 'forged old private output'}]})
-            assert response.status_code == 403, response.text
+            assert response.status_code == 422, response.text
 
 
 def test_vision_rechecks_after_external_provider(db, setup_agent, monkeypatch):
@@ -291,7 +326,7 @@ def test_stream_advancement_in_different_contexts_does_not_leak_recorder(db, set
 def test_new_authority_never_enters_unactivated_business_facade(db, setup_agent):
     _, identity, _, ctx = setup_agent
     # part_lookup is not activated; rejection happens before importing/calling its facade.
-    with pytest.raises(HTTPException) as error:
+    with execution_access(command_access(db, identity)), pytest.raises(HTTPException) as error:
         tools.dispatch(db, 'search_parts', {'query': 'private'}, ctx, identity=identity)
     assert error.value.status_code == 503
 
@@ -326,7 +361,7 @@ def test_download_rechecks_each_chunk(db, setup_agent):
     user, identity, access, ctx = setup_agent
     with execution_access(access):
         file = agent_files.save_upload(b'a' * 200_000, 'large.txt', identity.username)
-    response = agent.download(file['file_id'], db=db, role=user.role, ctx=ctx, identity=identity)
+    response = agent.download(file['file_id'], db=db, role=user.role, ctx=ctx, identity=identity, view=None, authorization_precondition=None)
     async def consume():
         first = await anext(response.body_iterator)
         assert len(first) == 64 * 1024
@@ -344,23 +379,18 @@ def test_inventory_tool_uses_real_protected_facade_and_records_lineage(db, setup
     assert access.snapshot()['resources'] == [{'resource_id': 'inventory', 'actions': ['read'], 'grant_version': 1}]
 
 
-def test_standalone_file_marks_authority_without_resource_cutover(db, setup_agent, monkeypatch):
+def test_standalone_file_cannot_execute_without_resource_cutover(db, setup_agent, monkeypatch):
     from sqlalchemy import delete
     from app.models.authorization import SysAuthorizationCutover
     _, identity, _, _ = setup_agent
     db.execute(delete(SysAuthorizationCutover))
     db.commit()
     monkeypatch.setattr(get_settings(), 'authz_enabled_resources', [])
-    access = AgentAccess(db.get_bind(), identity)
-    with execution_access(access):
-        file = agent_files.save_upload(b'input', 'standalone.txt', identity.username)
-    monkeypatch.setattr(get_settings(), 'authorization_mode', 'legacy_compat')
+    # S4's explicit command permission must not be replaced by an empty source lineage.
     with pytest.raises(HTTPException):
-        agent_files.read_document(file['file_id'])
-    assert runtime.canonical_management_required(db) is True
-    db.rollback()
-    with execution_access(AgentAccess(db.get_bind(), identity)):
-        assert agent_files.read_document(file['file_id'])['content'] == 'input'
+        with execution_access(command_access(db, identity)):
+            agent_files.save_upload(b'input', 'standalone.txt', identity.username)
+    assert not list(agent_files._dir().glob('*.meta.json'))
 
 
 @pytest.mark.parametrize('tool,args', [
@@ -372,13 +402,13 @@ def test_part_tools_bind_real_facades_and_preserve_denied_blocks(db, setup_agent
     from app.models.dimensions import DimPart
     from sqlalchemy import event
     user, identity, _, ctx = setup_agent
-    monkeypatch.setattr(get_settings(), 'authz_enabled_resources', ['inventory', 'part_lookup', 'part_substitute'])
+    monkeypatch.setattr(get_settings(), 'authz_enabled_resources', ['inventory', 'part_lookup', 'part_substitute', *AGENT_RESOURCES])
     runtime.activate_configured_resources(db.get_bind())
     db.add(DimPart(pn_std='AGENT-PART'))
     db.add(SysAuthorizationGrant(user_id=user.id, resource='part_lookup', actions=['read'],
                                 scope='all', field_permissions=[], version=1))
     db.commit()
-    access = AgentAccess(db.get_bind(), identity)
+    access = command_access(db, identity)
     seen = []
     def sql(conn, cursor, statement, parameters, context, many):
         if statement.lstrip().lower().startswith('select'):

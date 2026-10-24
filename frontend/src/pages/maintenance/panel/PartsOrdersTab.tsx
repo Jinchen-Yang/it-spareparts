@@ -1,6 +1,6 @@
 import { useContextQuery } from "../../../authz/contextQuery";
 import { useContextAdmission, useModuleAccess } from "../../../authz/access";
-import { surfaceRule } from "../../../authz/rules";
+import { anyRule, surfaceRule } from "../../../authz/rules";
 import { ContextChanged } from "../../../authz/contextProtocol";
 import type { AuthorizationContext } from "../../../authz/contextTypes";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -76,6 +76,9 @@ export function PartsOrdersTab({
 }) {
   const { message } = App.useApp();
   const admission = useContextAdmission();
+  const canFilterRows = admission.state(anyRule(
+    surfaceRule("maintenance_managed_rows.project_rows"), surfaceRule("maintenance_row_workbench.project_rows"),
+  ), true) !== "deny";
   const [ordersPage, setOrdersPage] = useState(1);
   const [contractFilter, setContractFilter] = useState<string | undefined>();
   // v1.36 Phase E：页面直建手工需求行（action_maintenance_demand_manage）
@@ -341,7 +344,7 @@ export function PartsOrdersTab({
           }}
         />
       ) : null}
-      {(ordersQuery.entryState !== "deny" || linesQuery.entryState !== "deny") && <Card
+      {(ordersQuery.entryState !== "deny" || linesQuery.entryState !== "deny" || canFilterRows) && <Card
         size="small"
         title="需求单"
         extra={contractNos.length > 1 ? (

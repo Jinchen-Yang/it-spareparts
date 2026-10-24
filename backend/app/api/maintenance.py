@@ -1487,6 +1487,7 @@ def _import_roundtrip_in_worker(
                 view=view, precondition=precondition)
             db.close()
             return result
+        runtime.guard_legacy_execution(db, ('maintenance_cost_roundtrip',))
         record_access_log(
             ctx,
             "roundtrip_import",

@@ -1,0 +1,2478 @@
+{
+  "schema_version": 1,
+  "status": "agreed_frontend_contract_docs_only_pending_runtime_integration",
+  "authority": "Backend executable definitions / catalog manifest / context registry; this fragment is not runtime input",
+  "scope": "All S4 employee frontend modules: Chat, generic import and ordinary account directory/profile. Named-admin/platform/service boundaries are not employee surfaces.",
+  "resource_count": 11,
+  "surface_count": 44,
+  "resources": [
+    {
+      "id": "agent_chat",
+      "actions": [
+        {
+          "id": "show_conversation",
+          "label": "发送消息与工具结果",
+          "kind": "display",
+          "requires_actions": [
+            "use"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ],
+      "surfaces": [
+        {
+          "id": "agent_chat.conversation",
+          "label": "发送消息与工具结果",
+          "display_actions": [
+            "show_conversation"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "agent_chat",
+                  "actions": [
+                    "use"
+                  ],
+                  "field_permissions": []
+                },
+                {
+                  "resource_id": "private_chat_session",
+                  "actions": [
+                    "run"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/chat"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "agent_chat",
+              "actions": [
+                "use"
+              ]
+            },
+            {
+              "resource_id": "private_chat_session",
+              "actions": [
+                "run"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "private_chat_session",
+      "actions": [
+        {
+          "id": "show_sessions",
+          "label": "会话列表",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_history",
+          "label": "历史正文",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_create",
+          "label": "创建会话",
+          "kind": "display",
+          "requires_actions": [
+            "create"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_live",
+          "label": "接续实时结果",
+          "kind": "display",
+          "requires_actions": [
+            "attach"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_cancel",
+          "label": "停止生成",
+          "kind": "display",
+          "requires_actions": [
+            "cancel"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_delete",
+          "label": "删除会话",
+          "kind": "display",
+          "requires_actions": [
+            "delete"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ],
+      "surfaces": [
+        {
+          "id": "private_chat_session.list",
+          "label": "会话列表",
+          "display_actions": [
+            "show_sessions"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "private_chat_session",
+                  "actions": [
+                    "read"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/chat"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "private_chat_session",
+              "actions": [
+                "read"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "private_chat_session.messages",
+          "label": "历史正文",
+          "display_actions": [
+            "show_history"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "private_chat_session",
+                  "actions": [
+                    "read"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/chat"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "private_chat_session",
+              "actions": [
+                "read"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "private_chat_session.create",
+          "label": "创建会话",
+          "display_actions": [
+            "show_create"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "private_chat_session",
+                  "actions": [
+                    "create"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/chat"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "private_chat_session",
+              "actions": [
+                "create"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "private_chat_session.attach",
+          "label": "接续实时结果",
+          "display_actions": [
+            "show_live"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "private_chat_session",
+                  "actions": [
+                    "attach"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/chat"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "private_chat_session",
+              "actions": [
+                "attach"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "private_chat_session.cancel",
+          "label": "停止生成",
+          "display_actions": [
+            "show_cancel"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "private_chat_session",
+                  "actions": [
+                    "cancel"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/chat"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "private_chat_session",
+              "actions": [
+                "cancel"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "private_chat_session.delete",
+          "label": "删除会话",
+          "display_actions": [
+            "show_delete"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "private_chat_session",
+                  "actions": [
+                    "delete"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/chat"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "private_chat_session",
+              "actions": [
+                "delete"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "agent_file",
+      "actions": [
+        {
+          "id": "show_upload",
+          "label": "上传附件",
+          "kind": "display",
+          "requires_actions": [
+            "upload"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_preview",
+          "label": "预览附件",
+          "kind": "display",
+          "requires_actions": [
+            "preview"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_download",
+          "label": "下载附件及图片原件",
+          "kind": "display",
+          "requires_actions": [
+            "download"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ],
+      "surfaces": [
+        {
+          "id": "agent_file.upload",
+          "label": "上传附件",
+          "display_actions": [
+            "show_upload"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "agent_file",
+                  "actions": [
+                    "upload"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/chat"
+          ],
+          "route_entry": false,
+          "data_requirements": [
+            {
+              "resource_id": "agent_file",
+              "actions": [
+                "upload"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "agent_file.preview",
+          "label": "预览附件",
+          "display_actions": [
+            "show_preview"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "agent_file",
+                  "actions": [
+                    "preview"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/chat"
+          ],
+          "route_entry": false,
+          "data_requirements": [
+            {
+              "resource_id": "agent_file",
+              "actions": [
+                "preview"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "agent_file.download",
+          "label": "下载附件及图片原件",
+          "display_actions": [
+            "show_download"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "agent_file",
+                  "actions": [
+                    "download"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/chat"
+          ],
+          "route_entry": false,
+          "data_requirements": [
+            {
+              "resource_id": "agent_file",
+              "actions": [
+                "download"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "import_purchase",
+      "actions": [
+        {
+          "id": "show_upload",
+          "label": "采购文件预检",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_submit",
+          "label": "采购文件提交",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [
+            "submit_skip",
+            "submit_upsert"
+          ],
+          "requires_fields": []
+        },
+        {
+          "id": "show_history",
+          "label": "采购批次历史",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_jobs",
+          "label": "采购作业状态",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_report",
+          "label": "采购批次报告",
+          "kind": "display",
+          "requires_actions": [
+            "read_report"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "show_errors",
+          "label": "采购问题文件导出",
+          "kind": "display",
+          "requires_actions": [
+            "export_errors"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        }
+      ],
+      "surfaces": [
+        {
+          "id": "import_purchase.upload",
+          "label": "采购文件预检",
+          "display_actions": [
+            "show_upload"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_purchase",
+                  "actions": [
+                    "precheck"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_purchase",
+              "actions": [
+                "precheck"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_purchase.submit",
+          "label": "采购文件提交",
+          "display_actions": [
+            "show_submit"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_purchase",
+                  "actions": [
+                    "precheck",
+                    "submit_skip"
+                  ],
+                  "field_permissions": []
+                }
+              ],
+              [
+                {
+                  "resource_id": "import_purchase",
+                  "actions": [
+                    "precheck",
+                    "submit_upsert"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_purchase",
+              "actions": [
+                "precheck",
+                "submit_skip"
+              ]
+            },
+            {
+              "resource_id": "import_purchase",
+              "actions": [
+                "precheck",
+                "submit_upsert"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_purchase.history",
+          "label": "采购批次历史",
+          "display_actions": [
+            "show_history"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_purchase",
+                  "actions": [
+                    "read_status"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_purchase",
+              "actions": [
+                "read_status"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_purchase.jobs",
+          "label": "采购作业状态",
+          "display_actions": [
+            "show_jobs"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_purchase",
+                  "actions": [
+                    "read_status"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_purchase",
+              "actions": [
+                "read_status"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_purchase.report",
+          "label": "采购批次报告",
+          "display_actions": [
+            "show_report"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_purchase",
+                  "actions": [
+                    "read_report"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_purchase",
+              "actions": [
+                "read_report"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_purchase.errors",
+          "label": "采购问题文件导出",
+          "display_actions": [
+            "show_errors"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_purchase",
+                  "actions": [
+                    "export_errors"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_purchase",
+              "actions": [
+                "export_errors"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "import_sales",
+      "actions": [
+        {
+          "id": "show_upload",
+          "label": "销售文件预检",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_submit",
+          "label": "销售文件提交",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [
+            "submit_skip",
+            "submit_upsert"
+          ],
+          "requires_fields": []
+        },
+        {
+          "id": "show_history",
+          "label": "销售批次历史",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_jobs",
+          "label": "销售作业状态",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_report",
+          "label": "销售批次报告",
+          "kind": "display",
+          "requires_actions": [
+            "read_report"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "show_errors",
+          "label": "销售问题文件导出",
+          "kind": "display",
+          "requires_actions": [
+            "export_errors"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        }
+      ],
+      "surfaces": [
+        {
+          "id": "import_sales.upload",
+          "label": "销售文件预检",
+          "display_actions": [
+            "show_upload"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_sales",
+                  "actions": [
+                    "precheck"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_sales",
+              "actions": [
+                "precheck"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_sales.submit",
+          "label": "销售文件提交",
+          "display_actions": [
+            "show_submit"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_sales",
+                  "actions": [
+                    "precheck",
+                    "submit_skip"
+                  ],
+                  "field_permissions": []
+                }
+              ],
+              [
+                {
+                  "resource_id": "import_sales",
+                  "actions": [
+                    "precheck",
+                    "submit_upsert"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_sales",
+              "actions": [
+                "precheck",
+                "submit_skip"
+              ]
+            },
+            {
+              "resource_id": "import_sales",
+              "actions": [
+                "precheck",
+                "submit_upsert"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_sales.history",
+          "label": "销售批次历史",
+          "display_actions": [
+            "show_history"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_sales",
+                  "actions": [
+                    "read_status"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_sales",
+              "actions": [
+                "read_status"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_sales.jobs",
+          "label": "销售作业状态",
+          "display_actions": [
+            "show_jobs"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_sales",
+                  "actions": [
+                    "read_status"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_sales",
+              "actions": [
+                "read_status"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_sales.report",
+          "label": "销售批次报告",
+          "display_actions": [
+            "show_report"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_sales",
+                  "actions": [
+                    "read_report"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_sales",
+              "actions": [
+                "read_report"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_sales.errors",
+          "label": "销售问题文件导出",
+          "display_actions": [
+            "show_errors"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_sales",
+                  "actions": [
+                    "export_errors"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_sales",
+              "actions": [
+                "export_errors"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "import_inventory",
+      "actions": [
+        {
+          "id": "show_upload",
+          "label": "库存文件预检",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_submit",
+          "label": "库存文件提交",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [
+            "submit_skip",
+            "submit_upsert"
+          ],
+          "requires_fields": []
+        },
+        {
+          "id": "show_history",
+          "label": "库存批次历史",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_jobs",
+          "label": "库存作业状态",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_report",
+          "label": "库存批次报告",
+          "kind": "display",
+          "requires_actions": [
+            "read_report"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "show_errors",
+          "label": "库存问题文件导出",
+          "kind": "display",
+          "requires_actions": [
+            "export_errors"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        }
+      ],
+      "surfaces": [
+        {
+          "id": "import_inventory.upload",
+          "label": "库存文件预检",
+          "display_actions": [
+            "show_upload"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_inventory",
+                  "actions": [
+                    "precheck"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_inventory",
+              "actions": [
+                "precheck"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_inventory.submit",
+          "label": "库存文件提交",
+          "display_actions": [
+            "show_submit"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_inventory",
+                  "actions": [
+                    "precheck",
+                    "submit_skip"
+                  ],
+                  "field_permissions": []
+                }
+              ],
+              [
+                {
+                  "resource_id": "import_inventory",
+                  "actions": [
+                    "precheck",
+                    "submit_upsert"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_inventory",
+              "actions": [
+                "precheck",
+                "submit_skip"
+              ]
+            },
+            {
+              "resource_id": "import_inventory",
+              "actions": [
+                "precheck",
+                "submit_upsert"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_inventory.history",
+          "label": "库存批次历史",
+          "display_actions": [
+            "show_history"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_inventory",
+                  "actions": [
+                    "read_status"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_inventory",
+              "actions": [
+                "read_status"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_inventory.jobs",
+          "label": "库存作业状态",
+          "display_actions": [
+            "show_jobs"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_inventory",
+                  "actions": [
+                    "read_status"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_inventory",
+              "actions": [
+                "read_status"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_inventory.report",
+          "label": "库存批次报告",
+          "display_actions": [
+            "show_report"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_inventory",
+                  "actions": [
+                    "read_report"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_inventory",
+              "actions": [
+                "read_report"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_inventory.errors",
+          "label": "库存问题文件导出",
+          "display_actions": [
+            "show_errors"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_inventory",
+                  "actions": [
+                    "export_errors"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_inventory",
+              "actions": [
+                "export_errors"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "import_maintenance",
+      "actions": [
+        {
+          "id": "show_upload",
+          "label": "维保出库文件预检",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_submit",
+          "label": "维保出库文件提交",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [
+            "submit_skip",
+            "submit_upsert"
+          ],
+          "requires_fields": []
+        },
+        {
+          "id": "show_history",
+          "label": "维保出库批次历史",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_jobs",
+          "label": "维保出库作业状态",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_report",
+          "label": "维保出库批次报告",
+          "kind": "display",
+          "requires_actions": [
+            "read_report"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "show_errors",
+          "label": "维保出库问题文件导出",
+          "kind": "display",
+          "requires_actions": [
+            "export_errors"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        }
+      ],
+      "surfaces": [
+        {
+          "id": "import_maintenance.upload",
+          "label": "维保出库文件预检",
+          "display_actions": [
+            "show_upload"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_maintenance",
+                  "actions": [
+                    "precheck"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_maintenance",
+              "actions": [
+                "precheck"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_maintenance.submit",
+          "label": "维保出库文件提交",
+          "display_actions": [
+            "show_submit"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_maintenance",
+                  "actions": [
+                    "precheck",
+                    "submit_skip"
+                  ],
+                  "field_permissions": []
+                }
+              ],
+              [
+                {
+                  "resource_id": "import_maintenance",
+                  "actions": [
+                    "precheck",
+                    "submit_upsert"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_maintenance",
+              "actions": [
+                "precheck",
+                "submit_skip"
+              ]
+            },
+            {
+              "resource_id": "import_maintenance",
+              "actions": [
+                "precheck",
+                "submit_upsert"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_maintenance.history",
+          "label": "维保出库批次历史",
+          "display_actions": [
+            "show_history"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_maintenance",
+                  "actions": [
+                    "read_status"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_maintenance",
+              "actions": [
+                "read_status"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_maintenance.jobs",
+          "label": "维保出库作业状态",
+          "display_actions": [
+            "show_jobs"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_maintenance",
+                  "actions": [
+                    "read_status"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_maintenance",
+              "actions": [
+                "read_status"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_maintenance.report",
+          "label": "维保出库批次报告",
+          "display_actions": [
+            "show_report"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_maintenance",
+                  "actions": [
+                    "read_report"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_maintenance",
+              "actions": [
+                "read_report"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_maintenance.errors",
+          "label": "维保出库问题文件导出",
+          "display_actions": [
+            "show_errors"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_maintenance",
+                  "actions": [
+                    "export_errors"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_maintenance",
+              "actions": [
+                "export_errors"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "import_expense",
+      "actions": [
+        {
+          "id": "show_upload",
+          "label": "报销文件预检",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_submit",
+          "label": "报销文件提交",
+          "kind": "display",
+          "requires_actions": [
+            "precheck"
+          ],
+          "requires_any_actions": [
+            "submit_skip",
+            "submit_upsert"
+          ],
+          "requires_fields": []
+        },
+        {
+          "id": "show_history",
+          "label": "报销批次历史",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_jobs",
+          "label": "报销作业状态",
+          "kind": "display",
+          "requires_actions": [
+            "read_status"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_report",
+          "label": "报销批次报告",
+          "kind": "display",
+          "requires_actions": [
+            "read_report"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "show_errors",
+          "label": "报销问题文件导出",
+          "kind": "display",
+          "requires_actions": [
+            "export_errors"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_supplier",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        }
+      ],
+      "surfaces": [
+        {
+          "id": "import_expense.upload",
+          "label": "报销文件预检",
+          "display_actions": [
+            "show_upload"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_expense",
+                  "actions": [
+                    "precheck"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_expense",
+              "actions": [
+                "precheck"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_expense.submit",
+          "label": "报销文件提交",
+          "display_actions": [
+            "show_submit"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_expense",
+                  "actions": [
+                    "precheck",
+                    "submit_skip"
+                  ],
+                  "field_permissions": []
+                }
+              ],
+              [
+                {
+                  "resource_id": "import_expense",
+                  "actions": [
+                    "precheck",
+                    "submit_upsert"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_expense",
+              "actions": [
+                "precheck",
+                "submit_skip"
+              ]
+            },
+            {
+              "resource_id": "import_expense",
+              "actions": [
+                "precheck",
+                "submit_upsert"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_expense.history",
+          "label": "报销批次历史",
+          "display_actions": [
+            "show_history"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_expense",
+                  "actions": [
+                    "read_status"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_expense",
+              "actions": [
+                "read_status"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_expense.jobs",
+          "label": "报销作业状态",
+          "display_actions": [
+            "show_jobs"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_expense",
+                  "actions": [
+                    "read_status"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_expense",
+              "actions": [
+                "read_status"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_expense.report",
+          "label": "报销批次报告",
+          "display_actions": [
+            "show_report"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_expense",
+                  "actions": [
+                    "read_report"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_expense",
+              "actions": [
+                "read_report"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "import_expense.errors",
+          "label": "报销问题文件导出",
+          "display_actions": [
+            "show_errors"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_expense",
+                  "actions": [
+                    "export_errors"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_expense",
+              "actions": [
+                "export_errors"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "import_expense_void",
+      "actions": [
+        {
+          "id": "show_preview",
+          "label": "报销作废预演",
+          "kind": "display",
+          "requires_actions": [
+            "preview"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ],
+      "surfaces": [
+        {
+          "id": "import_expense_void.preview",
+          "label": "报销作废预演",
+          "display_actions": [
+            "show_preview"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "import_expense_void",
+                  "actions": [
+                    "preview"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/import"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "import_expense_void",
+              "actions": [
+                "preview"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "account_directory",
+      "actions": [
+        {
+          "id": "show_list",
+          "label": "账号目录",
+          "kind": "display",
+          "requires_actions": [
+            "read"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "show_activity",
+          "label": "账号活动",
+          "kind": "display",
+          "requires_actions": [
+            "read_activity"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ],
+      "surfaces": [
+        {
+          "id": "account_directory.list",
+          "label": "账号目录",
+          "display_actions": [
+            "show_list"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "account_directory",
+                  "actions": [
+                    "read"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/accounts"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "account_directory",
+              "actions": [
+                "read"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "account_directory.activity",
+          "label": "账号活动",
+          "display_actions": [
+            "show_activity"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "account_directory",
+                  "actions": [
+                    "read_activity"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/accounts"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "account_directory",
+              "actions": [
+                "read_activity"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "account_profile",
+      "actions": [
+        {
+          "id": "show_edit",
+          "label": "修改显示资料",
+          "kind": "display",
+          "requires_actions": [
+            "update"
+          ],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ],
+      "surfaces": [
+        {
+          "id": "account_profile.edit",
+          "label": "修改显示资料",
+          "display_actions": [
+            "show_edit"
+          ],
+          "data_rule": {
+            "anyOf": [
+              [
+                {
+                  "resource_id": "account_profile",
+                  "actions": [
+                    "update"
+                  ],
+                  "field_permissions": []
+                }
+              ]
+            ]
+          },
+          "page_routes": [
+            "/accounts"
+          ],
+          "route_entry": true,
+          "data_requirements": [
+            {
+              "resource_id": "account_profile",
+              "actions": [
+                "update"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "consumer_bindings": {
+    "agent_chat.conversation": {
+      "source_component": "frontend/src/pages/ChatPage.tsx:send/startStream",
+      "entry_kind": "discovery_or_target",
+      "locator_query": "session_id",
+      "http_entries": [
+        "POST /api/agent/sessions/{session_id}/chat/stream"
+      ]
+    },
+    "private_chat_session.list": {
+      "source_component": "frontend/src/pages/ChatPage.tsx:history sidebar/mobile Drawer",
+      "entry_kind": "discovery",
+      "locator_query": null,
+      "http_entries": [
+        "GET /api/agent/sessions"
+      ]
+    },
+    "private_chat_session.messages": {
+      "source_component": "frontend/src/pages/ChatPage.tsx:openSession",
+      "entry_kind": "target",
+      "locator_query": "session_id",
+      "http_entries": [
+        "GET /api/agent/sessions/{session_id}/messages"
+      ]
+    },
+    "private_chat_session.create": {
+      "source_component": "frontend/src/pages/ChatPage.tsx:newChat/lazy create",
+      "entry_kind": "input",
+      "locator_query": null,
+      "http_entries": [
+        "POST /api/agent/sessions"
+      ]
+    },
+    "private_chat_session.attach": {
+      "source_component": "frontend/src/pages/ChatPage.tsx:startStream attach",
+      "entry_kind": "target",
+      "locator_query": "session_id",
+      "http_entries": [
+        "POST /api/agent/sessions/{session_id}/chat/attach"
+      ]
+    },
+    "private_chat_session.cancel": {
+      "source_component": "frontend/src/pages/ChatPage.tsx:stop",
+      "entry_kind": "target",
+      "locator_query": "session_id",
+      "http_entries": [
+        "POST /api/agent/sessions/{session_id}/chat/cancel"
+      ]
+    },
+    "private_chat_session.delete": {
+      "source_component": "frontend/src/pages/ChatPage.tsx:removeSession",
+      "entry_kind": "target",
+      "locator_query": "session_id",
+      "http_entries": [
+        "DELETE /api/agent/sessions/{session_id}"
+      ]
+    },
+    "agent_file.upload": {
+      "source_component": "frontend/src/pages/ChatPage.tsx:doUpload/pendingFile",
+      "entry_kind": "embedded",
+      "locator_query": null,
+      "http_entries": [
+        "POST /api/agent/upload"
+      ]
+    },
+    "agent_file.preview": {
+      "source_component": "frontend/src/pages/ChatPage.tsx:FileCard.openPreview",
+      "entry_kind": "embedded",
+      "locator_query": null,
+      "http_entries": [
+        "GET /api/agent/files/{file_id}/preview"
+      ]
+    },
+    "agent_file.download": {
+      "source_component": "frontend/src/pages/ChatPage.tsx:FileCard.download/image",
+      "entry_kind": "embedded",
+      "locator_query": null,
+      "http_entries": [
+        "GET /api/agent/files/{file_id}"
+      ]
+    },
+    "import_purchase.upload": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:runPrecheck + pages/import/ImportPrecheckPanel.tsx",
+      "entry_kind": "input",
+      "locator_query": null,
+      "http_entries": [
+        "POST /api/import/precheck"
+      ]
+    },
+    "import_purchase.submit": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:submitBatch",
+      "entry_kind": "input",
+      "locator_query": null,
+      "http_entries": [
+        "POST /api/import/upload-batch"
+      ]
+    },
+    "import_purchase.history": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:loadBatches",
+      "entry_kind": "discovery",
+      "locator_query": null,
+      "http_entries": [
+        "GET /api/import/batches"
+      ]
+    },
+    "import_purchase.jobs": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:poll/resumePolling",
+      "entry_kind": "target",
+      "locator_query": "job_id",
+      "http_entries": [
+        "GET /api/import/jobs/{job_id}"
+      ]
+    },
+    "import_purchase.report": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:detail Modal/WbddUploadFeedback",
+      "entry_kind": "target",
+      "locator_query": "batch_id",
+      "http_entries": [
+        "GET /api/import/batches/{batch_id}"
+      ]
+    },
+    "import_purchase.errors": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:downloadImportErrors",
+      "entry_kind": "target",
+      "locator_query": "batch_id",
+      "http_entries": [
+        "GET /api/import/batches/{batch_id}/errors.csv"
+      ]
+    },
+    "import_sales.upload": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:runPrecheck + pages/import/ImportPrecheckPanel.tsx",
+      "entry_kind": "input",
+      "locator_query": null,
+      "http_entries": [
+        "POST /api/import/precheck"
+      ]
+    },
+    "import_sales.submit": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:submitBatch",
+      "entry_kind": "input",
+      "locator_query": null,
+      "http_entries": [
+        "POST /api/import/upload-batch"
+      ]
+    },
+    "import_sales.history": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:loadBatches",
+      "entry_kind": "discovery",
+      "locator_query": null,
+      "http_entries": [
+        "GET /api/import/batches"
+      ]
+    },
+    "import_sales.jobs": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:poll/resumePolling",
+      "entry_kind": "target",
+      "locator_query": "job_id",
+      "http_entries": [
+        "GET /api/import/jobs/{job_id}"
+      ]
+    },
+    "import_sales.report": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:detail Modal/WbddUploadFeedback",
+      "entry_kind": "target",
+      "locator_query": "batch_id",
+      "http_entries": [
+        "GET /api/import/batches/{batch_id}"
+      ]
+    },
+    "import_sales.errors": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:downloadImportErrors",
+      "entry_kind": "target",
+      "locator_query": "batch_id",
+      "http_entries": [
+        "GET /api/import/batches/{batch_id}/errors.csv"
+      ]
+    },
+    "import_inventory.upload": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:runPrecheck + pages/import/ImportPrecheckPanel.tsx",
+      "entry_kind": "input",
+      "locator_query": null,
+      "http_entries": [
+        "POST /api/import/precheck"
+      ]
+    },
+    "import_inventory.submit": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:submitBatch",
+      "entry_kind": "input",
+      "locator_query": null,
+      "http_entries": [
+        "POST /api/import/upload-batch"
+      ]
+    },
+    "import_inventory.history": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:loadBatches",
+      "entry_kind": "discovery",
+      "locator_query": null,
+      "http_entries": [
+        "GET /api/import/batches"
+      ]
+    },
+    "import_inventory.jobs": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:poll/resumePolling",
+      "entry_kind": "target",
+      "locator_query": "job_id",
+      "http_entries": [
+        "GET /api/import/jobs/{job_id}"
+      ]
+    },
+    "import_inventory.report": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:detail Modal/WbddUploadFeedback",
+      "entry_kind": "target",
+      "locator_query": "batch_id",
+      "http_entries": [
+        "GET /api/import/batches/{batch_id}"
+      ]
+    },
+    "import_inventory.errors": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:downloadImportErrors",
+      "entry_kind": "target",
+      "locator_query": "batch_id",
+      "http_entries": [
+        "GET /api/import/batches/{batch_id}/errors.csv"
+      ]
+    },
+    "import_maintenance.upload": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:runPrecheck + pages/import/ImportPrecheckPanel.tsx",
+      "entry_kind": "input",
+      "locator_query": null,
+      "http_entries": [
+        "POST /api/import/precheck"
+      ]
+    },
+    "import_maintenance.submit": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:submitBatch",
+      "entry_kind": "input",
+      "locator_query": null,
+      "http_entries": [
+        "POST /api/import/upload-batch"
+      ]
+    },
+    "import_maintenance.history": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:loadBatches",
+      "entry_kind": "discovery",
+      "locator_query": null,
+      "http_entries": [
+        "GET /api/import/batches"
+      ]
+    },
+    "import_maintenance.jobs": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:poll/resumePolling",
+      "entry_kind": "target",
+      "locator_query": "job_id",
+      "http_entries": [
+        "GET /api/import/jobs/{job_id}"
+      ]
+    },
+    "import_maintenance.report": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:detail Modal/WbddUploadFeedback",
+      "entry_kind": "target",
+      "locator_query": "batch_id",
+      "http_entries": [
+        "GET /api/import/batches/{batch_id}"
+      ]
+    },
+    "import_maintenance.errors": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:downloadImportErrors",
+      "entry_kind": "target",
+      "locator_query": "batch_id",
+      "http_entries": [
+        "GET /api/import/batches/{batch_id}/errors.csv"
+      ]
+    },
+    "import_expense.upload": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:runPrecheck + pages/import/ImportPrecheckPanel.tsx",
+      "entry_kind": "input",
+      "locator_query": null,
+      "http_entries": [
+        "POST /api/import/precheck"
+      ]
+    },
+    "import_expense.submit": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:submitBatch",
+      "entry_kind": "input",
+      "locator_query": null,
+      "http_entries": [
+        "POST /api/import/upload-batch"
+      ]
+    },
+    "import_expense.history": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:loadBatches",
+      "entry_kind": "discovery",
+      "locator_query": null,
+      "http_entries": [
+        "GET /api/import/batches"
+      ]
+    },
+    "import_expense.jobs": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:poll/resumePolling",
+      "entry_kind": "target",
+      "locator_query": "job_id",
+      "http_entries": [
+        "GET /api/import/jobs/{job_id}"
+      ]
+    },
+    "import_expense.report": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:detail Modal/WbddUploadFeedback",
+      "entry_kind": "target",
+      "locator_query": "batch_id",
+      "http_entries": [
+        "GET /api/import/batches/{batch_id}"
+      ]
+    },
+    "import_expense.errors": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:downloadImportErrors",
+      "entry_kind": "target",
+      "locator_query": "batch_id",
+      "http_entries": [
+        "GET /api/import/batches/{batch_id}/errors.csv"
+      ]
+    },
+    "import_expense_void.preview": {
+      "source_component": "frontend/src/pages/ImportPage.tsx:previewExpenseVoid + pages/import/ExpenseVoidPreviewPanel.tsx",
+      "entry_kind": "input",
+      "locator_query": null,
+      "http_entries": [
+        "POST /api/import/expense-void-preview"
+      ]
+    },
+    "account_directory.list": {
+      "source_component": "frontend/src/pages/accounts/UnifiedPermissionCenter.tsx:load/directory table",
+      "entry_kind": "discovery",
+      "locator_query": null,
+      "http_entries": [
+        "GET /api/accounts"
+      ]
+    },
+    "account_directory.activity": {
+      "source_component": "frontend/src/pages/accounts/AccountsTab.tsx:openActivity; migrate existing activity UI into UnifiedPermissionCenter",
+      "entry_kind": "embedded",
+      "locator_query": null,
+      "http_entries": [
+        "GET /api/accounts/{username}/activity"
+      ]
+    },
+    "account_profile.edit": {
+      "source_component": "frontend/src/pages/accounts/AccountCommandModal.tsx:kind=profile",
+      "entry_kind": "embedded",
+      "locator_query": null,
+      "http_entries": [
+        "PUT /api/accounts/{username}"
+      ]
+    }
+  },
+  "constraints": [
+    "Display actions are explicit grants. A data action never supplies show. All field dependencies are local to the owning resource.",
+    "Target route_entry allows only an input/resolution shell. Query session_id/batch_id/job_id never supplies authorization. Missing ID shows locator input; valid ID resolves only its exact entry before facts or command.",
+    "No target entry may automatically list/create/run/read_status/poll. Starting an explicit job-status view is the only reason to poll, and only after actual authorization.",
+    "Chat run uses agent_chat.use AND private_chat_session.run; attach is independent. Without session_id, run UI needs explicit create action to create a session, never implicit create.",
+    "File surfaces remain embedded in a permitted chat host. Preview does not allow image original GET. There is no new file-center route.",
+    "Show_submit has a visible preparation dependency precheck AND (submit_skip OR submit_upsert); each formal mutation API remains independently authorized by its selected mode and actual full input.",
+    "A page with multiple source surfaces is an OR for admission only. Actual mixed import submission is an AND over all selected sources/targets, decided by the server.",
+    "Import expense void may reuse the local file input to preview only; no automatic generic precheck or submit. K=false keeps amounts null without removing the entire preview.",
+    "Report/export hard C/S/K/F are inherited from their owning data actions; the display descriptor repeats the same closed fields for editor explanation and never grants them.",
+    "Plain /chat and /import retain existing legacy page gating only for never-cutover resources. Canonical seed show eligibility must use actual old page visibility, not new API readability.",
+    "API-only renameChatSession, stateless agent APIs, import single upload and import job list get no fabricated UI surface.",
+    "Named authorization-admin control entry is governed by actor_capabilities and uses GET /api/authz/accounts, never ordinary /accounts as an implicit target finder.",
+    "actor_capabilities.read_accounts/edit_account_profiles express only data/command eligibility. Ordinary directory, activity and profile surfaces additionally require their explicit show action, including for named admins.",
+    "Catalog boundaries are a separate closed read-only registry, never employee module IDs or an allow source. Generator consumes authoritative backend boundaries separately."
+  ]
+}

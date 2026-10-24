@@ -1,0 +1,5768 @@
+{
+  "snapshot": {
+    "schema_version": 1,
+    "authorization_mode": "unified_modules",
+    "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+    "version": "a5bde6fbd5d79682230b6b44d8b995f1407bc2f2d76232b81c17533069d52801",
+    "username": "import-user",
+    "principal": {
+      "id": 1,
+      "username": "import-user",
+      "display_name": null
+    },
+    "authorization_epoch": 1,
+    "actor_capabilities": {
+      "read_accounts": {
+        "effect": "deny",
+        "reason": {
+          "code": "ACCOUNT_PROFILE_CAPABILITY_MISSING",
+          "message": "当前账号没有此操作权限"
+        }
+      },
+      "edit_account_profiles": {
+        "effect": "deny",
+        "reason": {
+          "code": "ACCOUNT_PROFILE_CAPABILITY_MISSING",
+          "message": "当前账号没有此操作权限"
+        }
+      },
+      "manage_authorization": {
+        "effect": "deny",
+        "reason": {
+          "code": "NAMED_ADMIN_REQUIRED",
+          "message": "当前账号没有此操作权限"
+        }
+      },
+      "manage_templates": {
+        "effect": "deny",
+        "reason": {
+          "code": "NAMED_ADMIN_REQUIRED",
+          "message": "当前账号没有此操作权限"
+        }
+      },
+      "create_accounts": {
+        "effect": "deny",
+        "reason": {
+          "code": "NAMED_ADMIN_REQUIRED",
+          "message": "当前账号没有此操作权限"
+        }
+      },
+      "reset_account_passwords": {
+        "effect": "deny",
+        "reason": {
+          "code": "NAMED_ADMIN_REQUIRED",
+          "message": "当前账号没有此操作权限"
+        }
+      },
+      "manage_account_lifecycle": {
+        "effect": "deny",
+        "reason": {
+          "code": "NAMED_ADMIN_REQUIRED",
+          "message": "当前账号没有此操作权限"
+        }
+      }
+    },
+    "can_manage": false,
+    "resources": {
+      "company_summary": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_kpi_sales": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_kpi_purchase": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_kpi_profit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_kpi_coverage": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_order_health": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_profit_ranking": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "company_sales_orders": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_recent_orders": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "company_purchase_orders": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_recent_orders": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "company_pool_analysis": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_summary": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_sales_transactions": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_customer_cross_brand": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_pools": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "price_discipline": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_summary": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "sales_analysis": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_options": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_summary": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_groups": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_trend": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_orders": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_order_detail": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_amount_histogram": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "export": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_overview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_compact": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_groups": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_trend": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_orders": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_summary_counts": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_summary_amounts": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_summary_profit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_amount_histogram": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_order_detail": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_reconciliation": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_export": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "part_lookup": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "purchase_records_read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "sales_records_read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "inventory_read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "financial_summary_read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "market_prices_read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_search": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_purchase_history": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_sales_history": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_inventory": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_quick_pricing": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "profit_analysis": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_part_analysis": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_salesperson_analysis": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_customer_analysis": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "export": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "recompute": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_summary": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_export": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_recompute": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "purchase_analysis": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_summary": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_trend": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_groups": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_orders": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_order_detail": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "purchase_records": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_model_analysis": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_price_trend_advice": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_exceptions": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_records": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "inventory": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "adjust": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_list": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_adjust": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "pool_catalog": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "archive": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "create": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "edit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "edit_members": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "restore": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_list": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_identity_edit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_members_edit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_lifecycle": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "pool_price_policy": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "set": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_set": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "pool_price_analysis": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_part_reference": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_list": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_members": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_price_map": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "pool_order_facts": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_purchase_facts": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_sales_facts": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_order_detail": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "part_master": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "create": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "edit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "normalize_apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "normalize_preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_inline_edit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_list": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_create": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_edit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_normalize": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "part_substitute": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "manage": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_relations": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_manage": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "part_identity": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "review_alias": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "confirm": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "merge": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "rename": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "unmerge": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_candidates": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_merges": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_aliases": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "governance": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "review": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "classify": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "exclude": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "refresh": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_parts": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_issues": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_metrics": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "data_quality": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_purchase_issues": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_sales_issues": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "review": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_issues": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "data_quality_calibration": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "data_import": {
+        "migration_state": "retired",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {},
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_cost": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_projects": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_lines": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "export_summary": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "export_orders": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "export_lines": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "export_workbook": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "recompute": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_summary": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_summary": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_attention": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_project": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_orders": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_order_lines": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_export_options": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "export": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_project_export": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_project_health": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_project_orders": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_project_cards": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_cards": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_project_directory": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_project_selectors": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_project": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "update": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "archive": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "restore": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_overview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_edit_basics": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_assignments": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "assign": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "archive": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_manager": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_source_assignment": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_sources": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_analysis": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_pn_ranking": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_spend_trend": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_filter_options": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_explorer": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_rankings": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_pn_compact": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_pn_detail": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_spend": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_project_focus": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_filters": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_dashboard": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_options": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_summary": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_projects": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_parts": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_receipts": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_quantity_checks": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_orders": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_consumption": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_consumption_issues": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "export": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_valuation": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "adjust_valuation_parameters": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_overview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_projects": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_parts": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_consumption": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_checks": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_receipt_ranking": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_receipt_drill": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_filters": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_orders": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_consumption_issues": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_valuation": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_valuation_summary": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_valuation_parameters": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_export": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_demand": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_delete_intent": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "void_plan": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "void": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_manual_protection": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "create_line": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "edit_line": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "clear_override": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "restore": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_list": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_lines": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_batch_edit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_lifecycle": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_create": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_create_project": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_clear_override": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_return_summary": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_source_document": {
+        "migration_state": "retired",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {},
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_issue": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_workspace": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_search": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_demand_candidates": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_candidates": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "create": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "update": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "confirm": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "update_status": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "create_manual": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "update_manual": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "preview_manual": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "void": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "correct_header": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "correct_line": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_facts": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_workflow": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_correction": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_manual": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_cost_fill": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_gaps": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "fill": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "recompute": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "backfill": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_return_obligation": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "create": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "submit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "mark_in_transit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "warehouse_confirm": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "void": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "resolve_category": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_return_receipt": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_demands": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_summary": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_receipts": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_audit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "create": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "update": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "void": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_ledger": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_summary": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_batch_create": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_batch_maintain": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_audit_history": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_salvage": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "register": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "void": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_front_stock": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_collection": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_snapshots": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_plan": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "create": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "update": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "restore_plan": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_plans": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_actuals": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_manage_actuals": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_expense": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_workspace": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_rows": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "create": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "mark_readiness": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "update_status": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "backfill": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_records": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_expense_reconcile": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_collection_followup": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "evidence_read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "record": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "evidence_upload": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_collection_plan_import": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_finance_workbook": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "validate": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_project_transfer": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "receipt_ruling": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_batch": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_row_workbench": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_fields": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "export": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_cost_rows": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_cost_rows": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_project_rows": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_ledger_import": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_metadata": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_report": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_shipment_import": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_document_import": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_ai_assist": {
+        "migration_state": "retired",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {},
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_acceptance": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_checklist": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "checklist_preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "checklist_apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "template_download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_deliverable": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "attachment_download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "submit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "attachment_upload": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "attachment_delete": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_checklist": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_checklist_import": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_report": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_attachments": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_audit": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_warehouse": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_documents": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_ambiguities": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "resolve_ambiguity": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_migration": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_manifest": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_project_evidence": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "approve": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "reconcile": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "replenishment_request": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "revise": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "export_screening": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_versions": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_exports": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "display_policy": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_audit_identity": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "update": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_update": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_contract": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "create": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "update": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "archive": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_contract_cost": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "export": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_cost_roundtrip": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "template_download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_managed_workbook": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "validate": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "update_contract_amount": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_project_master": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_parts_roundtrip": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_site_roundtrip": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_expense_roundtrip": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_collection_roundtrip": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_general_workbook": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_project_master": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_parts_roundtrip": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_site_roundtrip": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_expense_roundtrip": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_collection_roundtrip": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_global_rows": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_fields": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "export": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_global_rows": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_global_workbook": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "validate": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_roundtrip": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_manager_workbook": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "validate": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "job_read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_project_operations": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_workspace": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_tasks": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_workspace": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_project_health": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_project_purchase": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_procurement": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_project_roundtrip": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "download_v2": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "download_v3": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "validate_v2": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply_v2": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "error_download_v2": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_recovery": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_return_import": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "submit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "job_read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "raw_download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "retry": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "cancel": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_import": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_raw_download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "company_pool_order_facts": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_order_detail": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "retired_pool_rebuild": {
+        "migration_state": "retired",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {},
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "retired_replenishment": {
+        "migration_state": "retired",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {},
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_acceptance_directory": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "search": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_ai_document": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "propose": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "accept": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_ai_ledger": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "propose": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "accept": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_ai_proposals": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_business_date": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_collection_followup_directory": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "search": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_collection_plan_import_read": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "raw_download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_contract_amount_write": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "validate": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_document_import_targets": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_document_relink": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "relink": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_general_workbook_write": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "validate": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "reassign_source_orders": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_project_master": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_parts_roundtrip": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_site_roundtrip": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_expense_roundtrip": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_collection_roundtrip": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_managed_rows": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_fields": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "export": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_project_rows": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_global_rows": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_manager_directory": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_candidates": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_operation_directory": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_project_backfill": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_project_transfer_export": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_options": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_return_categories": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_shipment_import_targets": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_source_assignment_write": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "assign": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "unassign": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "auto_assign": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_manage_sources": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_source_cancellation": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_confirmation": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "confirm": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_cascade": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_source_health": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_warehouse_import": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "apply": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "reconcile": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_wbdd_reconciliation": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_missing": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "reconcile": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_reconcile": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "maintenance_wbdd_snapshot": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read_latest": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "submit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_upload": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "replenishment_capabilities": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "replenishment_catalog": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_candidate_catalog": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "replenishment_project_commands": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "cart_read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "cart_update": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "cart_delete": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "submit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "revise": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_draft": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_revise": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "replenishment_project_directory": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_project_selector": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "import_purchase": {
+        "migration_state": "implemented",
+        "runtime_state": "enabled",
+        "configurable": true,
+        "grant_version": 1,
+        "decisions": {
+          "precheck": {
+            "effect": "requires_context",
+            "reason": {
+              "code": "OBJECT_CONTEXT_REQUIRED",
+              "message": "需要检查当前业务对象"
+            }
+          },
+          "submit_skip": {
+            "effect": "requires_context",
+            "reason": {
+              "code": "OBJECT_CONTEXT_REQUIRED",
+              "message": "需要检查当前业务对象"
+            }
+          },
+          "submit_upsert": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "read_status": {
+            "effect": "requires_context",
+            "reason": {
+              "code": "OBJECT_CONTEXT_REQUIRED",
+              "message": "需要检查当前业务对象"
+            }
+          },
+          "read_report": {
+            "effect": "requires_context",
+            "reason": {
+              "code": "OBJECT_CONTEXT_REQUIRED",
+              "message": "需要检查当前业务对象"
+            }
+          },
+          "export_errors": {
+            "effect": "requires_context",
+            "reason": {
+              "code": "OBJECT_CONTEXT_REQUIRED",
+              "message": "需要检查当前业务对象"
+            }
+          },
+          "show_upload": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_submit": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_history": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_jobs": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_report": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_errors": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          }
+        },
+        "scope_kind": "all",
+        "field_permissions": [
+          "data_customer",
+          "data_profit",
+          "data_purchase_cost",
+          "data_supplier"
+        ]
+      },
+      "import_sales": {
+        "migration_state": "implemented",
+        "runtime_state": "enabled",
+        "configurable": true,
+        "grant_version": 1,
+        "decisions": {
+          "precheck": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "submit_skip": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "submit_upsert": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "read_status": {
+            "effect": "requires_context",
+            "reason": {
+              "code": "OBJECT_CONTEXT_REQUIRED",
+              "message": "需要检查当前业务对象"
+            }
+          },
+          "read_report": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "export_errors": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_upload": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_submit": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_history": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_jobs": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_report": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_errors": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          }
+        },
+        "scope_kind": "all",
+        "field_permissions": []
+      },
+      "import_inventory": {
+        "migration_state": "implemented",
+        "runtime_state": "enabled",
+        "configurable": true,
+        "grant_version": 0,
+        "decisions": {
+          "precheck": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "submit_skip": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "submit_upsert": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "read_status": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "read_report": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "export_errors": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "show_upload": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "show_submit": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "show_history": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "show_jobs": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "show_report": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "show_errors": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "import_maintenance": {
+        "migration_state": "implemented",
+        "runtime_state": "enabled",
+        "configurable": true,
+        "grant_version": 0,
+        "decisions": {
+          "precheck": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "submit_skip": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "submit_upsert": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "read_status": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "read_report": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "export_errors": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "show_upload": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "show_submit": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "show_history": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "show_jobs": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "show_report": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          },
+          "show_errors": {
+            "effect": "deny",
+            "reason": {
+              "code": "NO_GRANT",
+              "message": "未获得资源授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "import_expense": {
+        "migration_state": "implemented",
+        "runtime_state": "enabled",
+        "configurable": true,
+        "grant_version": 1,
+        "decisions": {
+          "precheck": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "submit_skip": {
+            "effect": "requires_context",
+            "reason": {
+              "code": "OBJECT_CONTEXT_REQUIRED",
+              "message": "需要检查当前业务对象"
+            }
+          },
+          "submit_upsert": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "read_status": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "read_report": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "export_errors": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_upload": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_submit": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_history": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_jobs": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_report": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          },
+          "show_errors": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          }
+        },
+        "scope_kind": "all",
+        "field_permissions": []
+      },
+      "import_expense_void": {
+        "migration_state": "implemented",
+        "runtime_state": "enabled",
+        "configurable": true,
+        "grant_version": 1,
+        "decisions": {
+          "preview": {
+            "effect": "requires_context",
+            "reason": {
+              "code": "OBJECT_CONTEXT_REQUIRED",
+              "message": "需要检查当前业务对象"
+            }
+          },
+          "show_preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "NOT_GRANTED",
+              "message": "未获得此资源动作授权"
+            }
+          }
+        },
+        "scope_kind": "all",
+        "field_permissions": []
+      },
+      "agent_chat": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "use": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_conversation": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "private_chat_session": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "attach": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "create": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "rename": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "delete": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "run": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "cancel": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_sessions": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_history": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_create": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_live": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_cancel": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_delete": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "agent_file": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "upload": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "generate": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_upload": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_preview": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_download": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "account_directory": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "read": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "read_activity": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_list": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_activity": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      },
+      "account_profile": {
+        "migration_state": "implemented",
+        "runtime_state": "legacy",
+        "configurable": false,
+        "grant_version": 0,
+        "decisions": {
+          "update": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          },
+          "show_edit": {
+            "effect": "deny",
+            "reason": {
+              "code": "MODULE_NOT_ENABLED",
+              "message": "模块尚未切换新授权"
+            }
+          }
+        },
+        "scope_kind": "none",
+        "field_permissions": []
+      }
+    },
+    "sales_analysis": {
+      "enabled": false,
+      "read": false,
+      "export": false,
+      "scope": "none",
+      "customer_count": 0,
+      "field_permissions": [],
+      "reason": "模块尚未切换新授权"
+    }
+  },
+  "precheck_resolution": {
+    "locator": {
+      "object_type": "operation_input",
+      "object_id": "2b85ffb344cceec84d2758f36ee72ec74475cd50841779809b20184aa361d4df"
+    },
+    "authorization_context": {
+      "schema_version": 1,
+      "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+      "authorization_epoch": 1,
+      "context": {
+        "kind": "object",
+        "object_type": "operation_input",
+        "id": "2b85ffb344cceec84d2758f36ee72ec74475cd50841779809b20184aa361d4df",
+        "authorization_revision": "8f72444bef8f2691615f760e1d22d4beef7d05bfd00c37fd0174fcbf538bc17f"
+      },
+      "resources": {
+        "import_purchase": {
+          "grant_version": 1,
+          "decisions": {
+            "precheck": {
+              "effect": "allow",
+              "reason": null
+            }
+          },
+          "field_permissions": [
+            "data_customer",
+            "data_profit",
+            "data_purchase_cost",
+            "data_supplier"
+          ]
+        }
+      }
+    }
+  },
+  "precheck": {
+    "schema_version": 1,
+    "authorization_mode": "unified_modules",
+    "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+    "authorization_context": {
+      "schema_version": 1,
+      "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+      "authorization_epoch": 1,
+      "context": {
+        "kind": "object",
+        "object_type": "operation_input",
+        "id": "2b85ffb344cceec84d2758f36ee72ec74475cd50841779809b20184aa361d4df",
+        "authorization_revision": "8f72444bef8f2691615f760e1d22d4beef7d05bfd00c37fd0174fcbf538bc17f"
+      },
+      "resources": {
+        "import_purchase": {
+          "grant_version": 1,
+          "decisions": {
+            "precheck": {
+              "effect": "allow",
+              "reason": null
+            }
+          },
+          "field_permissions": [
+            "data_customer",
+            "data_profit",
+            "data_purchase_cost",
+            "data_supplier"
+          ]
+        }
+      }
+    },
+    "content": {
+      "mode": "skip",
+      "files": [
+        {
+          "filename": "purchase.xlsx",
+          "file_type": "purchase",
+          "ok": true,
+          "missing_price": false,
+          "warning": null,
+          "can_import": true,
+          "severity": "info",
+          "selected_sheets": [
+            "采购"
+          ],
+          "sheets": [
+            {
+              "sheet_name": "采购",
+              "detected_type": "purchase",
+              "action": "selected",
+              "header_row": 1,
+              "data_rows": 1,
+              "duplicate_headers": [],
+              "issues": []
+            }
+          ],
+          "issues": [],
+          "exact_success_match": null,
+          "blocked_reason": null
+        }
+      ],
+      "any_warning": false,
+      "missing_price_any": false,
+      "has_errors": false,
+      "can_import_all": true
+    },
+    "inputs": [
+      {
+        "file_index": 0,
+        "input_sha256": "c9cbdc4343ac86f90ca523c8f1b7d754c94fee696e3c16813ea71e4872cbc64c",
+        "source_domain": "purchase"
+      }
+    ]
+  },
+  "receipt": {
+    "schema_version": 1,
+    "authorization_mode": "unified_modules",
+    "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+    "authorization_context": {
+      "schema_version": 1,
+      "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+      "authorization_epoch": 1,
+      "context": {
+        "kind": "object",
+        "object_type": "operation_input",
+        "id": "f659f3d2539b435fcfc30d32fd29302385043c57b6cfb6acb4e3f24a20dca991",
+        "authorization_revision": "4ae715c505ad3cd441290663a304e948804294f23cb9b65602d56a97af45f839"
+      },
+      "resources": {
+        "import_purchase": {
+          "grant_version": 1,
+          "decisions": {
+            "submit_skip": {
+              "effect": "allow",
+              "reason": null
+            }
+          },
+          "field_permissions": [
+            "data_customer",
+            "data_profit",
+            "data_purchase_cost",
+            "data_supplier"
+          ]
+        }
+      }
+    },
+    "batch_id": 1,
+    "source_domain": "purchase",
+    "status": "success",
+    "committed": true,
+    "derived_refresh": "complete"
+  },
+  "list_resolution": {
+    "locator": {
+      "collection_ref": "generic_import_batches"
+    },
+    "authorization_context": {
+      "schema_version": 1,
+      "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+      "authorization_epoch": 1,
+      "context": {
+        "kind": "collection",
+        "id": "generic_import_batches",
+        "authorization_revision": "4662c36eeeee2bc800ba46cfb2da0fb6640529f7c836da68341a8cbcf342c070"
+      },
+      "resources": {
+        "import_purchase": {
+          "grant_version": 1,
+          "decisions": {
+            "read_status": {
+              "effect": "allow",
+              "reason": null
+            }
+          },
+          "field_permissions": [
+            "data_customer",
+            "data_profit",
+            "data_purchase_cost",
+            "data_supplier"
+          ]
+        },
+        "import_sales": {
+          "grant_version": 1,
+          "decisions": {
+            "read_status": {
+              "effect": "allow",
+              "reason": null
+            }
+          },
+          "field_permissions": []
+        },
+        "import_inventory": {
+          "grant_version": null,
+          "decisions": {
+            "read_status": {
+              "effect": "deny",
+              "reason": {
+                "code": "NOT_GRANTED",
+                "message": "未获得当前业务对象的操作权限"
+              }
+            }
+          },
+          "field_permissions": []
+        },
+        "import_maintenance": {
+          "grant_version": null,
+          "decisions": {
+            "read_status": {
+              "effect": "deny",
+              "reason": {
+                "code": "NOT_GRANTED",
+                "message": "未获得当前业务对象的操作权限"
+              }
+            }
+          },
+          "field_permissions": []
+        },
+        "import_expense": {
+          "grant_version": 1,
+          "decisions": {
+            "read_status": {
+              "effect": "deny",
+              "reason": {
+                "code": "NOT_GRANTED",
+                "message": "未获得当前业务对象的操作权限"
+              }
+            }
+          },
+          "field_permissions": []
+        }
+      }
+    }
+  },
+  "list": {
+    "schema_version": 1,
+    "authorization_mode": "unified_modules",
+    "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+    "authorization_context": {
+      "schema_version": 1,
+      "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+      "authorization_epoch": 1,
+      "context": {
+        "kind": "collection",
+        "id": "generic_import_batches",
+        "authorization_revision": "4662c36eeeee2bc800ba46cfb2da0fb6640529f7c836da68341a8cbcf342c070"
+      },
+      "resources": {
+        "import_purchase": {
+          "grant_version": 1,
+          "decisions": {
+            "read_status": {
+              "effect": "allow",
+              "reason": null
+            }
+          },
+          "field_permissions": [
+            "data_customer",
+            "data_profit",
+            "data_purchase_cost",
+            "data_supplier"
+          ]
+        },
+        "import_sales": {
+          "grant_version": 1,
+          "decisions": {
+            "read_status": {
+              "effect": "allow",
+              "reason": null
+            }
+          },
+          "field_permissions": []
+        },
+        "import_inventory": {
+          "grant_version": null,
+          "decisions": {
+            "read_status": {
+              "effect": "deny",
+              "reason": {
+                "code": "NOT_GRANTED",
+                "message": "未获得当前业务对象的操作权限"
+              }
+            }
+          },
+          "field_permissions": []
+        },
+        "import_maintenance": {
+          "grant_version": null,
+          "decisions": {
+            "read_status": {
+              "effect": "deny",
+              "reason": {
+                "code": "NOT_GRANTED",
+                "message": "未获得当前业务对象的操作权限"
+              }
+            }
+          },
+          "field_permissions": []
+        },
+        "import_expense": {
+          "grant_version": 1,
+          "decisions": {
+            "read_status": {
+              "effect": "deny",
+              "reason": {
+                "code": "NOT_GRANTED",
+                "message": "未获得当前业务对象的操作权限"
+              }
+            }
+          },
+          "field_permissions": []
+        }
+      }
+    },
+    "items": [
+      {
+        "batch_id": 1,
+        "source_domain": "purchase",
+        "metadata": {
+          "filename": "purchase.xlsx",
+          "file_type": "purchase",
+          "status": "success",
+          "uploaded_at": "2026-10-24T02:47:04.992517+00:00",
+          "uploaded_by": "import-user",
+          "rows_total": 1,
+          "rows_inserted": 1,
+          "rows_skipped": 0,
+          "rows_error": 0,
+          "rows_inactive": 0
+        }
+      }
+    ],
+    "returned_count": 1,
+    "total": null,
+    "limit": 100,
+    "restricted": true
+  },
+  "report": {
+    "schema_version": 1,
+    "authorization_mode": "unified_modules",
+    "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+    "authorization_context": {
+      "schema_version": 1,
+      "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+      "authorization_epoch": 1,
+      "context": {
+        "kind": "object",
+        "object_type": "generic_import_batch",
+        "id": "1",
+        "authorization_revision": "242683d8361be5ac23f99a2f8b02befca4b7830f45ee16a68ddf318111f98806"
+      },
+      "resources": {
+        "import_purchase": {
+          "grant_version": 1,
+          "decisions": {
+            "read_status": {
+              "effect": "allow",
+              "reason": null
+            },
+            "read_report": {
+              "effect": "allow",
+              "reason": null
+            }
+          },
+          "field_permissions": [
+            "data_customer",
+            "data_profit",
+            "data_purchase_cost",
+            "data_supplier"
+          ]
+        }
+      }
+    },
+    "batch_id": 1,
+    "source_domain": "purchase",
+    "metadata": {
+      "filename": "purchase.xlsx",
+      "file_type": "purchase",
+      "status": "success",
+      "uploaded_at": "2026-10-24T02:47:04.992517+00:00",
+      "uploaded_by": "import-user",
+      "rows_total": 1,
+      "rows_inserted": 1,
+      "rows_skipped": 0,
+      "rows_error": 0,
+      "rows_inactive": 0
+    },
+    "report": {
+      "file_type": "purchase",
+      "new_parts": 1,
+      "import_mode": "skip",
+      "rows_inactive": 0,
+      "errors_preview": [],
+      "orders_updated": 0,
+      "fact_rows_error": 0,
+      "orders_inserted": 1,
+      "fact_rows_skipped": 0,
+      "fact_rows_updated": 0,
+      "source_rows_total": 1,
+      "fact_rows_inserted": 1,
+      "rows_skipped_no_data": 0,
+      "missing_price_columns": false,
+      "data_quality_detection": {
+        "created": 0,
+        "matched": 0,
+        "scanned": 1,
+        "refreshed": 0,
+        "unchanged": 0,
+        "source_changed": 0
+      },
+      "workbook_projects_bumped": 0
+    },
+    "errors": [],
+    "issue_count": 0,
+    "block_access": {
+      "status": {
+        "effect": "allow",
+        "reason": null
+      },
+      "report": {
+        "effect": "allow",
+        "reason": null
+      }
+    }
+  },
+  "status_only": {
+    "schema_version": 1,
+    "authorization_mode": "unified_modules",
+    "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+    "authorization_context": {
+      "schema_version": 1,
+      "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+      "authorization_epoch": 1,
+      "context": {
+        "kind": "object",
+        "object_type": "generic_import_batch",
+        "id": "2",
+        "authorization_revision": "8b9ad543ff9789b2e6ce093b976d4589da4c14ab6815994c8cf67dab997dd7a5"
+      },
+      "resources": {
+        "import_sales": {
+          "grant_version": 1,
+          "decisions": {
+            "read_status": {
+              "effect": "allow",
+              "reason": null
+            },
+            "read_report": {
+              "effect": "deny",
+              "reason": {
+                "code": "NOT_GRANTED",
+                "message": "未获得当前业务对象的操作权限"
+              }
+            }
+          },
+          "field_permissions": []
+        }
+      }
+    },
+    "batch_id": 2,
+    "source_domain": "sales",
+    "metadata": {
+      "filename": "secret-sales.xlsx",
+      "file_type": "sales",
+      "status": "success",
+      "uploaded_at": "2026-10-24T02:47:05.739836+00:00",
+      "uploaded_by": null,
+      "rows_total": 9,
+      "rows_inserted": 0,
+      "rows_skipped": 0,
+      "rows_error": 0,
+      "rows_inactive": 0
+    },
+    "report": null,
+    "errors": [],
+    "issue_count": null,
+    "block_access": {
+      "status": {
+        "effect": "allow",
+        "reason": null
+      },
+      "report": {
+        "effect": "deny",
+        "reason": {
+          "code": "NOT_GRANTED",
+          "message": "未获得当前业务对象的操作权限"
+        }
+      }
+    }
+  },
+  "partial_job_resolution": {
+    "locator": {
+      "object_type": "generic_import_job",
+      "object_id": "1"
+    },
+    "authorization_context": {
+      "schema_version": 1,
+      "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+      "authorization_epoch": 1,
+      "context": {
+        "kind": "object",
+        "object_type": "generic_import_job",
+        "id": "1",
+        "authorization_revision": "834651e94fefc659771ba8036cfaf7b6be36835f7ebac30785798f6e71b5d180"
+      },
+      "resources": {
+        "import_purchase": {
+          "grant_version": 1,
+          "decisions": {
+            "read_status": {
+              "effect": "allow",
+              "reason": null
+            }
+          },
+          "field_permissions": [
+            "data_customer",
+            "data_profit",
+            "data_purchase_cost",
+            "data_supplier"
+          ]
+        },
+        "import_expense": {
+          "grant_version": 1,
+          "decisions": {
+            "read_status": {
+              "effect": "deny",
+              "reason": {
+                "code": "NOT_GRANTED",
+                "message": "未获得当前业务对象的操作权限"
+              }
+            }
+          },
+          "field_permissions": []
+        }
+      }
+    }
+  },
+  "partial_job": {
+    "schema_version": 1,
+    "authorization_mode": "unified_modules",
+    "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+    "authorization_context": {
+      "schema_version": 1,
+      "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+      "authorization_epoch": 1,
+      "context": {
+        "kind": "object",
+        "object_type": "generic_import_job",
+        "id": "1",
+        "authorization_revision": "834651e94fefc659771ba8036cfaf7b6be36835f7ebac30785798f6e71b5d180"
+      },
+      "resources": {
+        "import_purchase": {
+          "grant_version": 1,
+          "decisions": {
+            "read_status": {
+              "effect": "allow",
+              "reason": null
+            }
+          },
+          "field_permissions": [
+            "data_customer",
+            "data_profit",
+            "data_purchase_cost",
+            "data_supplier"
+          ]
+        },
+        "import_expense": {
+          "grant_version": 1,
+          "decisions": {
+            "read_status": {
+              "effect": "deny",
+              "reason": {
+                "code": "NOT_GRANTED",
+                "message": "未获得当前业务对象的操作权限"
+              }
+            }
+          },
+          "field_permissions": []
+        }
+      }
+    },
+    "job": {
+      "job_id": 1,
+      "created_at": "2026-10-24T02:47:06.167812+00:00",
+      "finished_at": null,
+      "mode": "skip",
+      "partial": true,
+      "restricted": true,
+      "status": null,
+      "total_files": null,
+      "done_files": null,
+      "error_files": null,
+      "note": null,
+      "visible_status": "processing",
+      "visible_total_files": 1,
+      "visible_done_files": 0,
+      "visible_error_files": 0,
+      "items": [
+        {
+          "item_id": "6b3fd66484494b54864c2861dd1267bf",
+          "input_index": null,
+          "source_domain": "purchase",
+          "filename": "purchase.xlsx",
+          "state": "queued",
+          "batch_id": null,
+          "code": null
+        }
+      ]
+    }
+  },
+  "void_resolution": {
+    "locator": {
+      "object_type": "operation_input",
+      "object_id": "df60916eca0b98b8b66b314f95a71a7eb934f855e99be96777e3f018fcc42d72"
+    },
+    "authorization_context": {
+      "schema_version": 1,
+      "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+      "authorization_epoch": 1,
+      "context": {
+        "kind": "object",
+        "object_type": "operation_input",
+        "id": "df60916eca0b98b8b66b314f95a71a7eb934f855e99be96777e3f018fcc42d72",
+        "authorization_revision": "5875c9b833bb4d71ba07ca8a181a07105b1dc5a2da05cabd0b82a4efa79088d8"
+      },
+      "resources": {
+        "import_expense_void": {
+          "grant_version": 1,
+          "decisions": {
+            "preview": {
+              "effect": "allow",
+              "reason": null
+            }
+          },
+          "field_permissions": []
+        }
+      }
+    }
+  },
+  "void": {
+    "schema_version": 1,
+    "authorization_mode": "unified_modules",
+    "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+    "authorization_context": {
+      "schema_version": 1,
+      "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+      "authorization_epoch": 1,
+      "context": {
+        "kind": "object",
+        "object_type": "operation_input",
+        "id": "df60916eca0b98b8b66b314f95a71a7eb934f855e99be96777e3f018fcc42d72",
+        "authorization_revision": "5875c9b833bb4d71ba07ca8a181a07105b1dc5a2da05cabd0b82a4efa79088d8"
+      },
+      "resources": {
+        "import_expense_void": {
+          "grant_version": 1,
+          "decisions": {
+            "preview": {
+              "effect": "allow",
+              "reason": null
+            }
+          },
+          "field_permissions": []
+        }
+      }
+    },
+    "fingerprint_version": 2,
+    "previews": [
+      {
+        "filename": "changed.xlsx",
+        "file_hash": "425382b857854b9a31e5c3fcb2ed36005083ee975ffbe4b37597b1b239d47b96",
+        "mode": "upsert",
+        "status": "ready",
+        "file_type": "expense",
+        "rows_incoming": 2,
+        "dropped_no_contract": 0,
+        "contracts": [
+          "XSDD-P"
+        ],
+        "anchored": true,
+        "contract": "XSDD-P",
+        "void": {
+          "rows": 1,
+          "amount": null,
+          "already_void_rows": 0
+        },
+        "void_rows": [
+          {
+            "raw_line_id": "BXD-3#1@44f54c82",
+            "linked_sales_order_no": "XSDD-P",
+            "bxd_no": "BXD-3",
+            "line_no": 1,
+            "expense_date": "2026-05-03",
+            "person": "丙",
+            "reason": "租金",
+            "data_status": "已结束",
+            "amount": null
+          }
+        ],
+        "preview_token": "opaque-preview-token-redacted",
+        "expires_in_seconds": 1800
+      }
+    ]
+  }
+}

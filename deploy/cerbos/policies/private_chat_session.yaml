@@ -1,0 +1,269 @@
+{
+  "apiVersion": "api.cerbos.dev/v1",
+  "resourcePolicy": {
+    "version": "default",
+    "resource": "private_chat_session",
+    "rules": [
+      {
+        "name": "explicit-attach",
+        "actions": [
+          "attach"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"attach\" in P.attr.grants.private_chat_session.actions && (R.attr.module_probe || ((P.attr.grants.private_chat_session.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"private_chat_session\", \"scope\": P.attr.grants.private_chat_session.scope, \"version\": P.attr.grants.private_chat_session.version, \"field_permissions\": P.attr.grants.private_chat_session.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-cancel",
+        "actions": [
+          "cancel"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"cancel\" in P.attr.grants.private_chat_session.actions && (R.attr.module_probe || ((P.attr.grants.private_chat_session.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"private_chat_session\", \"scope\": P.attr.grants.private_chat_session.scope, \"version\": P.attr.grants.private_chat_session.version, \"field_permissions\": P.attr.grants.private_chat_session.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-create",
+        "actions": [
+          "create"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"create\" in P.attr.grants.private_chat_session.actions && (R.attr.module_probe || ((P.attr.grants.private_chat_session.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"private_chat_session\", \"scope\": P.attr.grants.private_chat_session.scope, \"version\": P.attr.grants.private_chat_session.version, \"field_permissions\": P.attr.grants.private_chat_session.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-delete",
+        "actions": [
+          "delete"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"delete\" in P.attr.grants.private_chat_session.actions && (R.attr.module_probe || ((P.attr.grants.private_chat_session.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"private_chat_session\", \"scope\": P.attr.grants.private_chat_session.scope, \"version\": P.attr.grants.private_chat_session.version, \"field_permissions\": P.attr.grants.private_chat_session.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-read",
+        "actions": [
+          "read"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"read\" in P.attr.grants.private_chat_session.actions && (R.attr.module_probe || ((P.attr.grants.private_chat_session.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"private_chat_session\", \"scope\": P.attr.grants.private_chat_session.scope, \"version\": P.attr.grants.private_chat_session.version, \"field_permissions\": P.attr.grants.private_chat_session.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-rename",
+        "actions": [
+          "rename"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"rename\" in P.attr.grants.private_chat_session.actions && (R.attr.module_probe || ((P.attr.grants.private_chat_session.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"private_chat_session\", \"scope\": P.attr.grants.private_chat_session.scope, \"version\": P.attr.grants.private_chat_session.version, \"field_permissions\": P.attr.grants.private_chat_session.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-run",
+        "actions": [
+          "run"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"run\" in P.attr.grants.private_chat_session.actions && (R.attr.module_probe || ((P.attr.grants.private_chat_session.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"private_chat_session\", \"scope\": P.attr.grants.private_chat_session.scope, \"version\": P.attr.grants.private_chat_session.version, \"field_permissions\": P.attr.grants.private_chat_session.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-cancel",
+        "actions": [
+          "show_cancel"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_cancel\" in P.attr.grants.private_chat_session.actions && \"cancel\" in P.attr.grants.private_chat_session.actions && (R.attr.module_probe || ((P.attr.grants.private_chat_session.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"private_chat_session\", \"scope\": P.attr.grants.private_chat_session.scope, \"version\": P.attr.grants.private_chat_session.version, \"field_permissions\": P.attr.grants.private_chat_session.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-create",
+        "actions": [
+          "show_create"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_create\" in P.attr.grants.private_chat_session.actions && \"create\" in P.attr.grants.private_chat_session.actions && (R.attr.module_probe || ((P.attr.grants.private_chat_session.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"private_chat_session\", \"scope\": P.attr.grants.private_chat_session.scope, \"version\": P.attr.grants.private_chat_session.version, \"field_permissions\": P.attr.grants.private_chat_session.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-delete",
+        "actions": [
+          "show_delete"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_delete\" in P.attr.grants.private_chat_session.actions && \"delete\" in P.attr.grants.private_chat_session.actions && (R.attr.module_probe || ((P.attr.grants.private_chat_session.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"private_chat_session\", \"scope\": P.attr.grants.private_chat_session.scope, \"version\": P.attr.grants.private_chat_session.version, \"field_permissions\": P.attr.grants.private_chat_session.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-history",
+        "actions": [
+          "show_history"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_history\" in P.attr.grants.private_chat_session.actions && \"read\" in P.attr.grants.private_chat_session.actions && (R.attr.module_probe || ((P.attr.grants.private_chat_session.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"private_chat_session\", \"scope\": P.attr.grants.private_chat_session.scope, \"version\": P.attr.grants.private_chat_session.version, \"field_permissions\": P.attr.grants.private_chat_session.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-live",
+        "actions": [
+          "show_live"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_live\" in P.attr.grants.private_chat_session.actions && \"attach\" in P.attr.grants.private_chat_session.actions && (R.attr.module_probe || ((P.attr.grants.private_chat_session.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"private_chat_session\", \"scope\": P.attr.grants.private_chat_session.scope, \"version\": P.attr.grants.private_chat_session.version, \"field_permissions\": P.attr.grants.private_chat_session.field_permissions}"
+          }
+        }
+      },
+      {
+        "name": "explicit-show-sessions",
+        "actions": [
+          "show_sessions"
+        ],
+        "effect": "EFFECT_ALLOW",
+        "roles": [
+          "registered_account"
+        ],
+        "condition": {
+          "match": {
+            "expr": "\"show_sessions\" in P.attr.grants.private_chat_session.actions && \"read\" in P.attr.grants.private_chat_session.actions && (R.attr.module_probe || ((P.attr.grants.private_chat_session.scope == \"self\" && (R.attr.is_owner))))"
+          }
+        },
+        "output": {
+          "when": {
+            "ruleActivated": "{\"resource\": \"private_chat_session\", \"scope\": P.attr.grants.private_chat_session.scope, \"version\": P.attr.grants.private_chat_session.version, \"field_permissions\": P.attr.grants.private_chat_session.field_permissions}"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,3 +1,8 @@
+import { useLocation } from "react-router-dom";
+import { useAuthz } from "../authz/AuthzProvider";
+import { withRouteAccess } from "../authz/access";
+import { IMPORT_SOURCES } from "../api/importProtocol";
+import CanonicalImportPage from "./import/CanonicalImportPage";
 import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useRef, useState } from "react";
 import { App, Card, Upload, Descriptions, Tag, Space, Button, Modal, Progress, Switch, Tooltip, List, Alert, Checkbox } from "antd";
@@ -118,7 +123,7 @@ interface PrecheckSnapshot {
   previews: ExpenseVoidPreview[];
 }
 
-export default function ImportPage() {
+function LegacyImportPage() {
   const { message } = App.useApp();
   const [upsertMode, setUpsertMode] = useState(false);  // false=skip(默认), true=upsert(修复模式)
   const [staged, setStaged] = useState<File[]>([]);
@@ -721,4 +726,15 @@ export default function ImportPage() {
       </Modal>
     </Space>
   );
+}
+
+function ImportPage() {
+  const authz = useAuthz();
+  const legacy = [...IMPORT_SOURCES.map(source => `import_${source}`), "import_expense_void"].every(id => authz.snapshot?.resources[id]?.runtime_state === "legacy");
+  return legacy ? <LegacyImportPage /> : <CanonicalImportPage />;
+}
+const ControlledImportPage = withRouteAccess(ImportPage, "/import");
+export default function ImportRoute() {
+  const location = useLocation();
+  return <ControlledImportPage key={location.search} />;
 }

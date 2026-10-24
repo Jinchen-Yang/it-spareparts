@@ -170,12 +170,10 @@ def subject(user):
 
 
 def actor(db, identity, *, admin=True, locked=None, capability=None):
-    who = principal.load_principal(db, identity, locked_user=locked)
     if admin:
-        return principal.require_named_admin(who)
-    if who is None or principal.actor_capabilities(who)[capability]['effect'] != 'allow':
-        raise authz_error(403, 'AUTHZ_FORBIDDEN', '当前账号没有此资料操作权限')
-    return who
+        return principal.require_named_admin(principal.load_principal(db, identity, locked_user=locked))
+    from app.authz.control_access import require_capability
+    return require_capability(db, identity, capability, locked_user=locked)
 
 
 def target(db, username):

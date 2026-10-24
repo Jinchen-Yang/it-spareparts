@@ -272,7 +272,7 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
       if (readStableProject) {
         try { stable = (await getMaintenanceProject(projectId, readTransport)).data.project; }
         catch (reason) {
-          if (!readTransport.isCurrent()) return false;
+          if (seq !== projectRequestSeq.current || !readTransport.isCurrent()) return false;
           setError(readError(reason, "项目基本信息加载失败"));
         }
       }

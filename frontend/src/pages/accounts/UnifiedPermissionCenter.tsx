@@ -1,4 +1,8 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { accountAccess } from "../../authz/accountAccess";
+import AccountProfileModal from "./AccountProfileModal";
+import AccountActivityDrawer from "./AccountActivityDrawer";
 import {
   Alert,
   Button,
@@ -22,6 +26,8 @@ import {
 import {
   listCanonicalAccounts,
   listCanonicalTemplates,
+  listAuthorizationTargets,
+  validateCanonicalAccounts,
   type CanonicalAccount,
   type CanonicalTemplate,
 } from "../../api/accounts";
@@ -34,6 +40,13 @@ import AccountCommandModal, {
 } from "./AccountCommandModal";
 export default function UnifiedPermissionCenter() {
   const { snapshot } = useAuthz();
+  const access = accountAccess(snapshot);
+  const [params, setParams] = useSearchParams();
+  const located = params.get("username")?.trim() || "";
+  const [locator, setLocator] = useState(located);
+  const [profile, setProfile] = useState<{ username: string; name?: string | null } | null>(null);
+  const [activity, setActivity] = useState<string | null>(null);
+  useEffect(() => { setLocator(located); setProfile(null); setActivity(null); }, [located]);
   const task = useAuthorizationTask("permission-center");
   const [catalog, setCatalog] = useState<AuthzCatalog | null>(null),
     [accounts, setAccounts] = useState<CanonicalAccount[]>([]),
@@ -63,21 +76,13 @@ export default function UnifiedPermissionCenter() {
     task.run(
       async () => {
         const [a, c, t] = await Promise.all([
-          listCanonicalAccounts(task.owner),
+          access.control ? listAuthorizationTargets(task.owner) : access.list ? listCanonicalAccounts(task.owner) : Promise.resolve({ data: [] }),
           needCatalog ? getAuthzCatalog(task.owner) : Promise.resolve(null),
           can("manage_templates")
             ? listCanonicalTemplates(task.owner).then((r) => r.data)
             : Promise.resolve([]),
         ]);
-        for (const row of a.data)
-          if (
-            !safeVersion(row.id) ||
-            !row.id ||
-            !safeVersion(row.authorization_epoch) ||
-            !row.authorization_summary ||
-            !Array.isArray(row.authorization_summary.override_resources)
-          )
-            throw new Error("账号摘要协议无效");
+        validateCanonicalAccounts(a.data);
         for (const row of t)
           if (
             !safeVersion(row.version) ||
@@ -107,6 +112,7 @@ export default function UnifiedPermissionCenter() {
     schema_version: 1,
     authorization_mode: "unified_modules",
     modules: [],
+    boundaries: [],
   };
   const targets = (rows: CanonicalAccount[]): Target[] =>
     rows.map((u) => ({
@@ -150,7 +156,8 @@ export default function UnifiedPermissionCenter() {
     {
       title: "规范授权来源",
       key: "source",
-      render: (_: unknown, u: CanonicalAccount) => (
+      render: (_: unknown, u: CanonicalAccount) => u.authorization_summary_status === "invalid" || !u.authorization_summary
+        ? <Tag color="warning">授权摘要不可用</Tag> : (
         <Space wrap>
           <Tag>
             {u.authorization_summary.template_code
@@ -182,14 +189,15 @@ export default function UnifiedPermissionCenter() {
       key: "op",
       render: (_: unknown, u: CanonicalAccount) => (
         <Space wrap>
-          {can("edit_account_profiles") && (
+          {access.profile && (
             <Button
               type="link"
-              onClick={() => setCommand({ kind: "profile", account: u })}
+              onClick={() => setProfile({ username: u.username, name: u.display_name })}
             >
               资料
             </Button>
           )}
+          {access.activity && <Button type="link" onClick={() => setActivity(u.username)}>活动</Button>}
           {can("manage_authorization") && (
             <>
               <Button type="link" onClick={() => setAccountTarget(u.username)}>
@@ -252,6 +260,15 @@ export default function UnifiedPermissionCenter() {
         message="统一模块授权"
         description="账号与模板使用完整模块配置。尚未迁移的模块只读展示待实施，旧布尔改权入口已停用；资料、角色和显式应用模板分别操作。"
       />
+      {(access.activity || access.profile) && <Space wrap style={{ marginBottom: 16 }}>
+        <Input aria-label="已知用户名" placeholder="输入准确用户名" value={locator} onChange={event => setLocator(event.target.value)} />
+        <Button disabled={!locator.trim()} onClick={() => {
+          const next = new URLSearchParams(params); next.set("username", locator.trim()); setParams(next);
+        }}>打开目标</Button>
+        {located && <span>目标：{located}</span>}
+        {located && access.activity && <Button onClick={() => setActivity(located)}>查看目标活动</Button>}
+        {located && access.profile && <Button onClick={() => setProfile({ username: located })}>修改目标显示名</Button>}
+      </Space>}
       {task.error && (
         <Alert
           type="error"
@@ -299,7 +316,7 @@ export default function UnifiedPermissionCenter() {
                       </Button>
                     )}
                   </Space>
-                  <Table
+                  {(access.control || access.list) && <Table
                     rowKey="id"
                     size="small"
                     columns={columns}
@@ -319,7 +336,7 @@ export default function UnifiedPermissionCenter() {
                           }
                         : undefined
                     }
-                  />
+                  />}
                 </>
               ),
             },
@@ -376,7 +393,7 @@ export default function UnifiedPermissionCenter() {
                                       !accounts.some(
                                         (u) =>
                                           u.authorization_summary
-                                            .template_code === t.code &&
+                                            ?.template_code === t.code &&
                                           u.role !== "admin",
                                       )
                                     }
@@ -386,7 +403,7 @@ export default function UnifiedPermissionCenter() {
                                           accounts.filter(
                                             (u) =>
                                               u.authorization_summary
-                                                .template_code === t.code &&
+                                                ?.template_code === t.code &&
                                               u.role !== "admin",
                                           ),
                                         ),
@@ -466,6 +483,9 @@ export default function UnifiedPermissionCenter() {
           onDone={() => void load()}
         />
       )}
+      {profile && access.profile && <AccountProfileModal key={profile.username} username={profile.username} initialName={profile.name}
+        onClose={() => setProfile(null)} onDone={() => void load()} />}
+      {activity && access.activity && <AccountActivityDrawer key={activity} username={activity} onClose={() => setActivity(null)} />}
     </>
   );
 }
