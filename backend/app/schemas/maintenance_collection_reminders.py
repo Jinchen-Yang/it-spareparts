@@ -191,6 +191,7 @@ class ProjectDetailResponse(BaseModel):
 
 # ---------- follow-up ----------
 class FollowUpRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     expected_version: int = Field(ge=1)
@@ -342,6 +343,7 @@ class ApplyBinding(BaseModel):
 
 class ApplyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     expected_batch_version: int = Field(ge=1)
     expected_data_version: str
@@ -368,6 +370,7 @@ class ApplyResponse(BaseModel):
 
 # ---------- 搜索请求 ----------
 class SearchRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     q: str = Field(default="", max_length=256)

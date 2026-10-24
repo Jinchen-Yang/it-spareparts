@@ -29,7 +29,8 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from sqlalchemy import Date, and_, case, false, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
+from sqlalchemy.sql.selectable import SelectBase
 
 from app.business_time import BUSINESS_TZ, business_today
 from app.config import Settings, get_settings
@@ -165,11 +166,15 @@ def resolve_project_scope(
 
 
 def _project_rows(
-    db: Session, scope: set[str] | None
+    db: Session, scope: set[str] | None, *, strict_projection=False
 ) -> dict[str, MaintenanceProject]:
     statement = select(MaintenanceProject)
+    if strict_projection:
+        statement = statement.options(load_only(MaintenanceProject.project_id, MaintenanceProject.project_code,
+            MaintenanceProject.display_name, MaintenanceProject.business_type, MaintenanceProject.no_return_note,
+            raiseload=True))
     if scope is not None:
-        if not scope:
+        if not isinstance(scope, SelectBase) and not scope:
             return {}
         statement = statement.where(MaintenanceProject.project_id.in_(scope))
     statement = statement.order_by(
@@ -219,9 +224,10 @@ def _base_filters(
     end: date,
     q: str | None,
     business_type: str | None = None,
+    strict_projection=False,
 ) -> _Filters:
     """先范围收敛（项目 × 业务类型 × 关键词），后聚合——一切统计共用。"""
-    projects = _project_rows(db, scope)
+    projects = _project_rows(db, scope, strict_projection=strict_projection)
     if business_type:
         projects = {
             project_id: project
@@ -264,7 +270,7 @@ def _occurred_period_conditions(lower: datetime | None, upper: datetime) -> list
 def _scope_condition(column, scope: set[str] | None) -> list:
     if scope is None:
         return []
-    if not scope:
+    if not isinstance(scope, SelectBase) and not scope:
         # 空集=无可见项目：恒假条件，绝不回退全量。
         return [false()]
     return [column.in_(scope)]
@@ -2045,7 +2051,7 @@ def _scoped_order_ids(
         .where(FMaintenanceOrder.data_status == "已生效")
     )
     if scope is not None:
-        if not scope:
+        if not isinstance(scope, SelectBase) and not scope:
             return []
         statement = statement.where(
             MaintenanceSourceOrderAssignment.project_id.in_(scope)
@@ -2196,7 +2202,7 @@ def build_quantity_checks_payload(
         summaries.update(summarize_demand_returns(
             db,
             source_order_ids=order_ids[start:start + MAX_BATCH_SIZE],
-            allowed_project_ids=scope,
+            allowed_project_ids=set(projects) if isinstance(scope, SelectBase) else scope,
         ))
     order_meta = {}
     if order_ids:

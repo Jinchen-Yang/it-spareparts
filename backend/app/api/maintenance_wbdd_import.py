@@ -6,9 +6,10 @@
 - 非 WBDD 文件 / 布局不符 → 422 零写入；同 Idempotency-Key 重放 → 200 返回原报告。
 """
 import logging
+from typing import Literal
 import os
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Response, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Response, status
 from fastapi import UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
@@ -27,6 +28,10 @@ from app.security import (
     require_page,
 )
 from app.services import maintenance_wbdd_import as wbdd
+from app.services import maintenance_wbdd_authorization as canonical
+from app.services import maintenance_authorization as foundation
+from app.services.maintenance_workflow_authorization import multipart_precondition
+from app.api import maintenance_project_scope as auth_transport
 from app.services.maintenance_cost import (
     MaintenanceCostRecomputeBusy,
     WorkbookInvalidationConflictError as CostWorkbookInvalidationConflictError,
@@ -58,10 +63,14 @@ def upload_wbdd(
     response: Response,
     file: UploadFile = File(...),
     idempotency_key: str = Depends(_idempotency_key),
+    verified=Depends(auth_transport.identity_for('maintenance_wbdd_snapshot')),
+    view: Literal['authorization'] | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+    form_precondition: str | None = Form(None, alias="authorization_precondition"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY)),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_wbdd_snapshot", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_wbdd_snapshot", require_action(_ACTION_KEY))),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
@@ -71,6 +80,9 @@ def upload_wbdd(
     tmp = _save_upload_to_temp(file, name)
     try:
         try:
+            if verified is not None:
+                return canonical.upload(db,verified,file_path=tmp,original_name=name,idempotency_key=idempotency_key,
+                    authorization_view=view=='authorization',precondition=multipart_precondition(authorization_precondition,form_precondition))
             report, replayed = wbdd.import_wbdd(
                 db, file_path=tmp, original_name=name,
                 operator=str(ctx.user_id or "unknown"),
@@ -117,7 +129,10 @@ def upload_wbdd(
                 {"code": "source_identity_conflict", "message": str(exc)},
             ) from exc
         except ReaderError as exc:
-            db.commit()  # failed batch 已记录（与通用导入语义一致）
+            if verified is None:
+                db.commit()  # legacy parse-failure audit
+            else:
+                db.rollback()
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 {"code": "reader_error", "message": str(exc)},
@@ -131,25 +146,37 @@ def upload_wbdd(
 @router.get("/latest")
 def latest(
     response: Response,
+    verified=Depends(auth_transport.identity_for('maintenance_wbdd_snapshot')),
+    view: Literal['authorization'] | None = Query(None),
+    authorization_precondition: str | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_wbdd_snapshot", "page_maintenance")),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    if verified is not None:
+        return canonical.read(db,verified,entry_id=canonical.HEALTH,
+            authorization_view=view=='authorization',precondition=foundation.decode_precondition(authorization_precondition))
     return wbdd.latest_health(db)
 
 
 @router.get("/latest/missing")
 def latest_missing(
     response: Response,
+    verified=Depends(auth_transport.identity_for('maintenance_wbdd_reconciliation')),
+    view: Literal['authorization'] | None = Query(None),
+    authorization_precondition: str | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY)),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_wbdd_reconciliation", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate("maintenance_wbdd_reconciliation", require_action(_ACTION_KEY))),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """最近一次快照的差异清单明细（#264/#267）：供「按氚云现状批量作废」页面。"""
     response.headers["Cache-Control"] = "no-store"
+    if verified is not None:
+        return canonical.read(db,verified,entry_id=canonical.MISSING,
+            authorization_view=view=='authorization',precondition=foundation.decode_precondition(authorization_precondition))
     from app.services.maintenance_project_assignments import maintenance_scope_project_ids
 
     return wbdd.latest_missing(
@@ -158,6 +185,7 @@ def latest_missing(
 
 
 class ReconciliationRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     expected_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -172,11 +200,13 @@ def reconcile(
     batch_id: int,
     body: ReconciliationRequest,
     response: Response,
+    verified=Depends(auth_transport.identity_for('maintenance_wbdd_reconciliation')),
+    view: Literal['authorization'] | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _upload: None = Depends(require_action(_ACTION_KEY)),
-    _delete: None = Depends(require_action("action_maintenance_demand_delete")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_wbdd_reconciliation", "page_maintenance")),
+    _upload: None = Depends(auth_transport.legacy_gate("maintenance_wbdd_reconciliation", require_action(_ACTION_KEY))),
+    _delete: None = Depends(auth_transport.legacy_gate("maintenance_wbdd_reconciliation", require_action("action_maintenance_demand_delete"))),
     identity: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
@@ -186,6 +216,9 @@ def reconcile(
     from app.services.maintenance_project_assignments import maintenance_scope_project_ids
 
     response.headers["Cache-Control"] = "no-store"
+    if verified is not None:
+        return canonical.reconcile(db,verified,params={'batch_id':batch_id,**body.model_dump(exclude={'authorization_precondition'})},
+            authorization_view=view=='authorization',precondition=body.authorization_precondition)
     operator = _real_operator(db, identity)
     try:
         result = maintenance_wbdd_sync.apply_reconciliation(

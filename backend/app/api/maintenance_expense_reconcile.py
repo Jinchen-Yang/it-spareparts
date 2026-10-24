@@ -6,6 +6,9 @@ from sqlalchemy.orm import Session
 
 from app import permissions as _perm
 from app.auth import current_role
+from app.authz import runtime
+from app.api.maintenance_project_scope import identity_for, legacy_page
+from app.services import maintenance_diagnostics_access as protected_diagnostics
 from app.db import get_db
 from app.models.system import SysUser
 from app.security import (
@@ -25,9 +28,15 @@ def get_expense_reconcile(
     response: Response = None,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_expense_reconcile", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_expense_reconcile")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_expense_reconcile"):
+        return protected_diagnostics.read_expense_reconcile(db,typed_identity,limit=limit,offset=offset,view=view,precondition=authorization_precondition)
     """台账报销归集 vs 氚云 BXD raw vs 正式费用事实逐单对账（证据视角，只读）。"""
     response.headers["Cache-Control"] = "no-store"
     if not ctx.is_authenticated:

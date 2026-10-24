@@ -4468,6 +4468,7 @@ def _record_operation_result(
             payload_hash=intent.payload_hash,
             result_json=result,
             import_batch_id=batch.id,
+            owner_user_id=batch.owner_user_id,
             applied_by=operated_by,
         )
     )
@@ -4546,6 +4547,7 @@ def import_roundtrip_workbook(
     *,
     filename: str,
     operated_by: str,
+    _authorization=None,
 ) -> dict[str, Any]:
     """完整预检后原子应用一份固定协议工作簿。
 
@@ -4554,6 +4556,10 @@ def import_roundtrip_workbook(
     """
     if not operated_by or not operated_by.strip():
         raise RoundtripWorkbookError("维保回填必须使用实名账号", status_code=401)
+    if _authorization is not None:
+        from app.services.maintenance_roundtrip_authorization import RoundtripAuthorization
+        if type(_authorization) is not RoundtripAuthorization:
+            raise ValueError('回填必须使用内部类型化授权')
     workbook = None
     try:
         # Hash/lock/idempotency are deliberately ahead of openpyxl. Exact byte-for-byte
@@ -4564,13 +4570,17 @@ def import_roundtrip_workbook(
             text("SELECT pg_advisory_xact_lock(:key)"),
             {"key": config.DATA_CHANGE_ADVISORY_LOCK_KEY},
         )
+        owner_user_id = _authorization.capture(db, file_hash) if _authorization is not None else None
         duplicate = pipeline.successful_batch_ids_by_hash(
             db,
             {file_hash},
             file_type=ROUNDTRIP_FILE_TYPE,
         ).get(file_hash)
         if duplicate is not None:
-            db.rollback()
+            if _authorization is not None:
+                _authorization.finish(db, replay_batch_ids=[duplicate])
+            else:
+                db.rollback()
             return {
                 "status": "success",
                 "no_op": True,
@@ -4604,7 +4614,12 @@ def import_roundtrip_workbook(
                 .order_by(MaintenanceRoundtripOperation.id)
                 .limit(1)
             )
-            db.rollback()
+            if _authorization is not None:
+                replay_batch_ids = db.scalars(select(MaintenanceRoundtripOperation.import_batch_id).where(
+                    MaintenanceRoundtripOperation.export_id == metadata['export_id'])).all()
+                _authorization.finish(db, replay_batch_ids=replay_batch_ids)
+            else:
+                db.rollback()
             return {
                 "status": "success",
                 "no_op": True,
@@ -4642,6 +4657,7 @@ def import_roundtrip_workbook(
         contracts, states = _verify_contract_revisions(db, revisions, changes)
 
         batch = SysImportBatch(
+            owner_user_id=owner_user_id,
             filename=(filename or "maintenance_roundtrip.xlsx")[:256],
             file_type=ROUNDTRIP_FILE_TYPE,
             file_hash=file_hash,
@@ -4713,7 +4729,11 @@ def import_roundtrip_workbook(
             operated_by=operated_by,
         )
 
-        storage_path = pipeline._archive(path, file_hash)
+        if _authorization is not None:
+            _authorization.finish(db)
+            storage_path = _authorization.archive(path, file_hash)
+        else:
+            storage_path = pipeline._archive(path, file_hash)
         db.add(
             SysRawFile(
                 batch_id=batch.id,
@@ -4751,7 +4771,10 @@ def import_roundtrip_workbook(
             "recompute": recompute_stats,
         }
         batch.status = "success"
-        db.commit()
+        if _authorization is not None:
+            _authorization.publish(db, batch)
+        else:
+            db.commit()
         return {
             "status": "success",
             "no_op": False,

@@ -1,6 +1,6 @@
 """回款提醒凭证 API（F6）：上传凭证 = 回款提醒关闭依据。"""
 
-from fastapi import APIRouter, Depends, File, HTTPException, Path, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Path, Response, UploadFile, Query, Form, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -10,7 +10,9 @@ from app.api.maintenance_collection_reminders import (
     _raise_http,
     _real_operator,
 )
-from app.api.maintenance_project_scope import enforce_maintenance_project_access
+from app.api.maintenance_project_scope import enforce_maintenance_project_access, identity_for, legacy_page
+from app.authz import runtime
+from app.services import maintenance_collection_followup_access as protected
 from app.auth import current_identity, current_role
 from app.business_time import business_today
 from app.db import get_db
@@ -37,11 +39,17 @@ def list_milestone_evidence(
     response: Response = None,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_collection_followup","page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_collection_followup")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """回款提醒凭证元数据列表（md5/sha256/大小/上传人，不含文件内容）。"""
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_collection_followup"):
+        return protected.evidence_read(db,typed_identity,milestone_id=milestone_id,view=view,
+            precondition=authorization_precondition)
     project_id = _milestone_project(db, milestone_id)
     if project_id is None:
         _domain_error(
@@ -65,11 +73,29 @@ async def upload_milestone_evidence(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_collection_followup","page_maintenance")),
     _action: None = Depends(_explicit_follow_up_action),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_collection_followup")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Form(None),
+    response: Response = None,
 ) -> dict:
     """上传回款提醒凭证（巡检报告/图片/PDF）。同节点同 md5 重放幂等。"""
+    response.headers['Cache-Control']='no-store'
+    if runtime.is_authoritative(db,"maintenance_collection_followup"):
+        content=await file.read(MAX_UPLOAD_READ_BYTES+1)
+        if len(content)>MAX_UPLOAD_READ_BYTES:
+            _domain_error(413,code='file_too_large',message='凭证文件过大')
+        try:
+            return protected.evidence_upload(db,typed_identity,milestone_id=milestone_id,content=content,
+                filename=file.filename,mime_type=file.content_type,legacy_context=ctx,as_of=business_today(),
+                view=view,precondition=authorization_precondition)
+        except collection_evidence.CollectionEvidenceTooLarge as exc:
+            _domain_error(413,code='file_too_large',message=str(exc))
+        except collection_evidence.CollectionEvidenceUnsupported as exc:
+            _domain_error(422,code='invalid_request',message=str(exc))
+        except Exception as exc:_raise_http(exc)
     project_id = _milestone_project(db, milestone_id)
     if project_id is None:
         _domain_error(

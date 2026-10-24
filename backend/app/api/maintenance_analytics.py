@@ -8,6 +8,9 @@ from sqlalchemy.orm import Session
 
 from app.api.date_validation import validate_date_query
 from app.auth import current_role
+from app.authz import runtime
+from app.api.maintenance_project_scope import identity_for, legacy_page
+from app.services import maintenance_analysis_access as protected_analysis
 from app.config import get_settings
 from app.db import get_db
 from app.models.maintenance_project import MaintenanceProject
@@ -97,8 +100,11 @@ def pn_ranking(
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_analysis", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_analysis")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """全项目 PN 维度：备件需求成本排名 + 同期间实际领用与返还。
 
@@ -107,6 +113,10 @@ def pn_ranking(
     全字段筛选（项目/客户/销售/单号/需求类型/仓库/取价来源）在服务层聚合前
     生效；非法码或超限返回 422。
     """
+    if runtime.is_authoritative(db, "maintenance_analysis"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_analysis.read(db, identity, endpoint='pn-ranking', params={'range_':range_, 'date_from':date_from, 'date_to':date_to, 'q':q, 'business_type':business_type, 'project':project, 'customer':customer, 'sp':sp, 'order_no':order_no, 'demand_type':demand_type, 'warehouse':warehouse, 'cost_source':cost_source, 'sort':sort, 'page':page, 'page_size':page_size},
+            view=view, precondition=authorization_precondition)
     response.headers["Cache-Control"] = "no-store"
     _require_customer_filter(ctx, customer)
     can_cost = can_view_cost(ctx)
@@ -221,8 +231,11 @@ def spend_trend(
     ),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_analysis", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_analysis")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """开支统计：按期（日/周/月/年）× 业务类型 × 销售拆分已知成本。
 
@@ -230,6 +243,10 @@ def spend_trend(
     data_purchase_cost 权限（ready/restricted/not_imported 三态信封）。
     审计只记粒度与布尔标志，不落客户/销售/单号等自由文本。
     """
+    if runtime.is_authoritative(db, "maintenance_analysis"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_analysis.read(db, identity, endpoint='spend-trend', params={'range_':range_, 'date_from':date_from, 'date_to':date_to, 'granularity':granularity, 'business_type':business_type, 'project':project, 'customer':customer, 'sp':sp, 'order_no':order_no, 'demand_type':demand_type, 'warehouse':warehouse, 'cost_source':cost_source},
+            view=view, precondition=authorization_precondition)
     response.headers["Cache-Control"] = "no-store"
     _require_customer_filter(ctx, customer)
     can_cost = can_view_cost(ctx)
@@ -309,10 +326,17 @@ def filter_options(
     response: Response,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_analysis", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_analysis")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """筛选器候选项（仓库）：随行键范围收敛，不泄露范围外仓库。"""
+    if runtime.is_authoritative(db, "maintenance_analysis"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_analysis.read(db, identity, endpoint='filter-options', params={},
+            view=view, precondition=authorization_precondition)
     response.headers["Cache-Control"] = "no-store"
     # 2026-08-21 行键收敛：与 pn-ranking 同一可见项目集
     from app.services import maintenance_project_assignments
@@ -353,10 +377,17 @@ def explorer(
     cost_source: str = Query("all", pattern="^(all|(linked|estimated|manual|missing)(,(linked|estimated|manual|missing))*)$", max_length=128),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_analysis", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for("maintenance_analysis")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """Three chart views with one scoped statement snapshot, no raw fact export."""
+    if runtime.is_authoritative(db, "maintenance_analysis"):
+        response.headers["Cache-Control"] = "no-store"
+        return protected_analysis.read(db, identity, endpoint='explorer', params={'dimension':dimension, 'metric':metric, 'focus':focus, 'page':page, 'page_size':page_size, 'top_n':top_n, 'include_pn_overview':include_pn_overview, 'focus_page':focus_page, 'focus_page_size':focus_page_size, 'range_':range_, 'date_from':date_from, 'date_to':date_to, 'q':q, 'business_type':business_type, 'project':project, 'customer':customer, 'sp':sp, 'order_no':order_no, 'demand_type':demand_type, 'warehouse':warehouse, 'cost_source':cost_source},
+            view=view, precondition=authorization_precondition)
     from app.services import maintenance_project_assignments
 
     response.headers["Cache-Control"] = "no-store"

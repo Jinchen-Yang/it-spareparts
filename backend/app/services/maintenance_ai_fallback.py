@@ -209,8 +209,7 @@ def _parse_with_mapping(doc_type: str, data: bytes, filename: str, mapping: dict
     return docs.parse_doc_workbook(doc_type, data, filename, column_aliases=aliases)
 
 
-def propose(
-    db: Session,
+def prepare_proposal(
     *,
     doc_type: str,
     data: bytes,
@@ -219,8 +218,8 @@ def propose(
     samples: list[list],
     operated_by: str,
     llm_call=None,
-) -> dict:
-    """生成并保存一次提案；附确定性试解析证据。"""
+) -> tuple[MaintenanceAiMappingProposal, dict]:
+    """Generate a detached proposal; no database session crosses the LLM call."""
     proposal, meta = call_llm_for_mapping(
         doc_type, headers, samples, llm_call=llm_call
     )
@@ -260,9 +259,7 @@ def propose(
         status="pending",
         created_by=operated_by,
     )
-    db.add(row)
-    db.commit()
-    return {
+    return row, {
         "proposal_id": row.proposal_id,
         "doc_type": doc_type,
         "column_mapping": proposal["column_mapping"],
@@ -272,6 +269,14 @@ def propose(
         "trial_error": trial_error,
         "trial_counts": trial_counts,
     }
+
+
+def propose(db: Session, **kwargs) -> dict:
+    """Legacy producer; canonical callers use the explicit transaction facade."""
+    row, result = prepare_proposal(**kwargs)
+    db.add(row)
+    db.commit()
+    return result
 
 
 def accept_proposal(
@@ -352,6 +357,7 @@ def list_proposals(
     username: str | None = None,
     role: str | None = None,
     limit: int = 50,
+    authorization_condition=None,
 ) -> list[dict]:
     statement = select(MaintenanceAiMappingProposal).order_by(
         MaintenanceAiMappingProposal.created_at.desc()
@@ -359,7 +365,10 @@ def list_proposals(
     if doc_type is not None:
         statement = statement.where(MaintenanceAiMappingProposal.doc_type == doc_type)
     # 提案含 filename/hash/creator 等元数据：非 admin 只能看自己创建的提案
-    if role != "admin":
+    if authorization_condition is not None:
+        statement = statement.where(authorization_condition,
+            MaintenanceAiMappingProposal.owner_user_id.is_not(None))
+    elif role != "admin":
         statement = statement.where(
             MaintenanceAiMappingProposal.created_by == (username or "")
         )

@@ -69,6 +69,7 @@ def restore_collection_milestones(
     specs: list[MilestoneRestoreSpec],
     reason: str,
     operated_by: str,
+    _authorization=None,
 ) -> dict:
     """整批恢复已作废节点；任一校验失败则由调用方回滚整个事务。"""
 
@@ -118,7 +119,7 @@ def restore_collection_milestones(
     project = db.scalar(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == project_id)
-        .with_for_update()
+        .with_for_update().execution_options(populate_existing=True)
     )
     if project is None or not project.is_active:
         raise MilestoneRestoreNotFound("项目不存在、已归档或不可恢复")
@@ -134,7 +135,7 @@ def restore_collection_milestones(
             MaintenanceProjectContract.effective_to.is_(None),
         )
         .order_by(MaintenanceProjectContract.project_contract_id)
-        .with_for_update()
+        .with_for_update().execution_options(populate_existing=True)
     ))
     contract_by_no = {contract.contract_no: contract for contract in contracts}
     if set(contract_by_no) != set(contract_nos):
@@ -144,7 +145,7 @@ def restore_collection_milestones(
         select(MaintenanceCollectionMilestone)
         .where(MaintenanceCollectionMilestone.milestone_id.in_(sorted(entity_ids)))
         .order_by(MaintenanceCollectionMilestone.milestone_id)
-        .with_for_update()
+        .with_for_update().execution_options(populate_existing=True)
     ))
     milestone_by_id = {row.milestone_id: row for row in milestones}
     if set(milestone_by_id) != set(entity_ids):
@@ -161,6 +162,12 @@ def restore_collection_milestones(
     audits_by_entity: dict[str, list[MaintenanceProjectOperationAudit]] = {}
     for audit in restore_audits:
         audits_by_entity.setdefault(audit.entity_id, []).append(audit)
+
+    if _authorization is not None:
+        from app.services.maintenance_milestone_restore_access import RestoreAuthorization
+        if type(_authorization) is not RestoreAuthorization:
+            raise ValueError("restore requires actual typed authorization")
+        _authorization.authorize_locked(db)
 
     restored: list[dict] = []
     replayed: list[dict] = []

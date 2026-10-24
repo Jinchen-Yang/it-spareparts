@@ -1,3 +1,4 @@
+from app.authz.service import context_resolution, check_context_precondition
 """验收需求清单 Excel 导入 API（2026-08-21 客户反馈）。
 
 - GET  checklist：当前生效清单 + 历史（项目可见即可读）；
@@ -6,9 +7,14 @@
 - POST /acceptance-checklist/{batch_id}/apply：整表替换当前清单（仅本人批次）。
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response, status
 from starlette.datastructures import UploadFile
 from sqlalchemy.orm import Session
+from app.authz import runtime
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_authorization as foundation
+from app.services import maintenance_workflow_authorization as workflow_auth
+from app.services import authorization_artifacts as artifacts
 
 from app.auth import current_identity, current_role
 from app.db import get_db
@@ -60,10 +66,23 @@ def get_project_checklist(
     response: Response = None,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_acceptance", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(auth_transport.identity_for("maintenance_acceptance")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db, 'maintenance_acceptance'):
+        entry_id = 'GET /api/maintenance/projects/stable/{project_id}/acceptance/checklist'
+        with foundation.read_context_snapshot(lambda: Session(db.get_bind()), typed_identity,
+                entry_id=entry_id, params={'project_id': project_id}) as (snapshot, _, batch, accesses):
+            ref = batch.contexts[0].ref
+            if view == 'authorization':
+                return context_resolution(accesses, ref)
+            workflow_auth.require_complete(accesses)
+            check_context_precondition(foundation.decode_precondition(authorization_precondition), accesses, batch.contexts[0].ref)
+            return {**checklist.project_checklist(snapshot, project_id), 'authorization_context': accesses.wire(ref)}
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     return checklist.project_checklist(db, project_id)
 
@@ -73,11 +92,24 @@ def download_checklist_template(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_acceptance", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(auth_transport.identity_for("maintenance_acceptance")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> Response:
-    enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
-    data = checklist.build_template()
+    if runtime.is_authoritative(db, 'maintenance_acceptance'):
+        entry_id = 'GET /api/maintenance/projects/stable/{project_id}/acceptance/checklist/template'
+        with foundation.read_context_snapshot(lambda: Session(db.get_bind()), typed_identity,
+                entry_id=entry_id, params={'project_id': project_id}) as (_, _, batch, accesses):
+            if view == 'authorization':
+                return context_resolution(accesses, batch.contexts[0].ref)
+            workflow_auth.require_complete(accesses)
+            check_context_precondition(foundation.decode_precondition(authorization_precondition), accesses, batch.contexts[0].ref)
+            data = checklist.build_template()
+    else:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
+        data = checklist.build_template()
     return Response(
         content=data,
         media_type=("application/vnd.openxmlformats-officedocument"
@@ -96,12 +128,22 @@ async def preview_checklist(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_acceptance", "page_maintenance")),
     _preflight: None = Depends(_preflight),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(auth_transport.identity_for("maintenance_acceptance")),
+    view: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
+    canonical = runtime.is_authoritative(db, 'maintenance_acceptance')
+    if canonical:
+        with foundation.read_context_snapshot(lambda: Session(db.get_bind()), typed_identity,
+                entry_id=workflow_auth.CHECKLIST_PREVIEW, params={'project_id': project_id}) as (_, _, batch, accesses):
+            if view == 'authorization':
+                return context_resolution(accesses, batch.contexts[0].ref)
+            workflow_auth.require_complete(accesses)
+    else:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     try:
         form = await request.form()
     except Exception as exc:  # noqa: BLE001
@@ -146,10 +188,19 @@ async def preview_checklist(
         parsed = await import_safety.parse_in_threadpool(
             checklist.parse_checklist_workbook, data, filename
         )
+        if canonical:
+            # Authentication/read preflight owns no business changes. Release
+            # that transaction before the independent publication marker.
+            db.rollback()
+            artifacts.begin_artifact_protocol(db.get_bind())
         batch_id = checklist.store_preview(
             db, parsed, project_id=project_id,
             uploaded_by=_real_operator(ident), idempotency_key=idempotency_key,
+            identity=typed_identity,
+            authorization_precondition=foundation.decode_precondition(form.get('authorization_precondition')),
         )
+        current = checklist._current_batch(db, project_id)
+        will_replace_rows = current.item_rows if current else 0
         db.commit()
     except checklist.ChecklistParseError as exc:
         db.rollback()
@@ -163,7 +214,6 @@ async def preview_checklist(
             status.HTTP_409_CONFLICT,
             {"code": "batch_conflict", "message": str(exc)},
         ) from exc
-    current = checklist.project_checklist(db, project_id)["current"]
     return {
         "batch_id": batch_id,
         "file_hash": parsed["file_hash"],
@@ -175,21 +225,37 @@ async def preview_checklist(
             f"第 {it['row_no']} 行：{msg}"
             for it in parsed["items"] for msg in it["issues"]
         ][:20],
-        "will_replace_rows": current["item_rows"] if current else 0,
+        "will_replace_rows": will_replace_rows,
     }
 
 
 @router.post("/acceptance-checklist/{batch_id}/apply")
 def apply_checklist(
+    body: dict | None = Body(None),
     batch_id: str = Path(..., min_length=36, max_length=36),
     response: Response = None,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_acceptance", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(auth_transport.identity_for("maintenance_acceptance")),
+    view: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db, 'maintenance_acceptance'):
+        if view == 'authorization':
+            with foundation.read_context_snapshot(lambda: Session(db.get_bind()), typed_identity,
+                    entry_id=workflow_auth.CHECKLIST_APPLY, params={'batch_id': batch_id}) as (_, _, batch, accesses):
+                return context_resolution(accesses, batch.contexts[0].ref)
+        try:
+            summary = checklist.apply_batch(db, batch_id, operated_by='', identity=typed_identity,
+                authorization_precondition=foundation.decode_precondition((body or {}).get('authorization_precondition')))
+            db.commit()
+            return summary
+        except Exception:
+            db.rollback()
+            raise
     operator = _real_operator(ident)
     # 2026-08-25 行级补齐：apply 此前只校验「本人批次」，不校验项目可见性——
     # 越权账号拿到 batch_id 即可整表替换他人项目清单。加载批次后、整表

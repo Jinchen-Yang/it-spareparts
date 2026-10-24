@@ -339,8 +339,18 @@ class MaintenanceProjectWorkbookAdapter:
         user_ctx: UserContext,
         operator: str,
         as_of: date,
+        identity=None,
+        read_snapshot=None,
+        authorization_precondition=None,
     ) -> None:
         self.db = db
+        from app.authz import runtime
+        self.canonical = runtime.is_authoritative(db, 'maintenance_project_roundtrip')
+        self.identity = identity
+        self.read_snapshot = read_snapshot
+        self.authorization_precondition = authorization_precondition
+        self._authorization_params = None
+        self._authorized_accesses = None
         self.user_ctx = user_ctx
         self.operator = operator
         self.as_of = as_of
@@ -348,7 +358,39 @@ class MaintenanceProjectWorkbookAdapter:
         self._locked_project: MaintenanceProject | None = None
         self._validation_row: MaintenanceProjectWorkbookValidation | None = None
 
+    def _authorize(self, entry_id, params, *, locked=False):
+        if not self.canonical:
+            return None
+        from sqlalchemy.orm import sessionmaker
+        from app.authz import service
+        from app.services import maintenance_authorization as foundation
+        from app.services import maintenance_workflow_authorization as authorization
+        if locked or self.read_snapshot is not None:
+            actor = service.lock_actor(self.db, self.identity) if locked else None
+            batch = foundation.resolve_entry_context(self.db, self.identity, entry_id=entry_id,
+                params=params, read_snapshot=self.read_snapshot, locked_user=actor)
+            accesses = service.context_accesses(self.db, self.identity, batch,
+                read_snapshot=self.read_snapshot, locked_user=actor)
+            authorization.require_complete(accesses)
+            service.check_context_precondition(self.authorization_precondition, accesses, batch.contexts[0].ref)
+        else:
+            with foundation.read_context_snapshot(sessionmaker(bind=self.db.get_bind()), self.identity,
+                    entry_id=entry_id, params=params) as (_, _, batch, accesses):
+                authorization.require_complete(accesses)
+                service.check_context_precondition(self.authorization_precondition, accesses, batch.contexts[0].ref)
+        self._authorized_accesses = accesses
+        self.operator = accesses.principal.username
+        access = next(iter(accesses.accesses.values()))
+        self.user_ctx = service.field_context(access, self.user_ctx)
+        return accesses
+
     def _state(self, project_id: str) -> MaintenanceProjectWorkbookState:
+        if self.canonical and self._authorized_accesses is None:
+            from app.authz.errors import authz_error
+            raise authz_error(403, 'AUTHZ_CONTEXT_REQUIRED', '工作簿需要当前完整授权')
+        if self.read_snapshot is not None:
+            self.read_snapshot.validate(self.db)
+            return operations.read_workbook_state(self.db, project_id=project_id)
         if self._locked_state is not None:
             if self._locked_state.project_id != project_id:
                 raise ProjectWorkbookV2Error(
@@ -607,6 +649,9 @@ class MaintenanceProjectWorkbookAdapter:
         }
 
     def export(self, project_id: str, *, hmac_key: bytes):
+        if self.canonical:
+            from app.services.maintenance_project_workbook_access import export_workbook
+            return export_workbook(self, project_id, hmac_key=hmac_key)
         state = self._state(project_id)
         exported_at = _now()
         artifact = build_project_workbook(
@@ -639,6 +684,9 @@ class MaintenanceProjectWorkbookAdapter:
         *,
         hmac_key: bytes,
     ) -> tuple[WorkbookValidation | None, tuple[WorkbookIssue, ...], str]:
+        if self.canonical:
+            from app.services.maintenance_project_workbook_access import validate_workbook
+            return validate_workbook(self, project_id, content, hmac_key=hmac_key)
         state = self._state(project_id)
         try:
             validation = validate_project_workbook(
@@ -704,6 +752,11 @@ class MaintenanceProjectWorkbookAdapter:
         *,
         data_version: str,
     ) -> tuple[WorkbookApplyResult, MaintenanceProjectWorkbookState]:
+        if self.canonical:
+            from app.services import maintenance_workflow_authorization as authorization
+            self._authorization_params = {'project_id': project_id, 'validation_token': validation_id,
+                                          'data_version': data_version}
+            self._authorize(authorization.PROJECT_WORKBOOK_APPLY, self._authorization_params)
         state = self._state(project_id)
         self._project(project_id)
         row = self.db.scalar(
@@ -718,7 +771,13 @@ class MaintenanceProjectWorkbookAdapter:
             raise ProjectWorkbookV2Error(
                 "validation_token 不属于当前项目", status_code=409
             )
-        if not hmac.compare_digest(row.created_by, self.operator):
+        if self.canonical:
+            from app.services import authorization_artifacts as artifacts
+            binding = artifacts.load_artifact_binding(self.db,
+                target=artifacts.ArtifactTarget('project_workbook_validation', row.validation_id, 1))
+            if binding.subject.owner_user_id != self._authorized_accesses.principal.id:
+                raise artifacts.unavailable()
+        elif not hmac.compare_digest(row.created_by, self.operator):
             raise ProjectWorkbookV2Error(
                 "validation_token 不属于当前用户", status_code=409
             )
@@ -868,6 +927,15 @@ class MaintenanceProjectWorkbookAdapter:
             ):
                 raise ProjectWorkbookV2Error("工作簿操作已存在", status_code=409)
 
+        if self.canonical:
+            # create_collection checks monotonicity against all sibling months;
+            # collect that entire existing lock set before the final actor.
+            list(self.db.scalars(select(MaintenanceCollectionSnapshot)
+                .where(MaintenanceCollectionSnapshot.project_contract_id.in_(
+                    sorted({item.project_contract_id for item in creates})))
+                .order_by(MaintenanceCollectionSnapshot.collection_id).with_for_update()))
+            from app.services import maintenance_workflow_authorization as authorization
+            self._authorize(authorization.PROJECT_WORKBOOK_APPLY, self._authorization_params, locked=True)
         for item in creates:
             created = operations.create_collection(
                 self.db,
@@ -923,6 +991,9 @@ class MaintenanceProjectWorkbookAdapter:
         self.db.flush()
 
     def load_error_workbook(self, validation_id: str) -> bytes | None:
+        if self.canonical:
+            from app.services.maintenance_project_workbook_access import read_error_workbook
+            return read_error_workbook(self, validation_id)
         row = self.db.get(MaintenanceProjectWorkbookValidation, validation_id)
         if (
             row is None

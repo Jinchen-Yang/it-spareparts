@@ -20,6 +20,12 @@ from app.security import (
 )
 from app.services import import_safety
 from app.services import maintenance_ai_fallback as ai
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_ai_fallback_authorization as authorization
+from app.services import maintenance_authorization as foundation
+from app.services.maintenance_workflow_authorization import multipart_precondition
+
+_RESOURCES = authorization.RESOURCES
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 MAX_PREVIEW_BYTES = 16 * 1024 * 1024
@@ -124,12 +130,17 @@ async def propose_ai_mapping(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCES, "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for(*_RESOURCES)),
+    view: str | None = Query(None, pattern='^authorization$'),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
     action_key = _action_key(doc_type)
-    _enforce_doc_action(ctx, action_key)
+    if identity is None:
+        _enforce_doc_action(ctx, action_key)
 
     try:
         form = await request.form(max_files=2, max_fields=8)
@@ -158,6 +169,14 @@ async def propose_ai_mapping(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {"code": "invalid_file", "message": str(exc)},
         )
+    if identity is not None:
+        from hashlib import sha256
+        params = {'doc_type': doc_type, 'input_sha256': sha256(data).hexdigest()}
+        precondition = multipart_precondition(authorization_precondition, form.get('authorization_precondition'))
+        if view == 'authorization':
+            return authorization.view(db, identity, entry_id=authorization.PROPOSE, params=params)
+        authorization.view(db, identity, entry_id=authorization.PROPOSE, params=params,
+            precondition=precondition, require=True)
     # AI 只做容错层：主解析器能解析的文件不允许走 AI 提案（round-4 Blocker 4）
     accepted, _parser_error = await import_safety.parse_in_threadpool(
         ai.parser_accepts_file, doc_type, data, filename
@@ -174,15 +193,12 @@ async def propose_ai_mapping(
         headers, samples = await import_safety.parse_in_threadpool(
             _read_headers_and_samples, data, doc_type
         )
-        result = ai.propose(
-            db,
-            doc_type=doc_type,
-            data=data,
-            filename=filename,
-            headers=headers,
-            samples=samples,
-            operated_by=_real_operator(ident),
-        )
+        if identity is not None:
+            result = authorization.propose(db, identity, doc_type=doc_type, data=data,
+                filename=filename, headers=headers, samples=samples, precondition=precondition)
+        else:
+            result = ai.propose(db, doc_type=doc_type, data=data, filename=filename,
+                headers=headers, samples=samples, operated_by=_real_operator(ident))
     except ValueError as exc:
         # 识别不出业务 sheet 的台账等：不得外发数据行当表头（round-5 Blocker 10）
         raise HTTPException(
@@ -210,18 +226,26 @@ async def accept_ai_mapping(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCES, "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for(*_RESOURCES)),
+    view: str | None = Query(None, pattern='^authorization$'),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    row = db.get(MaintenanceAiMappingProposal, proposal_id)
-    if row is None:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND,
-            {"code": "not_found", "message": "提案不存在"},
-        )
-    action_key = _action_key(row.doc_type)
-    _enforce_doc_action(ctx, action_key)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    if identity is not None and view == 'authorization':
+        return authorization.view(db, identity, entry_id=authorization.ACCEPT,
+            params={'proposal_id': proposal_id})
+    if identity is None:
+        row = db.get(MaintenanceAiMappingProposal, proposal_id)
+        if row is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                {"code": "not_found", "message": "提案不存在"},
+            )
+        action_key = _action_key(row.doc_type)
+        _enforce_doc_action(ctx, action_key)
 
     idempotency_key = request.headers.get("idempotency-key", "")
     if not (8 <= len(idempotency_key) <= 128):
@@ -251,14 +275,14 @@ async def accept_ai_mapping(
             {"code": "invalid_file", "message": str(exc)},
         )
     try:
-        batch_id = ai.accept_proposal(
-            db,
-            proposal_id=proposal_id,
-            data=data,
-            filename=file.filename or "upload.xlsx",
-            operated_by=_real_operator(ident),
-            idempotency_key=idempotency_key,
-        )
+        if identity is not None:
+            batch_id = authorization.accept(db, identity, proposal_id=proposal_id, data=data,
+                filename=file.filename or "upload.xlsx", idempotency_key=idempotency_key,
+                precondition=multipart_precondition(authorization_precondition, form.get('authorization_precondition')))
+        else:
+            batch_id = ai.accept_proposal(db, proposal_id=proposal_id, data=data,
+                filename=file.filename or "upload.xlsx", operated_by=_real_operator(ident),
+                idempotency_key=idempotency_key)
     except ai.AIProposalError as exc:
         db.rollback()
         raise HTTPException(
@@ -274,10 +298,18 @@ def list_ai_proposals(
     response: Response = None,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCES, "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for(*_RESOURCES)),
+    view: str | None = Query(None, pattern='^authorization$'),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    if identity is not None:
+        return authorization.list_proposals(db, identity, doc_type=doc_type,
+            authorization_view=view == 'authorization',
+            precondition=foundation.decode_precondition(authorization_precondition))
     # 非 admin 只能看到自己创建的提案（元数据含 filename/hash/creator）
     return {
         "rows": ai.list_proposals(

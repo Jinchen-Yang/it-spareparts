@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.authz.service import context_resolution
+
 import hashlib
 import json
 from collections import defaultdict
@@ -284,15 +286,53 @@ class MaintenanceManagerWorkbookAdapter:
         user_ctx: UserContext,
         operator: str,
         as_of: date,
+        identity=None,
+        read_snapshot=None,
+        authorization_precondition=None,
     ) -> None:
         self.db = db
+        from app.authz import runtime
+        self.canonical = runtime.is_authoritative(db, 'maintenance_manager_workbook')
+        self.identity = identity
+        self.read_snapshot = read_snapshot
+        self.authorization_precondition = authorization_precondition
+        self._canonical_principal = None
         self.user_ctx = user_ctx
         self.operator = str(operator or "").strip()[:64]
         self.as_of = as_of
         if not self.operator:
             raise ManagerWorkbookPermissionError("缺少可审计的操作人")
 
+    def _authorize(self, entry_id, params, *, locked=False):
+        if not self.canonical:
+            return None
+        from sqlalchemy.orm import sessionmaker
+        from app.authz import service
+        from app.services import maintenance_authorization as foundation
+        from app.services import maintenance_workflow_authorization as authorization
+        if locked or self.read_snapshot is not None:
+            actor = service.lock_actor(self.db, self.identity) if locked else None
+            context = foundation.resolve_entry_context(self.db, self.identity, entry_id=entry_id,
+                params=params, read_snapshot=self.read_snapshot, locked_user=actor)
+            accesses = service.context_accesses(self.db, self.identity, context,
+                read_snapshot=self.read_snapshot, locked_user=actor)
+            authorization.require_complete(accesses)
+            service.check_context_precondition(self.authorization_precondition, accesses, context.contexts[0].ref)
+        else:
+            with foundation.read_context_snapshot(sessionmaker(bind=self.db.get_bind()), self.identity,
+                    entry_id=entry_id, params=params) as (_, _, context, accesses):
+                authorization.require_complete(accesses)
+                service.check_context_precondition(self.authorization_precondition, accesses, context.contexts[0].ref)
+        self._canonical_principal = accesses.principal
+        self.operator = accesses.principal.username
+        return accesses
+
     def _owner(self) -> SysUser:
+        if self.canonical:
+            if self._canonical_principal is None:
+                from app.authz.errors import authz_error
+                raise authz_error(403, 'AUTHZ_CONTEXT_REQUIRED', '月度工作簿必须通过当前完整授权入口读取')
+            return self.db.get(SysUser, self._canonical_principal.id, populate_existing=True)
         if not self.user_ctx.is_authenticated or not self.user_ctx.user_id:
             raise ManagerWorkbookPermissionError("请先登录")
         statement = select(SysUser).where(
@@ -376,27 +416,30 @@ class MaintenanceManagerWorkbookAdapter:
             self.db.scalar(
                 select(MaintenanceProject)
                 .where(MaintenanceProject.project_id == project_id)
-                .with_for_update()
+                .with_for_update().execution_options(populate_existing=True)
             )
-        rows = list(self.db.execute(statement.with_for_update()))
+        rows = list(self.db.execute(statement.with_for_update().execution_options(populate_existing=True)))
         probe_keys = [(a.assignment_id, p.project_id) for a, p in probe]
         if [(a.assignment_id, p.project_id) for a, p in rows] != probe_keys:
             raise ManagerWorkbookConflict("本人负责项目范围已变化，请重新下载")
 
-        # 最后才锁 owner：这与 assign_primary_manager 的 target-user 锁位置
-        # 一致。用 id 确认仍是同一个活动账号，避免身份字段并发变化。
-        locked_owner = self.db.scalar(
-            select(SysUser)
-            .where(
-                SysUser.id == owner.id,
-                SysUser.username == self.user_ctx.user_id,
-                SysUser.is_active.is_(True),
+        # Canonical commands acquire the actor only after contract/service/
+        # milestone locks in load_snapshot have also been collected.
+        if not self.canonical:
+            # 最后才锁 owner：这与 assign_primary_manager 的 target-user 锁位置
+            # 一致。用 id 确认仍是同一个活动账号，避免身份字段并发变化。
+            locked_owner = self.db.scalar(
+                select(SysUser)
+                .where(
+                    SysUser.id == owner.id,
+                    SysUser.username == self.user_ctx.user_id,
+                    SysUser.is_active.is_(True),
+                )
+                .execution_options(populate_existing=True)
+                .with_for_update()
             )
-            .execution_options(populate_existing=True)
-            .with_for_update()
-        )
-        if locked_owner is None:
-            raise ManagerWorkbookPermissionError("当前项目经理账号不存在或已停用")
+            if locked_owner is None:
+                raise ManagerWorkbookPermissionError("当前项目经理账号不存在或已停用")
 
         # 此处不能 FOR UPDATE：若 scope 扩张，新项目的 state/project 尚未
         # 按序加锁；只读比较后直接失败才不会制造新的锁序倒置。
@@ -440,7 +483,7 @@ class MaintenanceManagerWorkbookAdapter:
                 )
             )
             if lock:
-                contract_statement = contract_statement.with_for_update()
+                contract_statement = contract_statement.with_for_update().execution_options(populate_existing=True)
             contract_rows = list(self.db.scalars(contract_statement))
         contract_ids = [row.project_contract_id for row in contract_rows]
 
@@ -457,7 +500,7 @@ class MaintenanceManagerWorkbookAdapter:
                 .order_by(MaintenanceServicePeriod.project_id)
             )
             if lock:
-                period_statement = period_statement.with_for_update()
+                period_statement = period_statement.with_for_update().execution_options(populate_existing=True)
             service_periods = {
                 row.project_id: row for row in self.db.scalars(period_statement)
             }
@@ -486,8 +529,8 @@ class MaintenanceManagerWorkbookAdapter:
                 )
             )
             if lock:
-                milestone_statement = milestone_statement.with_for_update()
-                collection_statement = collection_statement.with_for_update()
+                milestone_statement = milestone_statement.with_for_update().execution_options(populate_existing=True)
+                collection_statement = collection_statement.with_for_update().execution_options(populate_existing=True)
             milestones = list(self.db.scalars(milestone_statement))
             collection_rows = list(self.db.scalars(collection_statement))
         if project_ids:
@@ -500,7 +543,7 @@ class MaintenanceManagerWorkbookAdapter:
                 )
             )
             if lock:
-                acceptance_statement = acceptance_statement.with_for_update()
+                acceptance_statement = acceptance_statement.with_for_update().execution_options(populate_existing=True)
             acceptance_rows = list(self.db.scalars(acceptance_statement))
 
         attachments_by_deliverable: dict[str, int] = defaultdict(int)
@@ -659,6 +702,12 @@ class MaintenanceManagerWorkbookAdapter:
         *,
         hmac_key: bytes,
     ) -> tuple[ManagerWorkbookExportArtifact, dict]:
+        from app.services import maintenance_workflow_authorization as authorization
+        if self.canonical and self.read_snapshot is None:
+            from sqlalchemy.orm import sessionmaker
+            return read_monthly_workbook(sessionmaker(bind=self.db.get_bind()), self.identity,
+                report_month, ctx=self.user_ctx, as_of=self.as_of, hmac_key=hmac_key)
+        self._authorize(authorization.MONTHLY_DOWNLOAD, {'report_month': report_month.strftime('%Y-%m')})
         snapshot = self.load_snapshot(report_month)
         artifact = build_manager_workbook(snapshot, hmac_key=hmac_key)
         return artifact, snapshot
@@ -671,6 +720,11 @@ class MaintenanceManagerWorkbookAdapter:
         hmac_key: bytes,
     ) -> tuple[ManagerWorkbookValidation, MaintenanceManagerUploadBatch]:
         report_month = _month(report_month)
+        from app.services import maintenance_workflow_authorization as authorization
+        from app.services import authorization_artifacts as artifacts
+        params = {'report_month': report_month.strftime('%Y-%m'),
+                  'file_sha256': hashlib.sha256(content).hexdigest()}
+        self._authorize(authorization.MONTHLY_VALIDATE, params)
         # Serialize validation/apply per owner without holding sys_user before
         # any project state row (the latter would invert direct-assign order).
         owner = self._owner()
@@ -685,19 +739,36 @@ class MaintenanceManagerWorkbookAdapter:
             )
             .order_by(MaintenanceManagerUploadBatch.created_at.desc())
             .limit(1)
+            .with_for_update()
         )
         now = datetime.now(UTC)
         if existing is not None and (
             existing.status == "applied"
             or (existing.status in {"valid", "error"} and existing.expires_at > now)
         ):
+            if self.canonical:
+                artifacts.load_artifact_binding(self.db, target=artifacts.ArtifactTarget('manager_upload_batch', existing.batch_id, 1))
+                # A replay remains a current whole-scope operation, and the
+                # producer plan's original full scope must still be current.
+                snapshot = self.load_snapshot(report_month, lock=True)
+                if snapshot['scope_version'] != existing.scope_version:
+                    raise ManagerWorkbookConflict('本人负责项目范围已变化，请重新下载')
+                self._authorize(authorization.MONTHLY_VALIDATE, params, locked=True)
             return _validation_from_batch(existing), existing
 
-        snapshot = self.load_snapshot(report_month)
+        if self.canonical and existing is not None:
+            raise ManagerWorkbookConflict('校验已过期，请重新下载工作簿后上传')
+        snapshot = self.load_snapshot(report_month, lock=self.canonical)
+        if self.canonical:
+            self._authorize(authorization.MONTHLY_VALIDATE, params, locked=True)
+            current_scope = self._scope_assignment_rows(owner, lock=False)
+            if sorted(a.project_id for a, _ in current_scope) != sorted(p['project_id'] for p in snapshot['projects']):
+                raise ManagerWorkbookConflict('本人负责项目范围已变化，请重新下载')
         validation = validate_manager_workbook(
             content,
             snapshot=snapshot,
             hmac_key=hmac_key,
+            stable_owner_only=self.canonical,
         )
         if existing is not None:
             validation = replace(validation, validation_id=existing.batch_id)
@@ -765,9 +836,18 @@ class MaintenanceManagerWorkbookAdapter:
             batch.applied_by = None
             batch.applied_at = None
         self.db.flush()
+        if self.canonical:
+            from app.authz import service
+            actor = service.lock_actor(self.db, self.identity)
+            artifacts.register_artifact_binding(self.db, self.identity,
+                target=artifacts.ArtifactTarget('manager_upload_batch', batch.batch_id, 1),
+                input_digest=authorization.monthly_plan_digest(self.db,batch), locked_user=actor)
         return validation, batch
 
     def apply(self, batch_id: str, *, data_version: str | None = None) -> dict:
+        from app.services import maintenance_workflow_authorization as authorization
+        params = {'validation_token': batch_id, 'data_version': data_version}
+        self._authorize(authorization.MONTHLY_APPLY, params)
         # 仅做身份 probe；真正的 owner FOR UPDATE 由
         # load_snapshot(lock=True) 在 state/project/assignment 之后获取。
         owner = self._owner()
@@ -782,6 +862,9 @@ class MaintenanceManagerWorkbookAdapter:
         if data_version is not None and data_version != batch.data_version:
             raise ManagerWorkbookConflict("校验数据版本与确认请求不一致")
         if batch.status == "applied":
+            if self.canonical:
+                self.load_snapshot(batch.report_month, lock=True)
+                self._authorize(authorization.MONTHLY_APPLY, params, locked=True)
             return dict(batch.result_json or {})
         if batch.status != "valid" or batch.plan_json is None:
             raise ManagerWorkbookInvalid("校验批次不可应用，请重新上传并校验")
@@ -801,6 +884,11 @@ class MaintenanceManagerWorkbookAdapter:
         ):
             raise ManagerWorkbookConflict("本人负责项目范围或数据版本已变化，请重新下载")
 
+        if self.canonical:
+            self._authorize(authorization.MONTHLY_APPLY, params, locked=True)
+            current_scope = self._scope_assignment_rows(owner, lock=False)
+            if sorted(a.project_id for a, _ in current_scope) != sorted(p['project_id'] for p in snapshot['projects']):
+                raise ManagerWorkbookConflict('本人负责项目范围已变化，请重新下载')
         plan = batch.plan_json
         changed_rows = 0
         reason = f"项目经理 {batch.report_month:%Y-%m} 月度全量工作簿 v3 应用"
@@ -1008,6 +1096,12 @@ class MaintenanceManagerWorkbookAdapter:
 
     def status(self, report_month: date) -> dict:
         report_month = _month(report_month)
+        from app.services import maintenance_workflow_authorization as authorization
+        if self.canonical and self.read_snapshot is None:
+            from sqlalchemy.orm import sessionmaker
+            return read_monthly_workbook(sessionmaker(bind=self.db.get_bind()), self.identity,
+                report_month, ctx=self.user_ctx, as_of=self.as_of, status_only=True)
+        self._authorize(authorization.MONTHLY_STATUS, {'report_month': report_month.strftime('%Y-%m')})
         owner = self._owner()
         snapshot = self.load_snapshot(report_month)
         latest = self.db.scalar(
@@ -1019,6 +1113,9 @@ class MaintenanceManagerWorkbookAdapter:
             .order_by(MaintenanceManagerUploadBatch.created_at.desc())
             .limit(1)
         )
+        if self.canonical and latest is not None:
+            from app.services import authorization_artifacts as artifacts
+            artifacts.load_artifact_binding(self.db, target=artifacts.ArtifactTarget('manager_upload_batch', latest.batch_id, 1))
         configured = sum(
             1
             for project in snapshot["projects"]
@@ -1064,3 +1161,52 @@ class MaintenanceManagerWorkbookAdapter:
             "attachment_carrier": "controlled_business_file",
             "approval_role": "admin_only_pending_business_configuration",
         }
+
+
+def read_monthly_workbook(session_factory, identity, report_month, *, ctx, as_of,
+                          hmac_key=None, status_only=False, authorization_view=False, authorization_precondition=None):
+    from app.services import maintenance_workflow_authorization as authorization
+    from app.services import maintenance_authorization as foundation
+    entry_id = authorization.MONTHLY_STATUS if status_only else authorization.MONTHLY_DOWNLOAD
+    branch = 'authorization_view' if status_only and authorization_view else None
+    with foundation.read_context_snapshot(session_factory, identity, entry_id=entry_id,
+            params={'report_month': report_month.strftime('%Y-%m')}, branch=branch) as (db, proof, batch, accesses):
+        if authorization_view:
+            return context_resolution(accesses, batch.contexts[0].ref)
+        authorization.require_complete(accesses)
+        from app.authz.service import check_context_precondition
+        check_context_precondition(authorization_precondition, accesses, batch.contexts[0].ref)
+        adapter = MaintenanceManagerWorkbookAdapter(db, user_ctx=ctx, operator=identity.username,
+            as_of=as_of, identity=identity, read_snapshot=proof)
+        if status_only:
+            result = adapter.status(report_month)
+            result['authorization_context'] = accesses.wire(batch.contexts[0].ref)
+            return result
+        return adapter.export(report_month, hmac_key=hmac_key)
+
+
+def validate_monthly_workbook(session_factory, identity, report_month, content, *, ctx,
+                              as_of, hmac_key, authorization_view=False, authorization_precondition=None):
+    from app.services import maintenance_workflow_authorization as authorization
+    from app.services import maintenance_authorization as foundation
+    from app.services import authorization_artifacts as artifacts
+    params = {'report_month': report_month.strftime('%Y-%m'), 'file_sha256': hashlib.sha256(content).hexdigest()}
+    with foundation.read_context_snapshot(session_factory, identity,
+            entry_id=authorization.MONTHLY_VALIDATE, params=params) as (_, _, batch, accesses):
+        if authorization_view:
+            return context_resolution(accesses, batch.contexts[0].ref)
+        authorization.require_complete(accesses)
+    # This independent transaction precedes every owner/domain lock.
+    with session_factory() as db:
+        artifacts.begin_artifact_protocol(db.get_bind())
+        adapter = MaintenanceManagerWorkbookAdapter(db, user_ctx=ctx, operator=identity.username,
+            as_of=as_of, identity=identity, authorization_precondition=authorization_precondition)
+        try:
+            validation, row = adapter.validate(report_month, content, hmac_key=hmac_key)
+            # Materialize the public DTO before releasing the final actor lock.
+            result = (validation, {column.name: getattr(row, column.name) for column in row.__table__.columns})
+            db.commit()
+            return result
+        except Exception:
+            db.rollback()
+            raise

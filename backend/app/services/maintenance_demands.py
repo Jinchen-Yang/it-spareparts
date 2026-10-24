@@ -515,6 +515,7 @@ def create_delete_intent(
     operated_by: str,
     allowed_project_ids: set[str] | None = None,
     now: datetime | None = None,
+    owner_user_id: int | None = None,
 ) -> dict:
     now = now or _utc_now()
     normalized_reason = reason.strip()
@@ -527,7 +528,7 @@ def create_delete_intent(
     request_digest = _request_digest(
         source_order_ids=source_order_ids,
         reason=normalized_reason,
-        operated_by=operated_by,
+        operated_by=f"authz-user:{owner_user_id}" if owner_user_id is not None else operated_by,
     )
     # Serialize the check/insert pair per key.  The unique constraint remains
     # the database backstop; this lock makes concurrent retries return the one
@@ -542,6 +543,8 @@ def create_delete_intent(
         )
     )
     if existing is not None:
+        if owner_user_id is not None and existing.owner_user_id != owner_user_id:
+            raise MaintenanceDemandForbidden("不能认领其他账号或历史删除回执")
         if existing.request_digest != request_digest:
             raise DeleteIntentConflict("幂等键已被另一份删除请求使用")
         return _intent_payload(db, existing)
@@ -567,8 +570,9 @@ def create_delete_intent(
     line_count = sum(int(item["line_count"]) for item in items)
     if line_count > MAX_DELETE_LINES:
         raise DeleteIntentConflict(f"一次最多涉及 {MAX_DELETE_LINES} 行备件")
-    selection_digest = _selection_digest(items, normalized_reason, operated_by)
+    selection_digest = _selection_digest(items, normalized_reason, f"authz-user:{owner_user_id}" if owner_user_id is not None else operated_by)
     intent = MaintenanceDemandDeleteIntent(
+        owner_user_id=owner_user_id,
         intent_id=str(uuid4()),
         idempotency_key=idempotency_key,
         request_digest=request_digest,
@@ -597,11 +601,13 @@ def create_delete_intent(
     return _intent_payload(db, intent)
 
 
-def get_delete_intent(db: Session, *, intent_id: str, operated_by: str) -> dict:
+def get_delete_intent(db: Session, *, intent_id: str, operated_by: str, owner_user_id: int | None = None) -> dict:
     intent = db.get(MaintenanceDemandDeleteIntent, intent_id)
     if intent is None:
         raise MaintenanceDemandNotFound("删除意图不存在")
-    if intent.operated_by != operated_by:
+    if owner_user_id is not None and intent.owner_user_id != owner_user_id:
+        raise MaintenanceDemandForbidden("删除意图只能由原稳定账号继续；历史意图不能认领")
+    if owner_user_id is None and intent.operated_by != operated_by:
         raise DeleteIntentConflict("删除意图只能由原操作人继续")
     return _intent_payload(db, intent)
 
@@ -656,8 +662,11 @@ def _verify_actor_and_digest(
     *,
     digest: str,
     operated_by: str,
+    owner_user_id: int | None = None,
 ) -> None:
-    if intent.operated_by != operated_by:
+    if owner_user_id is not None and intent.owner_user_id != owner_user_id:
+        raise MaintenanceDemandForbidden("删除意图只能由原稳定账号继续；历史意图不能认领")
+    if owner_user_id is None and intent.operated_by != operated_by:
         raise DeleteIntentConflict("删除意图只能由原操作人继续")
     if intent.selection_digest != digest:
         raise DeleteIntentConflict("复核清单摘要不匹配，整批已拒绝")
@@ -698,11 +707,12 @@ def arm_delete_intent(
     digest: str,
     operated_by: str,
     now: datetime | None = None,
+    owner_user_id: int | None = None,
 ) -> dict:
     now = now or _utc_now()
     intent = _lock_intent(db, intent_id)
     _expire_if_needed(db, intent, now=now)
-    _verify_actor_and_digest(intent, digest=digest, operated_by=operated_by)
+    _verify_actor_and_digest(intent, digest=digest, operated_by=operated_by, owner_user_id=owner_user_id)
     if intent.status == "armed_wait":
         return _intent_payload(db, intent)
     if intent.status != "reviewed":
@@ -829,6 +839,7 @@ def execute_delete_intent(
     operated_by: str,
     allowed_project_ids: set[str] | None = None,
     now: datetime | None = None,
+    owner_user_id: int | None = None,
 ) -> dict:
     now = now or _utc_now()
     # Same exclusive transaction lock as imports/cost writes: snapshot validation
@@ -839,7 +850,7 @@ def execute_delete_intent(
     )
     intent = _lock_intent(db, intent_id)
     _expire_if_needed(db, intent, now=now)
-    _verify_actor_and_digest(intent, digest=digest, operated_by=operated_by)
+    _verify_actor_and_digest(intent, digest=digest, operated_by=operated_by, owner_user_id=owner_user_id)
     if intent.status == "executed":
         return dict(intent.result_json or {})
     if intent.status != "armed_wait" or intent.not_before is None:
@@ -964,11 +975,12 @@ def cancel_delete_intent(
     digest: str,
     operated_by: str,
     now: datetime | None = None,
+    owner_user_id: int | None = None,
 ) -> dict:
     now = now or _utc_now()
     intent = _lock_intent(db, intent_id)
     _expire_if_needed(db, intent, now=now)
-    _verify_actor_and_digest(intent, digest=digest, operated_by=operated_by)
+    _verify_actor_and_digest(intent, digest=digest, operated_by=operated_by, owner_user_id=owner_user_id)
     if intent.status == "cancelled":
         return _intent_payload(db, intent)
     if intent.status not in {"reviewed", "armed_wait"}:
@@ -1284,6 +1296,9 @@ def void_fast(
     allowed_project_ids: set[str] | None = None,
     idempotency_key: str | None = None,
     now: datetime | None = None,
+    _source_authorization=None,
+    _wbdd_authorization=None,
+    owner_user_id: int | None = None,
 ) -> dict:
     """一键批量作废（#264/#267 契约）：一次事务内完成快照校验→墓碑→挂靠停用。
 
@@ -1300,11 +1315,46 @@ def void_fast(
     if len(reason) > MAX_REASON_LENGTH:
         raise MaintenanceDemandError("作废理由无效")
     source_order_ids = _validate_source_order_ids(source_order_ids)
+    if _wbdd_authorization is not None:
+        from app.services.maintenance_wbdd_authorization import WbddReconciliationAuthorization, RECONCILE
+        from app.authz.errors import authz_error
+        outer = _wbdd_authorization
+        if (type(outer) is not WbddReconciliationAuthorization or _source_authorization is not None
+                or outer.db is not db or outer.transaction is not db.get_transaction()
+                or outer.captured is None or len(outer.captured.contexts) != 1
+                or outer.captured.contexts[0].entry_id != RECONCILE):
+            raise authz_error(403, 'AUTHZ_CONTEXT_REQUIRED', '需求单同步缺少匹配的完整领域命令')
+        outer.captured.validate_observation(db)
+        outer.check_demand_side_effect(db, source_order_ids)
+        owner_user_id = outer.principal.id
+    if _source_authorization is not None:
+        # This inner tombstone is a side effect of one captured source-cancel
+        # command. It cannot authorize another demand or acquire the actor lock.
+        from app.services.maintenance_source_cancellation_access import SourceCancellationAuthorization, CONFIRM
+        from app.authz.errors import authz_error
+        outer = _source_authorization
+        if (type(outer) is not SourceCancellationAuthorization or outer.db is not db
+                or outer.transaction is not db.get_transaction() or outer.captured is None
+                or source_order_ids != [outer.params['source_order_id']]
+                or allowed_project_ids != {outer.params['project_id']}
+                or len(outer.captured.contexts) != 1
+                or outer.captured.contexts[0].entry_id != CONFIRM
+                or {subject.id for subject in outer.captured.contexts[0].policy_subjects['maintenance_source_cancellation']}
+                   != {outer.params['project_id']}):
+            raise authz_error(403, 'AUTHZ_CONTEXT_REQUIRED', '来源取消缺少匹配的完整领域命令')
+        owner_user_id = outer.principal.id
+        outer.captured.validate_observation(db)
+        actual = set(db.scalars(select(MaintenanceSourceOrderAssignment.project_id).where(
+            MaintenanceSourceOrderAssignment.source_order_id.in_(source_order_ids),
+            MaintenanceSourceOrderAssignment.is_active.is_(True))))
+        if actual != {outer.params['project_id']}:
+            raise authz_error(409, 'AUTHZ_CONTEXT_STALE', '来源取消的实际需求单归属已改变')
+
 
     request_digest = _request_digest(
         source_order_ids=source_order_ids,
         reason=normalized_reason,
-        operated_by=operated_by,
+        operated_by=f"authz-user:{owner_user_id}" if owner_user_id is not None else operated_by,
     )
     if idempotency_key:
         # 幂等重放（P2，Codex review #272）：同键同请求 → 返回首次结果；
@@ -1319,6 +1369,8 @@ def void_fast(
             )
         )
         if existing is not None:
+            if owner_user_id is not None and existing.owner_user_id != owner_user_id:
+                raise MaintenanceDemandForbidden("不能认领其他账号或历史删除回执")
             if existing.request_digest != request_digest:
                 raise DeleteIntentConflict("幂等键已被另一份作废请求使用")
             replay = dict(existing.result_json or {})
@@ -1406,10 +1458,11 @@ def void_fast(
     # 同事务落一条已执行的 intent：墓碑 FK（delete_intent_id）与既有审计链不变。
     idem = idempotency_key or f"void-fast:{uuid4()}"
     intent = MaintenanceDemandDeleteIntent(
+        owner_user_id=owner_user_id,
         intent_id=str(uuid4()),
         idempotency_key=idem,
         request_digest=request_digest,
-        selection_digest=_selection_digest(items, normalized_reason, operated_by),
+        selection_digest=_selection_digest(items, normalized_reason, f"authz-user:{owner_user_id}" if owner_user_id is not None else operated_by),
         status="executed",
         reason=normalized_reason,
         operated_by=operated_by,

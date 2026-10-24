@@ -1032,6 +1032,7 @@ def test_cancelled_validate_keeps_temp_and_limiter_until_worker_finishes(
                 request=object(),
                 response=Response(),
                 project_id="project-cancel",
+                identity=None,
                 ident={"sub": "cancel-user"},
                 _auth="admin",
                 _page=None,

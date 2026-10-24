@@ -51,6 +51,10 @@ from app.security import (
     require_page,
 )
 from app.services import maintenance_collection_plan_imports as imports
+from app.services import maintenance_collection_plan_access as protected
+from app.authz import runtime
+from app.authz.principal import VerifiedIdentity
+from app.api.maintenance_project_scope import identity_for, legacy_page
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 _IMPORT_ACTION_KEY = "action_maintenance_collection_plan_import"
@@ -116,6 +120,7 @@ def _raise_http(exc: Exception) -> None:
 
 
 def _explicit_import_action(
+    request: Request,
     ctx: UserContext = Depends(get_current_user_context),
     db: Session = Depends(get_db),
 ) -> None:
@@ -124,6 +129,8 @@ def _explicit_import_action(
     admin 不短路；任何请求体读取之前执行。
     """
     from app import permissions as _perm
+    resource=protected.READ if request.method=='GET' else protected.WRITE
+    if runtime.is_authoritative(db,resource):return
 
     if not ctx.is_authenticated or not ctx.user_id:
         _domain_error(
@@ -198,17 +205,19 @@ def _preview_upload_preflight(request: Request) -> None:
         )
 
 
-@router.post("/collection-plan-imports/preview")
+@router.post("/collection-plan-imports/preview", response_model=None)
 async def preview_collection_plan_import(
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page((protected.WRITE,protected.READ),"page_maintenance")),
     _action: None = Depends(_explicit_import_action),
     _preflight: None = Depends(_preview_upload_preflight),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity | None = Depends(identity_for(protected.WRITE)),
+    view: str | None = Query(default=None),
 ) -> PreviewResponse:
     response.headers["Cache-Control"] = "no-store"
     # 认证/权限依赖已在读取任何请求体之前完成；这里才手动解析 multipart。
@@ -255,6 +264,13 @@ async def preview_collection_plan_import(
                 code="upload_too_large",
                 message="工作簿超过上传安全上限",
             )
+    if identity is not None:
+        try:
+            return protected.preview(db,identity,content=content,filename=filename,
+                idempotency_key=idempotency_key,legacy_context=ctx,as_of=business_today(),view=view,
+                precondition=form.get('authorization_precondition'))
+        except HTTPException:raise
+        except Exception as exc:_raise_http(exc)
     operator = _real_operator(db, ident)
     user = _real_name_user(db, ctx)
     try:
@@ -299,7 +315,7 @@ async def preview_collection_plan_import(
     return PreviewResponse(**payload)
 
 
-@router.get("/collection-plan-imports/{batch_id}/binding-options")
+@router.get("/collection-plan-imports/{batch_id}/binding-options", response_model=None)
 def collection_plan_binding_options(
     response: Response,
     batch_id: str = Path(..., min_length=1, max_length=64),
@@ -308,11 +324,21 @@ def collection_plan_binding_options(
     page_size: int = Query(default=20, ge=1, le=50),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page((protected.WRITE,protected.READ),"page_maintenance")),
     _action: None = Depends(_explicit_import_action),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity | None = Depends(identity_for(protected.READ)),
+    view: str | None = Query(default=None),
+    authorization_precondition: str | None = Query(default=None),
 ) -> BindingOptionsResponse:
     response.headers["Cache-Control"] = "no-store"
+    if identity is not None:
+        try:
+            return protected.read(db,identity,entry_id=protected.OPTIONS,
+                params={'batch_id':batch_id,'q':q.strip(),'page':page,'page_size':page_size},
+                legacy_context=ctx,view=view,precondition=authorization_precondition)
+        except HTTPException:raise
+        except Exception as exc:_raise_http(exc)
     try:
         payload = imports.search_collection_binding_options(
             db,
@@ -333,7 +359,7 @@ def collection_plan_binding_options(
     return BindingOptionsResponse(**payload)
 
 
-@router.post("/collection-plan-imports/{batch_id}/apply")
+@router.post("/collection-plan-imports/{batch_id}/apply", response_model=None)
 def apply_collection_plan_import(
     body: ApplyRequest,
     response: Response,
@@ -341,11 +367,20 @@ def apply_collection_plan_import(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page((protected.WRITE,protected.READ),"page_maintenance")),
     _action: None = Depends(_explicit_import_action),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity | None = Depends(identity_for(protected.WRITE)),
+    view: str | None = Query(default=None),
 ) -> ApplyResponse:
     response.headers["Cache-Control"] = "no-store"
+    if identity is not None:
+        try:
+            return protected.apply(db,identity,batch_id=batch_id,
+                command=body.model_dump(mode='json',exclude={'authorization_precondition'}),
+                legacy_context=ctx,as_of=business_today(),view=view,precondition=body.authorization_precondition)
+        except HTTPException:raise
+        except Exception as exc:_raise_http(exc)
     operator = _real_operator(db, ident)
     user = _real_name_user(db, ctx)
     try:
@@ -387,17 +422,34 @@ def apply_collection_plan_import(
     return ApplyResponse(**payload)
 
 
-@router.get("/collection-plan-imports/{batch_id}/source-file")
+@router.get("/collection-plan-imports/{batch_id}/source-file", response_model=None)
 def collection_plan_source_file(
     response: Response,
     batch_id: str = Path(..., min_length=1, max_length=64),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page((protected.WRITE,protected.READ),"page_maintenance")),
     _action: None = Depends(_explicit_import_action),
     ctx: UserContext = Depends(get_current_user_context),
+    identity: VerifiedIdentity | None = Depends(identity_for(protected.READ)),
+    view: str | None = Query(default=None),
+    authorization_precondition: str | None = Query(default=None),
 ) -> FileResponse:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        try:
+            result=protected.read(db,identity,entry_id=protected.RAW,params={'batch_id':batch_id},
+                legacy_context=ctx,view=view,precondition=authorization_precondition)
+            if view=='authorization':return result
+            content,provenance=result
+            record_access_log(ctx,'collection_plan_source_file_download',f'collection_plan_import_batch:{batch_id}',{'file_size':len(content)})
+            from app.services.authorization_downloads import stream_materialized_bytes
+            return stream_materialized_bytes(content,db.get_bind(),identity,provenance,media_type='application/vnd.ms-excel',headers={
+                'Cache-Control':'no-store','X-Content-Type-Options':'nosniff',
+                'Content-Disposition':f'attachment; filename="collection-plan-{batch_id}.xls"'})
+        except HTTPException:raise
+        except Exception as exc:_raise_http(exc)
     operator = _real_operator(db, ident)
     user = _real_name_user(db, ctx)
     try:

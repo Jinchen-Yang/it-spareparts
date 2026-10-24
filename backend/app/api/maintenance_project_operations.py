@@ -12,10 +12,18 @@ from sqlalchemy.orm import Session
 from app.api.maintenance_project_scope import (
     enforce_maintenance_project_access,
     require_maintenance_project_access,
+    identity_for, legacy_page, legacy_project_scope, legacy_gate,
 )
 from app.auth import current_identity, current_role
 from app.business_time import business_today
 from app.db import get_db
+from app.authz import runtime
+from app.services import maintenance_project_read_access as protected_reads
+from app.services import maintenance_project_access as protected_projects
+from app.services import maintenance_finance_access as protected_finance
+from app.services import maintenance_site_issue_access as protected_issues
+from app.services import maintenance_operation_backfill_access as protected_backfills
+from app.authz.errors import authz_error
 from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import MaintenanceProjectContract
 from app.models.maintenance_project_operations import (
@@ -47,6 +55,7 @@ stable_site_issue_router = APIRouter(prefix="/maintenance/site-issues", tags=["m
 
 class ProjectOperationsSearch(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     q: str = ""
     as_of: date | None = None
@@ -70,6 +79,7 @@ class ProjectOperationsSearch(BaseModel):
 
 class ContractCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     contract_id: str = Field(min_length=1, max_length=64)
     contract_no: str = Field(min_length=1, max_length=64)
@@ -86,6 +96,7 @@ class ContractCreate(BaseModel):
 
 class ContractPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     version: int = Field(ge=1)
     contract_no: str | None = Field(default=None, min_length=1, max_length=64)
@@ -102,6 +113,7 @@ class ContractPatch(BaseModel):
 
 class ContractArchive(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     version: int = Field(ge=1)
     effective_to: date
@@ -110,6 +122,7 @@ class ContractArchive(BaseModel):
 
 class CollectionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     project_contract_id: str = Field(min_length=1, max_length=36)
     report_month: date
@@ -122,6 +135,7 @@ class CollectionCreate(BaseModel):
 
 class CollectionPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     version: int = Field(ge=1)
     report_month: date | None = None
@@ -145,6 +159,7 @@ class SiteIssueLineCreate(BaseModel):
 
 
 class SiteIssueCreate(BaseModel):
+    authorization_precondition: dict | None = None
     """Legacy direct-entry contract kept stable for existing API callers."""
 
     model_config = ConfigDict(extra="forbid")
@@ -169,6 +184,7 @@ class SiteIssueDraftLineCreate(BaseModel):
 
 
 class SiteIssueDraftCreate(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     idempotency_key: str = Field(min_length=8, max_length=128)
@@ -181,6 +197,7 @@ class SiteIssueDraftCreate(BaseModel):
 
 
 class SiteIssueCandidateSearch(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     q: str | None = None
@@ -189,6 +206,7 @@ class SiteIssueCandidateSearch(BaseModel):
 
 
 class SiteIssuePreview(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1, max_length=36)
@@ -196,6 +214,7 @@ class SiteIssuePreview(BaseModel):
 
 
 class SiteIssueCommand(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1, max_length=36)
@@ -205,6 +224,7 @@ class SiteIssueCommand(BaseModel):
 
 
 class SiteIssueLineCorrection(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     expected_issue_version: StrictInt = Field(ge=1)
@@ -231,6 +251,7 @@ class SiteIssueLineCorrection(BaseModel):
 
 
 class SiteIssueHeaderCorrection(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     expected_issue_version: StrictInt = Field(ge=1)
@@ -274,6 +295,7 @@ class ManualSiteIssueLineInput(BaseModel):
 
 
 class ManualSiteIssueBase(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     idempotency_key: str = Field(min_length=8, max_length=128)
@@ -291,6 +313,7 @@ class ManualSiteIssueCreate(ManualSiteIssueBase):
 
 
 class ManualSiteIssuePreviewRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     issue_date: date
@@ -301,6 +324,7 @@ class ManualSiteIssuePreviewRequest(BaseModel):
 
 
 class ManualSiteIssuePatch(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1, max_length=36)
@@ -320,6 +344,7 @@ class ManualSiteIssuePatch(BaseModel):
 
 
 class SiteIssuePatch(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1, max_length=36)
@@ -338,6 +363,7 @@ class SiteIssuePatch(BaseModel):
 
 
 class SiteIssueSearch(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(min_length=1, max_length=36)
@@ -356,6 +382,7 @@ class SiteIssueSearch(BaseModel):
 
 
 class SiteIssueStatusPatch(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     version: int = Field(ge=1)
@@ -367,6 +394,7 @@ class SiteIssueStatusPatch(BaseModel):
 
 class ManualCostPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     line_id: str = Field(min_length=1, max_length=64)
     version: int = Field(ge=1)
@@ -377,12 +405,14 @@ class ManualCostPatch(BaseModel):
 
 class CostGapRecompute(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     reason: str = Field(min_length=1, max_length=1000)
 
 
 class ExpenseCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     expense_id: str = Field(min_length=1, max_length=64)
     project_contract_id: str | None = Field(default=None, max_length=36)
@@ -401,6 +431,7 @@ class ExpenseCreate(BaseModel):
 
 class ExpenseReadinessMark(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     ready_through: date
     expected_version: int | None = Field(default=None, ge=0)
@@ -410,6 +441,7 @@ class ExpenseReadinessMark(BaseModel):
 
 class ExpenseStatusPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     version: int = Field(ge=1)
     raw_status: str = Field(min_length=1, max_length=64)
@@ -465,18 +497,27 @@ def create_project_contract(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_contract","page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_profit")
+        legacy_gate("maintenance_contract", require_action("action_maintenance_project_manage", require_data="data_profit"))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(legacy_project_scope("maintenance_contract")),
+    typed_identity=Depends(identity_for("maintenance_contract")),
+    view: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_contract"):
+        return protected_finance.execute(db,typed_identity,entry_id=protected_finance.CONTRACT_CREATE,
+            project_id=project_id,command=body.model_dump(exclude={"authorization_precondition"},),
+            view=view,precondition=body.authorization_precondition)
+
     operator = _real_operator(db, ident)
     try:
         payload = operations.create_contract(
             db,
             project_id=project_id,
-            **body.model_dump(exclude={"reason"}),
+            **body.model_dump(exclude={"reason", "authorization_precondition"}),
             reason=body.reason,
             operated_by=operator,
         )
@@ -539,12 +580,21 @@ def patch_project_contract(
     project_contract_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_contract","page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_profit")
+        legacy_gate("maintenance_contract", require_action("action_maintenance_project_manage", require_data="data_profit"))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_contract")),
+    view: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_contract"):
+        return protected_finance.execute(db,typed_identity,entry_id=protected_finance.CONTRACT_UPDATE,
+            project_contract_id=project_contract_id,command=body.model_dump(exclude={"authorization_precondition"},exclude_unset=True),
+            view=view,precondition=body.authorization_precondition)
+
     project_id = db.scalar(
         select(MaintenanceProjectContract.project_id).where(
             MaintenanceProjectContract.project_contract_id == project_contract_id
@@ -558,7 +608,7 @@ def patch_project_contract(
         ident=ident,
         project_contract_id=project_contract_id,
         version=body.version,
-        updates=body.model_dump(exclude_unset=True, exclude={"version", "reason"}),
+        updates=body.model_dump(exclude_unset=True, exclude={"version", "reason", "authorization_precondition"}),
         reason=body.reason,
     )
 
@@ -569,12 +619,21 @@ def archive_project_contract(
     project_contract_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_contract","page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_profit")
+        legacy_gate("maintenance_contract", require_action("action_maintenance_project_manage", require_data="data_profit"))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_contract")),
+    view: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_contract"):
+        return protected_finance.execute(db,typed_identity,entry_id=protected_finance.CONTRACT_ARCHIVE,
+            project_contract_id=project_contract_id,command=body.model_dump(exclude={"authorization_precondition"},),
+            view=view,precondition=body.authorization_precondition)
+
     project_id = db.scalar(
         select(MaintenanceProjectContract.project_id).where(
             MaintenanceProjectContract.project_contract_id == project_contract_id
@@ -599,18 +658,26 @@ def create_project_collection(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_collection","page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_roundtrip_apply", require_data="data_profit")
+        legacy_gate("maintenance_collection", require_action("action_maintenance_roundtrip_apply", require_data="data_profit"))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(legacy_project_scope("maintenance_collection")),
+    typed_identity=Depends(identity_for("maintenance_collection")),
+    view: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_collection"):
+        return protected_finance.execute(db,typed_identity,entry_id=protected_finance.COLLECTION_CREATE,
+            project_id=project_id,command=body.model_dump(exclude={"authorization_precondition"}),
+            view=view,precondition=body.authorization_precondition)
     operator = _real_operator(db, ident)
     try:
         payload = operations.create_collection(
             db,
             project_id=project_id,
-            **body.model_dump(exclude={"reason"}),
+            **body.model_dump(exclude={"reason", "authorization_precondition"}),
             reason=body.reason,
             operated_by=operator,
             source="direct_api",
@@ -640,12 +707,20 @@ def patch_project_collection(
     collection_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_collection","page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_roundtrip_apply", require_data="data_profit")
+        legacy_gate("maintenance_collection", require_action("action_maintenance_roundtrip_apply", require_data="data_profit"))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_collection")),
+    view: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_collection"):
+        return protected_finance.execute(db,typed_identity,entry_id=protected_finance.COLLECTION_UPDATE,
+            collection_id=collection_id,command=body.model_dump(exclude={"authorization_precondition"}, exclude_unset=True),
+            view=view,precondition=body.authorization_precondition)
     project_id = db.scalar(
         select(MaintenanceCollectionSnapshot.project_id).where(
             MaintenanceCollectionSnapshot.collection_id == collection_id
@@ -659,20 +734,27 @@ def patch_project_collection(
         ident=ident,
         collection_id=collection_id,
         version=body.version,
-        updates=body.model_dump(exclude_unset=True, exclude={"version", "reason"}),
+        updates=body.model_dump(exclude_unset=True, exclude={"version", "reason", "authorization_precondition"}),
         reason=body.reason,
     )
 
 
 @site_issue_beta_router.post("/projects/{project_id}/candidates/search")
 def search_project_site_issue_candidates(
+    response: Response,
     body: SiteIssueCandidateSearch,
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_issue','page_maintenance')),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.read(db,identity,entry_id=protected_issues.CANDIDATES,params={**command,'project_id':project_id},view=view,precondition=body.authorization_precondition))
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     try:
         payload = operations.search_site_issue_candidates(
@@ -708,15 +790,22 @@ def search_project_site_issue_candidates(
 # stable_site_issue_router，生产 beta 总闸恒 false，挂 beta 会整组 404（PR #361 P1）。
 @stable_site_issue_router.get("/projects/{project_id}/demand-candidates")
 def site_issue_demand_candidates(
+    response: Response,
     project_id: str = Path(..., min_length=1, max_length=36),
     part_id: int | None = Query(default=None, ge=1),
     q: str | None = Query(default=None, max_length=128),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_issue','page_maintenance')),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
+    authorization_precondition: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        return _site_canonical_result(lambda: protected_issues.read(db,identity,entry_id=protected_issues.DEMANDS,params={'project_id':project_id,'part_id':part_id,'q':q,'page':page,'page_size':page_size},view=view,precondition=authorization_precondition))
     """人工登记领用的「关联需求单」候选（2026-10-12 按 PN 建议口径）。
 
     只读建议端点：权限栈与 return-receipt-demands 候选端点同构，不挂提交动作
@@ -792,25 +881,32 @@ def site_issue_demand_candidates(
 
 @operations_beta_router.post("/{project_id}/site-issues", status_code=status.HTTP_201_CREATED)
 def create_project_site_issue(
+    response: Response,
     body: SiteIssueCreate,
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_issue','page_maintenance')),
     _action: None = Depends(
-        require_action(
+        legacy_gate('maintenance_issue', require_action(
             "action_maintenance_site_issue_manage",
             require_data="data_purchase_cost",
-        )
+        ))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(legacy_project_scope('maintenance_issue')),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.execute(db,identity,entry_id=protected_issues.CREATE,command=command,project_id=project_id,view=view,precondition=body.authorization_precondition))
     operator = _real_operator(db, ident)
     try:
         payload = operations.create_site_issue(
             db,
             project_id=project_id,
-            **body.model_dump(exclude={"reason"}),
+            **body.model_dump(exclude={"reason","authorization_precondition"}),
             reason=body.reason,
             operated_by=operator,
             source="direct_api",
@@ -836,25 +932,32 @@ def create_project_site_issue(
 
 @site_issue_beta_router.post("/projects/{project_id}", status_code=status.HTTP_201_CREATED)
 def create_project_site_issue_draft(
+    response: Response,
     body: SiteIssueDraftCreate,
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_issue','page_maintenance')),
     _action: None = Depends(
-        require_action(
+        legacy_gate('maintenance_issue', require_action(
             "action_maintenance_site_issue_manage",
             require_data="data_purchase_cost",
-        )
+        ))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(legacy_project_scope('maintenance_issue')),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.execute(db,identity,entry_id=protected_issues.DRAFT,command=command,project_id=project_id,view=view,precondition=body.authorization_precondition))
     operator = _real_operator(db, ident)
     try:
         payload = operations.create_site_issue_draft(
             db,
             project_id=project_id,
-            **body.model_dump(exclude={"reason"}),
+            **body.model_dump(exclude={"reason","authorization_precondition"}),
             reason=body.reason,
             operated_by=operator,
         )
@@ -884,19 +987,26 @@ def create_project_site_issue_draft(
 
 @site_issue_beta_router.post("/{issue_id}/preview")
 def preview_project_site_issue(
+    response: Response,
     body: SiteIssuePreview,
     issue_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_issue','page_maintenance')),
     _action: None = Depends(
-        require_action(
+        legacy_gate('maintenance_issue', require_action(
             "action_maintenance_site_issue_manage",
             require_data="data_purchase_cost",
-        )
+        ))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.read(db,identity,entry_id=protected_issues.PREVIEW,params={**command,'issue_id':issue_id},view=view,precondition=body.authorization_precondition))
     _enforce_site_issue_access(db, issue_id=issue_id, ctx=ctx)
     try:
         payload = operations.preview_site_issue(
@@ -920,19 +1030,26 @@ def preview_project_site_issue(
 
 @site_issue_beta_router.post("/{issue_id}/confirm")
 def confirm_project_site_issue(
+    response: Response,
     body: SiteIssueCommand,
     issue_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_issue','page_maintenance')),
     _action: None = Depends(
-        require_action(
+        legacy_gate('maintenance_issue', require_action(
             "action_maintenance_site_issue_manage",
             require_data="data_purchase_cost",
-        )
+        ))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.execute(db,identity,entry_id=protected_issues.CONFIRM,command=command,issue_id=issue_id,view=view,precondition=body.authorization_precondition))
     _enforce_site_issue_access(db, issue_id=issue_id, ctx=ctx)
     operator = _real_operator(db, ident)
     try:
@@ -971,19 +1088,26 @@ def confirm_project_site_issue(
 
 @site_issue_beta_router.patch("/{issue_id}")
 def patch_project_site_issue_v2(
+    response: Response,
     body: SiteIssuePatch,
     issue_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_issue','page_maintenance')),
     _action: None = Depends(
-        require_action(
+        legacy_gate('maintenance_issue', require_action(
             "action_maintenance_site_issue_manage",
             require_data="data_purchase_cost",
-        )
+        ))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.execute(db,identity,entry_id=protected_issues.UPDATE,command=command,issue_id=issue_id,view=view,precondition=body.authorization_precondition))
     _enforce_site_issue_access(db, issue_id=issue_id, ctx=ctx)
     operator = _real_operator(db, ident)
     try:
@@ -1031,19 +1155,26 @@ def patch_project_site_issue_v2(
 
 @stable_site_issue_router.post("/{issue_id}/void")
 def void_project_site_issue(
+    response: Response,
     body: SiteIssueCommand,
     issue_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_issue','page_maintenance')),
     _action: None = Depends(
-        require_action(
+        legacy_gate('maintenance_issue', require_action(
             "action_maintenance_site_issue_manage",
             require_data="data_purchase_cost",
-        )
+        ))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.execute(db,identity,entry_id=protected_issues.VOID,command=command,issue_id=issue_id,view=view,precondition=body.authorization_precondition))
     _enforce_site_issue_access(db, issue_id=issue_id, ctx=ctx)
     operator = _real_operator(db, ident)
     try:
@@ -1082,12 +1213,19 @@ def void_project_site_issue(
 
 @stable_site_issue_router.post("/search")
 def search_project_site_issues(
+    response: Response,
     body: SiteIssueSearch,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_issue','page_maintenance')),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.read(db,identity,entry_id=protected_issues.SEARCH,params=command,view=view,precondition=body.authorization_precondition))
     if is_field_hidden(ctx, "unit_cost"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权查看现场领用成本")
     enforce_maintenance_project_access(db, project_id=body.project_id, ctx=ctx)
@@ -1128,19 +1266,26 @@ def search_project_site_issues(
 
 @operations_beta_router.patch("/site-issues/{issue_id}/status")
 def patch_project_site_issue_status(
+    response: Response,
     body: SiteIssueStatusPatch,
     issue_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_issue','page_maintenance')),
     _action: None = Depends(
-        require_action(
+        legacy_gate('maintenance_issue', require_action(
             "action_maintenance_site_issue_manage",
             require_data="data_purchase_cost",
-        )
+        ))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.execute(db,identity,entry_id=protected_issues.STATUS,command=command,issue_id=issue_id,view=view,precondition=body.authorization_precondition))
     project_id = db.scalar(
         select(MaintenanceSiteIssue.project_id).where(
             MaintenanceSiteIssue.issue_id == issue_id
@@ -1185,10 +1330,17 @@ def project_cost_gaps(
     page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_cost_fill", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(legacy_project_scope("maintenance_cost_fill")),
+    typed_identity=Depends(identity_for("maintenance_cost_fill")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_cost_fill"):
+        return protected_reads.read_cost_gaps(db,typed_identity,project_id,page=page,page_size=page_size,view=view,precondition=authorization_precondition)
     if is_field_hidden(ctx, "unit_cost"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权查看或回填采购成本")
     payload = operations.list_cost_gaps(
@@ -1219,15 +1371,24 @@ def recompute_project_cost_gaps(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_cost_fill","page_maintenance")),
     _action: None = Depends(
-        require_action(
+        legacy_gate("maintenance_cost_fill", require_action(
             "action_maintenance_project_manage",
             require_data="data_purchase_cost",
-        )
+        ))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(legacy_project_scope("maintenance_cost_fill")),
+    typed_identity=Depends(identity_for("maintenance_cost_fill")),
+    view: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_cost_fill"):
+        return protected_finance.execute(db,typed_identity,entry_id=protected_finance.COST_RECOMPUTE,
+            project_id=project_id,command=body.model_dump(exclude={"authorization_precondition"}),
+            view=view,precondition=body.authorization_precondition)
+
     return _contract_write_result(
         operations.recompute_cost_gaps,
         db=db,
@@ -1244,18 +1405,26 @@ def create_project_expense(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_expense","page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_roundtrip_apply", require_data="data_profit")
+        legacy_gate("maintenance_expense", require_action("action_maintenance_roundtrip_apply", require_data="data_profit"))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(legacy_project_scope("maintenance_expense")),
+    typed_identity=Depends(identity_for("maintenance_expense")),
+    view: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_expense"):
+        return protected_finance.execute(db,typed_identity,entry_id=protected_finance.EXPENSE_CREATE,
+            project_id=project_id,command=body.model_dump(exclude={"authorization_precondition"}),
+            view=view,precondition=body.authorization_precondition)
     operator = _real_operator(db, ident)
     try:
         payload = operations.create_expense(
             db,
             project_id=project_id,
-            **body.model_dump(exclude={"reason"}),
+            **body.model_dump(exclude={"reason", "authorization_precondition"}),
             reason=body.reason,
             operated_by=operator,
         )
@@ -1283,15 +1452,23 @@ def mark_project_expense_readiness(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_expense","page_maintenance")),
     _action: None = Depends(
-        require_action(
+        legacy_gate("maintenance_expense", require_action(
             "action_maintenance_roundtrip_apply",
             require_data="data_profit",
-        )
+        ))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(legacy_project_scope("maintenance_expense")),
+    typed_identity=Depends(identity_for("maintenance_expense")),
+    view: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_expense"):
+        return protected_finance.execute(db,typed_identity,entry_id=protected_finance.EXPENSE_READY,
+            project_id=project_id,command=body.model_dump(exclude={"authorization_precondition"}),
+            view=view,precondition=body.authorization_precondition)
     return _contract_write_result(
         operations.mark_expense_readiness,
         db=db,
@@ -1311,15 +1488,24 @@ def patch_project_expense_status(
     expense_id: str = Path(..., min_length=1, max_length=64),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_expense","page_maintenance")),
     _action: None = Depends(
-        require_action(
+        legacy_gate("maintenance_expense", require_action(
             "action_maintenance_roundtrip_apply",
             require_data="data_profit",
-        )
+        ))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_expense")),
+    view: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_expense"):
+        return protected_finance.execute(db,typed_identity,entry_id=protected_finance.EXPENSE_STATUS,
+            expense_id=expense_id,command=body.model_dump(exclude={"authorization_precondition"}),
+            view=view,precondition=body.authorization_precondition)
+
     project_id = db.scalar(
         select(MaintenanceProjectExpenseAttribution.project_id).where(
             MaintenanceProjectExpenseAttribution.expense_id == expense_id
@@ -1363,12 +1549,21 @@ def patch_project_cost_gap(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_cost_fill","page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_project_manage", require_data="data_purchase_cost")
+        legacy_gate("maintenance_cost_fill", require_action("action_maintenance_project_manage", require_data="data_purchase_cost"))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(legacy_project_scope("maintenance_cost_fill")),
+    typed_identity=Depends(identity_for("maintenance_cost_fill")),
+    view: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_cost_fill"):
+        return protected_finance.execute(db,typed_identity,entry_id=protected_finance.COST_FILL,
+            project_id=project_id,command=body.model_dump(exclude={"authorization_precondition"}),
+            view=view,precondition=body.authorization_precondition)
+
     return _contract_write_result(
         operations.fill_manual_cost,
         db=db,
@@ -1395,12 +1590,21 @@ def stable_project_workspace(
     expense_page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _scope: None = Depends(require_maintenance_project_access),
+    _page: None = Depends(legacy_page(tuple(resource for resource, _ in protected_reads.WORKSPACE_BLOCKS.values()), "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for(*tuple(resource for resource, _ in protected_reads.WORKSPACE_BLOCKS.values()))),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     effective_as_of = as_of or business_today()
+    if any(runtime.is_authoritative(db, resource) for resource, _ in protected_reads.WORKSPACE_BLOCKS.values()):
+        return protected_reads.read_workspace(db, typed_identity, project_id, legacy_context=ctx,
+            as_of=effective_as_of, view=view, precondition=authorization_precondition,
+            collection_page=collection_page, collection_page_size=collection_page_size,
+            requisition_page=requisition_page, requisition_page_size=requisition_page_size,
+            expense_page=expense_page, expense_page_size=expense_page_size)
+    enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     payload = operations.project_workspace(
         db,
         project_id=project_id,
@@ -1438,10 +1642,17 @@ def stable_project_tasks(
     as_of: date | None = None,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _scope: None = Depends(require_maintenance_project_access),
+    _page: None = Depends(legacy_page("maintenance_project_operations", "page_maintenance")),
+    _scope: None = Depends(legacy_project_scope("maintenance_project_operations")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_project_operations")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_project_operations"):
+        return protected_reads.read_tasks(db,typed_identity,project_id,as_of=as_of or business_today(),legacy_context=ctx,view=view,precondition=authorization_precondition)
     effective_as_of = as_of or business_today()
     payload = operations.project_tasks(
         db,
@@ -1474,10 +1685,17 @@ def stable_project_purchases(
     page_size: int | None = Query(None, ge=1, le=200),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _scope: None = Depends(require_maintenance_project_access),
+    _page: None = Depends(legacy_page("maintenance_project_purchase", "page_maintenance")),
+    _scope: None = Depends(legacy_project_scope("maintenance_project_purchase")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_project_purchase")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_project_purchase"):
+        return protected_reads.read_purchases(db,typed_identity,project_id,source_order_id=source_order_id,page=page,page_size=page_size,view=view,precondition=authorization_precondition)
     payload = procurement.list_project_procurement(
         db, project_id, source_order_id=source_order_id,
         page=page, page_size=page_size,
@@ -1613,9 +1831,19 @@ def stable_project_operations(
     owner_scope: str | None = Query(default=None, pattern="^(me|all)$"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_operation_directory","page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_operation_directory")),
+    view: str | None = Query(None),
+    response: Response = None,
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
+    if q is not None:
+        raise HTTPException(422,"项目搜索请使用安全搜索接口")
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_operation_directory"):
+        return protected_projects.read_operations_directory(db,typed_identity,entry_id='GET /api/maintenance/projects/stable/operations',
+            command={'as_of':as_of,'page':page,'page_size':page_size,'q':q,'lifecycle':lifecycle,'reminder':reminder,'include_inactive':include_inactive,'owner_scope':owner_scope},legacy_context=ctx,view=view,precondition=authorization_precondition)
     if q is not None:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -1641,11 +1869,15 @@ def stable_project_operations(
 
 @operations_beta_router.post("/site-issue-costs/backfill")
 def backfill_site_issue_costs_endpoint(
+    response: Response,
     force: bool = Query(False, description="算法升级后全量重算"),
+    identity=Depends(identity_for("maintenance_cost_fill")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_cost_fill","page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """领用成本回填：历史领用行跑「需求单价格优先」瀑布解析。
@@ -1654,6 +1886,10 @@ def backfill_site_issue_costs_endpoint(
     仅 admin。
     """
     from app.security import record_access_log
+
+    if runtime.is_authoritative(db,"maintenance_cost_fill"):
+        response.headers["Cache-Control"]="no-store"
+        return _site_canonical_result(lambda:protected_backfills.execute(db,identity,entry_id=protected_backfills.COST,params={'force':force},view=view,precondition=authorization_precondition))
 
     if ctx.role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "领用成本回填仅管理员可执行")
@@ -1668,10 +1904,14 @@ def backfill_site_issue_costs_endpoint(
 
 @operations_beta_router.post("/expense-attribution/backfill")
 def backfill_expense_attribution_endpoint(
+    response: Response,
+    identity=Depends(identity_for("maintenance_expense")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_expense","page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """报销归因回填（2026-08-22）：f_project_expense → 合同 → 项目事实表。
@@ -1680,6 +1920,10 @@ def backfill_expense_attribution_endpoint(
     仅 admin：一次性数据工程入口，不开放常规运维。
     """
     from app.security import record_access_log
+
+    if runtime.is_authoritative(db,"maintenance_expense"):
+        response.headers["Cache-Control"]="no-store"
+        return _site_canonical_result(lambda:protected_backfills.execute(db,identity,entry_id=protected_backfills.EXPENSE,params={},view=view,precondition=authorization_precondition))
 
     if ctx.role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "报销归因回填仅管理员可执行")
@@ -1696,9 +1940,16 @@ def search_stable_project_operations(
     body: ProjectOperationsSearch,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_operation_directory","page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_operation_directory")),
+    view: str | None = Query(None),
+    response: Response = None,
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_operation_directory"):
+        return protected_projects.read_operations_directory(db,typed_identity,entry_id='POST /api/maintenance/projects/stable/operations/search',
+            command=body.model_dump(exclude={"authorization_precondition"}),legacy_context=ctx,view=view,precondition=body.authorization_precondition)
     q = body.q.strip()
     if len(q) > 256:
         raise HTTPException(
@@ -1726,6 +1977,18 @@ def search_stable_project_operations(
         db=db,
         ctx=ctx,
     )
+
+
+def _site_canonical_result(call):
+    from app.services.maintenance_site_issue_facts import SiteIssueEditError
+    from app.services.maintenance_site_issue_line_correction import SiteIssueLineCorrectionConflict
+    try:return call()
+    except HTTPException:raise
+    except SiteIssueEditError as exc:raise HTTPException(exc.status_code,exc.detail,headers={'Cache-Control':'no-store'}) from exc
+    except SiteIssueLineCorrectionConflict as exc:raise HTTPException(409,exc.detail,headers={'Cache-Control':'no-store'}) from exc
+    except operations.MaintenanceOperationConflict as exc:raise authz_error(409,'DOMAIN_CONFLICT',str(exc)) from exc
+    except operations.MaintenanceOperationPermissionError as exc:raise authz_error(403,'AUTHZ_FORBIDDEN',str(exc)) from exc
+    except (operations.MaintenanceOperationError,receipts.ReturnReceiptError) as exc:raise authz_error(400,'DOMAIN_INVALID',str(exc)) from exc
 
 
 def _manual_site_issue_result(operation, *, db: Session, ident: dict, **kwargs):
@@ -1772,19 +2035,26 @@ def _manual_site_issue_result(operation, *, db: Session, ident: dict, **kwargs):
 
 @stable_site_issue_router.post("/manual/preview")
 def preview_manual_site_issue(
+    response: Response,
     body: ManualSiteIssuePreviewRequest,
     project_id: str = Query(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_issue','page_maintenance')),
     _action: None = Depends(
-        require_action(
+        legacy_gate('maintenance_issue', require_action(
             "action_maintenance_site_issue_manage",
             require_data="data_purchase_cost",
-        )
+        ))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.read(db,identity,entry_id=protected_issues.MANUAL_PREVIEW,params={**command,'project_id':project_id},view=view,precondition=body.authorization_precondition))
     from app.services import maintenance_manual_site_issue as manual_service
 
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
@@ -1806,19 +2076,26 @@ def preview_manual_site_issue(
     "/projects/{project_id}/manual", status_code=status.HTTP_201_CREATED
 )
 def create_manual_site_issue(
+    response: Response,
     body: ManualSiteIssueCreate,
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_issue','page_maintenance')),
     _action: None = Depends(
-        require_action(
+        legacy_gate('maintenance_issue', require_action(
             "action_maintenance_site_issue_manage",
             require_data="data_purchase_cost",
-        )
+        ))
     ),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(legacy_project_scope('maintenance_issue')),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.execute(db,identity,entry_id=protected_issues.MANUAL_CREATE,command=command,project_id=project_id,view=view,precondition=body.authorization_precondition))
     from app.services import maintenance_manual_site_issue as manual_service
 
     return _manual_site_issue_result(
@@ -1839,19 +2116,26 @@ def create_manual_site_issue(
 
 @stable_site_issue_router.patch("/manual/{issue_id}")
 def patch_manual_site_issue(
+    response: Response,
     body: ManualSiteIssuePatch,
     issue_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_issue','page_maintenance')),
     _action: None = Depends(
-        require_action(
+        legacy_gate('maintenance_issue', require_action(
             "action_maintenance_site_issue_manage",
             require_data="data_purchase_cost",
-        )
+        ))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.execute(db,identity,entry_id=protected_issues.MANUAL_UPDATE,command=command,issue_id=issue_id,view=view,precondition=body.authorization_precondition))
     from app.services import maintenance_manual_site_issue as manual_service
 
     _enforce_site_issue_access(db, issue_id=issue_id, ctx=ctx)
@@ -1885,12 +2169,21 @@ def patch_manual_site_issue(
     }},
 )
 def correct_site_issue_line(
+    response: Response,
     body: object = Body(None),
     issue_id: str = Path(..., min_length=1, max_length=36),
     issue_line_id: str = Path(..., min_length=1, max_length=64),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        try:body=SiteIssueLineCorrection.model_validate(body)
+        except ValidationError as exc:raise authz_error(422,'AUTHZ_INVALID_REQUEST','领用更正参数无效') from exc
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.execute(db,identity,entry_id=protected_issues.LINE,command=command,issue_id=issue_id,issue_line_id=issue_line_id,view=view,precondition=body.authorization_precondition))
     from app.services import maintenance_site_issue_line_correction as correction
 
     return _site_issue_correction_result(
@@ -1908,11 +2201,20 @@ def correct_site_issue_line(
     }},
 )
 def correct_site_issue_header(
+    response: Response,
     body: object = Body(None),
     issue_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
+    identity=Depends(identity_for('maintenance_issue')),
+    view: str | None = Query(default=None),
 ) -> dict:
+    if identity is not None:
+        response.headers['Cache-Control']='no-store'
+        try:body=SiteIssueHeaderCorrection.model_validate(body)
+        except ValidationError as exc:raise authz_error(422,'AUTHZ_INVALID_REQUEST','领用更正参数无效') from exc
+        command=body.model_dump(exclude={'authorization_precondition'})
+        return _site_canonical_result(lambda: protected_issues.execute(db,identity,entry_id=protected_issues.HEADER,command=command,issue_id=issue_id,view=view,precondition=body.authorization_precondition))
     from app.services import maintenance_site_issue_line_correction as correction
 
     return _site_issue_correction_result(
@@ -1956,7 +2258,7 @@ def _site_issue_correction_result(*, db, ident, body, schema, command_fn, **targ
                 "site_issue_edit_invalid_fields", "领用更正参数无效，请核对版本、字段意图、原因和幂等键",
             ) from exc
         result = command_fn(
-            db, **target, **command.model_dump(), authorize=authorize,
+            db, **target, **command.model_dump(exclude={"authorization_precondition"}), authorize=authorize,
         )
         db.commit()
         return result

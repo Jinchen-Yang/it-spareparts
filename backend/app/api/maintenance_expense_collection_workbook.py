@@ -1,3 +1,4 @@
+from app.authz.service import context_resolution, check_context_precondition
 """报销/回款往返工作簿 API（增补包 AB-3）。
 
 三个端点，与仓库既有工作簿端点同形：下载 .xlsx → validate（无副作用预演）
@@ -6,12 +7,16 @@
 """
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from starlette.datastructures import UploadFile
 from sqlalchemy.orm import Session
 
 from app.api.maintenance_project_scope import require_maintenance_project_access
+from app.api import maintenance_project_scope as auth_transport
+from app.authz import runtime
+from app.services import maintenance_authorization as foundation
+from app.services import maintenance_workflow_authorization as workflow_auth
 from app.auth import current_identity, current_role
 from app.db import get_db
 from app.security import (
@@ -113,13 +118,25 @@ def download_workbook(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_finance_workbook", "page_maintenance")),
     # 下载即看到金额：只挂数据组，不要求上传动作键（只读对账的人也能下载）
-    _data: None = Depends(_require_profit_visibility),
+    _data: None = Depends(auth_transport.legacy_gate(("maintenance_finance_workbook",), _require_profit_visibility)),
     ctx: UserContext = Depends(get_current_user_context),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(auth_transport.legacy_project_scope("maintenance_finance_workbook")),
+    typed_identity=Depends(auth_transport.identity_for("maintenance_finance_workbook")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ):
-    content = wbk.build_workbook(db, project_id=project_id)
+    if runtime.is_authoritative(db, 'maintenance_finance_workbook'):
+        with foundation.read_context_snapshot(lambda: Session(db.get_bind()), typed_identity,
+                entry_id='GET /api/maintenance' + _BASE + '.xlsx', params={'project_id': project_id}) as (snapshot, _, batch, accesses):
+            if view == 'authorization':
+                return context_resolution(accesses, batch.contexts[0].ref)
+            workflow_auth.require_complete(accesses)
+            check_context_precondition(foundation.decode_precondition(authorization_precondition), accesses, batch.contexts[0].ref)
+            content = wbk.build_workbook(snapshot, project_id=project_id)
+    else:
+        content = wbk.build_workbook(db, project_id=project_id)
     if content is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             {"code": "not_found", "message": "项目不存在"})
@@ -141,13 +158,25 @@ async def validate_workbook(
     response: Response = None,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_profit")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_finance_workbook", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(("maintenance_finance_workbook",), require_action(_ACTION_KEY, require_data="data_profit"))),
     ctx: UserContext = Depends(get_current_user_context),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(auth_transport.legacy_project_scope("maintenance_finance_workbook")),
+    typed_identity=Depends(auth_transport.identity_for("maintenance_finance_workbook")),
+    view: str | None = Query(None),
 ) -> dict:
     """无副作用预演：返回将要发生的改动条数，不写库。"""
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db, 'maintenance_finance_workbook'):
+        with foundation.read_context_snapshot(lambda: Session(db.get_bind()), typed_identity,
+                entry_id='POST /api/maintenance' + _BASE + '/validate', params={'project_id': project_id}) as (snapshot, _, batch, accesses):
+            if view == 'authorization':
+                return context_resolution(accesses, batch.contexts[0].ref)
+            workflow_auth.require_complete(accesses)
+            data = await _read_upload(request)
+            plan = _plan(snapshot, project_id, data)
+            return {'project_id': project_id, 'valid': True, **plan.summary,
+                    'authorization_context': accesses.wire(batch.contexts[0].ref)}
     data = await _read_upload(request)
     plan = _plan(db, project_id, data)
     return {"project_id": project_id, "valid": True, **plan.summary}
@@ -161,19 +190,37 @@ async def apply_workbook(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_profit")),
+    _page: None = Depends(auth_transport.legacy_page("maintenance_finance_workbook", "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(("maintenance_finance_workbook",), require_action(_ACTION_KEY, require_data="data_profit"))),
     ctx: UserContext = Depends(get_current_user_context),
-    _scope: None = Depends(require_maintenance_project_access),
+    _scope: None = Depends(auth_transport.legacy_project_scope("maintenance_finance_workbook")),
+    typed_identity=Depends(auth_transport.identity_for("maintenance_finance_workbook")),
+    view: str | None = Query(None),
 ) -> dict:
     """上传覆盖：整份事务应用；任何一行不合法则整份 422，不部分写入。"""
     response.headers["Cache-Control"] = "no-store"
-    data = await _read_upload(request)
-    plan = _plan(db, project_id, data)
+    canonical = runtime.is_authoritative(db, 'maintenance_finance_workbook')
+    authorization_callback = None
+    if canonical:
+        entry_id = 'POST /api/maintenance' + _BASE + '/apply'
+        with foundation.read_context_snapshot(lambda: Session(db.get_bind()), typed_identity,
+                entry_id=entry_id, params={'project_id': project_id}) as (snapshot, _, batch, accesses):
+            if view == 'authorization':
+                return context_resolution(accesses, batch.contexts[0].ref)
+            workflow_auth.require_complete(accesses)
+            data = await _read_upload(request)
+            plan = _plan(snapshot, project_id, data)
+        form = await request.form()
+        authorization_callback = workflow_auth.command_authorizer(typed_identity,
+            entry_id=entry_id, params={'project_id': project_id},
+            authorization_precondition=foundation.decode_precondition(form.get('authorization_precondition')))
+    else:
+        data = await _read_upload(request)
+        plan = _plan(db, project_id, data)
     batch_id = str(uuid.uuid4())
     try:
         result = wbk.apply(db, plan, operated_by=_operator(ident),
-                           import_batch_id=batch_id)
+                           import_batch_id=batch_id, authorization_callback=authorization_callback)
     except wbk.WorkbookError as exc:
         db.rollback()
         # issues 逐行列出违规（如多月累计倒退），回执不只报第一行（D-02）
@@ -181,6 +228,9 @@ async def apply_workbook(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {"code": exc.code, "message": exc.message, "issues": exc.issues},
         ) from exc
+    except Exception:
+        db.rollback()
+        raise
     record_access_log(ctx, "apply", "maintenance_expense_collection_workbook",
                       {"project_id": project_id, **plan.summary})
     return {"project_id": project_id, **result}

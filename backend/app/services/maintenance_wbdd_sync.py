@@ -48,12 +48,20 @@ def _audit(db, *, project_id, entity_type, entity_id, before, after, reason, ope
 
 def apply_reconciliation(db: Session, *, batch_id, expected_digest, source_order_ids,
                          line_ids, reason, operated_by, allowed_project_ids=None,
-                         idempotency_key):
+                         idempotency_key, _authorization=None):
     """Apply one displayed selection; caller commits or rolls back the transaction.
 
     Global lock precedes every project, order and line lock. Exact candidate
     membership and digest are checked again while all affected rows are locked.
     """
+    if _authorization is not None:
+        from app.services.maintenance_wbdd_authorization import WbddReconciliationAuthorization
+        if (type(_authorization) is not WbddReconciliationAuthorization or _authorization.db is not db
+                or _authorization.transaction is not db.get_transaction()
+                or _authorization.params != dict(batch_id=batch_id, expected_digest=expected_digest,
+                    source_order_ids=source_order_ids,line_ids=line_ids,reason=reason,idempotency_key=idempotency_key)):
+            raise ValueError('来源核对缺少同事务完整选择授权')
+    operator_identity = _authorization.operator_identity if _authorization is not None else operated_by
     reason = str(reason or "").strip()
     operated_by = str(operated_by or "").strip()
     if not reason or len(reason) > demands.MAX_REASON_LENGTH or not operated_by:
@@ -74,10 +82,10 @@ def apply_reconciliation(db: Session, *, batch_id, expected_digest, source_order
     if any(not value or len(value) > 64 for value in source_ids) or any(value <= 0 for value in selected_line_ids):
         raise ValueError("作废选择包含无效身份")
     request = {"batch_id": batch_id, "digest": expected_digest, "source_order_ids": source_ids,
-               "line_ids": selected_line_ids, "reason": reason, "operated_by": operated_by,
+               "line_ids": selected_line_ids, "reason": reason, "operated_by": operator_identity,
                "scope": sorted(allowed_project_ids) if allowed_project_ids is not None else None}
     request_digest = reconciliation._digest(request)
-    replay_key = reconciliation._digest([operated_by, idempotency_key])
+    replay_key = reconciliation._digest([operator_identity, idempotency_key])
     db.execute(select(func.pg_advisory_xact_lock(DATA_CHANGE_ADVISORY_LOCK_KEY)))
     # The API's preceding reads must not leave stale ORM instances in the guard.
     db.expire_all()
@@ -92,6 +100,11 @@ def apply_reconciliation(db: Session, *, batch_id, expected_digest, source_order
             raise ReconciliationConflict("同一幂等键已用于其他确认请求")
         if _state_digest(db, prior["source_ids"], prior["line_ids"], prior["site_ids"]) != prior["terminal_digest"]:
             raise ReconciliationConflict("此前作废的数据已被恢复或修改，请重新核对差异")
+        if _authorization is not None:
+            # Global data-change lock stabilizes the historical source closure.
+            operations.lock_workbook_states(db, project_ids={a.project_id for a in db.scalars(select(A).where(
+                A.source_order_id.in_(prior["source_ids"]),A.is_active.is_(True)))})
+            _authorization.capture(db)
         return {**prior["result"], "replayed": True}
     latest = db.scalar(select(SysImportBatch.id).where(
         SysImportBatch.file_type == "maintenance", SysImportBatch.status == "success",
@@ -143,6 +156,8 @@ def apply_reconciliation(db: Session, *, batch_id, expected_digest, source_order
     checked = reconciliation.build_candidates(db, batch, allowed_project_ids=allowed_project_ids)
     if checked["candidate_digest"] != expected_digest:
         raise ReconciliationConflict("差异或关联领用已变化，请重新核对后确认")
+    if _authorization is not None:
+        _authorization.capture(db)
     now = datetime.now(timezone.utc)
     for line in to_void:
         before = reconciliation._entity(line)
@@ -197,7 +212,7 @@ def apply_reconciliation(db: Session, *, batch_id, expected_digest, source_order
     if empty_sources:
         tombstone_result = demands.void_fast(db, source_order_ids=empty_sources, reason=reason,
             operated_by=operated_by, allowed_project_ids=allowed_project_ids,
-            idempotency_key=f"wbdd-sync:{replay_key}")
+            idempotency_key=f"wbdd-sync:{replay_key}", _wbdd_authorization=_authorization)
     for project_id, state in states.items():
         operations.bump_locked_workbook_revision(db, state=state)
     db.flush()
@@ -207,6 +222,10 @@ def apply_reconciliation(db: Session, *, batch_id, expected_digest, source_order
     saved[replay_key] = {"request_digest": request_digest, "source_ids": sorted(parents),
         "line_ids": [line.id for line in to_void], "site_ids": sorted(site_ids), "result": result,
         "terminal_digest": _state_digest(db, sorted(parents), [line.id for line in to_void], sorted(site_ids))}
+    if _authorization is not None:
+        saved[replay_key]["owner_user_id"] = _authorization.principal.id
+        saved[replay_key]["authorization_parent_ids"] = sorted(_authorization.captured_parents)
+        saved[replay_key]["authorization_source_projects"] = _authorization.captured_source_parents
     batch.report_json = {**(batch.report_json or {}), "_wbdd_sync_results": saved}
     db.flush()
     return result

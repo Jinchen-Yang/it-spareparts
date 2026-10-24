@@ -10,6 +10,8 @@ milestone，并在台账金额与正式 BXD 含税事实一致后同步 expense 
 """
 from __future__ import annotations
 
+from app.authz.service import context_resolution
+
 import hashlib
 import io
 import re
@@ -380,21 +382,62 @@ def store_preview(
     *,
     idempotency_key: str,
     commit: bool = True,
+    identity=None,
+    authorization_precondition=None,
+    producer_authorization=None,
 ) -> str:
     """落 raw 行并返回 batch_id。零 canonical 写入。
 
     Idempotency-Key 生效：(uploaded_by, idempotency_key) 唯一；
     同 key 同 hash 返回既有批次（重放），同 key 异 hash 拒绝。
     """
-    existing = db.execute(
-        select(MaintenanceLedgerImportBatch).where(
-            MaintenanceLedgerImportBatch.uploaded_by == operated_by,
-            MaintenanceLedgerImportBatch.idempotency_key == idempotency_key,
-        )
-    ).scalar_one_or_none()
+    from sqlalchemy.orm import sessionmaker
+    from app.authz import runtime, service as authz_service
+    from app.services import maintenance_workflow_authorization as authorization
+    from app.services import maintenance_authorization as foundation
+    from app.services import authorization_artifacts as artifacts
+    canonical = producer_authorization is not None or runtime.is_authoritative(db, 'maintenance_ledger_import')
+    actor = None
+    if canonical:
+        params = {'input_sha256': parsed['file_hash'], 'doc_type': 'ledger'}
+        if producer_authorization is not None:
+            from app.services.maintenance_ai_fallback_authorization import AiAcceptanceAuthorization
+            from app.authz.errors import authz_error
+            if type(producer_authorization) is not AiAcceptanceAuthorization or commit:
+                raise authz_error(403, 'AUTHZ_CONTEXT_REQUIRED', 'AI 接受必须使用同事务的受控生产许可')
+            actor_id = producer_authorization.prepare(db, 'ledger', parsed['file_hash'])
+            identity = producer_authorization.identity
+        else:
+            with foundation.read_context_snapshot(sessionmaker(bind=db.get_bind()), identity,
+                    entry_id=authorization.LEDGER_PREVIEW, params=params) as (_, _, _, accesses):
+                authorization.require_complete(accesses)
+                actor_id = accesses.principal.id
+        # Domain idempotency is locked before the actor; new rows have no
+        # pre-existing parent locks to acquire after the final authority check.
+        key = artifacts.stable_operation_key(actor_id, 'ledger_preview', idempotency_key)
+        db.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(key, 0))))
+        if producer_authorization is not None:
+            actor = producer_authorization.authorize(db, 'ledger', parsed['file_hash'])
+        else:
+            actor = authz_service.lock_actor(db, identity)
+            batch_context = foundation.resolve_entry_context(db, identity,
+                entry_id=authorization.LEDGER_PREVIEW, params=params, locked_user=actor)
+            accesses = authz_service.context_accesses(db, identity, batch_context, locked_user=actor)
+            authorization.require_complete(accesses)
+            authz_service.check_context_precondition(authorization_precondition, accesses, batch_context.contexts[0].ref)
+        operated_by = actor.username
+    existing = db.scalar(select(MaintenanceLedgerImportBatch).where(
+        (MaintenanceLedgerImportBatch.owner_user_id == actor.id if canonical else
+         (MaintenanceLedgerImportBatch.owner_user_id.is_(None) &
+          (MaintenanceLedgerImportBatch.uploaded_by == operated_by))),
+        MaintenanceLedgerImportBatch.idempotency_key == idempotency_key,
+    ))
     if existing is not None:
         if existing.file_hash != parsed["file_hash"]:
             raise LedgerBatchError("同一 Idempotency-Key 对应不同文件内容，拒绝重放")
+        if canonical:
+            artifacts.load_artifact_binding(db, target=artifacts.ArtifactTarget(
+                'ledger_import_batch', existing.batch_id, 1))
         return existing.batch_id
     batch = MaintenanceLedgerImportBatch(
         batch_id=str(uuid4()),
@@ -403,6 +446,7 @@ def store_preview(
         idempotency_key=idempotency_key,
         source_kind=parsed["source_kind"],
         uploaded_by=operated_by,
+        owner_user_id=actor.id if canonical else None,
         contract_rows=len(parsed["contract_rows"]),
         plan_rows=len(parsed["plan_rows"]),
         expense_rows=len(parsed["expense_rows"]),
@@ -532,6 +576,15 @@ def store_preview(
         "expense_rows": batch.expense_rows,
         "issue_rows": issue_rows,
     }
+    if canonical:
+        db.flush()
+        # A transient upload proof is not reusable stored authority. The
+        # durable owner/input binding is separate; reads resolve the real batch.
+        artifacts.register_artifact_binding(db, identity,
+            target=artifacts.ArtifactTarget('ledger_import_batch', batch.batch_id, 1),
+            input_digest=authorization.ledger_input_digest(db, batch),
+            operation=artifacts.IdempotentOperation('ledger_preview', idempotency_key),
+            locked_user=actor)
     if commit:
         db.commit()
     return batch.batch_id
@@ -1586,8 +1639,34 @@ def _prepare_expense_sync_plans(
     return plans, _expense_attribution_owners(db, observed_ids), failures
 
 
-def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
+def _apply_batch(db: Session, batch_id: str, operated_by: str, *, identity=None,
+                authorization_precondition=None) -> dict:
     """把 raw 行同步进 canonical 表。失败关闭：任何关键异常行都整批零写。"""
+    from sqlalchemy.orm import sessionmaker
+    from app.authz import runtime
+    from app.services import maintenance_workflow_authorization as authorization
+    from app.services import maintenance_authorization as foundation
+    canonical = runtime.is_authoritative(db, 'maintenance_ledger_import')
+    authorize = None
+    if canonical:
+        with foundation.read_context_snapshot(sessionmaker(bind=db.get_bind()), identity,
+                entry_id=authorization.LEDGER_APPLY, params={'batch_id': batch_id}) as (_, _, batch_proof, accesses):
+            authorization.require_complete(accesses)
+            from app.authz import service as authz_service
+            authz_service.check_context_precondition(authorization_precondition, accesses, batch_proof.contexts[0].ref)
+            operated_by = accesses.principal.username
+        authorize = authorization.command_authorizer(identity, entry_id=authorization.LEDGER_APPLY,
+            params={'batch_id': batch_id}, authorization_precondition=authorization_precondition)
+
+    def final_authority():
+        # All domain locks/mutations are still uncommitted. This is the final
+        # lock in each terminal branch; no later domain locks follow it.
+        if authorize is not None:
+            principal = authorize(db)
+            if principal.username != operated_by:
+                from app.authz.errors import authz_error
+                raise authz_error(409, 'AUTHZ_CONTEXT_STALE', '操作者身份已变化，请重试')
+
     # Serialize the same batch before reading its status.  ``populate_existing``
     # matters when the API ownership probe already placed a stale ORM instance
     # in this Session while another request was finishing the apply.
@@ -1660,6 +1739,7 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
                 f"(1+{sales_order.tax_rate}) = {expected_inc}"
             )
     if reconcile_failures:
+        final_authority()
         batch.status = "failed"
         batch.report_json = {
             **(batch.report_json or {}),
@@ -1677,6 +1757,7 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
     ))
     issue_expense_rows = [row for row in expense_rows if row.issues]
     if issue_expense_rows:
+        final_authority()
         batch.status = "failed"
         batch.report_json = {
             **(batch.report_json or {}),
@@ -1688,6 +1769,7 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
             f"台账批次存在 {len(issue_expense_rows)} 行报销归集异常，整批拒绝应用"
         )
     if issue_rows or issue_plan_rows:
+        final_authority()
         batch.status = "failed"
         batch.report_json = {
             **(batch.report_json or {}),
@@ -1710,6 +1792,7 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
         if row.order_no not in contract_order_nos
     ]
     if orphan_plan_rows:
+        final_authority()
         batch.status = "failed"
         batch.report_json = {
             **(batch.report_json or {}),
@@ -1729,6 +1812,7 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
         )
     )
     if expense_failures:
+        final_authority()
         batch.status = "failed"
         batch.report_json = {
             **(batch.report_json or {}),
@@ -2130,8 +2214,54 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
                 db, project_id=project_id, lock=True
             )
         operations.bump_locked_workbook_revision(db, state=state)
+    db.flush()
+    final_authority()
     batch.status = "applied"
     batch.applied_by = operated_by
     batch.applied_at = datetime.now(timezone.utc)
     db.commit()
     return summary
+
+
+def read_batch(session_factory, identity, batch_id, *, authorization_view=False, action_view=False, authorization_precondition=None):
+    """Resolve actual ownership and materialize the entire DTO in one snapshot."""
+    from app.services import maintenance_authorization as foundation
+    from app.services import maintenance_workflow_authorization as authorization
+    entry_id = authorization.LEDGER_APPLY if action_view else authorization.LEDGER_READ
+    with foundation.read_context_snapshot(session_factory, identity,
+            entry_id=entry_id, params={'batch_id': batch_id}) as (db, _, context_batch, accesses):
+        ref = context_batch.contexts[0].ref
+        wire = accesses.wire(ref)
+        if authorization_view:
+            return context_resolution(accesses, ref)
+        accesses.require(ref, 'maintenance_ledger_import', 'read_metadata')
+        from app.authz.service import check_context_precondition
+        check_context_precondition(authorization_precondition, accesses, ref)
+        model = MaintenanceLedgerImportBatch
+        row = db.execute(select(model.batch_id, model.file_hash, model.filename,
+            model.source_kind, model.uploaded_by, model.uploaded_at, model.contract_rows,
+            model.plan_rows, model.expense_rows, model.issue_rows, model.status,
+            model.applied_by, model.applied_at).where(model.batch_id == batch_id)).one()
+        report_access = accesses.get(ref, 'maintenance_ledger_import', 'read_report')
+        return {
+            'batch_id': row.batch_id, 'file_hash': row.file_hash, 'filename': row.filename,
+            'source_kind': row.source_kind, 'uploaded_by': row.uploaded_by,
+            'uploaded_at': row.uploaded_at.isoformat() if row.uploaded_at else None,
+            'contract_rows': row.contract_rows, 'plan_rows': row.plan_rows,
+            'expense_rows': row.expense_rows, 'issue_rows': row.issue_rows,
+            'status': row.status, 'applied_by': row.applied_by,
+            'applied_at': row.applied_at.isoformat() if row.applied_at else None,
+            'report': db.scalar(select(model.report_json).where(model.batch_id == batch_id)) if report_access is not None else None,
+            'authorization_context': wire,
+        }
+
+
+def apply_batch(db: Session, batch_id: str, operated_by: str, *, identity=None,
+                authorization_precondition=None) -> dict:
+    """No caller can accidentally commit an authorization-failed pending batch."""
+    try:
+        return _apply_batch(db, batch_id, operated_by, identity=identity,
+                            authorization_precondition=authorization_precondition)
+    except Exception:
+        db.rollback()
+        raise

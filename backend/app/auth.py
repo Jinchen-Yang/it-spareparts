@@ -26,6 +26,23 @@ from app.config import get_settings
 from app.db import get_db
 from app.models.system import SysAuditLog, SysUser
 
+
+def _beta_navigation_features(db: Session, *, role: str, permission_map: dict | None,
+                              real_identity: bool) -> dict[str, bool]:
+    features = beta_feature_availability(role=role, permission_map=permission_map,
+                                         real_identity=real_identity)
+    if real_identity:
+        from app.authz import runtime
+        states = runtime.runtime_states(db)
+        if any(resource.startswith("replenishment_") and state.runtime_state != "legacy"
+               for resource, state in states.items()):
+            # Canonical navigation checks explicit show/data decisions from /me.
+            # This existing flag then describes release availability only; it
+            # must not reintroduce the old page boolean above those decisions.
+            features["replenishment"] = bool(get_settings().replenishment_beta_enabled)
+    return features
+
+
 router = APIRouter(prefix="/auth", tags=["auth"])
 _bearer = HTTPBearer(auto_error=False)
 
@@ -237,7 +254,8 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
             name=display_name or salesperson_name,
             expires_at=exp,
             permissions=perms,
-            beta_features=beta_feature_availability(
+            beta_features=_beta_navigation_features(
+                db,
                 role=role,
                 permission_map=perms,
                 real_identity=True,
@@ -296,6 +314,7 @@ def current_identity(creds: HTTPAuthorizationCredentials | None = Depends(_beare
 def beta_features(
     response: Response,
     ident: dict = Depends(current_identity),
+    db: Session = Depends(get_db),
 ) -> dict[str, bool]:
     """Refresh kill-switch and whitelist state for an already logged-in client."""
 
@@ -305,7 +324,8 @@ def beta_features(
         and not ident.get("fb")
         and bool(ident.get("sub"))
     )
-    return beta_feature_availability(
+    return _beta_navigation_features(
+        db,
         role=str(ident.get("role") or "guest"),
         permission_map=ident.get("perms"),
         real_identity=real_identity,

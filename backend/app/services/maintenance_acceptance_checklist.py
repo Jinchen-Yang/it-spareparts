@@ -144,18 +144,40 @@ def store_preview(
     project_id: str,
     uploaded_by: str,
     idempotency_key: str,
+    identity=None,
+    authorization_precondition=None,
 ) -> str:
     """落 pending 批次 + raw 行。幂等重放：同 (uploaded_by, key) 且同 hash 返回原批次。"""
+    from app.authz import runtime, service as authz_service
+    from app.services import maintenance_workflow_authorization as authorization
+    from app.services import maintenance_authorization as foundation
+    from app.services import authorization_artifacts as artifacts
+    canonical = runtime.is_authoritative(db, 'maintenance_acceptance')
+    locked = None
+    if canonical:
+        locked = foundation.lock_context_batch(db, identity,
+            entry_id=authorization.CHECKLIST_PREVIEW, params={'project_id': project_id},
+            lock_domain=authorization.lock_project)
+        authorization.require_complete(locked.accesses)
+        ref = locked.batch.contexts[0].ref
+        authz_service.check_context_precondition(authorization_precondition, locked.accesses, ref)
+        uploaded_by = locked.actor.username
     existing = db.scalar(
         select(MaintenanceAcceptanceChecklistBatch).where(
-            MaintenanceAcceptanceChecklistBatch.uploaded_by == uploaded_by,
+            (MaintenanceAcceptanceChecklistBatch.owner_user_id == locked.actor.id if canonical else
+             ((MaintenanceAcceptanceChecklistBatch.owner_user_id.is_(None)) &
+              (MaintenanceAcceptanceChecklistBatch.uploaded_by == uploaded_by))),
             MaintenanceAcceptanceChecklistBatch.idempotency_key == idempotency_key,
         )
     )
     if existing is not None:
-        if existing.file_hash != parsed["file_hash"]:
+        if existing.file_hash != parsed["file_hash"] or existing.project_id != project_id:
             raise ChecklistBatchError("同一幂等键已用于不同文件，请换一个上传重试")
-        db.rollback()
+        if canonical:
+            artifacts.load_artifact_binding(db, target=artifacts.ArtifactTarget(
+                'acceptance_checklist_batch', existing.batch_id, 1))
+        else:
+            db.rollback()
         return existing.batch_id
     project = db.get(MaintenanceProject, project_id)
     if project is None:
@@ -167,6 +189,7 @@ def store_preview(
         filename=parsed["filename"][:255],
         idempotency_key=idempotency_key,
         uploaded_by=uploaded_by,
+        owner_user_id=locked.actor.id if canonical else None,
         item_rows=parsed["item_rows"],
         issue_rows=parsed["issue_rows"],
         status="pending",
@@ -190,6 +213,12 @@ def store_preview(
             issues=it["issues"],
         ))
     db.flush()
+    if canonical:
+        artifacts.register_artifact_binding(db, identity,
+            target=artifacts.ArtifactTarget('acceptance_checklist_batch', batch.batch_id, 1),
+            input_digest=authorization.checklist_input_digest(db,batch.batch_id),
+            operation=artifacts.IdempotentOperation('acceptance_checklist_preview', idempotency_key),
+            provenance=authorization.captured_provenance(locked.accesses), locked_user=locked.actor)
     return batch.batch_id
 
 
@@ -206,15 +235,34 @@ def _current_batch(db: Session, project_id: str
     )
 
 
-def apply_batch(db: Session, batch_id: str, *, operated_by: str) -> dict:
+def apply_batch(db: Session, batch_id: str, *, operated_by: str, identity=None,
+                authorization_precondition=None) -> dict:
     """应用批次：整表替换当前清单。有 issue 行 → 整批拒绝（fail-closed）。"""
-    batch = db.get(MaintenanceAcceptanceChecklistBatch, batch_id)
+    from app.authz import runtime, service as authz_service
+    from app.services import maintenance_workflow_authorization as authorization
+    from app.services import maintenance_authorization as foundation
+    from app.services import authorization_artifacts as artifacts
+    canonical = runtime.is_authoritative(db, 'maintenance_acceptance')
+    if canonical:
+        locked = foundation.lock_context_batch(db, identity,
+            entry_id=authorization.CHECKLIST_APPLY, params={'batch_id': batch_id},
+            lock_domain=authorization.lock_checklist)
+        authorization.require_complete(locked.accesses)
+        ref = locked.batch.contexts[0].ref
+        authz_service.check_context_precondition(authorization_precondition, locked.accesses, ref)
+        artifacts.load_artifact_binding(db, target=artifacts.ArtifactTarget('acceptance_checklist_batch', batch_id, 1))
+        batch = locked.domain_state
+        db.refresh(batch)  # Complete payload only after the current checklist action succeeds.
+        operated_by = locked.actor.username
+    else:
+        batch = db.get(MaintenanceAcceptanceChecklistBatch, batch_id)
     if batch is None:
         raise ChecklistBatchError("清单批次不存在")
-    if batch.uploaded_by != operated_by:
+    if not canonical and batch.uploaded_by != operated_by:
         raise ChecklistBatchError("只能应用本人上传的清单批次")
     if batch.status == "applied":
-        db.rollback()
+        if not canonical:
+            db.rollback()
         return _batch_summary(db, batch)
     if batch.status == "failed":
         raise ChecklistBatchError("批次已失败，请重新上传")

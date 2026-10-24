@@ -9,7 +9,7 @@ from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, selectinload, load_only
 
 from app.models.maintenance_project import (
     MaintenanceProject,
@@ -50,9 +50,10 @@ def project_directory(
     include_inactive: bool,
     as_of: date,
     user_ctx: UserContext | None = None,
+    project_condition=None,
 ) -> dict:
-    filters = []
-    if user_ctx is not None and maintenance_project_assignments.resolve_owner_scope(
+    filters = [] if project_condition is None else [project_condition]
+    if project_condition is None and user_ctx is not None and maintenance_project_assignments.resolve_owner_scope(
         user_ctx,
         None,
     ) == "me":
@@ -155,17 +156,28 @@ def project_overview(
     *,
     as_of: date,
     user_ctx: UserContext,
+    include_identity: bool = True,
+    include_contracts: bool = True,
+    summary_projection: bool = False,
 ) -> dict | None:
-    project = db.execute(
-        select(MaintenanceProject)
-        .options(selectinload(MaintenanceProject.contracts))
-        .where(MaintenanceProject.project_id == project_id)
-    ).scalar_one_or_none()
+    statement = select(MaintenanceProject).where(MaintenanceProject.project_id == project_id)
+    if not include_identity:
+        statement = statement.options(load_only(MaintenanceProject.project_id, raiseload=True))
+    if include_contracts:
+        loader = selectinload(MaintenanceProject.contracts)
+        if summary_projection:
+            loader = loader.load_only(MaintenanceProjectContract.project_contract_id,
+                MaintenanceProjectContract.contract_id, MaintenanceProjectContract.contract_no,
+                MaintenanceProjectContract.amount_inc_tax, MaintenanceProjectContract.included_in_total,
+                MaintenanceProjectContract.effective_from, MaintenanceProjectContract.effective_to,
+                MaintenanceProjectContract.status_mapping_state, raiseload=True)
+        statement = statement.options(loader)
+    project = db.execute(statement).scalar_one_or_none()
     if project is None:
         return None
 
     contracts = sorted(
-        project.contracts,
+        project.contracts if include_contracts else [],
         key=lambda row: (row.contract_no, row.effective_from, row.project_contract_id),
     )
     effective = [relation for relation in contracts if _is_effective(relation, as_of)]
@@ -239,8 +251,10 @@ def project_overview(
         cross_project_conflicts=cross_project_conflicts,
         as_of=as_of,
         user_ctx=user_ctx,
+        include_identity=include_identity,
+        summary_projection=summary_projection,
     )
-    if payload is not None:
+    if payload is not None and include_identity:
         # 项目级可见账号（2026-08-25）：面板「编辑基本信息」回显用
         # （挂在 project 子对象上，与前端 proj.visible_usernames 对齐）
         from app.services import maintenance_project_assignments as assignments
@@ -249,6 +263,8 @@ def project_overview(
             row["username"]
             for row in assignments.project_viewers(db, project_id=project_id)
         ]
+        payload["project"]["manager_assignment"] = assignments.active_assignment_views(
+            db, project_ids=[project_id]).get(project_id)
     return payload
 
 
@@ -259,6 +275,8 @@ def project_overview_from_facts(
     cross_project_conflicts: set[str],
     as_of: date,
     user_ctx: UserContext,
+    include_identity: bool = True,
+    summary_projection: bool = False,
 ) -> dict:
     """Build one project overview from already-batched ORM facts.
 
@@ -365,7 +383,7 @@ def project_overview_from_facts(
         ),
         "is_active": project.is_active,
         "version": project.version,
-    }
+    } if include_identity else {"project_id": project.project_id}
     contract_payload = [
         {
             "project_contract_id": relation.project_contract_id,
@@ -392,6 +410,12 @@ def project_overview_from_facts(
             "version": None if amount_restricted else relation.version,
         }
         for relation in contracts
+    ] if not summary_projection else [
+        {"project_contract_id": relation.project_contract_id, "contract_id": relation.contract_id,
+         "contract_no": relation.contract_no, "contract_amount": None if amount_restricted else relation.amount_inc_tax,
+         "included_in_total": relation.included_in_total, "effective_from": relation.effective_from.isoformat(),
+         "effective_to": relation.effective_to.isoformat() if relation.effective_to else None,
+         "is_effective": _is_effective(relation, as_of)} for relation in contracts
     ]
     payload = {
         "project": project_payload,

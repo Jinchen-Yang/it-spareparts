@@ -24,8 +24,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import and_, case, func, or_, select, text, update
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy import and_, case, func, literal, or_, select, text, update
+from sqlalchemy.orm import Session, aliased, load_only
 
 from app import config, security, tax_policy
 from app.business_time import business_today
@@ -874,7 +874,7 @@ def _lifecycle_status(missing_count: int, latest_end: date | None, as_of: date) 
     return "ended" if latest_end < as_of else "ongoing"
 
 
-def _project_period_subquery():
+def _project_period_subquery(source_condition=None):
     """project_std -> (挂靠项目数, period_from, period_to)，每名恰好一行。
 
     2026-09-03 用户报障：期限回填后项目列表/导出仍大面积「期限缺失」。根因是
@@ -908,6 +908,8 @@ def _project_period_subquery():
             MaintenanceProject.project_id
             == MaintenanceSourceOrderAssignment.project_id,
         )
+        .where(order.id.in_(select(FMaintenanceOrder.id).where(source_condition))
+               if source_condition is not None else literal(True))
         .group_by(name)
         .subquery()
     )
@@ -1091,11 +1093,22 @@ def _dual_cost_summary_from_row(row, *, lines: int) -> dict:
     return result
 
 
+def _without_cost_aggregate_columns(statement):
+    sensitive_prefixes = ('actual_cost_', 'estimated_cost_', 'parts_cost_', 'src_')
+    sensitive_names = {'actual_lines', 'estimated_lines', 'low_conf'}
+    return statement.with_only_columns(*[
+        literal(0).label(column.key) if column.key.startswith(sensitive_prefixes) or column.key in sensitive_names else column
+        for column in statement.selected_columns
+    ], maintain_column_froms=True)
+
+
 def projects_aggregate(db: Session, date_from: date | None = None,
                        date_to: date | None = None, q_text: str | None = None,
                        user_ctx: security.UserContext | None = None,
                        lifecycle: str = "all",
-                       as_of: date | None = None) -> dict:
+                       as_of: date | None = None, *,
+                       source_condition=None, strict_projection: bool = False,
+                       restrict_contract_scope: bool = False) -> dict:
     """项目维度聚合：成本按税口径分列小计（Q4：不混加），来源分布、覆盖率、合同额参考。
 
     合同额只认当前稳定项目合同台账的 ``amount_inc_tax``；未映射、缺金额、重复或
@@ -1129,7 +1142,7 @@ def projects_aggregate(db: Session, date_from: date | None = None,
     # 按它判生命周期，别再因某张 WBDD 单缺 maint_end 把整个项目打成「期限缺失」；
     # 一名对多项目或期限不全时回退 WBDD 兜底，避免张冠李戴。并进主查询而不是
     # 另发一条，保住 test_lifecycle_filters_keep_query_count_constant 的查询数契约。
-    _period_sub = _project_period_subquery()
+    _period_sub = _project_period_subquery(source_condition)
     stmt = (
         select(
             proj.label("project"),
@@ -1177,8 +1190,12 @@ def projects_aggregate(db: Session, date_from: date | None = None,
         .group_by(proj)
     )
     stmt = _scoped_filters(stmt, date_from, date_to)
-    scoped_sales = security.is_scoped_sales(user_ctx)
-    if scoped_sales:
+    if source_condition is not None:
+        stmt = stmt.where(source_condition)
+    if strict_projection and security.is_field_hidden(user_ctx, "cost_total"):
+        stmt = _without_cost_aggregate_columns(stmt)
+    scoped_sales = restrict_contract_scope or (not strict_projection and security.is_scoped_sales(user_ctx))
+    if scoped_sales and not strict_projection:
         if user_ctx and user_ctx.salesperson_name:
             stmt = stmt.where(mo.salesperson == user_ctx.salesperson_name)
         else:
@@ -1213,7 +1230,7 @@ def projects_aggregate(db: Session, date_from: date | None = None,
     canonical_contract_project_ids: set[str] = set()
     # 受限销售账号只能用本人可见的 WBDD 行做项目召回，不能据此穿透到
     # 项目级 canonical 合同台账（同项目还可能包含其他销售的合同事实）。
-    if classified and not scoped_sales:
+    if classified and not scoped_sales and (not strict_projection or not security.is_field_hidden(user_ctx, "contract_amount")):
         active_assignment = and_(
             MaintenanceSourceOrderAssignment.source_order_id == mo.raw_order_id,
             MaintenanceSourceOrderAssignment.is_active.is_(True),
@@ -1228,6 +1245,8 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             .group_by(proj, MaintenanceSourceOrderAssignment.project_id)
         )
         stable_stmt = _scoped_filters(stable_stmt, date_from, date_to)
+        if source_condition is not None:
+            stable_stmt = stable_stmt.where(source_condition)
         if q_text and q_text.strip():
             for group in keyword_groups_or_substr(q_text):
                 stable_stmt = stable_stmt.where(col_matches_any(mo.project_std, group))
@@ -1378,6 +1397,8 @@ def projects_aggregate(db: Session, date_from: date | None = None,
         for row in rows:
             row["contract_amount_inc_tax"] = None
             row["contract_amount"] = None
+            row["contract_incomplete"] = None
+            row["contract_shared"] = None
     if cost_restricted:
         # 叶子金额置 null 还不够：按隐藏 cost_total 排序本身会泄漏相对成本，Agent
         # 再截前 N 条时泄漏更严重。无成本权限统一退回项目名稳定序。
@@ -1401,6 +1422,7 @@ def _project_lines_query(
     date_to: date | None = None,
     user_ctx: security.UserContext | None = None,
     row_filters: tuple[RowFilter, ...] = (),
+    *, source_condition=None, strict_projection: bool = False,
 ):
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     base = (
@@ -1414,11 +1436,22 @@ def _project_lines_query(
             ),
         )
     )
+    if source_condition is not None:
+        base = base.where(source_condition)
+    if strict_projection:
+        order_columns = [mo.id, mo.order_no, mo.order_date, mo.demand_type, mo.business_type, mo.warehouse]
+        line_columns = [ml.id, ml.raw_line_id, ml.order_id, ml.pn_std, ml.description,
+            ml.qty, ml.return_qty, ml.returned_qty, ml.pending_return_qty]
+        if security.is_field_hidden(user_ctx, "cost_total"):
+            base = base.with_only_columns(ml, mo).options(
+                load_only(*line_columns, raiseload=True), load_only(*order_columns, raiseload=True))
+        else:
+            base = base.options(load_only(*order_columns, raiseload=True))
     # E2E #3：行级作废默认不进全局行列表（与总表/看板同口径）。
     base = base.where(ml.is_active.is_(True))
     base = base.where(mo.project_std == project if project != "(未填项目)"
                       else mo.project_std.is_(None))
-    if security.is_scoped_sales(user_ctx):
+    if not strict_projection and security.is_scoped_sales(user_ctx):
         if user_ctx and user_ctx.salesperson_name:
             base = base.where(mo.salesperson == user_ctx.salesperson_name)
         else:
@@ -1442,6 +1475,7 @@ def project_line_count(
     date_to: date | None = None,
     user_ctx: security.UserContext | None = None,
     row_filters: tuple[RowFilter, ...] = (),
+    *, source_condition=None, strict_projection: bool = False,
 ) -> int:
     """返回与项目明细/CSV 完全同作用域的行数，供资源预检。"""
     base = _project_lines_query(
@@ -1450,9 +1484,9 @@ def project_line_count(
         date_from,
         date_to,
         user_ctx=user_ctx,
-        row_filters=row_filters,
+        row_filters=row_filters, source_condition=source_condition, strict_projection=strict_projection,
     )
-    return db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    return db.scalar(select(func.count()).select_from(base.with_only_columns(FMaintenanceLine.id).subquery())) or 0
 
 
 def project_exists(
@@ -1460,6 +1494,7 @@ def project_exists(
     project: str,
     *,
     user_ctx: security.UserContext | None = None,
+    source_condition=None, strict_projection: bool = False,
 ) -> bool:
     """判断调用者是否可见项目对象，不把成本范围或明细存在性混入对象存在。"""
     order = FMaintenanceOrder
@@ -1469,7 +1504,9 @@ def project_exists(
         else order.project_std.is_(None),
         maintenance_demands.active_demand_condition(order),
     )
-    if security.is_scoped_sales(user_ctx):
+    if source_condition is not None:
+        visible = visible.where(source_condition)
+    if not strict_projection and security.is_scoped_sales(user_ctx):
         if user_ctx and user_ctx.salesperson_name:
             visible = visible.where(order.salesperson == user_ctx.salesperson_name)
         else:
@@ -1483,7 +1520,22 @@ def _serialize_project_line(
     override: MaintenanceManualCostOverride | None = None,
     *,
     hide_cost_signals: bool,
+    strict_projection: bool = False,
 ) -> dict:
+    if hide_cost_signals and strict_projection:
+        public_id = hmac.new(get_settings().secret_key.encode("utf-8"),
+            f"maintenance-project-line:{ln.raw_line_id}".encode("utf-8"), hashlib.sha256).hexdigest()[:24]
+        return {"id": f"ML-{public_id}", "order_no": order.order_no,
+            "order_date": order.order_date.isoformat() if order.order_date else None,
+            "demand_type": order.demand_type, "business_type": order.business_type, "warehouse": order.warehouse,
+            "pn_std": ln.pn_std, "description": ln.description, "qty": _f(ln.qty),
+            "return_qty": _f(ln.return_qty), "returned_qty": _f(ln.returned_qty),
+            "pending_return_qty": _f(ln.pending_return_qty), "anomaly_flags": [],
+            **{key: None for key in ("unit_cost", "cost_amount", "unit_cost_inc_tax", "unit_cost_ex_tax",
+                "cost_amount_inc_tax", "cost_amount_ex_tax", "cost_tier", "cost_source", "cost_tax_basis",
+                "price_month", "trace_months", "linked_purchase_order_no", "price_distance_days", "confidence",
+                "reference_side", "reference_pool_group_id", "reference_pool_version", "reference_sample_count",
+                "reference_from_date", "reference_to_date", "reference_latest_date")}}
     cost_fact = maintenance_cost_quality.resolved_line_cost_fields(
         source=ln.cost_source,
         tax_basis=ln.cost_tax_basis,
@@ -1591,6 +1643,7 @@ def iter_project_lines(
     user_ctx: security.UserContext | None = None,
     yield_per: int = 1000,
     row_filters: tuple[RowFilter, ...] = (),
+    *, source_condition=None, strict_projection: bool = False,
 ):
     """流式遍历项目明细；与分页 API 共用查询和序列化真相源。"""
     from app.services.maintenance_export_ordering import wbdd_export_order_by
@@ -1600,7 +1653,7 @@ def iter_project_lines(
         date_from,
         date_to,
         user_ctx=user_ctx,
-        row_filters=row_filters,
+        row_filters=row_filters, source_condition=source_condition, strict_projection=strict_projection,
     ).order_by(*wbdd_export_order_by()).execution_options(
         stream_results=True, yield_per=yield_per,
     )
@@ -1614,7 +1667,7 @@ def iter_project_lines(
                 ln,
                 order,
                 override,
-                hide_cost_signals=hide_cost_signals,
+                hide_cost_signals=hide_cost_signals, strict_projection=strict_projection,
             )
     finally:
         result.close()
@@ -1624,7 +1677,8 @@ def project_lines(db: Session, project: str, month: str | None = None,
                   date_from: date | None = None, date_to: date | None = None,
                   page: int = 1, page_size: int = 50,
                   user_ctx: security.UserContext | None = None,
-                  row_filters: tuple[RowFilter, ...] = ()) -> dict:
+                  row_filters: tuple[RowFilter, ...] = (), *,
+                  source_condition=None, strict_projection: bool = False) -> dict:
     """单项目 SKU 级明细（分页）：含成本来源/税口径/追溯月/关联采购单，逐行可解释。"""
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     base = _project_lines_query(
@@ -1633,9 +1687,9 @@ def project_lines(db: Session, project: str, month: str | None = None,
         date_from,
         date_to,
         user_ctx=user_ctx,
-        row_filters=row_filters,
+        row_filters=row_filters, source_condition=source_condition, strict_projection=strict_projection,
     )
-    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    total = db.scalar(select(func.count()).select_from(base.with_only_columns(ml.id).subquery())) or 0
     page = max(page, 1)
     paged = base.order_by(
         mo.order_date.desc().nullslast(), ml.id.desc(),
@@ -1646,7 +1700,7 @@ def project_lines(db: Session, project: str, month: str | None = None,
             row[0],
             row[1],
             row[2] if len(row) > 2 else None,
-            hide_cost_signals=hide_cost_signals,
+            hide_cost_signals=hide_cost_signals, strict_projection=strict_projection,
         )
         for row in db.execute(paged)
     ]
@@ -1665,7 +1719,11 @@ def _contract_amounts(db: Session, order_nos: list[str]) -> dict[str, Decimal]:
         return {}
     today = business_today()
     rows = db.execute(
-        select(MaintenanceProjectContract)
+        select(MaintenanceProjectContract).options(load_only(
+            MaintenanceProjectContract.project_contract_id, MaintenanceProjectContract.project_id,
+            MaintenanceProjectContract.contract_id, MaintenanceProjectContract.contract_no,
+            MaintenanceProjectContract.included_in_total, MaintenanceProjectContract.status_mapping_state,
+            MaintenanceProjectContract.amount_inc_tax, raiseload=True))
         .where(
             MaintenanceProjectContract.contract_no.in_(order_nos),
             MaintenanceProjectContract.effective_from <= today,
@@ -1723,7 +1781,7 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
           user_ctx: security.UserContext | None = None,
           lifecycle: str = "all",
           as_of: date | None = None,
-          q_text: str | None = None) -> dict:
+          q_text: str | None = None, *, strict_projection: bool = False) -> dict:
     """合同级预算消耗参考看板。
 
     预算 = 当前 mapped 合同台账 ``amount_inc_tax``；已知支出 = 归一含税备件成本
@@ -1793,6 +1851,8 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
                 _matched_maintenance_contracts(date_from, date_to, q_text),
             ),
         )
+    if strict_projection and security.is_field_hidden(user_ctx, "cost_total"):
+        stmt = _without_cost_aggregate_columns(stmt)
     raw = db.execute(stmt).all()
 
     groups: dict[str, dict] = {}
@@ -1889,26 +1949,29 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
                 g[k] = v if g[k] is None else fn(g[k], v)
 
     contract_nos = [contract_no for contract_no in groups if contract_no]
-    revenue_evidence = maintenance_margin_evidence.load_contract_revenue_evidence(
-        db,
-        contract_nos,
-    )
-    expense_evidence = maintenance_margin_evidence.load_untyped_expense_evidence(
-        db,
-        contract_nos,
-        date_from=_effective_cost_date_from(date_from),
-        date_to=date_to,
-    )
-    expense_snapshot_complete = (
-        maintenance_margin_evidence.load_expense_snapshot_completeness(
+    if strict_projection and profit_restricted:
+        revenue_evidence, expense_evidence, expense_snapshot_complete, contracts = {}, {}, {}, {}
+    else:
+        revenue_evidence = maintenance_margin_evidence.load_contract_revenue_evidence(
             db,
             contract_nos,
-            required_through=date_to or as_of,
         )
-    )
-    # 预算/含税收入只认当前合同台账 amount_inc_tax；销售表仍只为未税毛利证据，
-    # 绝不能再用固定税率猜出含税合同额覆盖工作簿修改。
-    contracts = _contract_amounts(db, contract_nos)
+        expense_evidence = maintenance_margin_evidence.load_untyped_expense_evidence(
+            db,
+            contract_nos,
+            date_from=_effective_cost_date_from(date_from),
+            date_to=date_to,
+        )
+        expense_snapshot_complete = (
+            maintenance_margin_evidence.load_expense_snapshot_completeness(
+                db,
+                contract_nos,
+                required_through=date_to or as_of,
+            )
+        )
+        # 预算/含税收入只认当前合同台账 amount_inc_tax；销售表仍只为未税毛利证据，
+        # 绝不能再用固定税率猜出含税合同额覆盖工作簿修改。
+        contracts = _contract_amounts(db, contract_nos)
     expenses = {
         contract_no: evidence.legacy_raw_total
         for contract_no, evidence in expense_evidence.items()
@@ -2179,6 +2242,11 @@ def contract_workbook_data(
             # 2026-08-19：作废明细行不进合同工作簿；无明细单的占位行保留（#55）
             or_(ml.id.is_(None), ml.is_active.is_(True)),
         )
+        # This renderer never uses customer fields; do not fetch them into the
+        # whole-workbook producer's ORM identity map.
+        .options(load_only(mo.id, mo.order_no, mo.order_date, mo.linked_sales_order_no,
+            mo.project_raw, mo.project_std, mo.demand_type, mo.warehouse,
+            mo.salesperson, mo.business_type, raiseload=True))
     )
     stmt = _scoped_filters(stmt, date_from, date_to)
     stmt = stmt.order_by(*wbdd_export_order_by())

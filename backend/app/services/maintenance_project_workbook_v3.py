@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from app.authz.service import context_resolution
+
 import io
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -608,7 +610,7 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
         ws_dict.append([line])
     ws_dict.sheet_state = "hidden"
     ws_meta = wb.create_sheet("99_元数据")
-    state = operations.get_or_create_workbook_state(db, project_id=project_id)
+    state = operations.read_workbook_state(db, project_id=project_id)
     ws_meta.append(["协议版本", WORKBOOK_PROTOCOL_VERSION])
     ws_meta.append(["导出ID", str(uuid4())])
     ws_meta.append(["项目编号", project.project_code])
@@ -622,3 +624,21 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
+
+
+def read_project_workbook(session_factory, identity, project_id: str, *, authorization_view: bool = False, authorization_precondition=None):
+    """Whole-file entry: permission evidence and every sheet share one snapshot."""
+    from app.services import maintenance_authorization as foundation
+    from app.services.maintenance_workflow_authorization import require_complete
+    entry_id = 'GET /api/maintenance/projects/stable/{project_id}/workbook-v3.xlsx'
+    with foundation.read_context_snapshot(session_factory, identity, entry_id=entry_id,
+            params={'project_id': project_id}) as (db, _, batch, accesses):
+        ref = batch.contexts[0].ref
+        if authorization_view:
+            return context_resolution(accesses, ref)
+        require_complete(accesses)
+        from app.authz.service import check_context_precondition
+        check_context_precondition(authorization_precondition, accesses, ref)
+        # download_v3 requires cost AND profit from this same Grant. The
+        # renderer is called only after the complete resource decision.
+        return build_project_workbook(db, project_id)

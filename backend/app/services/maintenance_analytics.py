@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import Date, and_, case, func, or_, select
+from sqlalchemy import Date, Numeric, and_, case, cast, false, func, literal, or_, select
 from sqlalchemy.orm import Session
 
 from app.business_time import business_today
@@ -198,6 +198,8 @@ def pn_ranking(
     page_size: int = 20,
     can_cost: bool,
     allowed_project_ids: set[str] | None = None,
+    authorized_project_query=None,
+    strict_field_projection=False,
 ) -> dict:
     """PN 排名聚合。
 
@@ -249,6 +251,9 @@ def pn_ranking(
         )
     )
 
+    if strict_field_projection and not can_cost:
+        cost_inc = cost_ex = cast(literal(None), Numeric)
+        missing_inc = false()
     # ---- 主聚合：WBDD 明细按 PN 分组（单查询，无 N+1） ----
     stmt = (
         select(
@@ -310,6 +315,8 @@ def pn_ranking(
             .correlate(MaintenanceSourceOrderAssignment)
             .exists()
         )
+    if authorized_project_query is not None:
+        stmt = stmt.where(MaintenanceSourceOrderAssignment.project_id.in_(authorized_project_query))
     if allowed_project_ids is not None:
         # outerjoin 上的 where 让未归属行（NULL）自然落选——范围账号看不到无主行
         stmt = stmt.where(
@@ -375,7 +382,8 @@ def pn_ranking(
         fact_project_ids = (classified if fact_project_ids is None
                             else fact_project_ids & classified)
     facts = pn_totals(db, project_ids=fact_project_ids, date_from=start, date_to=end,
-                      source_order_ids=fact_source_ids, demand_part_scope=demand_part_scope)
+                      source_order_ids=fact_source_ids, demand_part_scope=demand_part_scope,
+                      authorized_project_query=authorized_project_query)
     by_part = {f["part_id"]: f for f in facts if f["part_id"] is not None}
     by_pn = {}
     ambiguous_pns = set()
@@ -554,7 +562,7 @@ def pn_ranking(
     }
 
 
-def filter_options(db: Session, *, allowed_project_ids: set[str] | None = None) -> dict:
+def filter_options(db: Session, *, allowed_project_ids: set[str] | None = None, authorized_project_query=None) -> dict:
     """筛选器候选项：有效订单的非空仓库去重排序（最多 200）。
 
     allowed_project_ids 非 None（行键开）时用 EXISTS 收敛到可见项目，
@@ -585,6 +593,11 @@ def filter_options(db: Session, *, allowed_project_ids: set[str] | None = None) 
             )
             .exists()
         )
+    if authorized_project_query is not None:
+        stmt = stmt.where(select(1).where(
+            MaintenanceSourceOrderAssignment.source_order_id == FMaintenanceOrder.raw_order_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+            MaintenanceSourceOrderAssignment.project_id.in_(authorized_project_query)).exists())
     return {"warehouses": [w for w in db.scalars(stmt).all() if w]}
 
 
@@ -691,6 +704,7 @@ def _spend_filters(
     cost_sources: list[str] | None,
     start: date | None,
     end: date | None,
+    authorized_project_query=None,
 ):
     """pn_ranking 同款筛选子句（主聚合/销售/项目三条分组查询共用，口径单一）。
 
@@ -711,6 +725,8 @@ def _spend_filters(
             .correlate(MaintenanceSourceOrderAssignment)
             .exists()
         )
+    if authorized_project_query is not None:
+        stmt = stmt.where(MaintenanceSourceOrderAssignment.project_id.in_(authorized_project_query))
     if allowed_project_ids is not None:
         # outerjoin 上的 where 让未归属行（NULL）自然落选——范围账号看不到无主行
         stmt = stmt.where(
@@ -765,6 +781,8 @@ def spend_trend(
     cost_sources: list[str] | None = None,
     can_cost: bool,
     allowed_project_ids: set[str] | None = None,
+    authorized_project_query=None,
+    strict_field_projection=False,
 ) -> dict:
     """开支统计：按期（日/周/月/年）× 业务类型 × 销售 × 项目拆分已知成本。
 
@@ -819,11 +837,15 @@ def spend_trend(
         )
     )
 
+    if strict_field_projection and not can_cost:
+        cost_inc = cost_ex = cast(literal(None), Numeric)
+        missing_inc = false()
     def apply_filters(statement):
         return _spend_filters(
             statement,
             business_type_clause=business_type_clause,
             allowed_project_ids=allowed_project_ids,
+            authorized_project_query=authorized_project_query,
             project_ids=project_ids,
             customer=customer,
             salesperson=salesperson,

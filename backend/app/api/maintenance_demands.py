@@ -2,13 +2,15 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import Request, APIRouter, Depends, HTTPException, Path, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import current_identity, current_role, require_admin
 from app.db import get_db
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_demand_authorization as canonical
 from app.models.system import SysUser
 from app.security import (
     UserContext,
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 class DemandSearchRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     # Length is validated explicitly in the endpoint.  Pydantic's default
@@ -42,6 +45,7 @@ class DemandSearchRequest(BaseModel):
 
 
 class DeleteIntentCreateRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     # Keep item/count validation in the service.  Pydantic's collection bound
@@ -58,12 +62,14 @@ class DeleteIntentCreateRequest(BaseModel):
 
 
 class DeleteIntentActionRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     digest: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
 
 
 class DemandRestoreRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     # Do not use Pydantic max_length here: its default 422 reflects the entire
@@ -123,9 +129,25 @@ def search_demands(
     body: DemandSearchRequest,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/demands/search', {**body.model_dump(exclude={"authorization_precondition"}), },
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from app.services import maintenance_demand_manual
+            if isinstance(exc, (maintenance_demand_manual.DemandManualError, maintenance_demand_manual.DemandManualConflict)):
+                _raise_manual_error(exc)
+            _raise_service_error(exc)
+            raise
     if body.q is not None and len(body.q) > 128:
         # Keep the rejection generic and perform it before access auditing so
         # neither the raw term nor any derivative is persisted.
@@ -161,6 +183,7 @@ def search_demands(
 
 
 class DemandVoidFastRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     # Bound validation stays in the service（同 DeleteIntentCreateRequest 的
@@ -181,11 +204,27 @@ def void_fast(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_demand_delete")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(canonical.RESOURCE, require_action("action_maintenance_demand_delete"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
 ) -> dict:
     """一键批量作废（#264/#267）：单事务墓碑 + 挂靠停用，无两阶段等待。"""
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/demands/void-fast', {**body.model_dump(exclude={"authorization_precondition"}), },
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from app.services import maintenance_demand_manual
+            if isinstance(exc, (maintenance_demand_manual.DemandManualError, maintenance_demand_manual.DemandManualConflict)):
+                _raise_manual_error(exc)
+            _raise_service_error(exc)
+            raise
     operated_by = _real_operator(db, ident)
     allowed_project_ids = scope_resolve(db, ctx)
     record_access_log(
@@ -222,10 +261,26 @@ def create_delete_intent(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_demand_delete")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(canonical.RESOURCE, require_action("action_maintenance_demand_delete"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/demands/delete-intents', {**body.model_dump(exclude={"authorization_precondition"}), },
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from app.services import maintenance_demand_manual
+            if isinstance(exc, (maintenance_demand_manual.DemandManualError, maintenance_demand_manual.DemandManualConflict)):
+                _raise_manual_error(exc)
+            _raise_service_error(exc)
+            raise
     operated_by = _real_operator(db, ident)
     allowed_project_ids = scope_resolve(db, ctx)
     try:
@@ -253,9 +308,25 @@ def get_delete_intent(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_demand_delete")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(canonical.RESOURCE, require_action("action_maintenance_demand_delete"))),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'GET /api/maintenance/demands/delete-intents/{intent_id}', {"intent_id": intent_id},
+                view=request.query_params.get("view"), precondition=request.query_params.get("authorization_precondition"))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from app.services import maintenance_demand_manual
+            if isinstance(exc, (maintenance_demand_manual.DemandManualError, maintenance_demand_manual.DemandManualConflict)):
+                _raise_manual_error(exc)
+            _raise_service_error(exc)
+            raise
     operated_by = _real_operator(db, ident)
     try:
         return maintenance_demands.get_delete_intent(
@@ -317,9 +388,25 @@ def arm_delete_intent(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_demand_delete")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(canonical.RESOURCE, require_action("action_maintenance_demand_delete"))),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/demands/delete-intents/{intent_id}/arm', {**body.model_dump(exclude={"authorization_precondition"}), "intent_id": intent_id},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from app.services import maintenance_demand_manual
+            if isinstance(exc, (maintenance_demand_manual.DemandManualError, maintenance_demand_manual.DemandManualConflict)):
+                _raise_manual_error(exc)
+            _raise_service_error(exc)
+            raise
     return _intent_action(
         action="arm",
         intent_id=intent_id,
@@ -337,11 +424,27 @@ def execute_delete_intent(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_demand_delete")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(canonical.RESOURCE, require_action("action_maintenance_demand_delete"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
 ) -> dict:
     # 执行时重新鉴权（TOCTOU）：创建意图时的范围可能已失效（改派/撤权）。
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/demands/delete-intents/{intent_id}/execute', {**body.model_dump(exclude={"authorization_precondition"}), "intent_id": intent_id},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from app.services import maintenance_demand_manual
+            if isinstance(exc, (maintenance_demand_manual.DemandManualError, maintenance_demand_manual.DemandManualConflict)):
+                _raise_manual_error(exc)
+            _raise_service_error(exc)
+            raise
     allowed_project_ids = scope_resolve(db, ctx)
     return _intent_action(
         action="execute",
@@ -360,9 +463,25 @@ def cancel_delete_intent(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_demand_delete")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(canonical.RESOURCE, require_action("action_maintenance_demand_delete"))),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/demands/delete-intents/{intent_id}/cancel', {**body.model_dump(exclude={"authorization_precondition"}), "intent_id": intent_id},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from app.services import maintenance_demand_manual
+            if isinstance(exc, (maintenance_demand_manual.DemandManualError, maintenance_demand_manual.DemandManualConflict)):
+                _raise_manual_error(exc)
+            _raise_service_error(exc)
+            raise
     return _intent_action(
         action="cancel",
         intent_id=intent_id,
@@ -381,10 +500,27 @@ def restore_demand(
     source_order_id: str = Path(...),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _admin: str = Depends(require_admin),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_demand_delete")),
+    _admin: str = Depends(current_role),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(canonical.RESOURCE, require_action("action_maintenance_demand_delete"))),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
 ) -> dict:
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/demands/{source_order_id}/restore', {**body.model_dump(exclude={"authorization_precondition"}), "source_order_id": source_order_id},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from app.services import maintenance_demand_manual
+            if isinstance(exc, (maintenance_demand_manual.DemandManualError, maintenance_demand_manual.DemandManualConflict)):
+                _raise_manual_error(exc)
+            _raise_service_error(exc)
+            raise
+    require_admin(_admin)
     operated_by = _real_operator(db, ident)
     try:
         result = maintenance_demands.restore_demand(
@@ -413,11 +549,26 @@ def list_manual_protection_review(
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_demand_manage")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(canonical.RESOURCE, require_action("action_maintenance_demand_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
 ) -> dict:
     """历史整行人工保护待核对清单；只读，不含成本或人工账本原值。"""
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'GET /api/maintenance/demands/manual-protection-review', {"page": page, "page_size": page_size},
+                view=request.query_params.get("view"), precondition=request.query_params.get("authorization_precondition"))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from app.services import maintenance_demand_manual
+            if isinstance(exc, (maintenance_demand_manual.DemandManualError, maintenance_demand_manual.DemandManualConflict)):
+                _raise_manual_error(exc)
+            _raise_service_error(exc)
+            raise
     from app.services import maintenance_demand_manual
 
     response.headers["Cache-Control"] = "no-store"
@@ -432,6 +583,7 @@ def list_manual_protection_review(
 
 
 class DemandLinePatchRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     updates: dict  # 字段白名单在 service 层失败关闭校验
@@ -443,6 +595,7 @@ class DemandLinePatchRequest(BaseModel):
 
 
 class DemandLineCreateRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     order_date: str  # YYYY-MM-DD（服务层解析）
@@ -459,6 +612,7 @@ class DemandLineCreateRequest(BaseModel):
 
 
 class DemandLineOverrideClearRequest(BaseModel):
+    authorization_precondition: dict | None = None
     model_config = ConfigDict(extra="forbid")
 
     field_name: str = Field(min_length=1, max_length=64)
@@ -485,11 +639,27 @@ def patch_demand_line(
     raw_line_id: str = Path(min_length=1, max_length=64),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_demand_manage")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(canonical.RESOURCE, require_action("action_maintenance_demand_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
 ) -> dict:
     """页面直改一条需求明细行（override 账本 + 审计 + recompute 联动）。"""
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'PATCH /api/maintenance/demands/lines/{raw_line_id}', {**body.model_dump(exclude={"authorization_precondition"}), "raw_line_id": raw_line_id},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from app.services import maintenance_demand_manual
+            if isinstance(exc, (maintenance_demand_manual.DemandManualError, maintenance_demand_manual.DemandManualConflict)):
+                _raise_manual_error(exc)
+            _raise_service_error(exc)
+            raise
     from app.services import maintenance_demand_manual
 
     operated_by = _real_operator(db, ident)
@@ -523,11 +693,27 @@ def create_demand_line(
     body: DemandLineCreateRequest,
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_demand_manage")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(canonical.RESOURCE, require_action("action_maintenance_demand_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
 ) -> dict:
     """页面直建手工需求行（page_manual 来源，不参与氚云删单比对）。"""
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/demands/lines', {**body.model_dump(exclude={"authorization_precondition"}), },
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from app.services import maintenance_demand_manual
+            if isinstance(exc, (maintenance_demand_manual.DemandManualError, maintenance_demand_manual.DemandManualConflict)):
+                _raise_manual_error(exc)
+            _raise_service_error(exc)
+            raise
     from datetime import date as _date
 
     from app.services import maintenance_demand_manual
@@ -571,11 +757,27 @@ def clear_override(
     raw_line_id: str = Path(min_length=1, max_length=64),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_demand_manage")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(canonical.RESOURCE, require_action("action_maintenance_demand_manage"))),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
 ) -> dict:
     """恢复首次修改前的 source_value 快照；采用新原件值需要重新上传。"""
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'POST /api/maintenance/demands/lines/{raw_line_id}/clear-override', {**body.model_dump(exclude={"authorization_precondition"}), "raw_line_id": raw_line_id},
+                view=request.query_params.get("view"), precondition=body.authorization_precondition)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from app.services import maintenance_demand_manual
+            if isinstance(exc, (maintenance_demand_manual.DemandManualError, maintenance_demand_manual.DemandManualConflict)):
+                _raise_manual_error(exc)
+            _raise_service_error(exc)
+            raise
     from app.services import maintenance_demand_manual
 
     operated_by = _real_operator(db, ident)
@@ -629,14 +831,30 @@ def list_demand_lines(
     source_order_id: str = Path(min_length=1, max_length=64),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(canonical.RESOURCE, "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    request: Request = None,
+    response: Response = None,
+    canonical_identity=Depends(auth_transport.identity_for(canonical.RESOURCE)),
 ) -> dict:
     """列出一个需求单头下的明细行（页面行编辑的数据源）。
 
     可见性：scope 受限账号只能看自己项目内的单（失败关闭）；
     include_inactive=false 默认只回活行（作废行不可编辑也无须展示）。
     """
+    if canonical_identity is not None:
+        response.headers["Cache-Control"] = "no-store"
+        try:
+            return canonical.execute(db, canonical_identity, 'GET /api/maintenance/demands/orders/{source_order_id}/lines', {"source_order_id": source_order_id},
+                view=request.query_params.get("view"), precondition=request.query_params.get("authorization_precondition"))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            from app.services import maintenance_demand_manual
+            if isinstance(exc, (maintenance_demand_manual.DemandManualError, maintenance_demand_manual.DemandManualConflict)):
+                _raise_manual_error(exc)
+            _raise_service_error(exc)
+            raise
     from app.models.maintenance import FMaintenanceLine
 
     visible = scope_resolve(db, ctx)
@@ -650,6 +868,12 @@ def list_demand_lines(
         ).all()
         if not assigned or not set(assigned) <= set(visible):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "该项目不在你的可见范围")
+    return _list_demand_lines_data(db, source_order_id, visible=visible)
+
+
+def _list_demand_lines_data(db: Session, source_order_id: str, *, visible) -> dict:
+    from app.models.maintenance import FMaintenanceLine
+
     order = db.scalar(
         select(maintenance_demands.FMaintenanceOrder).where(
             maintenance_demands.FMaintenanceOrder.raw_order_id == source_order_id

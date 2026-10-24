@@ -318,7 +318,7 @@ def test_every_registered_beta_route_has_the_server_gate_dependency():
             f"{','.join(sorted(route.methods))} {route.path}"
             for route in routes
             if not any(
-                dependency.call is gate
+                dependency.call is gate or getattr(dependency.call, "release_gate", None) is gate
                 for dependency in route.dependant.dependencies
             )
         ]

@@ -44,7 +44,7 @@ def _blank_business_type():
     )
 
 
-def candidate_project_ids(db: Session) -> list[str]:
+def candidate_project_ids(db: Session, *, project_condition=None) -> list[str]:
     """待回填候选：主档有效、业务类型为空。只填空，绝不覆盖。"""
 
     return list(
@@ -53,6 +53,7 @@ def candidate_project_ids(db: Session) -> list[str]:
             .where(
                 MaintenanceProject.is_active.is_(True),
                 _blank_business_type(),
+                *([project_condition] if project_condition is not None else []),
             )
             .order_by(MaintenanceProject.project_id)
         )
@@ -113,10 +114,10 @@ def derive_by_project(
     }
 
 
-def preview(db: Session) -> dict:
+def preview(db: Session, *, project_condition=None) -> dict:
     """只读：这一轮回填会填哪些、哪些冲突、哪些推不出来。不写库。"""
 
-    candidates = candidate_project_ids(db)
+    candidates = candidate_project_ids(db,project_condition=project_condition)
     derived = derive_by_project(db, candidates)
     names = dict(
         db.execute(

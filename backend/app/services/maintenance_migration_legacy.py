@@ -92,6 +92,7 @@ def _assignment_rows(
     *,
     as_of: date,
     blockers: list[dict[str, Any]],
+    read_snapshot=None,
 ) -> tuple[list[Any], bool]:
     required = {
         "assignment_id",
@@ -102,7 +103,13 @@ def _assignment_rows(
     }
     if not _table_has_columns(db, "maintenance_source_order_assignment", required):
         return [], False
-    db.execute(text("LOCK TABLE maintenance_source_order_assignment IN SHARE MODE"))
+    if read_snapshot is not None:
+        from app.authz.context import ReadSnapshotProof
+        if type(read_snapshot) is not ReadSnapshotProof:
+            raise ValueError("需要真实一致读证明")
+        read_snapshot.validate(db)
+    else:
+        db.execute(text("LOCK TABLE maintenance_source_order_assignment IN SHARE MODE"))
     source_order_ids = list(
         db.scalars(
             select(FMaintenanceOrder.raw_order_id)
@@ -154,11 +161,13 @@ def _legacy_cost_lines(
     project_id: str,
     as_of: date,
     blockers: list[dict[str, Any]],
+    read_snapshot=None,
 ) -> tuple[list[dict[str, Any]], bool]:
     assignments, assignment_contract_ready = _assignment_rows(
         db,
         as_of=as_of,
         blockers=blockers,
+        read_snapshot=read_snapshot,
     )
     if not assignment_contract_ready:
         _blocker(
@@ -555,19 +564,25 @@ def _legacy_expenses(
 
 
 def load_project_legacy_truth(
-    db: Session, project_id: str, as_of: date
+    db: Session, project_id: str, as_of: date, *, read_snapshot=None
 ) -> dict[str, Any]:
     """Load immutable old-formula facts; any incomplete scope fails closed."""
 
-    db.execute(
-        text(
-            "LOCK TABLE f_maintenance_order, f_maintenance_line, "
-            "f_project_expense, maintenance_project_contract IN SHARE MODE"
+    if read_snapshot is not None:
+        from app.authz.context import ReadSnapshotProof
+        if type(read_snapshot) is not ReadSnapshotProof:
+            raise ValueError("需要真实一致读证明")
+        read_snapshot.validate(db)
+    else:
+        db.execute(
+            text(
+                "LOCK TABLE f_maintenance_order, f_maintenance_line, "
+                "f_project_expense, maintenance_project_contract IN SHARE MODE"
+            )
         )
-    )
     blockers: list[dict[str, Any]] = []
     cost_lines, assignment_ready = _legacy_cost_lines(
-        db, project_id=project_id, as_of=as_of, blockers=blockers
+        db, project_id=project_id, as_of=as_of, blockers=blockers, read_snapshot=read_snapshot
     )
     expenses = _legacy_expenses(
         db, project_id=project_id, as_of=as_of, blockers=blockers

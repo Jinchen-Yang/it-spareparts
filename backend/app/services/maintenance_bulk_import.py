@@ -34,7 +34,7 @@ from uuid import uuid4
 
 from openpyxl import load_workbook
 from sqlalchemy import and_, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app import config
 from app.business_time import business_today
@@ -1047,7 +1047,9 @@ class SalesContractAmountAdapter(HeaderAdapter):
             db, order_variants
         )
 
-        sales_rows = list(db.scalars(select(FSalesOrder).where(or_(
+        sales_rows = list(db.scalars(select(FSalesOrder).options(load_only(FSalesOrder.id, FSalesOrder.raw_order_id,
+                        FSalesOrder.order_no, FSalesOrder.data_status, FSalesOrder.amount_ex_tax,
+                        FSalesOrder.tax_rate, FSalesOrder.order_date, raiseload=True)).where(or_(
             FSalesOrder.raw_order_id.in_(sorted(raw_ids or {""})),
             FSalesOrder.order_no.in_(sorted(order_variants or {""})),
         ))))
@@ -1587,7 +1589,9 @@ class SalesContractAmountAdapter(HeaderAdapter):
             sales: FSalesOrder | None = None
             if item.get("sales_order_id") is not None:
                 sales = db.scalar(
-                    select(FSalesOrder)
+                    select(FSalesOrder).options(load_only(FSalesOrder.id, FSalesOrder.raw_order_id,
+                        FSalesOrder.order_no, FSalesOrder.data_status, FSalesOrder.amount_ex_tax,
+                        FSalesOrder.tax_rate, FSalesOrder.order_date, raiseload=True))
                     .where(FSalesOrder.id == item["sales_order_id"])
                     .with_for_update()
                 )
@@ -1606,7 +1610,9 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 variants = {item["sales_order_no"], norm, f"XSDD-{norm}"}
                 candidates = list(
                     db.scalars(
-                        select(FSalesOrder)
+                        select(FSalesOrder).options(load_only(FSalesOrder.id, FSalesOrder.raw_order_id,
+                        FSalesOrder.order_no, FSalesOrder.data_status, FSalesOrder.amount_ex_tax,
+                        FSalesOrder.tax_rate, FSalesOrder.order_date, raiseload=True))
                         .where(
                             or_(
                                 FSalesOrder.raw_order_id == item["contract_id"],
@@ -1727,8 +1733,8 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 if current.get(norm) or history.get(norm):
                     raise BulkImportConflict("预览后销售订单已出现项目归属")
                 metadata = item["new_project"]
-                for existing in db.scalars(select(MaintenanceProject)):
-                    if existing.project_code.casefold() == metadata["project_code"].casefold():
+                for existing_code in db.scalars(select(MaintenanceProject.project_code)):
+                    if existing_code.casefold() == metadata["project_code"].casefold():
                         raise BulkImportConflict("预览后 XSDD 稳定项目编号已被占用")
                 # 负责人取销售订单「项目经理(必填)」首位；该列是多值且不同行
                 # 顺序不一致，完整原值写进建项审计 reason（项目表无备注列，
@@ -4281,7 +4287,7 @@ def _enforce_project_scope(
             raise BulkImportScopeDenied("批次包含当前账号无权访问的项目，整批拒绝")
 
 
-def preview_transfer(
+def prepare_transfer(
     db: Session,
     files: list[tuple[str, bytes]],
     *,
@@ -4460,6 +4466,24 @@ def preview_transfer(
             "data_version": data_version,
         }
     )
+    return {'artifacts': artifacts, 'plans': plans, 'public_rows': public_rows,
+        'row_map': row_map, 'summary': summary, 'expires_at': expires_at,
+        'data_version': data_version, 'public_payload': public_payload,
+        'payload_hash': payload_hash, 'hashes': hashes}
+
+
+def preview_transfer(db: Session, files: list[tuple[str, bytes]], *, operated_by: str,
+                     allowed_project_ids: set[str] | None = None, _authorization=None) -> dict:
+    if _authorization is not None:
+        from app.services.maintenance_batch_transfer_authorization import TransferAuthorization
+        if type(_authorization) is not TransferAuthorization:
+            raise ValueError('批量传输需要内部类型化授权')
+        prepared = _authorization.prepare_preview(db, files)
+    else:
+        prepared = prepare_transfer(db, files, operated_by=operated_by, allowed_project_ids=allowed_project_ids)
+    artifacts, plans, public_rows, row_map, summary, expires_at, data_version, public_payload, payload_hash, hashes = (
+        prepared[key] for key in ('artifacts','plans','public_rows','row_map','summary','expires_at',
+            'data_version','public_payload','payload_hash','hashes'))
     # file_hash = 原件 sha256（单文件）/ 各原件 sha256 排序后再 sha256（多文件）；
     # 逐文件 sha256 见 sys_raw_file 与 report_json.files[].source_sha256。
     # 预览 payload 与 apply 选择的指纹都留在 report_json，不再挤占 file_hash。
@@ -4468,6 +4492,7 @@ def preview_transfer(
         file_type=TRANSFER_BATCH_TYPE,
         file_hash=_batch_file_hash(hashes),
         uploaded_by=operated_by,
+        owner_user_id=_authorization.principal.id if _authorization is not None else None,
         rows_total=summary["total"],
         rows_inserted=0,
         rows_skipped=summary["total"] - summary["ready"],
@@ -4484,7 +4509,8 @@ def preview_transfer(
             "file_id": f"file-{index + 1}-{artifact.file_hash[:12]}",
             "filename": filename[:256],
             "file_hash": artifact.file_hash,
-            "storage_path": pipeline.archive_bytes(data, artifact.file_hash),
+            "storage_path": (_authorization.archive_bytes(data, artifact.file_hash) if _authorization is not None
+                else pipeline.archive_bytes(data, artifact.file_hash)),
         }
         for index, ((filename, data), artifact) in enumerate(
             zip(files, artifacts, strict=True)
@@ -4520,7 +4546,10 @@ def preview_transfer(
                     },
                 )
             )
-    db.commit()
+    if _authorization is not None:
+        _authorization.publish_preview(db, batch)
+    else:
+        db.commit()
     return {
         **public_payload,
         "preview_id": str(batch.id),
@@ -4627,6 +4656,7 @@ def apply_transfer(
     allow_admin: bool = False,
     allowed_project_ids: set[str] | None = None,
     real_operator: bool = False,
+    _authorization=None,
 ) -> dict:
     """应用冻结预览。
 
@@ -4636,17 +4666,24 @@ def apply_transfer(
     事实写入同一门禁；缺省 False 即失败关闭。
     """
 
+    if _authorization is not None:
+        from app.services.maintenance_batch_transfer_authorization import TransferAuthorization, batch_projection
+        if type(_authorization) is not TransferAuthorization:
+            raise ValueError("批量传输需要内部类型化授权")
     batch_id = _batch_id_from_transfer_token(preview_token)
-    batch = db.scalar(
-        select(SysImportBatch)
+    batch_statement = select(SysImportBatch) \
         .where(SysImportBatch.id == batch_id)
-        .with_for_update()
-    )
+    if _authorization is not None:
+        batch_statement = batch_projection(batch_statement)
+    batch = db.scalar(batch_statement.with_for_update())
     if batch is None or batch.file_type != TRANSFER_BATCH_TYPE:
         raise BulkImportNotFound("批量预览不存在")
-    if batch.uploaded_by != operated_by and not allow_admin:
+    if _authorization is None and batch.uploaded_by != operated_by and not allow_admin:
         raise BulkImportNotFound("批量预览不存在")
-    report = dict(batch.report_json or {})
+    if _authorization is not None:
+        _authorization.capture(db)
+    report = (_authorization.projected_report(db,batch) if _authorization is not None
+        else dict(batch.report_json or {}))
     expected_token = str(report.get("token_hash") or "")
     actual_token = hashlib.sha256(preview_token.encode("utf-8")).hexdigest()
     if not hmac.compare_digest(expected_token, actual_token):
@@ -4681,6 +4718,8 @@ def apply_transfer(
             ],
             allowed_project_ids,
         )
+        if _authorization is not None:
+            _authorization.finish_apply(db,batch,report=report,replay=True)
         return result
     if batch.status != "processing":
         raise BulkImportConflict("该预览已失败或失效，请重新上传预览")
@@ -4712,9 +4751,10 @@ def apply_transfer(
         for plan_index, mappings in selected_by_plan.items()
         for _row_key, operation_index in mappings
     ]
-    _enforce_project_scope(selected_operations, allowed_project_ids)
+    if _authorization is None:
+        _enforce_project_scope(selected_operations, allowed_project_ids)
     # 经营事实写入门禁：新建 / 覆盖已确认快照、登记台账行都是经营事实，一律实名。
-    if not real_operator and any(
+    if _authorization is None and not real_operator and any(
         public_by_key[key].get("action") in _FACT_WRITING_ACTIONS
         for key in selected
     ):
@@ -4725,15 +4765,17 @@ def apply_transfer(
     )
     _advisory_lock(db, f"maintenance-transfer-apply:{selection_hash}")
     # 偏唯一索引下最多一行；不带 ORDER BY id LIMIT 1——那会让规划器沿主键扫描。
+    already_statement = _applied_selection_statement(batch_id=batch.id, selection_hash=selection_hash)
+    if _authorization is not None:
+        already_statement = batch_projection(already_statement).with_for_update()
     already = min(
-        db.scalars(
-            _applied_selection_statement(batch_id=batch.id, selection_hash=selection_hash)
-        ).all(),
+        db.scalars(already_statement).all(),
         key=lambda row: row.id,
         default=None,
     )
     if already is not None:
-        already_report = dict(already.report_json or {})
+        already_report = (_authorization.projected_report(db,already) if _authorization is not None
+            else dict(already.report_json or {}))
         already_selected = [
             str(key) for key in already_report.get("selected_row_keys") or []
         ]
@@ -4745,6 +4787,8 @@ def apply_transfer(
             )
         ):
             raise BulkImportConflict("幂等批次的已应用行选择证据不一致")
+        if _authorization is not None:
+            _authorization.finish_apply(db,already,report=already_report,replay=True)
         return dict(already_report.get("result") or {})
 
     project_ids: set[str] = set()
@@ -4880,7 +4924,10 @@ def apply_transfer(
     report["applied_at"] = datetime.now(timezone.utc).isoformat()
     report["applied_by"] = operated_by
     # file_hash 保持原件 sha256；选择指纹只在 report_json.selection_hash。
-    batch.report_json = report
+    if _authorization is not None:
+        _authorization.save_apply_report(db,batch,report)
+    else:
+        batch.report_json = report
     batch.status = "success"
     batch.rows_inserted = len(result_rows)
     batch.rows_skipped = int(batch.rows_total or 0) - len(result_rows)
@@ -4905,11 +4952,14 @@ def apply_transfer(
             operated_by=operated_by,
         )
     )
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
+    if _authorization is not None:
+        _authorization.finish_apply(db,batch,report=report)
+    else:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
     return result
 
 

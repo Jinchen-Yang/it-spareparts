@@ -14,6 +14,9 @@ from sqlalchemy.orm import Session
 
 from app.api.date_validation import validate_date_order
 from app.auth import current_role
+from app.authz import runtime
+from app.api.maintenance_project_scope import identity_for, legacy_gate
+from app.services import maintenance_board_access as protected_board
 from app.business_time import business_today
 from app.db import get_db
 from app.maintenance_boss import require_maintenance_boss
@@ -96,6 +99,7 @@ def _validate_summary_window(
 
 class ProjectSearch(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     q: str = Field(min_length=1, max_length=128)
     page: int = Field(default=1, ge=1)
@@ -109,6 +113,7 @@ class ProjectSearch(BaseModel):
 
 class ProjectExportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    authorization_precondition: dict | None = None
 
     fields: list[str] = Field(min_length=1, max_length=len(project_export.EXPORT_FIELDS))
     q: str | None = Field(default=None, max_length=128)
@@ -128,9 +133,16 @@ def board_health(
     response: Response,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    ctx: UserContext = Depends(require_board_view),
+    ctx: UserContext = Depends(get_current_user_context),
+    _legacy: None = Depends(legacy_gate("maintenance_source_health",require_board_view)),
+    typed_identity=Depends(identity_for("maintenance_source_health")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_source_health"):
+        return protected_board.read(db,typed_identity,endpoint="health",params={},
+            legacy_context=ctx,view=view,precondition=authorization_precondition)
     return board.health(db)
 
 
@@ -141,9 +153,16 @@ def board_summary(
     date_to: date | None = Query(None, alias="to"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    ctx: UserContext = Depends(require_board_view),
+    ctx: UserContext = Depends(get_current_user_context),
+    _legacy: None = Depends(legacy_gate("maintenance_summary",require_board_view)),
+    typed_identity=Depends(identity_for("maintenance_summary")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_summary"):
+        return protected_board.read(db,typed_identity,endpoint="summary",params={'date_from':date_from,'date_to':date_to},
+            legacy_context=ctx,view=view,precondition=authorization_precondition)
     return board.summary(db, user_ctx=ctx, date_from=date_from, date_to=date_to,
                          allowed_project_ids=_allowed_scope(db, ctx))
 
@@ -154,9 +173,16 @@ def board_attention(
     limit: int = Query(10, ge=1, le=10),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    ctx: UserContext = Depends(require_board_view),
+    ctx: UserContext = Depends(get_current_user_context),
+    _legacy: None = Depends(legacy_gate("maintenance_summary",require_board_view)),
+    typed_identity=Depends(identity_for("maintenance_summary")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_summary"):
+        return protected_board.read(db,typed_identity,endpoint="attention",params={'limit':limit},
+            legacy_context=ctx,view=view,precondition=authorization_precondition)
     return board.attention(db, user_ctx=ctx, limit=limit,
                            allowed_project_ids=_allowed_scope(db, ctx))
 
@@ -176,9 +202,16 @@ def board_projects(
     business_type: str = Query("all", pattern=board.BUSINESS_TYPE_FILTER_PATTERN),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    ctx: UserContext = Depends(require_board_view),
+    ctx: UserContext = Depends(get_current_user_context),
+    _legacy: None = Depends(legacy_gate("maintenance_project_cards",require_board_view)),
+    typed_identity=Depends(identity_for("maintenance_project_cards")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_project_cards"):
+        return protected_board.read(db,typed_identity,endpoint="projects",params={'q':q,'page':page,'page_size':page_size,'lifecycle':lifecycle,'sort':sort,'has_activity':has_activity,'card_status':card_status,'date_from':date_from,'date_to':date_to,'business_type':business_type},
+            legacy_context=ctx,view=view,precondition=authorization_precondition)
     if q is not None:
         # 仓库既有约定：GET 带自由文本 → 422，改用 POST /projects/search
         raise HTTPException(
@@ -215,9 +248,16 @@ def board_projects_search(
     response: Response,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    ctx: UserContext = Depends(require_board_view),
+    ctx: UserContext = Depends(get_current_user_context),
+    _legacy: None = Depends(legacy_gate("maintenance_project_cards",require_board_view)),
+    typed_identity=Depends(identity_for("maintenance_project_cards")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_project_cards"):
+        return protected_board.read(db,typed_identity,endpoint="projects/search",params=payload.model_dump(exclude={'authorization_precondition'}),
+            legacy_context=ctx,view=view,precondition=payload.authorization_precondition)
     record_access_log(ctx, "boss_board_projects_search", "maintenance",
                       {"page": payload.page, "page_size": payload.page_size})
     try:
@@ -246,9 +286,17 @@ def board_projects_search(
 def board_project_export_options(
     response: Response,
     _auth: str = Depends(current_role),
-    ctx: UserContext = Depends(require_board_view),
+    db: Session = Depends(get_db),
+    ctx: UserContext = Depends(get_current_user_context),
+    _legacy: None = Depends(legacy_gate("maintenance_summary",require_board_view)),
+    typed_identity=Depends(identity_for("maintenance_summary")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_summary"):
+        return protected_board.read(db,typed_identity,endpoint='export/options',params={},
+            legacy_context=ctx,view=view,precondition=authorization_precondition)
     return project_export.export_options(ctx)
 
 
@@ -257,8 +305,11 @@ def board_project_export(
     payload: ProjectExportRequest,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    ctx: UserContext = Depends(require_board_view),
-) -> Response:
+    ctx: UserContext = Depends(get_current_user_context),
+    _legacy: None = Depends(legacy_gate("maintenance_summary",require_board_view)),
+    typed_identity=Depends(identity_for("maintenance_summary")),
+    view: str | None = Query(None),
+) :
     record_access_log(
         ctx,
         "boss_board_projects_export",
@@ -272,17 +323,26 @@ def board_project_export(
         },
     )
     try:
-        content, row_count = project_export.build_project_export(
-            db,
-            user_ctx=ctx,
-            field_keys=payload.fields,
-            q_text=payload.q,
-            lifecycle=payload.lifecycle,
-            card_status=payload.card_status,
-            sort=payload.sort,
-            business_type=payload.business_type,
-            allowed_project_ids=_allowed_scope(db, ctx),
-        )
+        if runtime.is_authoritative(db,"maintenance_summary"):
+            result=protected_board.prepare_export(db,typed_identity,
+                params=payload.model_dump(exclude={'authorization_precondition'}),legacy_context=ctx,
+                view=view,precondition=payload.authorization_precondition)
+            if isinstance(result,dict):
+                return result
+            content,row_count=result
+        else:
+            content, row_count = project_export.build_project_export(
+                db,
+                user_ctx=ctx,
+                field_keys=payload.fields,
+                q_text=payload.q,
+                lifecycle=payload.lifecycle,
+                card_status=payload.card_status,
+                sort=payload.sort,
+                business_type=payload.business_type,
+                allowed_project_ids=_allowed_scope(db, ctx),
+            )
+
     except project_export.UnknownProjectExportField as exc:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -344,10 +404,17 @@ def board_project(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    ctx: UserContext = Depends(require_board_view),
+    ctx: UserContext = Depends(get_current_user_context),
+    _legacy: None = Depends(legacy_gate("maintenance_summary",require_board_view)),
+    typed_identity=Depends(identity_for("maintenance_summary")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """按稳定项目 ID 读取一张聚合卡；详情页不得靠名称搜索第 1 页猜项目。"""
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_summary"):
+        return protected_board.read(db,typed_identity,endpoint="project",params={'project_id':project_id},
+            legacy_context=ctx,view=view,precondition=authorization_precondition)
     allowed = _allowed_scope(db, ctx)
     if allowed is not None and project_id not in allowed:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "项目不存在或无权查看")
@@ -403,9 +470,16 @@ def board_project_orders(
     contract_no: str | None = Depends(contract_no_filter),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    ctx: UserContext = Depends(require_board_view),
+    ctx: UserContext = Depends(get_current_user_context),
+    _legacy: None = Depends(legacy_gate("maintenance_summary",require_board_view)),
+    typed_identity=Depends(identity_for("maintenance_summary")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_summary"):
+        return protected_board.read(db,typed_identity,endpoint='orders',params={'project_id':project_id,'page':page,'page_size':page_size,'contract_no':contract_no},
+            legacy_context=ctx,view=view,precondition=authorization_precondition)
     allowed = _allowed_scope(db, ctx)
     if project_id == board.UNASSIGNED_BUCKET:
         # 未归属单没有「本人范围」可言：仅全范围账号可见，其余 404（不暴露存在性）
@@ -430,10 +504,18 @@ def board_order_lines(
     page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    ctx: UserContext = Depends(require_board_view),
+    ctx: UserContext = Depends(get_current_user_context),
+    _legacy: None = Depends(legacy_gate("maintenance_summary",require_board_view)),
+    typed_identity=Depends(identity_for("maintenance_summary")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    if not board.order_exists(db, source_order_id=source_order_id):
+    if runtime.is_authoritative(db,"maintenance_summary"):
+        return protected_board.read(db,typed_identity,endpoint='lines',params={'source_order_id':source_order_id,'page':page,'page_size':page_size},
+            legacy_context=ctx,view=view,precondition=authorization_precondition)
+    stored_order_id = board.order_id(db, source_order_id=source_order_id)
+    if stored_order_id is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "单据不存在")
     allowed = _allowed_scope(db, ctx)
     if allowed is not None:
@@ -443,4 +525,4 @@ def board_order_lines(
         if owner_project is None or owner_project not in allowed:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "单据不存在")
     return board.order_lines(db, user_ctx=ctx, source_order_id=source_order_id,
-                             page=page, page_size=page_size)
+                             page=page, page_size=page_size, _order_id=stored_order_id)

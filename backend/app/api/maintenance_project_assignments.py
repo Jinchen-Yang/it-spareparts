@@ -1,6 +1,6 @@
 """Explicit project-manager account assignment APIs (#205)."""
 
-from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -17,6 +17,9 @@ from app.security import (
     require_page,
 )
 from app.services import maintenance_project_assignments as assignments
+from app.api import maintenance_project_scope as auth_transport
+
+_RESOURCE = 'maintenance_assignments'
 
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
@@ -30,6 +33,7 @@ class ManagerAssignmentCreate(BaseModel):
     expected_assignment_version: int | None = Field(default=None, ge=1)
     sync_salesperson: bool = False
     reason: str = Field(min_length=1, max_length=1000)
+    authorization_precondition: dict | None = None
 
 
 class ManagerAccountSearch(BaseModel):
@@ -38,6 +42,7 @@ class ManagerAccountSearch(BaseModel):
     q: str = ""
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=500)
+    authorization_precondition: dict | None = None
 
 
 class ManagerAssignmentArchive(BaseModel):
@@ -45,6 +50,7 @@ class ManagerAssignmentArchive(BaseModel):
 
     version: int = Field(ge=1)
     reason: str = Field(min_length=1, max_length=1000)
+    authorization_precondition: dict | None = None
 
 
 def _real_operator(db: Session, ident: dict) -> str:
@@ -84,16 +90,22 @@ def assign_project_manager(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCE, "page_maintenance")),
     _action: None = Depends(
-        require_action(
+        auth_transport.legacy_gate(_RESOURCE, require_action(
             "action_maintenance_project_manage",
             require_data="data_profit",
-        )
+        ))
     ),
-    _admin: None = Depends(_require_assignment_admin),
+    _admin: None = Depends(auth_transport.legacy_gate(_RESOURCE, _require_assignment_admin)),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for(_RESOURCE)),
+    view: str | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        return assignments.assignment_command(db, identity, project_id=project_id,
+            command=body.model_dump(exclude={'authorization_precondition'}), view=view,
+            authorization_precondition=body.authorization_precondition)
     operator = _real_operator(db, ident)
     try:
         payload = assignments.assign_primary_manager(
@@ -148,16 +160,22 @@ def archive_project_manager_assignment(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCE, "page_maintenance")),
     _action: None = Depends(
-        require_action(
+        auth_transport.legacy_gate(_RESOURCE, require_action(
             "action_maintenance_project_manage",
             require_data="data_profit",
-        )
+        ))
     ),
-    _admin: None = Depends(_require_assignment_admin),
+    _admin: None = Depends(auth_transport.legacy_gate(_RESOURCE, _require_assignment_admin)),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for(_RESOURCE)),
+    view: str | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        return assignments.assignment_command(db, identity, assignment_id=assignment_id,
+            command=body.model_dump(exclude={'authorization_precondition'}), view=view,
+            authorization_precondition=body.authorization_precondition)
     operator = _real_operator(db, ident)
     try:
         payload = assignments.archive_primary_manager(

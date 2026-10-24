@@ -31,6 +31,12 @@ from app.api.date_validation import validate_date_query
 from app.api.maintenance_project_operations import _real_operator
 from app.auth import current_identity, current_role, require_admin
 from app.business_time import business_today
+from app.authz import runtime
+from app.api.maintenance_project_scope import identity_for, legacy_page, legacy_gate
+from app.services import maintenance_diagnostics_access as protected_diagnostics
+from app.services import maintenance_cost_access as protected_cost
+from app.services import maintenance_global_workbook_authorization as protected_global
+from app.services import maintenance_roundtrip_authorization as protected_roundtrip
 from app.db import SessionLocal, get_db
 from app.security import (
     UserContext, apply_field_visibility, get_current_user_context, record_access_log,
@@ -155,8 +161,18 @@ def _release_db_before_stream(db: Session, resource) -> None:
 @router.post("/recompute")
 def recompute(db: Session = Depends(get_db),
               ident: dict = Depends(current_identity),
-              _auth: str = Depends(require_admin),   # 全表重算(~1min 写库)：限管理员，与导入触发方口径一致
-              ctx: UserContext = Depends(get_current_user_context)) -> dict:
+              _auth: str = Depends(legacy_gate('maintenance_cost', lambda ctx: require_admin(ctx.role))),
+              ctx: UserContext = Depends(get_current_user_context),
+              typed_identity=Depends(identity_for('maintenance_cost')),
+              view: str | None = Query(None),
+              authorization_precondition: str | None = Query(None)) -> dict:
+    if runtime.is_authoritative(db, 'maintenance_cost'):
+        try:
+            return protected_global.recompute(db, typed_identity, view=view, precondition=authorization_precondition)
+        except maintenance_cost.MaintenanceCostRecomputeBusy as exc:
+            raise HTTPException(409, str(exc), headers={'Retry-After': '5'}) from exc
+        except maintenance_cost.WorkbookInvalidationConflictError as exc:
+            raise HTTPException(409, '维保数据归属在重算期间发生变化，本次重算已整体回滚，请重试') from exc
     operator = _real_operator(db, ident)
     record_access_log(ctx, "recompute", "maintenance", {"operated_by": operator})
     try:
@@ -183,12 +199,20 @@ def projects(
     date_to: date | None = Query(None),
     q: str | None = Query(None, max_length=128),
     lifecycle: str = Query("ongoing", pattern=r"^(ongoing|ended|missing|all)$"),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+    response: Response = None,
+    ident=Depends(identity_for('maintenance_cost')),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401，不依赖全局 RBAC 开关
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_cost', 'page_maintenance')),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     _validate_date_pair(date_from, date_to)
+    if runtime.is_authoritative(db, 'maintenance_cost'):
+        if response is not None: response.headers['Cache-Control'] = 'no-store'
+        return protected_cost.read(db, ident, entry_id=protected_cost.PROJECTS, params={'date_from': date_from, 'date_to': date_to, 'q': q, 'lifecycle': lifecycle},
+            legacy_context=ctx, view=view, precondition=authorization_precondition)
     record_access_log(ctx, "projects", "maintenance")
     data = maintenance_cost.projects_aggregate(
         db, date_from, date_to, q, user_ctx=ctx,
@@ -207,12 +231,20 @@ def lines(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     filters: str | None = Query(None),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+    response: Response = None,
+    ident=Depends(identity_for('maintenance_cost')),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_cost', 'page_maintenance')),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     _reject_row_sort(request)
+    if runtime.is_authoritative(db, 'maintenance_cost'):
+        if response is not None: response.headers['Cache-Control'] = 'no-store'
+        return protected_cost.read(db, ident, entry_id=protected_cost.LINES, params={'project': project, 'month': month, 'date_from': date_from, 'date_to': date_to, 'page': page, 'page_size': page_size, 'filters': filters},
+            legacy_context=ctx, view=view, precondition=authorization_precondition)
     row_filters = parse_filters(filters)
     record_access_log(ctx, "lines", "maintenance", {"project": project})
     data = maintenance_cost.project_lines(
@@ -524,17 +556,29 @@ def export(
     date_to: date | None = Query(None),
     q: str | None = Query(None, max_length=128),
     lifecycle: str = Query("ongoing", pattern=r"^(ongoing|ended|missing|all)$"),
+    response: Response = None,
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+    ident=Depends(identity_for('maintenance_cost')),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_cost', 'page_maintenance')),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     _validate_date_pair(date_from, date_to)
+    if runtime.is_authoritative(db, 'maintenance_cost'):
+        if response is not None: response.headers['Cache-Control'] = 'no-store'
+        return protected_cost.prepare_export(db, ident, entry_id=protected_cost.SUMMARY_EXPORT, params={'date_from': date_from, 'date_to': date_to, 'q': q, 'lifecycle': lifecycle},
+            legacy_context=ctx, render=_render_project_csv, view=view, precondition=authorization_precondition)
     record_access_log(ctx, "export", "maintenance")
     data = maintenance_cost.projects_aggregate(
         db, date_from, date_to, q, user_ctx=ctx,
         lifecycle=lifecycle, as_of=business_today(),
     )
+    return _render_project_csv(data, ctx, db=db)
+
+
+def _render_project_csv(data, ctx, db=None):
     contract_amount_restricted = is_field_hidden(ctx, "contract_amount")
     data = apply_field_visibility(data, ctx)   # 导出同样过脱敏层（§8.5）
     if not data["rows"]:
@@ -632,9 +676,15 @@ def orders_export(
     date_to: date | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_cost", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for('maintenance_cost')),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> StreamingResponse:
+    if runtime.is_authoritative(db, 'maintenance_cost'):
+        return protected_global.read(db, typed_identity, entry_id=protected_global.ORDERS,
+            params={'date_from': date_from, 'date_to': date_to}, legacy_context=ctx, view=view, precondition=authorization_precondition)
     if is_scoped_sales(ctx):
         raise HTTPException(status_code=403, detail="受限销售账号不能导出逐单维保数据")
     if (date_from is None) != (date_to is None):
@@ -681,9 +731,16 @@ def orders_export(
 def maintenance_as_of(
     response: Response,
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_business_date", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
-) -> dict[str, str]:
+    typed_identity=Depends(identity_for("maintenance_business_date")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+    db: Session = Depends(get_db),
+) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_business_date"):
+        return protected_diagnostics.read_business_date(db,typed_identity,view=view,precondition=authorization_precondition)
     record_access_log(ctx, "as_of", "maintenance")
     response.headers["Cache-Control"] = "no-store"
     return {"as_of": business_today().isoformat()}
@@ -695,10 +752,16 @@ def export_workbooks(
     date_to: date | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_cost", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for('maintenance_cost')),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> StreamingResponse:
     """按命中维保订单的时间范围，一次导出全部合同项目工作簿。"""
+    if runtime.is_authoritative(db, 'maintenance_cost'):
+        return protected_global.read(db, typed_identity, entry_id=protected_global.WORKBOOKS,
+            params={'date_from': date_from, 'date_to': date_to}, legacy_context=ctx, view=view, precondition=authorization_precondition)
     _require_workbook_export_permissions(ctx)
     audit_scope = (
         {"scope": "all"}
@@ -745,13 +808,22 @@ def lines_export(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     filters: str | None = Query(None),
+    response: Response = None,
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+    ident=Depends(identity_for('maintenance_cost')),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_cost', 'page_maintenance')),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     """单项目 SKU 明细导出（财务逐行复核入账用）——全量、含成本来源/税口径。"""
     _reject_row_sort(request)
+    _validate_date_pair(date_from, date_to)
+    if runtime.is_authoritative(db, 'maintenance_cost'):
+        if response is not None: response.headers['Cache-Control'] = 'no-store'
+        return protected_cost.prepare_export(db, ident, entry_id=protected_cost.LINES_EXPORT, params={'project': project, 'month': month, 'date_from': date_from, 'date_to': date_to, 'filters': filters},
+            legacy_context=ctx, render=lambda data, fields: _render_line_csv(data, fields, project=project), view=view, precondition=authorization_precondition)
     row_filters = parse_filters(filters)
     if (date_from is None) != (date_to is None):
         raise HTTPException(status_code=422, detail="date_from 与 date_to 必须同时提供")
@@ -774,6 +846,12 @@ def lines_export(
             status_code=413,
             detail=f"CSV 数据行超过 {_MAX_CSV_DATA_ROWS} 行上限",
         )
+    source_rows = maintenance_cost.iter_project_lines(db, project, month, date_from, date_to,
+        user_ctx=ctx, row_filters=row_filters)
+    return _render_line_csv({'rows': source_rows}, ctx, project=project, db=db)
+
+
+def _render_line_csv(data, ctx, *, project, db=None):
     header = ["日期", "维保单号", "需求类型", "业务类型", "出库仓库", "PN", "描述",
               "数量", "退货", "单价", "金额",
               "含税单位成本", "未税单位成本", "含税成本金额", "未税成本金额",
@@ -783,15 +861,7 @@ def lines_export(
               "参考起始日", "参考截止日", "最近样本日", "异常标记"]
 
     def rows():
-        source_rows = maintenance_cost.iter_project_lines(
-            db,
-            project,
-            month,
-            date_from,
-            date_to,
-            user_ctx=ctx,
-            row_filters=row_filters,
-        )
+        source_rows = data['rows']
         try:
             for raw_row in source_rows:
                 r = apply_field_visibility(raw_row, ctx)
@@ -840,13 +910,21 @@ def board(
     date_to: date | None = Query(None),
     q: str | None = Query(None, max_length=128),
     lifecycle: str = Query("ongoing", pattern=r"^(ongoing|ended|missing|all)$"),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+    response: Response = None,
+    ident=Depends(identity_for('maintenance_contract_cost')),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_contract_cost', 'page_maintenance')),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """合同预算消耗参考：成本或费用数据不完整时不计算红黄绿。"""
     _validate_date_pair(date_from, date_to)
+    if runtime.is_authoritative(db, 'maintenance_contract_cost'):
+        if response is not None: response.headers['Cache-Control'] = 'no-store'
+        return protected_cost.read(db, ident, entry_id=protected_cost.BOARD, params={'date_from': date_from, 'date_to': date_to, 'q': q, 'lifecycle': lifecycle, 'status': status},
+            legacy_context=ctx, view=view, precondition=authorization_precondition)
     _require_full_contract_scope(ctx)
     record_access_log(ctx, "board", "maintenance")
     data = maintenance_cost.board(
@@ -888,13 +966,21 @@ def board_export(
     date_to: date | None = Query(None),
     q: str | None = Query(None, max_length=128),
     lifecycle: str = Query("ongoing", pattern=r"^(ongoing|ended|missing|all)$"),
+    response: Response = None,
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+    ident=Depends(identity_for('maintenance_contract_cost')),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page('maintenance_contract_cost', 'page_maintenance')),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     """合同级详细盈亏 CSV；与看板复用同一计算、范围与脱敏口径。"""
     _validate_date_pair(date_from, date_to)
+    if runtime.is_authoritative(db, 'maintenance_contract_cost'):
+        if response is not None: response.headers['Cache-Control'] = 'no-store'
+        return protected_cost.prepare_export(db, ident, entry_id=protected_cost.BOARD_EXPORT, params={'date_from': date_from, 'date_to': date_to, 'q': q, 'lifecycle': lifecycle, 'status': status},
+            legacy_context=ctx, render=_render_contract_csv, view=view, precondition=authorization_precondition)
     _require_full_contract_scope(ctx)
     record_access_log(
         ctx,
@@ -918,6 +1004,10 @@ def board_export(
         as_of=business_today(),
     )
     data = apply_field_visibility(data, ctx)
+    return _render_contract_csv(data, ctx, db=db)
+
+
+def _render_contract_csv(data, ctx, db=None):
     if not data["rows"]:
         raise HTTPException(
             status_code=422,
@@ -1019,14 +1109,20 @@ def export_workbook(
     date_to: date | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_cost", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for('maintenance_cost')),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> StreamingResponse:
     """§16.4 工作簿形态回填导出：与财务现用「项目预算工作簿」同构（四个 Sheet）。
 
     xlsx 无法走字段级脱敏，因此必须同时具备成本与利润查看权限。
     「产品成本」按财务习惯填单据级总成本于每张 WBDD 首行；行级取价明细作附加列（增强不破坏）。
     """
+    if runtime.is_authoritative(db, 'maintenance_cost'):
+        return protected_global.read(db, typed_identity, entry_id=protected_global.WORKBOOK,
+            params={'contract': contract, 'date_from': date_from, 'date_to': date_to}, legacy_context=ctx, view=view, precondition=authorization_precondition)
     _require_workbook_export_permissions(ctx)
     if (date_from is None) != (date_to is None):
         raise HTTPException(status_code=422, detail="date_from 与 date_to 必须同时提供")
@@ -1068,10 +1164,16 @@ def roundtrip_template(
     blank: bool = Query(False),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_cost_roundtrip", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for('maintenance_cost_roundtrip')),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> StreamingResponse:
     """导出固定协议的维保项目可编辑工作簿。"""
+    if runtime.is_authoritative(db, 'maintenance_cost_roundtrip'):
+        return protected_global.read(db, typed_identity, entry_id=protected_global.TEMPLATE,
+            params={'contract': contract, 'date_from': date_from, 'date_to': date_to, 'blank': blank}, legacy_context=ctx, view=view, precondition=authorization_precondition)
     _require_roundtrip_permissions(ctx)
     record_access_log(
         ctx,
@@ -1120,10 +1222,16 @@ def roundtrip_templates(
     date_to: date | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_cost_roundtrip", "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for('maintenance_cost_roundtrip')),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> StreamingResponse:
     """按合同拆分导出可独立校验的固定回填工作簿 ZIP。"""
+    if runtime.is_authoritative(db, 'maintenance_cost_roundtrip'):
+        return protected_global.read(db, typed_identity, entry_id=protected_global.TEMPLATES,
+            params={'date_from': date_from, 'date_to': date_to}, legacy_context=ctx, view=view, precondition=authorization_precondition)
     _require_roundtrip_permissions(ctx)
     record_access_log(
         ctx,
@@ -1193,7 +1301,7 @@ def _save_roundtrip_upload(file: UploadFile) -> tuple[str, str]:
     return path, original_name[:256]
 
 
-async def _parse_and_save_roundtrip_upload(request: Request) -> tuple[str, str]:
+async def _parse_and_save_roundtrip_upload(request: Request, *, canonical=False):
     """鉴权后才解析 multipart，并同时限制总请求体、文件数和文件字节数。"""
     content_type = request.headers.get("content-type", "")
     media_type = content_type.partition(";")[0].strip().lower()
@@ -1278,7 +1386,7 @@ async def _parse_and_save_roundtrip_upload(request: Request) -> tuple[str, str]:
                 limited_request.headers,
                 limited_request.stream(),
                 max_files=1,
-                max_fields=0,
+                max_fields=1 if canonical else 0,
                 # 1024B 会在表单解析阶段拒绝正常体积的 Excel（#267 修复 4）。
                 # 总量已有 content-length + limited_receive 双重 413 限制，
                 # 这里放宽到文件上限只是取消对文件 part 的误伤。
@@ -1298,6 +1406,15 @@ async def _parse_and_save_roundtrip_upload(request: Request) -> tuple[str, str]:
                 detail="multipart 请求格式无效",
             ) from exc
         items = form.multi_items()
+        authorization_precondition = None
+        if canonical:
+            fields = [value for name, value in items if name == 'authorization_precondition']
+            if fields:
+                if (len(fields) != 1 or not isinstance(fields[0], str)
+                        or len(fields[0].encode('utf-8')) > 32768):
+                    raise HTTPException(422, '授权前提参数无效')
+                authorization_precondition = fields[0]
+                items = [(name, value) for name, value in items if name != 'authorization_precondition']
         if (
             len(items) != 1
             or items[0][0] != "file"
@@ -1330,7 +1447,7 @@ async def _parse_and_save_roundtrip_upload(request: Request) -> tuple[str, str]:
         if close_cancellation is not None:
             raise close_cancellation
 
-        result = (owned_path, original_name)
+        result = (owned_path, original_name, authorization_precondition) if canonical else (owned_path, original_name)
         owned_path = None
         return result
     except BaseException:
@@ -1357,10 +1474,19 @@ def _import_roundtrip_in_worker(
     original_name: str,
     operated_by: str,
     ctx: UserContext,
+    *, canonical=None,
 ) -> dict:
     """在线程内完成审计、事务、回滚和关闭，避免跨线程使用 Session。"""
     db = SessionLocal()
     try:
+        if canonical is not None:
+            from app.authz.principal import resume_task_identity
+            owner_id, epoch, view, precondition = canonical
+            identity = resume_task_identity(db, owner_id, epoch)
+            result = protected_roundtrip.execute(db, identity, path=path, filename=original_name,
+                view=view, precondition=precondition)
+            db.close()
+            return result
         record_access_log(
             ctx,
             "roundtrip_import",
@@ -1408,11 +1534,15 @@ async def _wait_for_roundtrip_import_worker(
     original_name: str,
     operated_by: str,
     ctx: UserContext,
+    *, canonical=None,
 ) -> dict:
     """普通请求取消时仍等待已启动 worker 收尾，防止提前删文件或释放进程锁。"""
+    from functools import partial
+    call = (_import_roundtrip_in_worker if canonical is None else
+            partial(_import_roundtrip_in_worker, canonical=canonical))
     worker = asyncio.create_task(
         anyio.to_thread.run_sync(
-            _import_roundtrip_in_worker,
+            call,
             path,
             original_name,
             operated_by,
@@ -1438,20 +1568,28 @@ async def roundtrip_import(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(
-        "action_maintenance_roundtrip_apply",
-        require_data="data_profit",
-    )),
+    _page: None = Depends(legacy_page("maintenance_cost_roundtrip", "page_maintenance")),
+    _action: None = Depends(legacy_gate("maintenance_cost_roundtrip", require_action(
+        "action_maintenance_roundtrip_apply", require_data="data_profit"))),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_cost_roundtrip")),
+    view: str | None = Query(None),
 ) -> dict:
     """校验并原子应用系统导出的固定协议工作簿。
 
     路由签名不声明 ``UploadFile``，避免 FastAPI 在依赖执行前消费 multipart。身份、页面、
     显式写动作和数据可见依赖全部通过后，才进入限并发、限总字节的解析路径。
     """
-    _require_roundtrip_permissions(ctx)
-    operator = _real_operator(db, ident)
+    canonical = isinstance(db, Session) and runtime.is_authoritative(db, 'maintenance_cost_roundtrip')
+    if canonical:
+        from app.authz.principal import load_principal
+        principal = load_principal(db, typed_identity)
+        operator = principal.username
+        worker_identity = (principal.id, principal.authorization_epoch)
+        db.rollback()
+    else:
+        _require_roundtrip_permissions(ctx)
+        operator = _real_operator(db, ident)
     if not _ROUNDTRIP_IMPORT_PARSE_LOCK.acquire(blocking=False):
         raise HTTPException(
             status_code=429,
@@ -1460,8 +1598,14 @@ async def roundtrip_import(
         )
     path = None
     try:
-        path, original_name = await _parse_and_save_roundtrip_upload(request)
+        if canonical:
+            path, original_name, precondition = await _parse_and_save_roundtrip_upload(request, canonical=True)
+        else:
+            path, original_name = await _parse_and_save_roundtrip_upload(request)
         try:
+            if canonical:
+                return await _wait_for_roundtrip_import_worker(path, original_name, operator, ctx,
+                    canonical=(*worker_identity, view, precondition))
             return await _wait_for_roundtrip_import_worker(
                 path,
                 original_name,

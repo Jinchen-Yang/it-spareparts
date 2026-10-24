@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.authz.service import context_resolution
+
 import asyncio
 from contextlib import suppress
 from datetime import date
@@ -10,10 +12,11 @@ import re
 import threading
 
 import anyio
+from app.services.workbook_tasks import run_worker
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.maintenance import (
     _content_disposition,
@@ -23,6 +26,11 @@ from app.api.maintenance import (
 )
 from app.api.maintenance_project_operations import _real_operator
 from app.auth import current_identity, current_role
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_authorization as foundation
+from app.services import maintenance_workflow_authorization as authorization
+from app.services.maintenance_manager_workbook_adapter import read_monthly_workbook, validate_monthly_workbook
+_RESOURCE = 'maintenance_manager_workbook'
 from app.business_time import business_today
 from app.config import get_settings
 from app.db import SessionLocal, get_db
@@ -53,6 +61,7 @@ class ManagerWorkbookApplyRequest(BaseModel):
 
     validation_token: str = Field(min_length=1, max_length=64)
     data_version: str = Field(min_length=1, max_length=64)
+    authorization_precondition: dict | None = None
 
 
 def _parse_report_month(value: str | None) -> date:
@@ -239,12 +248,19 @@ def manager_workbook_status(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCE, "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for(_RESOURCE)),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     _no_store(response)
     month = _parse_report_month(report_month)
     try:
+        if identity is not None:
+            return read_monthly_workbook(sessionmaker(bind=db.get_bind()), identity, month,
+                ctx=ctx, as_of=business_today(), status_only=True, authorization_view=view == 'authorization',
+                authorization_precondition=foundation.decode_precondition(authorization_precondition) if view != 'authorization' else None)
         payload = _adapter(db, ident=ident, ctx=ctx).status(month)
     except Exception as exc:
         _raise_http(exc)
@@ -262,15 +278,23 @@ def export_manager_workbook(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCE, "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
-) -> Response:
+    identity=Depends(auth_transport.identity_for(_RESOURCE)),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+) -> object:
     month = _parse_report_month(report_month)
     try:
-        artifact, _snapshot = _adapter(db, ident=ident, ctx=ctx).export(
-            month,
-            hmac_key=_hmac_key(),
-        )
+        if identity is not None:
+            result = read_monthly_workbook(sessionmaker(bind=db.get_bind()), identity, month,
+                ctx=ctx, as_of=business_today(), hmac_key=_hmac_key(), authorization_view=view == 'authorization',
+                authorization_precondition=foundation.decode_precondition(authorization_precondition) if view != 'authorization' else None)
+            if view == 'authorization':
+                return result
+            artifact, _snapshot = result
+        else:
+            artifact, _snapshot = _adapter(db, ident=ident, ctx=ctx).export(month, hmac_key=_hmac_key())
     except Exception as exc:
         _raise_http(exc)
     record_access_log(
@@ -300,8 +324,11 @@ async def validate_manager_workbook_upload(
     report_month: str | None = Query(default=None),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCE, "page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for(_RESOURCE)),
+    view: str | None = Query(None),
+    db: Session = Depends(get_db),
 ) -> dict:
     _no_store(response)
     month = _parse_report_month(report_month)
@@ -313,6 +340,26 @@ async def validate_manager_workbook_upload(
         )
     upload_path: str | None = None
     try:
+        if identity is not None:
+            from starlette.datastructures import UploadFile
+            from types import SimpleNamespace
+            from app.services import import_safety
+            form = await request.form()
+            file = form.get('file')
+            if not isinstance(file, UploadFile):
+                raise HTTPException(422, '缺少工作簿 file 上传字段')
+            content = await import_safety.read_limited(file, 64 * 1024 * 1024)
+            import_safety.validate_xlsx_zip(content, max_bytes=64 * 1024 * 1024)
+            precondition = foundation.decode_precondition(form.get('authorization_precondition'))
+            factory = sessionmaker(bind=db.get_bind())
+            db.rollback()
+            result = await run_worker(lambda: validate_monthly_workbook(
+                factory, identity, month, content, ctx=ctx, as_of=business_today(), hmac_key=_hmac_key(),
+                authorization_view=view == 'authorization', authorization_precondition=precondition))
+            if view == 'authorization':
+                return result
+            validation, batch_values = result
+            return _validation_payload(validation, SimpleNamespace(**batch_values))
         upload_path, _original_name = await _parse_and_save_roundtrip_upload(request)
         return await _run_validation_worker(
             report_month=month,
@@ -337,21 +384,30 @@ def apply_manager_workbook(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCE, "page_maintenance")),
     _action: None = Depends(
-        require_action(
+        auth_transport.legacy_gate(_RESOURCE, require_action(
             "action_maintenance_manager_workbook_apply",
             require_data="data_profit",
-        )
+        ))
     ),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for(_RESOURCE)),
+    view: str | None = Query(None),
 ) -> dict:
     _no_store(response)
     try:
-        result = _adapter(db, ident=ident, ctx=ctx).apply(
-            body.validation_token,
-            data_version=body.data_version,
-        )
+        if identity is not None:
+            if view == 'authorization':
+                with foundation.read_context_snapshot(sessionmaker(bind=db.get_bind()), identity,
+                        entry_id=authorization.MONTHLY_APPLY, params={'validation_token': body.validation_token,
+                            'data_version': body.data_version}) as (_, _, batch, accesses):
+                    return context_resolution(accesses, batch.contexts[0].ref)
+            adapter = MaintenanceManagerWorkbookAdapter(db, user_ctx=ctx, operator=identity.username,
+                as_of=business_today(), identity=identity, authorization_precondition=body.authorization_precondition)
+        else:
+            adapter = _adapter(db, ident=ident, ctx=ctx)
+        result = adapter.apply(body.validation_token, data_version=body.data_version)
         db.commit()
     except IntegrityError as exc:
         db.rollback()

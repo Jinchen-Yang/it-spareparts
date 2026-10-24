@@ -107,6 +107,7 @@ def _active_evidence_payload(
         "uploaded_by": evidence.uploaded_by,
         "uploaded_at": evidence.uploaded_at.isoformat(),
         "replayed": True,
+        "owner_user_id": file_row.owner_user_id,
     }
 
 
@@ -247,6 +248,7 @@ def save_evidence(
     filename: str | None,
     mime_type: str | None,
     content: bytes,
+    owner_user_id: int | None = None,
 ) -> dict | None:
     """上传回款提醒凭证。节点不存在 → None；同里程碑同 md5 重放 → 返回既有记录。"""
     milestone = db.scalar(
@@ -285,6 +287,7 @@ def save_evidence(
         sha256=sha256_digest,
         security_state="active",
         uploaded_by=operator,
+        owner_user_id=owner_user_id,
         version=1,
     )
     evidence_row = MaintenanceCollectionEvidence(
@@ -300,6 +303,9 @@ def save_evidence(
     try:
         db.flush()
     except IntegrityError:
+        if owner_user_id is not None:
+            # Canonical caller must not continue after releasing its locks.
+            raise
         # 并发同 md5：DB 部分唯一索引兜底，回滚本笔后稳定重放既有凭证（round-5 Blocker 5）
         db.rollback()
         existing = _active_evidence_payload(
@@ -329,6 +335,7 @@ def save_evidence(
         "uploaded_by": evidence_row.uploaded_by,
         "uploaded_at": evidence_row.uploaded_at.isoformat(),
         "replayed": False,
+        "owner_user_id": owner_user_id,
     }
 
 
@@ -429,6 +436,7 @@ def try_close_milestone_after_upload(
     operator: str,
     user_ctx,
     as_of,
+    _authorize=None,
 ) -> dict:
     """上传凭证 = 回款提醒关闭（§2.1）：上传成功后同事务标记 handled。
 
@@ -456,6 +464,7 @@ def try_close_milestone_after_upload(
             operator=operator,
             user_ctx=user_ctx,
             as_of=as_of,
+            _authorize=_authorize,
         )
     except reminders.CollectionReminderConflict:
         # 并发关闭冲突：以节点实际状态为准

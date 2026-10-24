@@ -124,9 +124,13 @@ def _resolved_object_path(object_key: str) -> Path:
 
 
 def _operation_key(
-    *, operator: str, operation_type: str, deliverable_id: str, client_key: str
+    *, operator: str, operation_type: str, deliverable_id: str, client_key: str, owner_user_id=None
 ) -> str:
     key = _required_text(client_key, "Idempotency-Key", 128)
+    if owner_user_id is not None:
+        from app.services.authorization_artifacts import stable_operation_key
+        return stable_operation_key(owner_user_id, 'acceptance.' + operation_type,
+            _payload_hash({'deliverable_id': deliverable_id, 'key': key}))
     return hashlib.sha256(
         f"{operator}\x1f{operation_type}\x1f{deliverable_id}\x1f{key}".encode("utf-8")
     ).hexdigest()
@@ -144,6 +148,7 @@ def _existing_operation(
     *,
     operation_key: str,
     payload_hash: str,
+    owner_user_id=None,
 ) -> dict | None:
     row = db.scalar(
         select(MaintenanceAcceptanceOperation).where(
@@ -152,6 +157,9 @@ def _existing_operation(
     )
     if row is None:
         return None
+    if owner_user_id is not None and row.owner_user_id != owner_user_id:
+        from app.services.authorization_artifacts import unavailable
+        raise unavailable()
     if row.payload_hash != payload_hash:
         raise MaintenanceAcceptanceConflict("同一 Idempotency-Key 不能用于不同请求")
     return {**row.result_json, "replayed": True}
@@ -168,7 +176,7 @@ def _locked_deliverable(
             MaintenanceAcceptanceDeliverable.project_id == project_id,
             MaintenanceAcceptanceDeliverable.deliverable_type == "acceptance_report",
         )
-        .with_for_update()
+        .with_for_update().execution_options(populate_existing=True)
     )
     if row is None:
         # 2026-08-25 客户拍板：验收"只是个上传的地方"，没有截止日概念——
@@ -301,9 +309,12 @@ def search_acceptance(
     approval_status: str | None,
     page: int,
     page_size: int,
+    authorization_condition=None,
 ) -> dict:
     filters = []
-    if user_ctx.role not in FULL_SCOPE_ROLES:
+    if authorization_condition is not None:
+        filters.append(authorization_condition)
+    elif user_ctx.role not in FULL_SCOPE_ROLES:
         # 2026-08-25 行级口径对齐：与直达路由 can_access_project 共用同一
         # 谓词（负责人 ∪ 台账 salesperson）——此前只用负责人口径，sales
         # 按台账销售名能直达上传/查看，却在列表里搜不到。
@@ -375,6 +386,8 @@ def upload_attachment(
     filename: str | None,
     mime_type: str | None,
     content: bytes,
+    owner_user_id: int | None = None,
+    verify_file_binding=None,
 ) -> tuple[dict, Path | None]:
     """一个上传口（2026-08-25 客户口径）：传文件即落库——自动 SHA-256、
     自动建交付行、自动挂项目，不做版本号/乐观锁（此前的版本握手只制造了
@@ -391,7 +404,7 @@ def upload_attachment(
         operator=operator,
         operation_type="attachment_upload",
         deliverable_id=deliverable.deliverable_id,
-        client_key=client_key,
+        client_key=client_key, owner_user_id=owner_user_id,
     )
     payload_hash = _payload_hash(
         {
@@ -402,9 +415,16 @@ def upload_attachment(
         }
     )
     replay = _existing_operation(
-        db, operation_key=operation_key, payload_hash=payload_hash
+        db, operation_key=operation_key, payload_hash=payload_hash, owner_user_id=owner_user_id
     )
     if replay is not None:
+        if owner_user_id is not None:
+            if verify_file_binding is None:
+                raise ValueError('Canonical upload needs a current artifact binding')
+            file = db.get(BusinessFile, replay['file_id'])
+            if file is None:
+                raise MaintenanceAcceptanceConflict('原附件已不可用')
+            verify_file_binding(file)
         return replay, None
     # 2026-08-25 内容去重（替代被删的版本握手）：行锁内查该交付行 active
     # 链接中是否已有同 sha256 附件——有则按幂等回放形态直接返回存档结果
@@ -412,6 +432,12 @@ def upload_attachment(
     # 无则正常落库。保持「只传文件本身」口径，无需客户端幂等键。
     for _dup_link, duplicate in _active_attachments(db, deliverable.deliverable_id):
         if duplicate.sha256 == digest:
+            if owner_user_id is not None:
+                if duplicate.owner_user_id is None:
+                    continue  # Unknown legacy evidence is not claimed; publish a new copy.
+                if verify_file_binding is None:
+                    raise ValueError('Canonical upload needs a current artifact binding')
+                verify_file_binding(duplicate)
             dup_name = _uploader_names(
                 db, {duplicate.uploaded_by} if duplicate.uploaded_by else set()
             ).get(duplicate.uploaded_by or "", "")
@@ -443,7 +469,7 @@ def upload_attachment(
         size_bytes=len(content),
         sha256=digest,
         security_state="active",
-        uploaded_by=operator,
+        uploaded_by=operator, owner_user_id=owner_user_id,
         version=1,
     )
     link = BusinessFileLink(
@@ -478,7 +504,7 @@ def upload_attachment(
         deliverable_id=deliverable.deliverable_id,
         project_id=project_id,
         result_json=result,
-        operated_by=operator,
+        operated_by=operator, owner_user_id=owner_user_id,
     )
     db.add_all([file_row, link, operation])
     db.flush()
@@ -507,16 +533,17 @@ def submit_acceptance(
     expected_version: int,
     operator: str,
     client_key: str,
+    owner_user_id: int | None = None,
 ) -> dict:
     deliverable = _locked_deliverable(db, project_id=project_id)
     operation_key = _operation_key(
         operator=operator,
         operation_type="submit",
         deliverable_id=deliverable.deliverable_id,
-        client_key=client_key,
+        client_key=client_key, owner_user_id=owner_user_id,
     )
     payload_hash = _payload_hash({"expected_version": expected_version})
-    replay = _existing_operation(db, operation_key=operation_key, payload_hash=payload_hash)
+    replay = _existing_operation(db, operation_key=operation_key, payload_hash=payload_hash, owner_user_id=owner_user_id)
     if replay is not None:
         return replay
     if deliverable.version != expected_version and not (
@@ -558,7 +585,7 @@ def submit_acceptance(
             deliverable_id=deliverable.deliverable_id,
             project_id=project_id,
             result_json=result,
-            operated_by=operator,
+            operated_by=operator, owner_user_id=owner_user_id,
         )
     )
     db.flush()
@@ -570,6 +597,7 @@ def controlled_download(
     *,
     file_id: str,
     operator: str,
+    audit: bool = True,
 ) -> tuple[bytes, BusinessFile]:
     joined = db.execute(
         select(BusinessFile, BusinessFileLink, MaintenanceAcceptanceDeliverable)
@@ -598,17 +626,18 @@ def controlled_download(
     digest = hashlib.sha256(content).hexdigest()
     if len(content) != file_row.size_bytes or digest != file_row.sha256:
         raise MaintenanceAcceptanceConflict("验收附件完整性校验失败，已阻止下载")
-    db.add(
-        BusinessFileDownloadAudit(
-            file_id=file_row.file_id,
-            link_id=link.link_id,
-            deliverable_id=deliverable.deliverable_id,
-            project_id=deliverable.project_id,
-            downloaded_by=operator,
-            sha256_at_download=digest,
+    if audit:
+        db.add(
+            BusinessFileDownloadAudit(
+                file_id=file_row.file_id,
+                link_id=link.link_id,
+                deliverable_id=deliverable.deliverable_id,
+                project_id=deliverable.project_id,
+                downloaded_by=operator,
+                sha256_at_download=digest,
+            )
         )
-    )
-    db.flush()
+        db.flush()
     return content, file_row
 
 
@@ -637,6 +666,7 @@ def archive_attachment(
     project_id: str,
     file_id: str,
     operator: str,
+    owner_user_id: int | None = None,
 ) -> dict:
     """删除验收附件（2026-08-25 客户口径：能传也能删）。
 
@@ -691,14 +721,14 @@ def archive_attachment(
                 operator=operator,
                 operation_type="attachment_archive",
                 deliverable_id=deliverable.deliverable_id,
-                client_key=f"archive-{file_id}-{uuid4()}",
+                client_key=f"archive-{file_id}-{uuid4()}", owner_user_id=owner_user_id,
             ),
             payload_hash=_payload_hash({"file_id": file_id}),
             operation_type="attachment_archive",
             deliverable_id=deliverable.deliverable_id,
             project_id=project_id,
             result_json=result,
-            operated_by=operator,
+            operated_by=operator, owner_user_id=owner_user_id,
         )
     )
     db.flush()

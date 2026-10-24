@@ -2515,7 +2515,8 @@ def test_roundtrip_import_cleanup_os_error_does_not_replace_cancellation(
         cancelled_import,
     )
     monkeypatch.setattr(maintenance_api.os, "remove", denied_remove)
-    ctx = SimpleNamespace(
+    from app.security import UserContext
+    ctx = UserContext(
         is_authenticated=True,
         user_id="reviewer",
         role="admin",
@@ -2660,18 +2661,21 @@ def test_roundtrip_import_repeated_cancel_keeps_lock_until_worker_finishes_and_c
             upload.cancel()
             await asyncio.sleep(0.05)
             completed_before_worker = upload.done()
-            busy_task = asyncio.create_task(
-                _asgi_roundtrip_import_with_receive_meter_async(
-                    busy_body,
-                    busy_boundary,
-                    token=token,
+            async def busy_request():
+                # Authentication/scheduling may delay the second request past
+                # the former fixed 50 ms release timer.
+                await asyncio.sleep(0.1)
+                return await _asgi_roundtrip_import_with_receive_meter_async(
+                    busy_body, busy_boundary, token=token,
                 )
-            )
-            await asyncio.sleep(0.05)
-            release.set()
-            with pytest.raises(asyncio.CancelledError):
-                await upload
-            return await busy_task, completed_before_worker
+            busy_task = asyncio.create_task(busy_request())
+            try:
+                busy_result = await busy_task
+            finally:
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await upload
+            return busy_result, completed_before_worker
 
     (status, consumed, headers), completed_before_worker = asyncio.run(exercise())
 

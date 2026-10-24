@@ -278,6 +278,7 @@ def _command_replay(
     action: str,
     request_fingerprint: str,
     entity_id: str | None = None,
+    owner_user_id: int | None = None,
 ) -> dict | None:
     row = db.scalar(
         select(MaintenanceBadReturnCommand).where(
@@ -286,6 +287,8 @@ def _command_replay(
     )
     if row is None:
         return None
+    if owner_user_id is not None and row.owner_user_id != owner_user_id:
+        raise BadReturnPermissionError("当前账号不能认领其他账号或历史匿名回执")
     if (
         row.project_id != project_id
         or row.entity_type != entity_type
@@ -294,7 +297,9 @@ def _command_replay(
         or (entity_id is not None and row.entity_id != entity_id)
     ):
         raise BadReturnConflict("幂等键已用于不同的坏件返还操作")
-    return {**row.response_json, "idempotent_replay": True}
+    stored = row.response_json
+    response = stored["response"] if stored.get("schema_version") == 1 and "authorization_contract" in stored else stored
+    return {**response, "idempotent_replay": True}
 
 
 def _record_command(
@@ -307,17 +312,21 @@ def _record_command(
     action: str,
     request_fingerprint: str,
     response: dict,
+    owner_user_id: int | None = None,
+    authorization_contract: dict | None = None,
 ) -> None:
     db.add(
         MaintenanceBadReturnCommand(
             command_id=str(uuid4()),
+            owner_user_id=owner_user_id,
             idempotency_key=idempotency_key,
             project_id=project_id,
             entity_type=entity_type,
             entity_id=entity_id,
             action=action,
             request_fingerprint=request_fingerprint,
-            response_json=response,
+            response_json=({"schema_version": 1, "response": response,
+                "authorization_contract": authorization_contract} if authorization_contract is not None else response),
         )
     )
 
@@ -1099,6 +1108,8 @@ def create_bad_return(
     note: str | None,
     reason: str,
     operated_by: str,
+    owner_user_id: int | None = None,
+    authorization_contract: dict | None = None,
 ) -> dict | None:
     _set_write_lock_timeout(db)
     clean_key = _required(idempotency_key, "幂等键", 128)
@@ -1144,6 +1155,7 @@ def create_bad_return(
     _lock_idempotency_key(db, clean_key)
     replay = _command_replay(
         db,
+        owner_user_id=owner_user_id,
         idempotency_key=clean_key,
         project_id=project_id,
         entity_type="bad_return",
@@ -1239,6 +1251,8 @@ def create_bad_return(
     )
     _record_command(
         db,
+        owner_user_id=owner_user_id,
+        authorization_contract=authorization_contract,
         idempotency_key=clean_key,
         project_id=project_id,
         entity_type="bad_return",
@@ -1278,6 +1292,8 @@ def transition_bad_return(
     logistics_reference: str | None = None,
     warehouse_reference: str | None = None,
     inbound_reference: str | None = None,
+    owner_user_id: int | None = None,
+    authorization_contract: dict | None = None,
 ) -> dict | None:
     _set_write_lock_timeout(db)
     clean_key = _required(idempotency_key, "幂等键", 128)
@@ -1316,6 +1332,7 @@ def transition_bad_return(
     _lock_idempotency_key(db, clean_key)
     replay = _command_replay(
         db,
+        owner_user_id=owner_user_id,
         idempotency_key=clean_key,
         project_id=project_id,
         entity_type="bad_return",
@@ -1421,6 +1438,8 @@ def transition_bad_return(
     )
     _record_command(
         db,
+        owner_user_id=owner_user_id,
+        authorization_contract=authorization_contract,
         idempotency_key=clean_key,
         project_id=project_id,
         entity_type="bad_return",
@@ -1498,6 +1517,8 @@ def resolve_obligation_category(
     idempotency_key: str,
     reason: str,
     operated_by: str,
+    owner_user_id: int | None = None,
+    authorization_contract: dict | None = None,
 ) -> dict | None:
     _set_write_lock_timeout(db)
     clean_key = _required(idempotency_key, "幂等键", 128)
@@ -1517,6 +1538,7 @@ def resolve_obligation_category(
     _lock_idempotency_key(db, clean_key)
     replay = _command_replay(
         db,
+        owner_user_id=owner_user_id,
         idempotency_key=clean_key,
         project_id=project_id,
         entity_type="return_obligation",
@@ -1587,6 +1609,8 @@ def resolve_obligation_category(
     )
     _record_command(
         db,
+        owner_user_id=owner_user_id,
+        authorization_contract=authorization_contract,
         idempotency_key=clean_key,
         project_id=project_id,
         entity_type="return_obligation",

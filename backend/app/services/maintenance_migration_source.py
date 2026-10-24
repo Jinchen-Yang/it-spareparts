@@ -28,7 +28,7 @@ from app.services.maintenance_migration_controls import (
     validate_historical_baseline_contract,
 )
 from app.services import maintenance_consumption_cost
-from app.services.maintenance_project_operations import get_or_create_workbook_state
+from app.services.maintenance_project_operations import get_or_create_workbook_state, read_workbook_state
 
 
 class MaintenanceMigrationSourceError(ValueError):
@@ -720,6 +720,7 @@ def build_project_source_payload(
     warehouse_ready_through: date | None = None,
     as_of: date | None = None,
     legacy_truth: Mapping[str, Any] | None = None,
+    read_snapshot=None,
 ) -> dict[str, Any]:
     """Read operational facts from the database; caller supplies only reviewed candidates.
 
@@ -729,10 +730,18 @@ def build_project_source_payload(
     """
 
     clean_project_id = _required_text(project_id, "项目稳定编号", max_length=36)
-    project, workbook_state = lock_project_source_snapshot(
-        db, project_id=clean_project_id
-    )
-    lock_optional_linkage_snapshot(db)
+    if read_snapshot is not None:
+        from app.authz.context import ReadSnapshotProof
+        if type(read_snapshot) is not ReadSnapshotProof:
+            raise ValueError("需要真实一致读证明")
+        read_snapshot.validate(db)
+        project = db.get(MaintenanceProject, clean_project_id)
+        if project is None or not project.is_active:
+            raise MaintenanceMigrationSourceError("维保项目不存在或已归档")
+        workbook_state = read_workbook_state(db, project_id=clean_project_id)
+    else:
+        project, workbook_state = lock_project_source_snapshot(db, project_id=clean_project_id)
+        lock_optional_linkage_snapshot(db)
     if historical_mode not in {"approved_cost_baseline", "stable_site_issues"}:
         raise MaintenanceMigrationSourceError("历史成本模式无效")
 
@@ -917,13 +926,14 @@ def build_project_source_payload(
             )
         opening_candidates.append((row, part_id, expected_key))
     part_ids = {part_id for _row, part_id, _key in opening_candidates}
+    part_query = select(DimPart).where(DimPart.id.in_(part_ids), DimPart.status == "active")
+    if read_snapshot is None:
+        part_query = part_query.with_for_update(read=True)
     active_parts = (
         {
             row.id: row
             for row in db.scalars(
-                select(DimPart)
-                .where(DimPart.id.in_(part_ids), DimPart.status == "active")
-                .with_for_update(read=True)
+                part_query
             )
         }
         if part_ids

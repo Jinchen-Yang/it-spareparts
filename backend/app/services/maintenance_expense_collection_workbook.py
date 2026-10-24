@@ -768,7 +768,7 @@ def _lock_project_apply_context(
     project = db.scalar(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == project_id)
-        .with_for_update()
+        .with_for_update().execution_options(populate_existing=True)
     )
     if project is None or not project.is_active:
         raise WorkbookError("project_not_editable", "项目已不存在或归档，请重新下载")
@@ -1132,7 +1132,8 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
           import_batch_id: str, commit: bool = True,
           workbook_state: MaintenanceProjectWorkbookState | None = None,
           bump_revision: bool = True,
-          track_change: bool = False) -> dict:
+          track_change: bool = False,
+          authorization_callback=None) -> dict:
     """整份事务应用。上传即覆盖——同合同同月份的 CREATE 覆盖既有累计额。
 
     例外只有 D-02 唯一保留的拒绝：**作废优先**。命中已作废月份的 CREATE/UPDATE
@@ -1144,6 +1145,16 @@ def apply(db: Session, plan: WorkbookPlan, *, operated_by: str,
     _reject_invalid_collection_plan(plan)
     contracts_by_no, workbook_state = _lock_and_recheck_apply_scope(
         db, plan, workbook_state=workbook_state)
+    from app.authz import runtime
+    from app.authz.errors import authz_error
+    from app.authz.principal import Principal
+    if runtime.is_authoritative(db, 'maintenance_finance_workbook'):
+        if not callable(authorization_callback):
+            raise authz_error(403, 'AUTHZ_CONTEXT_REQUIRED', '工作簿写入需要当前完整领域授权')
+        principal = authorization_callback(db)
+        if type(principal) is not Principal:
+            raise authz_error(403, 'AUTHZ_CONTEXT_REQUIRED', '工作簿写入主体无效')
+        operated_by = principal.username
     operating_fact_changed = False
     manual_batch = None
     missing_create_count = sum(

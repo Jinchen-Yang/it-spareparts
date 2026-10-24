@@ -12,13 +12,16 @@ admin 不得短路，无显式授权一律 403（P1-1/设计 §9）。领域错�
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Response, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.maintenance_project_operations import _real_operator
 from app.auth import current_identity, current_role
+from app.authz import runtime
+from app.api.maintenance_project_scope import identity_for, legacy_page
+from app.services import maintenance_collection_followup_access as protected
 from app.business_time import business_today
 from app.db import get_db
 from app.models.system import SysUser
@@ -118,6 +121,8 @@ def _explicit_follow_up_action(
     """写端点显式账号门：与 require_explicit_account_action 同一语义
     （admin 不短路、只认实名账号快照⊕覆盖），错误体用冻结 DomainError 形状。
     """
+    if runtime.is_authoritative(db,"maintenance_collection_followup"):
+        return
     if not ctx.is_authenticated or not ctx.user_id:
         _domain_error(
             status.HTTP_401_UNAUTHORIZED,
@@ -138,16 +143,22 @@ def _explicit_follow_up_action(
         )
 
 
-@router.post("/collection-reminders/search")
+@router.post("/collection-reminders/search",response_model=None)
 def search_collection_reminders(
     body: SearchRequest,
     response: Response,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_collection_followup_directory","page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_collection_followup_directory")),
+    view: str | None = Query(None),
 ) -> DirectoryResponse:
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_collection_followup_directory"):
+        return protected.read(db,typed_identity,entry_id=protected.DIRECTORY,
+            params=body.model_dump(exclude={'authorization_precondition'}),legacy_context=ctx,
+            as_of=business_today(),view=view,precondition=body.authorization_precondition)
     try:
         payload = reminders.search_collection_reminders(
             db,
@@ -177,16 +188,22 @@ def search_collection_reminders(
     return DirectoryResponse(**payload)
 
 
-@router.get("/projects/stable/{project_id}/collection-milestones")
+@router.get("/projects/stable/{project_id}/collection-milestones",response_model=None)
 def project_collection_milestones(
     response: Response,
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_collection_followup","page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_collection_followup")),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> ProjectDetailResponse:
     response.headers["Cache-Control"] = "no-store"
+    if runtime.is_authoritative(db,"maintenance_collection_followup"):
+        return protected.read(db,typed_identity,entry_id=protected.PROJECT,params={'project_id':project_id},
+            legacy_context=ctx,as_of=business_today(),view=view,precondition=authorization_precondition)
     try:
         payload = reminders.get_project_collection_milestones(
             db,
@@ -211,17 +228,28 @@ def project_collection_milestones(
     return ProjectDetailResponse(**payload)
 
 
-@router.post("/collection-milestones/{milestone_id}/follow-ups")
+@router.post("/collection-milestones/{milestone_id}/follow-ups",response_model=None)
 def follow_up_collection_milestone(
     body: FollowUpRequest,
+    response: Response,
     milestone_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
+    _page: None = Depends(legacy_page("maintenance_collection_followup","page_maintenance")),
     _action: None = Depends(_explicit_follow_up_action),
     ctx: UserContext = Depends(get_current_user_context),
+    typed_identity=Depends(identity_for("maintenance_collection_followup")),
+    view: str | None = Query(None),
 ) -> FollowUpResponse:
+    response.headers['Cache-Control']='no-store'
+    if runtime.is_authoritative(db,"maintenance_collection_followup"):
+        try:
+            return protected.record(db,typed_identity,milestone_id=milestone_id,
+                command=body.model_dump(exclude={'authorization_precondition'}),legacy_context=ctx,
+                as_of=business_today(),view=view,precondition=body.authorization_precondition)
+        except Exception as exc:
+            _raise_http(exc)
     operator = _real_operator(db, ident)
     try:
         payload = reminders.follow_up_collection_milestone(

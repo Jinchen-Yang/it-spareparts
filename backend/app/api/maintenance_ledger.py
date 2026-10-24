@@ -11,10 +11,12 @@ preview 零 canonical 写入；apply 幂等同步 project/contract/milestone。
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response, status
+from app.authz.service import context_resolution
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response, status
 from starlette.datastructures import UploadFile
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth import current_identity, current_role
 from app.db import get_db
@@ -28,6 +30,11 @@ from app.security import (
 )
 from app.services import import_safety
 from app.services import maintenance_ledger as ledger
+from app.api import maintenance_project_scope as auth_transport
+from app.services import maintenance_workflow_authorization as authorization
+from app.services import maintenance_authorization as foundation
+from app.services import authorization_artifacts as artifacts
+_RESOURCE = 'maintenance_ledger_import'
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 MAX_PREVIEW_BYTES = ledger.MAX_PREVIEW_BYTES
@@ -98,13 +105,16 @@ async def preview_ledger_import(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY)),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(_RESOURCE, require_action(_ACTION_KEY))),
     _preflight: None = Depends(_preview_preflight),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for(_RESOURCE)),
+    view: str | None = Query(None),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    _require_data_profit(ctx, db)
+    if identity is None:
+        _require_data_profit(ctx, db)
     try:
         form = await request.form()
     except Exception as exc:  # noqa: BLE001
@@ -148,12 +158,24 @@ async def preview_ledger_import(
         parsed = await import_safety.parse_in_threadpool(
             ledger.parse_ledger_workbook, data, filename
         )
+        if identity is not None:
+            with foundation.read_context_snapshot(sessionmaker(bind=db.get_bind()), identity,
+                    entry_id=authorization.LEDGER_PREVIEW,
+                    params={'input_sha256': parsed['file_hash'], 'doc_type': 'ledger'}) as (_, _, batch, accesses):
+                if view == 'authorization':
+                    return context_resolution(accesses, batch.contexts[0].ref)
+                authorization.require_complete(accesses)
+            # Only transport authentication/read probes have used this Session.
+            db.rollback()
+            artifacts.begin_artifact_protocol(db.get_bind())
         batch_id = ledger.store_preview(
-            db, parsed, _real_operator(db, ident), idempotency_key=idempotency_key
+            db, parsed, _real_operator(db, ident), idempotency_key=idempotency_key,
+            identity=identity,
+            authorization_precondition=foundation.decode_precondition(form.get('authorization_precondition')),
         )
     except ledger.LedgerParseError as exc:
         _raise_http(exc)
-    except ledger.LedgerBatchError as exc:
+    except Exception as exc:
         db.rollback()
         _raise_http(exc)
     return {
@@ -169,14 +191,29 @@ async def preview_ledger_import(
 @router.post("/ledger-imports/{batch_id}/apply")
 def apply_ledger_import(
     batch_id: str = Path(..., min_length=36, max_length=36),
+    body: dict | None = Body(None),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY)),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(_RESOURCE, require_action(_ACTION_KEY))),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for(_RESOURCE)),
+    view: str | None = Query(None),
 ) -> dict:
-    _require_data_profit(ctx, db)
+    if identity is None:
+        _require_data_profit(ctx, db)
+    if identity is not None:
+        if view == 'authorization':
+            return ledger.read_batch(sessionmaker(bind=db.get_bind()), identity, batch_id,
+                                     authorization_view=True, action_view=True)
+        try:
+            summary = ledger.apply_batch(db, batch_id, identity.username, identity=identity,
+                authorization_precondition=foundation.decode_precondition((body or {}).get('authorization_precondition')))
+            return {'batch_id': batch_id, **summary}
+        except Exception as exc:
+            db.rollback()
+            _raise_http(exc)
     operator = _real_operator(db, ident)
     batch = db.get(MaintenanceLedgerImportBatch, batch_id)
     if batch is not None and batch.uploaded_by != operator and ctx.role not in ("admin", "boss"):
@@ -199,12 +236,19 @@ def get_ledger_import(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY)),
+    _page: None = Depends(auth_transport.legacy_page(_RESOURCE, "page_maintenance")),
+    _action: None = Depends(auth_transport.legacy_gate(_RESOURCE, require_action(_ACTION_KEY))),
     ctx: UserContext = Depends(get_current_user_context),
+    identity=Depends(auth_transport.identity_for(_RESOURCE)),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
     """批次元数据读取与导入 action/所有者/全范围绑定；403/404 不泄漏存在性。"""
     response.headers["Cache-Control"] = "no-store"
+    if identity is not None:
+        return ledger.read_batch(sessionmaker(bind=db.get_bind()), identity, batch_id,
+                                 authorization_view=view == 'authorization',
+                authorization_precondition=foundation.decode_precondition(authorization_precondition) if view != 'authorization' else None)
     operator = _real_operator(db, ident)
     batch = db.get(MaintenanceLedgerImportBatch, batch_id)
     if batch is None:

@@ -287,12 +287,13 @@ def db(migrated):
         _reseed_templates(conn)
         _reseed_business_setting(conn)
         # The fixture resets all canonical state, including migration receipts.
-        # Re-establish the empty S2 boundary rather than pretending a deleted
+        # Re-establish the empty S2/S3 boundaries rather than pretending a deleted
         # production receipt is a valid downgrade proof.
-        conn.execute(text("""INSERT INTO sys_authorization_migration_receipt
-            (migration_key, entity_kind, entity_id, before_state, after_state)
-            VALUES ('authz_s2', 'boundary', 'global', '{}'::jsonb,
-                    CAST(:state AS jsonb))"""), {"state": '{"schema_version":1,"entities":[]}'})
+        for migration_key in ('authz_s2', 'authz_s3'):
+            conn.execute(text("""INSERT INTO sys_authorization_migration_receipt
+                (migration_key, entity_kind, entity_id, before_state, after_state)
+                VALUES (:key, 'boundary', 'global', '{}'::jsonb,
+                        CAST(:state AS jsonb))"""), {"key": migration_key, "state": '{"schema_version":1,"entities":[]}'})
         conn.commit()
     session = SessionLocal()
     try:

@@ -213,6 +213,7 @@ def _revision_idempotent_replay(
     role: str,
     client_request_id: str,
     request_digest: str,
+    authorization=None, commit=True,
 ) -> dict | None:
     """Return an exact prior revision retry; reject key reuse with new content."""
     for event in db.scalars(
@@ -222,6 +223,8 @@ def _revision_idempotent_replay(
         )
     ):
         after = event.after_json or {}
+        if authorization is not None and after.get("actor_user_id") != authorization.accesses.principal.id:
+            continue
         if after.get("client_request_id") != client_request_id:
             continue
         if after.get("request_digest") != request_digest:
@@ -236,10 +239,11 @@ def _revision_idempotent_replay(
             db,
             app.application_id,
             username=username,
-            role=role,
+            role=role, authorization_access=authorization,
         )
         result["idempotent"] = True
-        db.commit()
+        if commit:
+            db.commit()
         return result
     return None
 
@@ -251,12 +255,39 @@ def _application_scope(
     username: str,
     role: str,
     lock: bool = False,
+    authorization_access=None,
 ) -> ReplenishmentApplication:
     stmt = select(ReplenishmentApplication).where(
         ReplenishmentApplication.application_id == application_id
     )
-    if role != "admin":
-        stmt = stmt.where(ReplenishmentApplication.owner_username == username)
+    if authorization_access is None:
+        if role != "admin":
+            stmt = stmt.where(ReplenishmentApplication.owner_username == username)
+    else:
+        from app.authz.service import ResourceAccess
+        from app.authz.errors import authz_error
+        from app.services.replenishment_authorization import CommandAuthorization
+        if type(authorization_access) is ResourceAccess:
+            access = authorization_access
+            if (access.resource != 'replenishment_request' or access.action not in ('read', 'export_screening')
+                    or access.object_ref is None or access.object_ref.kind != 'replenishment_application'
+                    or access.object_ref.id != application_id):
+                raise authz_error(403, 'AUTHZ_FORBIDDEN', '申请授权不匹配')
+            stmt = stmt.where(ReplenishmentApplication.owner_user_id.is_not(None))
+            if access.scope == 'own_applications':
+                stmt = stmt.where(ReplenishmentApplication.owner_user_id == access.principal.id)
+            elif access.scope != 'all':
+                raise authz_error(403, 'AUTHZ_FORBIDDEN', '申请范围不匹配')
+        elif type(authorization_access) is CommandAuthorization:
+            authorization_access.check(db, actions=('submit', 'revise'))
+            stmt = stmt.where(ReplenishmentApplication.project_id == authorization_access.project_id,
+                              ReplenishmentApplication.owner_user_id.is_not(None))
+            if authorization_access.application_id is not None:
+                authorization_access.check(db, application_id=application_id)
+            else:
+                stmt = stmt.where(ReplenishmentApplication.owner_user_id == authorization_access.accesses.principal.id)
+        else:
+            raise authz_error(403, 'AUTHZ_FORBIDDEN', '需要实际申请授权')
     if lock:
         stmt = stmt.with_for_update()
     app = db.scalar(stmt)
@@ -409,8 +440,11 @@ def available_projects(
     db: Session,
     *,
     visible_project_ids: set[str] | None,
+    authorization_condition=None,
 ) -> list[dict]:
     predicate = [MaintenanceProject.is_active.is_(True)]
+    if authorization_condition is not None:
+        predicate.append(authorization_condition)
     if visible_project_ids is not None:
         predicate.append(MaintenanceProject.project_id.in_(visible_project_ids))
     projects = db.scalars(
@@ -508,7 +542,18 @@ def _authorized_project(
     username: str,
     user_ctx: UserContext,
     read_only: bool = False,
+    authorization=None,
 ) -> tuple[MaintenanceProject, UserContext]:
+    if authorization is not None:
+        from app.services.replenishment_authorization import CommandAuthorization
+        from app.authz.errors import authz_error
+        if type(authorization) is not CommandAuthorization:
+            raise authz_error(403, 'AUTHZ_FORBIDDEN', '需要当前补库事务授权')
+        authorization.check(db, project_id=project_id, actions=('submit', 'revise', 'cart_update', 'cart_delete'))
+        project = db.get(MaintenanceProject, project_id, populate_existing=True)
+        if project is None or not project.is_active:
+            raise ReplenishmentError('项目不存在或不可选', code='project_unavailable', status_code=404)
+        return project, user_ctx
     _verify_current_identity(username, user_ctx)
     current_ctx = _current_replenishment_context(db, username=username)
     _require_current_replenishment_permissions(
@@ -567,7 +612,11 @@ def _revision_target_project(
     application_id: str,
     username: str,
     user_ctx: UserContext,
+    authorization=None,
 ) -> str:
+    if authorization is not None:
+        authorization.check(db, application_id=application_id, actions=('revise',))
+        return authorization.project_id
     """Resolve a revision target without trusting the request's role snapshot."""
     _verify_current_identity(username, user_ctx)
     current_ctx = _current_replenishment_context(db, username=username)
@@ -810,8 +859,8 @@ def _version_payload(db: Session, version: ReplenishmentApplicationVersion) -> d
     }
 
 
-def get_application(db: Session, application_id: str, *, username: str, role: str) -> dict:
-    app = _application_scope(db, application_id, username=username, role=role)
+def get_application(db: Session, application_id: str, *, username: str, role: str, authorization_access=None) -> dict:
+    app = _application_scope(db, application_id, username=username, role=role, authorization_access=authorization_access)
     versions = list(
         db.scalars(
             select(ReplenishmentApplicationVersion)
@@ -856,8 +905,19 @@ def get_application(db: Session, application_id: str, *, username: str, role: st
     }
 
 
-def list_applications(db: Session, *, username: str, role: str, page: int = 1, page_size: int = 20) -> dict:
-    predicate = [] if role == "admin" else [ReplenishmentApplication.owner_username == username]
+def list_applications(db: Session, *, username: str, role: str, page: int = 1, page_size: int = 20, authorization_access=None) -> dict:
+    if authorization_access is None:
+        predicate = [] if role == "admin" else [ReplenishmentApplication.owner_username == username]
+    else:
+        from app.authz.service import ResourceAccess
+        from app.authz.errors import authz_error
+        access = authorization_access
+        if (type(access) is not ResourceAccess or access.resource != 'replenishment_request' or access.action != 'read'
+                or access.object_ref is None or access.object_ref.kind != 'collection'
+                or access.object_ref.id != 'replenishment_owned_applications'):
+            raise authz_error(403, 'AUTHZ_FORBIDDEN', '申请集合授权不匹配')
+        from app.services.replenishment_authorization import application_condition
+        predicate = [ReplenishmentApplication.owner_user_id.is_not(None), application_condition(access)]
     total = int(
         db.scalar(select(func.count()).select_from(ReplenishmentApplication).where(*predicate)) or 0
     )
@@ -1216,6 +1276,7 @@ def submit_application_atomic(
     lines: list[dict],
     request_note: str | None = None,
     commit: bool = True,
+    authorization=None,
 ) -> dict:
     """Validate, screen, freeze and create one immutable application transaction."""
     try:
@@ -1266,18 +1327,18 @@ def submit_application_atomic(
             db,
             project_id=project_id,
             username=username,
-            user_ctx=user_ctx,
+            user_ctx=user_ctx, authorization=authorization,
         )
         db.execute(
             select(
                 func.pg_advisory_xact_lock(
-                    func.hashtextextended(f"replenishment-submit:{username}:{key}", 0)
+                    func.hashtextextended(f"replenishment-submit:{authorization.accesses.principal.id if authorization else username}:{key}", 0)
                 )
             )
         )
         existing = db.scalar(
             select(ReplenishmentApplication).where(
-                ReplenishmentApplication.owner_username == username,
+                (ReplenishmentApplication.owner_user_id == authorization.accesses.principal.id) if authorization else (ReplenishmentApplication.owner_username == username),
                 ReplenishmentApplication.client_request_id == key,
             )
         )
@@ -1292,7 +1353,7 @@ def submit_application_atomic(
                 db,
                 existing.application_id,
                 username=username,
-                role=current_ctx.role,
+                role=current_ctx.role, authorization_access=authorization,
             )
             result["idempotent"] = True
             if commit:
@@ -1341,6 +1402,7 @@ def submit_application_atomic(
             application_id=application_id,
             application_no=f"BLK-{as_of:%Y%m%d}-{suffix}",
             owner_username=user.username,
+            owner_user_id=authorization.accesses.principal.id if authorization else None,
             owner_display_name=user.display_name
             or user.salesperson_name
             or user.username,
@@ -1353,6 +1415,7 @@ def submit_application_atomic(
             status="draft",
         )
         version = ReplenishmentApplicationVersion(
+            owner_user_id=authorization.accesses.principal.id if authorization else None,
             version_id=version_id,
             application_id=application_id,
             version_no=1,
@@ -1491,7 +1554,7 @@ def submit_application_atomic(
             db,
             application_id,
             username=username,
-            role=current_ctx.role,
+            role=current_ctx.role, authorization_access=authorization,
         )
         result["idempotent"] = False
         return result
@@ -1808,6 +1871,7 @@ def apply_revision_atomic(
     client_request_id: str,
     lines: list[dict] | None = None,
     resolutions: list[dict] | None = None,
+    authorization=None, commit=True,
 ) -> dict:
     """打回后重新提交（2026-08-18，双模式）：
     - lines：完整期望行集合——「退回编辑」全量重编辑（可添加/删减/换 PN/改数量/填备注）
@@ -1835,7 +1899,7 @@ def apply_revision_atomic(
             username=username,
             user_ctx=user_ctx,
             expected_application_version=expected_application_version,
-            client_request_id=client_request_id, lines=lines,
+            client_request_id=client_request_id, lines=lines, authorization=authorization, commit=commit,
         )
     """Resolve exactly the rejected request lines without reopening approved facts."""
     key = (client_request_id or "").strip()
@@ -1855,20 +1919,20 @@ def apply_revision_atomic(
             db,
             application_id=application_id,
             username=username,
-            user_ctx=user_ctx,
+            user_ctx=user_ctx, authorization=authorization,
         )
         _project, current_ctx = _authorized_project(
             db,
             project_id=target_project_id,
             username=username,
-            user_ctx=user_ctx,
+            user_ctx=user_ctx, authorization=authorization,
         )
         app = _application_scope(
             db,
             application_id,
             username=username,
             role=current_ctx.role,
-            lock=True,
+            lock=True, authorization_access=authorization,
         )
         if app.project_id != target_project_id:
             raise ReplenishmentError(
@@ -1882,7 +1946,7 @@ def apply_revision_atomic(
             username=username,
             role=current_ctx.role,
             client_request_id=key,
-            request_digest=request_digest,
+            request_digest=request_digest, authorization=authorization, commit=commit,
         )
         if replay is not None:
             return replay
@@ -1925,6 +1989,7 @@ def apply_revision_atomic(
             raise ReplenishmentError("替换 PN 不存在、已合并或已排除", code="part_unavailable", status_code=422)
 
         version = ReplenishmentApplicationVersion(
+            owner_user_id=authorization.accesses.principal.id if authorization else None,
             version_id=_uid(), application_id=app.application_id,
             version_no=app.latest_version_no + 1, parent_version_id=previous.version_id,
             # 先 draft 插行（guard_replenishment_line_draft_only 要求行插入时版本为 draft），
@@ -2049,17 +2114,19 @@ def apply_revision_atomic(
             version_id=version.version_id,
             after={
                 "client_request_id": key,
+                **({"actor_user_id": authorization.accesses.principal.id} if authorization else {}),
                 "request_digest": request_digest,
                 "line_count": len(final_lines),
                 "revision_mode": "resolutions",
             },
         )
-        db.commit()
+        if commit:
+            db.commit()
         result = get_application(
             db,
             app.application_id,
             username=username,
-            role=current_ctx.role,
+            role=current_ctx.role, authorization_access=authorization,
         )
         result["idempotent"] = False
         return result
@@ -2077,6 +2144,7 @@ def _apply_revision_full_lines(
     expected_application_version: int,
     client_request_id: str,
     lines: list[dict],
+    authorization=None, commit=True,
 ) -> dict:
     """打回后「退回编辑」全量重提交（2026-08-18，#10）：
     原申请生成新版本，行集合 = 用户编辑后的完整 lines（可添加/删减/换 PN/改数量/填备注），
@@ -2098,20 +2166,20 @@ def _apply_revision_full_lines(
             db,
             application_id=application_id,
             username=username,
-            user_ctx=user_ctx,
+            user_ctx=user_ctx, authorization=authorization,
         )
         _project, current_ctx = _authorized_project(
             db,
             project_id=target_project_id,
             username=username,
-            user_ctx=user_ctx,
+            user_ctx=user_ctx, authorization=authorization,
         )
         app = _application_scope(
             db,
             application_id,
             username=username,
             role=current_ctx.role,
-            lock=True,
+            lock=True, authorization_access=authorization,
         )
         if app.project_id != target_project_id:
             raise ReplenishmentError(
@@ -2125,7 +2193,7 @@ def _apply_revision_full_lines(
             username=username,
             role=current_ctx.role,
             client_request_id=key,
-            request_digest=request_digest,
+            request_digest=request_digest, authorization=authorization, commit=commit,
         )
         if replay is not None:
             return replay
@@ -2163,6 +2231,7 @@ def _apply_revision_full_lines(
         }
 
         version = ReplenishmentApplicationVersion(
+            owner_user_id=authorization.accesses.principal.id if authorization else None,
             version_id=_uid(), application_id=app.application_id,
             version_no=app.latest_version_no + 1, parent_version_id=previous.version_id,
             # 先 draft 插行（guard_replenishment_line_draft_only），行写完再置 submitted
@@ -2277,17 +2346,19 @@ def _apply_revision_full_lines(
             version_id=version.version_id,
             after={
                 "client_request_id": key,
+                **({"actor_user_id": authorization.accesses.principal.id} if authorization else {}),
                 "request_digest": request_digest,
                 "line_count": len(final_lines),
                 "revision_mode": "full_lines",
             },
         )
-        db.commit()
+        if commit:
+            db.commit()
         result = get_application(
             db,
             app.application_id,
             username=username,
-            role=current_ctx.role,
+            role=current_ctx.role, authorization_access=authorization,
         )
         result["idempotent"] = False
         return result
@@ -2378,10 +2449,11 @@ def system_screening_workbook(
     *,
     username: str,
     role: str,
+    authorization_access=None,
 ) -> tuple[bytes, str]:
     """Export only the immutable facts captured by atomic submission."""
     _actor(db, username)
-    app = _application_scope(db, application_id, username=username, role=role)
+    app = _application_scope(db, application_id, username=username, role=role, authorization_access=authorization_access)
     if app.is_legacy_project_unbound:
         raise ReplenishmentError(
             "历史补库申请尚未绑定真实项目，不能导出复核包",

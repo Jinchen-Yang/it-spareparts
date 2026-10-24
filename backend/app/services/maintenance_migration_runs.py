@@ -320,6 +320,7 @@ def _source_payloads_from_specs(
     legacy_loader: LegacyTruthLoader,
     as_of: date,
     approvals: Mapping[str, dict[str, Any]] | None = None,
+    read_snapshot=None,
 ) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
     total_fact_rows = 0
@@ -328,10 +329,14 @@ def _source_payloads_from_specs(
     # Lock every project in stable order before the first global linkage or
     # warehouse table lock.  Per-project locking after a global SHARE lock can
     # deadlock with a concurrent #201 reassignment on a later project.
-    lock_project_source_snapshots(
-        db,
-        project_ids=[str(spec["project_id"]) for spec in specs],
-    )
+    if read_snapshot is not None:
+        from app.authz.context import ReadSnapshotProof
+        if type(read_snapshot) is not ReadSnapshotProof:
+            raise ValueError("需要真实一致读证明")
+        read_snapshot.validate(db)
+    else:
+        lock_project_source_snapshots(
+            db, project_ids=[str(spec["project_id"]) for spec in specs])
     for spec in specs:
         project_id = str(spec["project_id"])
         cutover_date = _parse_date(spec["cutover_date"], "切换日期")
@@ -376,6 +381,7 @@ def _source_payloads_from_specs(
             warehouse_ready_through=warehouse_ready_through,
             as_of=as_of,
             legacy_truth=legacy_truth,
+            read_snapshot=read_snapshot,
         )
         total_fact_rows += sum(
             len(payload.get(section) or [])
@@ -578,6 +584,7 @@ def _event_replay(
     operation_key: str,
     command_fingerprint: str,
     operated_by: str,
+    actor_id: int | None = None,
 ) -> dict[str, Any] | None:
     event = db.scalar(
         select(MaintenanceMigrationEvent).where(
@@ -586,7 +593,8 @@ def _event_replay(
     )
     if event is None:
         return None
-    if event.operated_by != operated_by:
+    if ((actor_id is None and event.operated_by != operated_by) or
+            (actor_id is not None and event.payload_json.get("actor_user_id") != actor_id)):
         raise MaintenanceMigrationRunConflict("操作幂等键属于其他实名操作人")
     if (
         event.run_id != run_id
@@ -606,17 +614,31 @@ def create_preview_run(
     operated_by: str,
     warehouse_loader: WarehouseLoader = unavailable_warehouse_loader,
     legacy_loader: LegacyTruthLoader = unavailable_legacy_truth_loader,
+    identity=None,
+    authorization_precondition=None,
 ) -> dict[str, Any]:
     clean_key = _clean_text(idempotency_key, "请求幂等键", max_length=96)
     clean_reason = _clean_text(reason, "生成 dry-run 理由", max_length=1000)
-    operator = _clean_text(operated_by, "操作人", max_length=64)
+    operator = _clean_text(identity.username if identity is not None else operated_by, "操作人", max_length=64)
+    actor_id = None
+    authorize = None
     specs = _normalize_specs(projects)
+    if identity is not None:
+        from app.services import maintenance_migration_authorization as authz
+        from app.services import authorization_artifacts as artifacts
+        from app.authz.principal import load_principal
+        params = authz.preview_params(projects, reason)
+        authz.preflight(db, identity, authz.PREVIEW, params, precondition=authorization_precondition)
+        actor_id = load_principal(db, identity).id
+        authorize = authz.command_authorizer(identity, authz.PREVIEW, params, authorization_precondition)
+        artifacts.begin_artifact_protocol(db.get_bind())
+        clean_key = artifacts.stable_operation_key(actor_id, "migration.preview", clean_key)
     request_fingerprint = controls.canonical_hash(
         {
             "rule_version": controls.RULE_VERSION,
             "projects": specs,
             "reason": clean_reason,
-            "operated_by": operator,
+            **({"actor_user_id": actor_id} if actor_id is not None else {"operated_by": operator}),
         }
     )
     operation_key = _operation_key("preview", clean_key)
@@ -629,7 +651,12 @@ def create_preview_run(
     if existing is not None:
         if existing.request_fingerprint != request_fingerprint:
             raise MaintenanceMigrationRunConflict("请求幂等键已用于不同迁移清单")
-        return get_run_detail(db, run_id=existing.run_id)
+        if authorize is not None:
+            authz.lock_replay_projects(db, existing.run_id)
+            authorize(db)
+            authz.verify_content(db, existing.run_id)
+        result = get_run_detail(db, run_id=existing.run_id)
+        return {**result, "authorization_context": authorize.authorization_context} if authorize else result
 
     run_as_of = business_today()
     frozen_specs = [{**spec, "as_of": run_as_of.isoformat()} for spec in specs]
@@ -649,6 +676,8 @@ def create_preview_run(
     except (controls.MigrationControlError, MaintenanceMigrationSourceError) as exc:
         raise MaintenanceMigrationRunError(str(exc)) from exc
 
+    if authorize is not None:
+        actor_id = authorize(db)
     preview = wrapper["preview"]
     run = MaintenanceMigrationRun(
         run_id=_uuid(),
@@ -660,31 +689,35 @@ def create_preview_run(
         status="previewed",
         preview_json=wrapper,
         created_by=operator,
+        created_by_user_id=actor_id,
     )
     db.add(run)
     db.flush()
     _persist_initial_rows(db, run=run, wrapper=wrapper)
-    db.add(
-        MaintenanceMigrationEvent(
-            event_id=_uuid(),
-            operation_key=operation_key,
-            run_id=run.run_id,
-            action="preview",
-            from_status=None,
-            to_status="previewed",
-            payload_json={
-                "command_fingerprint": controls.canonical_hash(
-                    {"request_fingerprint": request_fingerprint, "reason": clean_reason}
-                ),
-                "request_fingerprint": request_fingerprint,
-                "source_snapshot_hash": run.source_snapshot_hash,
-            },
-            reason=clean_reason,
-            operated_by=operator,
-        )
+    event = MaintenanceMigrationEvent(
+        event_id=_uuid(),
+        operation_key=operation_key,
+        run_id=run.run_id,
+        action="preview",
+        from_status=None,
+        to_status="previewed",
+        payload_json={
+            "command_fingerprint": controls.canonical_hash(
+                {"request_fingerprint": request_fingerprint, "reason": clean_reason}
+            ),
+            "request_fingerprint": request_fingerprint,
+            "source_snapshot_hash": run.source_snapshot_hash,
+        },
+        reason=clean_reason,
+        operated_by=operator,
     )
-    db.flush()
-    return get_run_detail(db, run_id=run.run_id)
+    if identity is not None:
+        authz.finish_event(db, identity, run.run_id, actor_id, event)
+    else:
+        db.add(event)
+        db.flush()
+    result = get_run_detail(db, run_id=run.run_id)
+    return {**result, "authorization_context": authorize.authorization_context} if authorize else result
 
 
 def _candidate_rows(
@@ -936,6 +969,7 @@ def _rebuild(
     loader: WarehouseLoader,
     legacy_loader: LegacyTruthLoader,
     selected_candidate_ids: set[str] | None,
+    read_snapshot=None,
 ) -> dict[str, Any]:
     if run.rule_version != controls.RULE_VERSION:
         raise MaintenanceMigrationRunConflict(
@@ -968,6 +1002,7 @@ def _rebuild(
             legacy_loader=legacy_loader,
             as_of=run.business_as_of,
             approvals=approvals,
+            read_snapshot=read_snapshot,
         )
         wrapper = _wrapper(
             rule_version=run.rule_version,
@@ -1081,11 +1116,25 @@ def reconcile_run(
     project_signoffs: Sequence[Mapping[str, Any]],
     warehouse_loader: WarehouseLoader = unavailable_warehouse_loader,
     legacy_loader: LegacyTruthLoader = unavailable_legacy_truth_loader,
+    identity=None,
+    authorization_precondition=None,
 ) -> dict[str, Any]:
     clean_run_id = _clean_text(run_id, "迁移运行编号", max_length=36)
     clean_reason = _clean_text(reason, "对账理由", max_length=1000)
-    operator = _clean_text(operated_by, "操作人", max_length=64)
+    operator = _clean_text(identity.username if identity is not None else operated_by, "操作人", max_length=64)
+    actor_id = None
+    authorize = None
     signoffs = _normalize_project_signoffs(project_signoffs)
+    if identity is not None:
+        from app.services import maintenance_migration_authorization as authz
+        from app.services import authorization_artifacts as artifacts
+        from app.authz.principal import load_principal
+        params = {"run_id": clean_run_id}
+        authz.preflight(db, identity, authz.RECONCILE, params, precondition=authorization_precondition)
+        actor_id = load_principal(db, identity).id
+        authorize = authz.command_authorizer(identity, authz.RECONCILE, params, authorization_precondition)
+        artifacts.begin_artifact_protocol(db.get_bind())
+        operation_key = artifacts.stable_operation_key(actor_id, "migration.reconcile", operation_key)
     event_key = _operation_key("reconcile", operation_key)
     command_fingerprint = controls.canonical_hash(
         {
@@ -1093,18 +1142,18 @@ def reconcile_run(
             "expected_version": expected_version,
             "reason": clean_reason,
             "project_signoffs": signoffs,
-            "operated_by": operator,
+            **({"actor_user_id": actor_id} if actor_id is not None else {"operated_by": operator}),
         }
     )
     _advisory_lock(db, event_key)
     run = db.scalar(
         select(MaintenanceMigrationRun)
         .where(MaintenanceMigrationRun.run_id == clean_run_id)
-        .with_for_update()
+        .with_for_update().execution_options(populate_existing=True)
     )
     if run is None:
         raise MaintenanceMigrationRunNotFound("迁移 dry-run 不存在")
-    if operator == run.created_by:
+    if (actor_id == run.created_by_user_id if actor_id is not None else operator == run.created_by):
         raise MaintenanceMigrationRunConflict("对账人必须独立于 dry-run 创建人")
     replay = _event_replay(
         db,
@@ -1113,9 +1162,13 @@ def reconcile_run(
         operation_key=event_key,
         command_fingerprint=command_fingerprint,
         operated_by=operator,
+        actor_id=actor_id,
     )
     if replay is not None:
-        return replay
+        if authorize is not None:
+            authz.lock_replay_projects(db, clean_run_id)
+            authorize(db)
+        return {**replay, "authorization_context": authorize.authorization_context} if authorize else replay
     if run.version != expected_version:
         raise MaintenanceMigrationRunConflict("迁移运行版本已变化，请刷新后重试")
     if run.status != "previewed":
@@ -1145,6 +1198,8 @@ def reconcile_run(
             raise MaintenanceMigrationRunConflict(
                 f"项目 {project_id} 的候选应用后新旧口径差异已变化，请重新核对签字"
             )
+    if authorize is not None:
+        actor_id = authorize(db)
     now = datetime.now(timezone.utc)
     for row in [*baselines, *openings]:
         if (
@@ -1183,34 +1238,38 @@ def reconcile_run(
     )
     run.status = "reconciled"
     run.preview_json = wrapper
+    run.reconciled_by_user_id = actor_id
     run.reconciled_by = operator
     run.reconciled_at = now
     run.version += 1
-    db.add(
-        MaintenanceMigrationEvent(
-            event_id=_uuid(),
-            operation_key=event_key,
-            run_id=run.run_id,
-            action="reconcile",
-            from_status="previewed",
-            to_status="reconciled",
-            payload_json={
-                "command_fingerprint": command_fingerprint,
-                "input_fingerprint": wrapper["preview"]["input_fingerprint"],
-                "remaining_blocker_count": wrapper["preview"]["approval_blocker_count"],
-                "truth_comparison_hashes": {
-                    project_id: rebuilt_previews[project_id]["truth_comparison"][
-                        "truth_comparison_hash"
-                    ]
-                    for project_id in sorted(rebuilt_previews)
-                },
+    event = MaintenanceMigrationEvent(
+        event_id=_uuid(),
+        operation_key=event_key,
+        run_id=run.run_id,
+        action="reconcile",
+        from_status="previewed",
+        to_status="reconciled",
+        payload_json={
+            "command_fingerprint": command_fingerprint,
+            "input_fingerprint": wrapper["preview"]["input_fingerprint"],
+            "remaining_blocker_count": wrapper["preview"]["approval_blocker_count"],
+            "truth_comparison_hashes": {
+                project_id: rebuilt_previews[project_id]["truth_comparison"][
+                    "truth_comparison_hash"
+                ]
+                for project_id in sorted(rebuilt_previews)
             },
-            reason=clean_reason,
-            operated_by=operator,
-        )
+        },
+        reason=clean_reason,
+        operated_by=operator,
     )
-    db.flush()
-    return get_run_detail(db, run_id=run.run_id)
+    if identity is not None:
+        authz.finish_event(db, identity, run.run_id, actor_id, event)
+    else:
+        db.add(event)
+        db.flush()
+    result = get_run_detail(db, run_id=run.run_id)
+    return {**result, "authorization_context": authorize.authorization_context} if authorize else result
 
 
 def _signed_manifest(
@@ -1221,6 +1280,7 @@ def _signed_manifest(
     approved_at: datetime,
     signing_key: bytes,
     signing_key_id: str,
+    approved_by_user_id: int | None = None,
 ) -> tuple[dict[str, Any], str]:
     if not isinstance(signing_key, bytes) or len(signing_key) < 32:
         raise MaintenanceMigrationRunError("manifest 签名密钥配置无效")
@@ -1243,6 +1303,9 @@ def _signed_manifest(
             "reconciled_by": run.reconciled_by,
             "approved_by": approved_by,
             "approved_at": approved_at.isoformat(),
+            **({"created_by_user_id": run.created_by_user_id,
+                "reconciled_by_user_id": run.reconciled_by_user_id,
+                "approved_by_user_id": approved_by_user_id} if run.created_by_user_id is not None else {}),
         },
         "signature_algorithm": "HMAC-SHA256",
         "signing_key_id": key_id,
@@ -1316,11 +1379,25 @@ def approve_run(
     signing_key_id: str,
     warehouse_loader: WarehouseLoader = unavailable_warehouse_loader,
     legacy_loader: LegacyTruthLoader = unavailable_legacy_truth_loader,
+    identity=None,
+    authorization_precondition=None,
 ) -> dict[str, Any]:
     clean_run_id = _clean_text(run_id, "迁移运行编号", max_length=36)
     clean_reason = _clean_text(reason, "审批理由", max_length=1000)
-    operator = _clean_text(operated_by, "操作人", max_length=64)
+    operator = _clean_text(identity.username if identity is not None else operated_by, "操作人", max_length=64)
+    actor_id = None
+    authorize = None
     fingerprint = _clean_text(supplied_fingerprint, "预览指纹", max_length=64)
+    if identity is not None:
+        from app.services import maintenance_migration_authorization as authz
+        from app.services import authorization_artifacts as artifacts
+        from app.authz.principal import load_principal
+        params = {"run_id": clean_run_id}
+        authz.preflight(db, identity, authz.APPROVE, params, precondition=authorization_precondition)
+        actor_id = load_principal(db, identity).id
+        authorize = authz.command_authorizer(identity, authz.APPROVE, params, authorization_precondition)
+        artifacts.begin_artifact_protocol(db.get_bind())
+        operation_key = artifacts.stable_operation_key(actor_id, "migration.approve", operation_key)
     event_key = _operation_key("approve", operation_key)
     command_fingerprint = controls.canonical_hash(
         {
@@ -1328,10 +1405,17 @@ def approve_run(
             "expected_version": expected_version,
             "supplied_fingerprint": fingerprint,
             "reason": clean_reason,
-            "operated_by": operator,
+            **({"actor_user_id": actor_id} if actor_id is not None else {"operated_by": operator}),
         }
     )
     _advisory_lock(db, event_key)
+    run = db.scalar(
+        select(MaintenanceMigrationRun)
+        .where(MaintenanceMigrationRun.run_id == clean_run_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
+    if run is None:
+        raise MaintenanceMigrationRunNotFound("迁移 dry-run 不存在")
     replay = _event_replay(
         db,
         run_id=clean_run_id,
@@ -1339,21 +1423,19 @@ def approve_run(
         operation_key=event_key,
         command_fingerprint=command_fingerprint,
         operated_by=operator,
+        actor_id=actor_id,
     )
     if replay is not None:
-        return replay
-    run = db.scalar(
-        select(MaintenanceMigrationRun)
-        .where(MaintenanceMigrationRun.run_id == clean_run_id)
-        .with_for_update()
-    )
-    if run is None:
-        raise MaintenanceMigrationRunNotFound("迁移 dry-run 不存在")
+        if authorize is not None:
+            authz.lock_replay_projects(db, clean_run_id)
+            authorize(db)
+        return {**replay, "authorization_context": authorize.authorization_context} if authorize else replay
     if run.version != expected_version:
         raise MaintenanceMigrationRunConflict("迁移运行版本已变化，请刷新后重试")
     if run.status != "reconciled":
         raise MaintenanceMigrationRunConflict("只有已对账 dry-run 可以审批")
-    if operator in {run.created_by, run.reconciled_by}:
+    if (actor_id in {run.created_by_user_id, run.reconciled_by_user_id} if actor_id is not None
+            else operator in {run.created_by, run.reconciled_by}):
         raise MaintenanceMigrationRunConflict("最终审批人必须独立于创建人与对账人")
 
     wrapper = _rebuild(
@@ -1387,11 +1469,14 @@ def approve_run(
     if open_blockers:
         raise MaintenanceMigrationRunConflict("仍有未解决阻塞差异，不能审批")
 
+    if authorize is not None:
+        actor_id = authorize(db)
     now = datetime.now(timezone.utc)
     manifest, manifest_hash = _signed_manifest(
         run=run,
         wrapper=wrapper,
         approved_by=operator,
+        approved_by_user_id=actor_id,
         approved_at=now,
         signing_key=signing_key,
         signing_key_id=signing_key_id,
@@ -1402,28 +1487,32 @@ def approve_run(
     run.manifest_json = manifest
     run.manifest_hash = manifest_hash
     run.manifest_key_id = signing_key_id
+    run.approved_by_user_id = actor_id
     run.approved_by = operator
     run.approved_at = now
     run.version += 1
-    db.add(
-        MaintenanceMigrationEvent(
-            event_id=_uuid(),
-            operation_key=event_key,
-            run_id=run.run_id,
-            action="approve",
-            from_status="reconciled",
-            to_status="approved",
-            payload_json={
-                "command_fingerprint": command_fingerprint,
-                "input_fingerprint": current_fingerprint,
-                "manifest_hash": manifest_hash,
-            },
-            reason=clean_reason,
-            operated_by=operator,
-        )
+    event = MaintenanceMigrationEvent(
+        event_id=_uuid(),
+        operation_key=event_key,
+        run_id=run.run_id,
+        action="approve",
+        from_status="reconciled",
+        to_status="approved",
+        payload_json={
+            "command_fingerprint": command_fingerprint,
+            "input_fingerprint": current_fingerprint,
+            "manifest_hash": manifest_hash,
+        },
+        reason=clean_reason,
+        operated_by=operator,
     )
-    db.flush()
-    return get_run_detail(db, run_id=run.run_id)
+    if identity is not None:
+        authz.finish_event(db, identity, run.run_id, actor_id, event)
+    else:
+        db.add(event)
+        db.flush()
+    result = get_run_detail(db, run_id=run.run_id)
+    return {**result, "authorization_context": authorize.authorization_context} if authorize else result
 
 
 def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
@@ -1637,6 +1726,7 @@ def get_signed_manifest(
     verification_keys: Mapping[str, bytes],
     warehouse_loader: WarehouseLoader = unavailable_warehouse_loader,
     legacy_loader: LegacyTruthLoader = unavailable_legacy_truth_loader,
+    read_snapshot=None,
 ) -> dict[str, Any]:
     run = db.get(MaintenanceMigrationRun, run_id)
     if run is None:
@@ -1649,6 +1739,7 @@ def get_signed_manifest(
         loader=warehouse_loader,
         legacy_loader=legacy_loader,
         selected_candidate_ids=None,
+        read_snapshot=read_snapshot,
     )
     current_preview = wrapper["preview"]
     if (
@@ -1667,6 +1758,9 @@ def get_signed_manifest(
         "reconciled_by": run.reconciled_by,
         "approved_by": run.approved_by,
         "approved_at": run.approved_at.isoformat() if run.approved_at else None,
+        **({"created_by_user_id": run.created_by_user_id,
+            "reconciled_by_user_id": run.reconciled_by_user_id,
+            "approved_by_user_id": run.approved_by_user_id} if run.created_by_user_id is not None else {}),
     }
     if (
         manifest.get("run_id") != run.run_id
@@ -1693,12 +1787,13 @@ def search_runs(
     statuses: Sequence[str],
     page: int,
     page_size: int,
+    authorization_filters=(),
 ) -> dict[str, Any]:
     allowed = {"previewed", "reconciled", "approved"}
     normalized = sorted(set(statuses)) if statuses else []
     if any(status not in allowed for status in normalized):
         raise MaintenanceMigrationRunError("迁移状态筛选无效")
-    filters = []
+    filters = list(authorization_filters)
     if normalized:
         filters.append(MaintenanceMigrationRun.status.in_(normalized))
     total = db.scalar(

@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from sqlalchemy import false, func, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from app.models.maintenance_project import (
     MaintenanceProject,
@@ -351,8 +352,8 @@ def search_active_users(
         db.scalar(select(func.count()).select_from(SysUser).where(*filters)) or 0
     )
     users = list(
-        db.scalars(
-            select(SysUser)
+        db.execute(
+            select(SysUser.id, SysUser.username, SysUser.display_name, SysUser.is_active)
             .where(*filters)
             .order_by(
                 SysUser.display_name.asc().nulls_last(),
@@ -379,6 +380,21 @@ def search_active_users(
     }
 
 
+def read_manager_directory(session_factory, identity, command, *, authorization_view=False,
+                           authorization_precondition=None):
+    from app.authz import service
+    from app.services import maintenance_authorization as foundation
+    entry='POST /api/maintenance/project-manager-assignments/search'
+    with foundation.read_context_snapshot(session_factory,identity,entry_id=entry,params=command) as (db,_,batch,accesses):
+        ref=batch.contexts[0].ref
+        if authorization_view:
+            return service.context_resolution(accesses, ref)
+        accesses.require(ref,'maintenance_manager_directory','read')
+        service.check_context_precondition(foundation.decode_precondition(authorization_precondition),accesses,ref)
+        result=search_active_users(db,q_text=command.get('q'),page=command.get('page',1),page_size=command.get('page_size',20))
+        return {**result,'authorization_context':accesses.wire(ref)}
+
+
 def assign_primary_manager(
     db: Session,
     *,
@@ -391,6 +407,7 @@ def assign_primary_manager(
     operated_by: str,
     _prelocked_state: "MaintenanceProjectWorkbookState | None" = None,
     _skip_workbook_bump: bool = False,
+    _authorize=None,
 ) -> dict | None:
     reason = _required_text(reason, "改派原因", 1000)
     operated_by = _required_text(operated_by, "操作人", 64)
@@ -416,6 +433,7 @@ def assign_primary_manager(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == project_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if project is None:
         return None
@@ -433,6 +451,7 @@ def assign_primary_manager(
             MaintenanceProjectUserAssignment.archived_at.is_(None),
         )
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if current is None:
         if expected_assignment_id is not None or expected_assignment_version is not None:
@@ -451,9 +470,9 @@ def assign_primary_manager(
             raise MaintenanceProjectAssignmentError("当前负责人账号记录缺失")
         before = assignment_dict(current, current_user)
 
-    target_user = db.scalar(
-        select(SysUser).where(SysUser.id == user_id).with_for_update()
-    )
+    target_user = (_authorize(project, current, user_id) if _authorize is not None else db.scalar(
+        select(SysUser).where(SysUser.id == user_id).with_for_update().execution_options(populate_existing=True)
+    ))
     if target_user is None:
         raise MaintenanceProjectAssignmentError("负责人账号不存在")
     if not target_user.is_active:
@@ -541,6 +560,7 @@ def archive_primary_manager(
     version: int,
     reason: str,
     operated_by: str,
+    _authorize=None,
 ) -> dict | None:
     reason = _required_text(reason, "归档原因", 1000)
     operated_by = _required_text(operated_by, "操作人", 64)
@@ -564,6 +584,7 @@ def archive_primary_manager(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == project_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if project is None:
         return None
@@ -574,6 +595,7 @@ def archive_primary_manager(
             MaintenanceProjectUserAssignment.project_id == project_id,
         )
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if assignment is None:
         return None
@@ -581,7 +603,8 @@ def archive_primary_manager(
         raise MaintenanceProjectAssignmentConflict("项目负责人已变化，请刷新后重试")
     if assignment.archived_at is not None:
         raise MaintenanceProjectAssignmentConflict("项目负责人关系已归档")
-    user = db.get(SysUser, assignment.user_id)
+    user = (_authorize(project, assignment, None) if _authorize is not None
+            else db.get(SysUser, assignment.user_id))
     if user is None:
         raise MaintenanceProjectAssignmentError("负责人账号记录缺失")
     before = assignment_dict(assignment, user)
@@ -721,3 +744,111 @@ def sync_project_viewers(
     # project.version 与 workbook revision 由 API 与同次主档 PATCH 聚合：
     # 混合修改最多 +1，viewer-only 真实变化 +1，全 no-op +0。
     return project_viewers(db, project_id=project_id), True
+
+
+_ASSIGN_ENTRY = 'POST /api/maintenance/projects/stable/{project_id}/manager-assignment'
+_ARCHIVE_ENTRY = 'POST /api/maintenance/project-manager-assignments/{assignment_id}/archive'
+
+
+def _assignment_context(db, identity, *, entry_id, params, branch=None, read_snapshot=None, locked_user=None):
+    from app.authz.context import create_context_batch, relation_revision
+    from app.authz.context_registry import ENTRY_CONTRACTS
+    from app.authz.errors import authz_error
+    from app.services import maintenance_authorization as foundation
+    assignment = None
+    if entry_id == _ARCHIVE_ENTRY:
+        assignment = db.get(MaintenanceProjectUserAssignment, params['assignment_id'], populate_existing=True)
+        if assignment is None:
+            raise authz_error(404,'MAINTENANCE_ASSIGNMENT_NOT_FOUND','负责人关系不存在')
+        project_id, target_id = assignment.project_id, assignment.user_id
+    else:
+        project_id, target_id = params['project_id'], params['user_id']
+    _, projects = foundation.resolve_project_subjects(db,identity,[project_id],
+        read_snapshot=read_snapshot,locked_user=locked_user)
+    target = db.execute(select(SysUser.id, SysUser.username, SysUser.display_name,
+        SysUser.salesperson_name, SysUser.is_active, SysUser.token_version).where(
+        SysUser.id == target_id, SysUser.deleted_at.is_(None))).first()
+    if target is None:
+        raise authz_error(422, 'MAINTENANCE_ASSIGNMENT_INVALID', '负责人账号不存在')
+    slot = ENTRY_CONTRACTS[entry_id]['slots']['context_0']
+    selection = {key:params[key] for key in slot['selector_schema']['properties'] if key in params}
+    ref = foundation.slot_ref(entry_id,'context_0',assignment.assignment_id if assignment else project_id,selection=selection)
+    evidence = projects[project_id]
+    revision = relation_revision({'carrier':ref.to_dict(),'project':evidence.authorization_revision,
+        'target':[target.id,target.username,target.display_name,target.salesperson_name,target.is_active,target.token_version],
+        'assignment':([assignment.assignment_id,assignment.project_id,assignment.user_id,assignment.version,
+            assignment.archived_at.isoformat() if assignment.archived_at else None] if assignment else None)})
+    context = foundation.resolved_context(db,entry_id=entry_id,branch='default',carrier=ref,
+        slots={'context_0':(ref,)},subjects={'maintenance_assignments':(evidence.subject,)},revision=revision)
+    return create_context_batch(db,[context])
+
+
+def assignment_command(db, identity, *, project_id=None, assignment_id=None, command, view=None,
+                       authorization_precondition=None):
+    """Canonical assign/archive, including command authorization view and one commit."""
+    from app.authz import service
+    from app.authz.errors import authz_error
+    from app.authz.principal import VerifiedIdentity
+    from app.services import maintenance_authorization as foundation
+    if not isinstance(identity, VerifiedIdentity):
+        raise authz_error(401, 'AUTHZ_IDENTITY_INVALID', '需要真实验签身份')
+    entry = _ASSIGN_ENTRY if project_id is not None else _ARCHIVE_ENTRY
+    action = 'assign' if project_id is not None else 'archive'
+    params = {**command,**({'project_id':project_id} if project_id is not None else {'assignment_id':assignment_id})}
+    if view not in (None,'authorization'):
+        raise authz_error(422,'AUTHZ_INVALID_REQUEST','未知的授权视图')
+    precondition = foundation.decode_precondition(authorization_precondition)
+    # Initial current permission precedes business validation. The independent
+    # read-only snapshot takes no actor/domain locks; the callback below still
+    # reauthorizes after the complete domain lock set has been acquired.
+    with foundation.read_context_snapshot(lambda:Session(db.get_bind()),identity,
+            entry_id=entry,params=params) as (_,_,batch,accesses):
+        ref = batch.contexts[0].ref
+        if view == 'authorization':
+            return service.context_resolution(accesses, batch.contexts[0].ref)
+        accesses.require(ref, 'maintenance_assignments', action)
+        service.check_context_precondition(precondition, accesses, ref)
+    captured = {}
+    def authorize(project, current, new_target):
+        share_ids = [current.user_id] if current is not None else []
+        actor, users = foundation.lock_final_users(db,identity,
+            update_user_ids=[new_target] if new_target is not None else (),share_user_ids=share_ids)
+        batch = foundation.resolve_entry_context(db,identity,entry_id=entry,params=params,locked_user=actor)
+        accesses = service.context_accesses(db,identity,batch,locked_user=actor)
+        ref = batch.contexts[0].ref
+        accesses.require(ref,'maintenance_assignments',action)
+        service.check_context_precondition(precondition,accesses,ref)
+        captured.update(accesses=accesses,ref=ref)
+        return users[new_target if new_target is not None else current.user_id]
+    try:
+        if project_id is not None:
+            result = assign_primary_manager(db,project_id=project_id,operated_by=identity.username,
+                user_id=command['user_id'], expected_assignment_id=command.get('expected_assignment_id'),
+                expected_assignment_version=command.get('expected_assignment_version'),
+                sync_salesperson=command.get('sync_salesperson',False),reason=command['reason'],_authorize=authorize)
+        else:
+            result = archive_primary_manager(db,assignment_id=assignment_id,operated_by=identity.username,
+                version=command['version'],reason=command['reason'],_authorize=authorize)
+        if result is None:
+            raise authz_error(404,'MAINTENANCE_ASSIGNMENT_NOT_FOUND','项目或负责人关系不存在')
+        result = {**result,'authorization_context':captured['accesses'].wire(captured['ref'])}
+        db.commit()
+        return result
+    except MaintenanceProjectAssignmentConflict as exc:
+        db.rollback()
+        raise authz_error(409, 'MAINTENANCE_ASSIGNMENT_CONFLICT', str(exc)) from exc
+    except MaintenanceProjectAssignmentError as exc:
+        db.rollback()
+        raise authz_error(422, 'MAINTENANCE_ASSIGNMENT_INVALID', str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise authz_error(409, 'MAINTENANCE_ASSIGNMENT_CONFLICT', '项目负责人已变化，请刷新后重试') from exc
+    except Exception:
+        db.rollback()
+        raise
+
+
+# Fixed domain registrations, never inferred from caller-supplied action names.
+from app.services import maintenance_authorization as _foundation
+_foundation.register_entry_resolver(_ASSIGN_ENTRY, _assignment_context)
+_foundation.register_entry_resolver(_ARCHIVE_ENTRY, _assignment_context)

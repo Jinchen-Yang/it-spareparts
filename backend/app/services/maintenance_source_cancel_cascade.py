@@ -216,7 +216,7 @@ def confirmation_status(db: Session, *, project_id, batch_id, source_order_id,
 
 
 def confirm_cancellation(db: Session, *, project_id, batch_id, source_order_id,
-                         expected_digest, reason, operated_by, idempotency_key, reauthorize):
+                         expected_digest, reason, operated_by, idempotency_key, reauthorize, _authorization=None):
     """Confirm one reviewed candidate atomically; the API owns commit/rollback.
 
     Global -> workbook state -> project -> source header -> assignment -> demand
@@ -231,21 +231,36 @@ def confirm_cancellation(db: Session, *, project_id, batch_id, source_order_id,
     from app.services import maintenance_site_return_requirements as requirements
     from app.services.maintenance_wbdd_sync import _audit
 
+    if _authorization is not None:
+        from app.services.maintenance_source_cancellation_access import SourceCancellationAuthorization
+        if (type(_authorization) is not SourceCancellationAuthorization or _authorization.db is not db
+                or _authorization.params != {'project_id': project_id, 'batch_id': batch_id,
+                    'source_order_id': source_order_id, 'expected_digest': expected_digest,
+                    'reason': reason, 'idempotency_key': idempotency_key}):
+            raise ValueError('来源取消需要实际同事务完整命令')
+    operator_identity = _authorization.operator_identity if _authorization is not None else operated_by
     reason = str(reason or "").strip()
     if not reason or len(reason) > demands.MAX_REASON_LENGTH or not operated_by:
         raise ValueError("必须提供实名操作人和有效作废原因（最多1000字）")
     request_digest = _digest({"project_id": project_id, "batch_id": batch_id,
         "source_order_id": source_order_id, "expected_digest": expected_digest,
-        "reason": reason, "operated_by": operated_by})
-    replay_key = _digest([operated_by, idempotency_key])
+        "reason": reason, "operated_by": operator_identity})
+    replay_key = _digest([operator_identity, idempotency_key])
     db.execute(select(func.pg_advisory_xact_lock(DATA_CHANGE_ADVISORY_LOCK_KEY)))
     db.expire_all()
-    reauthorize()
+    if _authorization is None:
+        reauthorize()
     prior_batch = db.scalar(receipt_batch_query(replay_key))
     if prior_batch is not None:
         prior = prior_batch.report_json[RESULTS_KEY][replay_key]
         if prior["request_digest"] != request_digest:
             raise CancellationConflict("同一幂等键已用于其他确认请求，请刷新核对")
+        if _authorization is not None:
+            db.scalar(select(MaintenanceProject).where(MaintenanceProject.project_id == project_id)
+                      .with_for_update().execution_options(populate_existing=True))
+            db.scalar(select(SysImportBatch).where(SysImportBatch.id == prior_batch.id)
+                      .with_for_update().execution_options(populate_existing=True))
+            _authorization.capture(db)
         return {**prior["result"], "replayed": True}
 
     before, batch, order, lines, sites, exact = _impact(
@@ -272,7 +287,10 @@ def confirm_cancellation(db: Session, *, project_id, batch_id, source_order_id,
     db.scalar(select(SysImportBatch).where(SysImportBatch.id == batch_id)
               .with_for_update().execution_options(populate_existing=True))
     db.expire_all()
-    reauthorize()
+    if _authorization is None:
+        reauthorize()
+    else:
+        _authorization.capture(db)
     checked, batch, order, lines, sites, exact = _impact(
         db, project_id=project_id, batch_id=batch_id, source_order_id=source_order_id)
     if not checked["executable"] or checked["expected_digest"] != expected_digest:
@@ -315,7 +333,8 @@ def confirm_cancellation(db: Session, *, project_id, batch_id, source_order_id,
     # Do not pass an inner idempotency key: void_fast's key->global prefix would
     # invert this command's global-first protocol. Our receipt is the sole replay.
     tombstone = demands.void_fast(db, source_order_ids=[source_order_id], reason=reason,
-                                 operated_by=operated_by, allowed_project_ids={project_id})
+                                 operated_by=operated_by, allowed_project_ids={project_id},
+                                 _source_authorization=_authorization)
     operations.bump_locked_workbook_revision(db, state=states[project_id])
     result = {"batch_id": batch_id, "source_order_id": source_order_id,
               "voided_orders": tombstone["voided"], "voided_lines": len(active_lines),
@@ -324,6 +343,8 @@ def confirm_cancellation(db: Session, *, project_id, batch_id, source_order_id,
     saved = dict((batch.report_json or {}).get(RESULTS_KEY) or {})
     saved[replay_key] = {"request_digest": request_digest, "result": result,
                          "operated_by": operated_by, "reason": reason, "project_id": project_id}
+    if _authorization is not None:
+        saved[replay_key]['owner_user_id'] = _authorization.principal.id
     batch.report_json = {**(batch.report_json or {}), RESULTS_KEY: saved}
     db.flush()
     return result

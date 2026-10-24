@@ -1,6 +1,7 @@
 """Shared server-side row-scope guard for stable maintenance projects."""
 
 from fastapi import Depends, HTTPException, Path, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -8,6 +9,41 @@ from app.db import get_db
 from app.models.maintenance_project import MaintenanceProject
 from app.security import FULL_SCOPE_ROLES, UserContext, get_current_user_context
 from app.services import maintenance_project_assignments as assignments
+from app.authz import runtime
+from app.authz.principal import current_verified_identity
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+def identity_for(*resources):
+    """Typed identity is obtained only from the verified transport adapter."""
+    def dependency(db: Session = Depends(get_db), credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)):
+        if any(runtime.is_authoritative(db, resource) for resource in resources):
+            return current_verified_identity(credentials, db)
+        return None
+    return dependency
+
+
+def legacy_gate(resources, gate):
+    resources = (resources,) if isinstance(resources, str) else tuple(resources)
+    def dependency(db: Session = Depends(get_db), ctx=Depends(get_current_user_context)):
+        if not any(runtime.is_authoritative(db, resource) for resource in resources):
+            return gate(ctx)
+    return dependency
+
+
+def legacy_page(resource, key):
+    from app.security import require_page
+    return legacy_gate(resource, require_page(key))
+
+
+def legacy_project_scope(resource):
+    resources = (resource,) if isinstance(resource, str) else tuple(resource)
+    def dependency(project_id: str = Path(..., min_length=1, max_length=36),
+                   db: Session = Depends(get_db), ctx=Depends(get_current_user_context)):
+        if not any(runtime.is_authoritative(db, item) for item in resources):
+            enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
+    return dependency
 
 
 def enforce_maintenance_project_access(

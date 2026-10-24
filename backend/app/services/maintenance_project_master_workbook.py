@@ -1259,8 +1259,18 @@ def apply(
     import_batch_id: str,
     _prelocked_workbook_states: dict | None = None,
     _line_project_ids: dict[int, str] | None = None,
+    _authorization=None,
+    _global_authorization=None,
 ) -> dict:
     """整份事务应用；上传即覆盖。"""
+    if _authorization is not None:
+        from app.services.maintenance_master_apply_access import MasterWriteAuthorization, _receipt
+        if type(_authorization) is not MasterWriteAuthorization or _authorization.plan is not plan or plan.project_id is None:
+            raise ValueError('V1 整本应用授权必须绑定实际项目计划')
+    if _global_authorization is not None:
+        from app.services.maintenance_global_lines_access import GlobalLinesAuthorization
+        if type(_global_authorization) is not GlobalLinesAuthorization or plan.project_id is not None:
+            raise ValueError("global authorization requires an actual global workbook plan")
     workbook_state = None
     operating_fact_changed = False
     changed_project_ids: set[str] = set()
@@ -1290,6 +1300,16 @@ def apply(
             project_id=plan.project_id,
             issue_line_ids=[flag.issue_line_id for flag in plan.site_flags],
         )
+    if _authorization is not None:
+        receipt = db.scalar(select(MaintenanceProjectWorkbookOperation).where(
+            MaintenanceProjectWorkbookOperation.operation_key == _authorization.operation_key))
+        if receipt is not None:
+            _authorization.replay(db, receipt)
+            _, audit, _, _ = _receipt(db, str(receipt.id))
+            result = {**audit.after_json['response'], 'replayed': True}
+            db.commit()
+            return result
+        _authorization.capture(db)
     # Stable lock order prevents two uploads with different Excel row orders
     # from taking assignment locks in opposite order.
     for refill in sorted(plan.cost_refills, key=lambda item: item.line_id or -1):
@@ -1404,9 +1424,16 @@ def apply(
                     "工作簿包含未预锁的项目备件行，请重新下载",
                 )
             operations.bump_locked_workbook_revision(db, state=state)
+    result = {"applied_by": operated_by, "import_batch_id": import_batch_id,
+              "sheets": list(plan.sheets), **plan.summary}
+    if _authorization is not None:
+        _authorization.authorize_after(db)
+        result['replayed'] = False
+        _authorization.publish_v1(db, result)
+    if _global_authorization is not None:
+        _global_authorization.authorize_after(db)
     db.commit()
-    return {"applied_by": operated_by, "import_batch_id": import_batch_id,
-            "sheets": list(plan.sheets), **plan.summary}
+    return result
 
 
 def _lock_global_refill_rows(
@@ -1677,6 +1704,7 @@ def apply_global_lines(
     operated_by: str,
     import_batch_id: str,
     allowed_project_ids: set[str] | None = None,
+    _global_authorization=None,
 ) -> dict:
     """Recheck global-workbook row scope immediately before any write."""
     if (
@@ -1825,6 +1853,7 @@ def apply_global_lines(
         import_batch_id=import_batch_id,
         _prelocked_workbook_states=workbook_states,
         _line_project_ids=line_project_ids,
+        _global_authorization=_global_authorization,
     )
     # An ACK-loss replay reports the original requested count while making no
     # second mutation/version bump.
@@ -3155,6 +3184,7 @@ def build_project_master_v2(
     *,
     project_id: str,
     sheets: tuple[str, ...] | None = None,
+    read_snapshot=None,
 ) -> bytes | None:
     if db.scalar(
         select(MaintenanceProject.project_id).where(
@@ -3168,15 +3198,17 @@ def build_project_master_v2(
     # instead of merely making that freshly downloaded file immediately stale.
     from app.services import maintenance_project_operations as operations
 
-    workbook_state = operations.lock_workbook_states(
-        db,
-        project_ids={project_id},
-    )[project_id]
-    project = db.scalar(
-        select(MaintenanceProject)
-        .where(MaintenanceProject.project_id == project_id)
-        .with_for_update()
-    )
+    if read_snapshot is not None:
+        from app.authz.context import ReadSnapshotProof
+        if type(read_snapshot) is not ReadSnapshotProof:
+            raise ValueError('完整工作簿读取需要真实一致读证明')
+        read_snapshot.validate(db)
+        workbook_state = operations.read_workbook_state(db, project_id=project_id)
+        project = db.scalar(select(MaintenanceProject).where(MaintenanceProject.project_id == project_id))
+    else:
+        workbook_state = operations.lock_workbook_states(db, project_ids={project_id})[project_id]
+        project = db.scalar(select(MaintenanceProject).where(
+            MaintenanceProject.project_id == project_id).with_for_update())
     if project is None:
         return None
     exported_revision = workbook_state.revision
@@ -3525,7 +3557,7 @@ def _v2_meta(wb) -> dict[str, str]:
     return merged
 
 
-def _v2_verify_meta(db: Session, wb, project_id: str) -> dict[str, str]:
+def _v2_verify_meta(db: Session, wb, project_id: str, *, read_snapshot=None) -> dict[str, str]:
     meta = _v2_meta(wb)
     if meta.get("protocol_id") != V2_PROTOCOL_ID or meta.get("template_version") != V2_TEMPLATE_VERSION:
         raise WorkbookError("template_version_mismatch", "工作簿版本已更新，请重新下载当前项目总表后再上传。")
@@ -3546,6 +3578,9 @@ def _v2_verify_meta(db: Session, wb, project_id: str) -> dict[str, str]:
             "工作簿元数据签名无效或已过期，请重新下载当前项目总表后再上传。",
         )
     if meta.get("project_id") != project_id:
+        if read_snapshot is not None:
+            read_snapshot.validate(db)
+            raise WorkbookError('project_mismatch', '这份工作簿不属于当前项目，请重新下载')
         # 2026-08-23：带上工作簿真正所属的项目名——批量处理多项目时极易
         # 拿错文件，只说「不一致」用户不知道这表是谁的
         from app.models.maintenance_project import MaintenanceProject
@@ -6358,13 +6393,18 @@ def apply_project_master_v2(
     operated_by: str,
     import_batch_id: str,
     user_ctx: UserContext | None = None,
+    _authorization=None,
 ) -> dict:
     # 本服务拥有整本事务及 commit；所有写入/flush（含下游原语与回执）
     # 的约束失败都必须回滚，不能把 failed Session 或数据库 500 留给调用方。
+    if _authorization is not None:
+        from app.services.maintenance_master_apply_access import MasterWriteAuthorization
+        if type(_authorization) is not MasterWriteAuthorization or _authorization.plan is not plan:
+            raise ValueError('工作簿写入需要完整的受控授权事务')
     try:
         return _apply_project_master_v2(
             db, plan, operated_by=operated_by, import_batch_id=import_batch_id,
-            user_ctx=user_ctx,
+            user_ctx=user_ctx, _authorization=_authorization,
         )
     except IntegrityError as exc:
         db.rollback()
@@ -6396,9 +6436,10 @@ def _apply_project_master_v2(
     operated_by: str,
     import_batch_id: str,
     user_ctx: UserContext | None = None,
+    _authorization=None,
 ) -> dict:
     # All mutations deliberately happen on this one Session transaction.
-    apply_operation_key = _v2_apply_operation_key(plan, operated_by)
+    apply_operation_key = _authorization.operation_key if _authorization is not None else _v2_apply_operation_key(plan, operated_by)
     if apply_operation_key is not None:
         # The caller creates a fresh request UUID for every HTTP attempt.  A
         # deterministic server batch identity makes an ACK-loss replay return
@@ -6529,11 +6570,15 @@ def _apply_project_master_v2(
             ).all()
             if value
         )
+    if _authorization is not None:
+        state_project_ids.update(_authorization.parent_ids)
     workbook_states = operations.lock_workbook_states(
         db,
         project_ids=state_project_ids,
     )
     workbook_state = workbook_states[plan.project_id]
+    if _authorization is not None:
+        _authorization.lock_closure(db)
     project = db.scalar(
         select(MaintenanceProject)
         .where(MaintenanceProject.project_id == plan.project_id)
@@ -6564,13 +6609,16 @@ def _apply_project_master_v2(
                 or receipt.export_id != plan.export_id
                 or receipt.file_sha256 != plan.file_sha256
                 or receipt.payload_hash != plan.file_sha256
-                or receipt.operated_by != operated_by
+                or (_authorization is None and receipt.operated_by != operated_by)
+                or (_authorization is not None and receipt.owner_user_id != _authorization.owner_user_id)
                 or receipt.operation_type != "file_apply"
             ):
                 raise WorkbookError(
                     "idempotency_conflict",
                     "工作簿应用回执与当前请求不一致，请重新下载",
                 )
+            if _authorization is not None:
+                _authorization.replay(db, receipt)
             stored_result = _v2_stored_apply_result(db, receipt)
             db.commit()
             if stored_result is not None:
@@ -6645,6 +6693,8 @@ def _apply_project_master_v2(
     if current_merges != plan.site_issue_merges:
         raise WorkbookError("stale_site_issue_merge",
             "领用单合并对象、明细或单头已变化，本次未写入；请重新校验并核对合并计划后再应用")
+    if _authorization is not None:
+        _authorization.capture(db)
     if plan.project_note_change is not None:
         from app.services import maintenance_project_catalog as catalog
 
@@ -6748,7 +6798,7 @@ def _apply_project_master_v2(
             )
             operating_fact_changed = True
     if plan.assignment_changes:
-        if user_ctx is None:
+        if user_ctx is None and _authorization is None:
             raise WorkbookError(
                 "assignment_permission_denied",
                 "本次回传包含 WBDD 项目归属更正，缺少可审计的登录身份")
@@ -6769,6 +6819,7 @@ def _apply_project_master_v2(
                 user_ctx=user_ctx,
                 _prelocked_states=workbook_states,
                 _changed_project_ids=assignment_changed_project_ids,
+                _workbook_authorization=_authorization,
             )
             operating_fact_changed = (
                 bool(assignment_changed_project_ids)
@@ -7468,6 +7519,8 @@ def _apply_project_master_v2(
         # One successful workbook transaction invalidates every older V3/data
         # version exactly once, regardless of how many sheets it changed.
         operations.bump_locked_workbook_revision(db, state=workbook_state)
+    if _authorization is not None:
+        _authorization.authorize_after(db)
     result = _v2_apply_result(
         plan,
         operated_by=operated_by,
@@ -7486,6 +7539,7 @@ def _apply_project_master_v2(
             payload_hash=plan.file_sha256,
             operation_type="file_apply",
             operated_by=operated_by,
+            owner_user_id=_authorization.owner_user_id if _authorization is not None else None,
         )
         db.add(receipt)
         db.flush()
@@ -7500,10 +7554,13 @@ def _apply_project_master_v2(
                 "operation_key": apply_operation_key,
                 "response": deepcopy(result),
                 "requires_contract_amount_manage": plan.contract_amount_change is not None,
+                **({'authorization_contract': _authorization.metadata(result)} if _authorization is not None else {}),
             },
             reason=audit_reason,
             operated_by=operated_by,
             operated_at=receipt.created_at,
         ))
+    if _authorization is not None:
+        _authorization.publish(db, receipt)
     db.commit()
     return result

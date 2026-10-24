@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -18,6 +18,11 @@ from sqlalchemy.orm import Session
 from app import permissions
 from app.api.maintenance_project_scope import resolve_visible_project_ids
 from app.auth import current_identity
+from app.authz import runtime
+from app.authz.errors import authz_error
+from app.api import maintenance_project_scope as auth_transport
+from app.services import replenishment_authorization as canonical
+from app.services import maintenance_authorization as foundation
 from app.beta_access import replenishment_beta_whitelisted
 from app.config import get_settings
 from app.db import get_db
@@ -64,6 +69,19 @@ def _beta_page_whitelist(ident: dict = Depends(current_identity)) -> None:
             status.HTTP_403_FORBIDDEN,
             "未获得补库申请页面权限",
         )
+
+
+def _page_for(*resources):
+    def gate(db: Session = Depends(get_db), ident: dict = Depends(current_identity)):
+        if not any(runtime.is_authoritative(db, resource) for resource in resources):
+            _beta_page_whitelist(ident)
+    return gate
+
+
+def _view(value):
+    if value not in (None, 'authorization'):
+        raise authz_error(422, 'AUTHZ_INVALID_REQUEST', '未知的授权视图')
+    return value == 'authorization'
 
 
 def _allowed(ctx: UserContext, key: str) -> bool:
@@ -126,6 +144,7 @@ class AtomicLineWrite(StrictModel):
 
 
 class ApplicationCreate(StrictModel):
+    authorization_precondition: dict | None = None
     client_request_id: str = Field(min_length=8, max_length=128)
     project_id: str = Field(min_length=1, max_length=36)
     # 2026-08-18：不在 pydantic 层限长——超长文本反射进 422 detail 泄露敏感内容；
@@ -141,12 +160,14 @@ class CartLineWrite(StrictModel):
 
 
 class CartReplace(StrictModel):
+    authorization_precondition: dict | None = None
     expected_version: int | None = Field(None, ge=1)
     request_note: str | None = Field(None, max_length=4000)
     lines: list[CartLineWrite] = Field(min_length=1, max_length=200)
 
 
 class CartSubmit(StrictModel):
+    authorization_precondition: dict | None = None
     expected_version: int = Field(ge=1)
     # Stable cloud-draft key lets a response-loss retry recover the application
     # after the first successful transaction has deleted the submitted cart.
@@ -162,6 +183,7 @@ class RevisionResolution(StrictModel):
 
 
 class RevisionCreate(StrictModel):
+    authorization_precondition: dict | None = None
     expected_application_version: int = Field(ge=1)
     client_request_id: str = Field(min_length=8, max_length=128)
     # 二选一（2026-08-18）：
@@ -185,8 +207,19 @@ def capabilities(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
-    _page: None = Depends(_beta_page_whitelist),
+    _page: None = Depends(_page_for('replenishment_capabilities')),
+    identity=Depends(auth_transport.identity_for('replenishment_capabilities')),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        try:
+            result = canonical.read(db, identity, entry_id=canonical.CAPABILITIES, params={},
+                authorization_view=_view(view), precondition=foundation.decode_precondition(authorization_precondition))
+        except replenishment.ReplenishmentError as exc:
+            _raise_domain(exc)
+        _no_store(response)
+        return result
     _no_store(response)
     _identity(db, ident)
     return {
@@ -222,8 +255,19 @@ def catalog(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(_beta_page_whitelist),
+    _page: None = Depends(_page_for('replenishment_catalog')),
+    identity=Depends(auth_transport.identity_for('replenishment_catalog')),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        try:
+            result = canonical.read(db, identity, entry_id=canonical.CATALOG, params={'q':q,'page':page,'page_size':page_size},
+                authorization_view=_view(view), precondition=foundation.decode_precondition(authorization_precondition))
+        except replenishment.ReplenishmentError as exc:
+            _raise_domain(exc)
+        _no_store(response)
+        return result
     _no_store(response)
     _identity(db, ident)
     _require_price_data(ctx)
@@ -239,8 +283,19 @@ def projects(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(_beta_page_whitelist),
+    _page: None = Depends(_page_for('replenishment_project_directory')),
+    identity=Depends(auth_transport.identity_for('replenishment_project_directory')),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        try:
+            result = canonical.read(db, identity, entry_id=canonical.PROJECTS, params={},
+                authorization_view=_view(view), precondition=foundation.decode_precondition(authorization_precondition))
+        except replenishment.ReplenishmentError as exc:
+            _raise_domain(exc)
+        _no_store(response)
+        return result
     _no_store(response)
     _identity(db, ident)
     _require_price_data(ctx)
@@ -260,8 +315,19 @@ def get_cart_draft(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(_beta_page_whitelist),
+    _page: None = Depends(_page_for('replenishment_project_commands')),
+    identity=Depends(auth_transport.identity_for('replenishment_project_commands')),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        try:
+            result = canonical.read(db, identity, entry_id=canonical.CART_READ, params={'project_id':project_id},
+                authorization_view=_view(view), precondition=foundation.decode_precondition(authorization_precondition))
+        except replenishment.ReplenishmentError as exc:
+            _raise_domain(exc)
+        _no_store(response)
+        return result
     _no_store(response)
     username, _role = _identity(db, ident)
     _require_price_data(ctx)
@@ -285,9 +351,18 @@ def put_cart_draft(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(_beta_page_whitelist),
-    _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
+    _page: None = Depends(_page_for('replenishment_project_commands')),
+    _action: None = Depends(auth_transport.legacy_gate(('replenishment_project_commands',), require_action("action_replenishment_create", require_data="data_pool_price_governance"))),
+    identity=Depends(auth_transport.identity_for('replenishment_project_commands')),
+    view: str | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        _no_store(response)
+        try:
+            return canonical.command(db, identity, entry_id=canonical.CART_UPDATE, params={'project_id':project_id, **body.model_dump(exclude={'authorization_precondition'})},
+                legacy_context=ctx, precondition=body.authorization_precondition, authorization_view=_view(view))
+        except replenishment.ReplenishmentError as exc:
+            _raise_domain(exc)
     _no_store(response)
     username, _role = _identity(db, ident)
     try:
@@ -312,9 +387,19 @@ def remove_cart_draft(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(_beta_page_whitelist),
-    _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
+    _page: None = Depends(_page_for('replenishment_project_commands')),
+    _action: None = Depends(auth_transport.legacy_gate(('replenishment_project_commands',), require_action("action_replenishment_create", require_data="data_pool_price_governance"))),
+    identity=Depends(auth_transport.identity_for('replenishment_project_commands')),
+    view: str | None = Query(None),
+    authorization_precondition: dict | None = Body(None, embed=True),
 ) -> dict:
+    if identity is not None:
+        _no_store(response)
+        try:
+            return canonical.command(db, identity, entry_id=canonical.CART_DELETE, params={'project_id':project_id,'expected_version':expected_version},
+                legacy_context=ctx, precondition=authorization_precondition, authorization_view=_view(view))
+        except replenishment.ReplenishmentError as exc:
+            _raise_domain(exc)
     _no_store(response)
     username, _role = _identity(db, ident)
     try:
@@ -338,9 +423,18 @@ def submit_cart_draft(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(_beta_page_whitelist),
-    _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
+    _page: None = Depends(_page_for('replenishment_project_commands')),
+    _action: None = Depends(auth_transport.legacy_gate(('replenishment_project_commands',), require_action("action_replenishment_create", require_data="data_pool_price_governance"))),
+    identity=Depends(auth_transport.identity_for('replenishment_project_commands')),
+    view: str | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        _no_store(response)
+        try:
+            return canonical.command(db, identity, entry_id=canonical.CART_SUBMIT, params={'project_id':project_id, **body.model_dump(exclude={'authorization_precondition'})},
+                legacy_context=ctx, precondition=body.authorization_precondition, authorization_view=_view(view))
+        except replenishment.ReplenishmentError as exc:
+            _raise_domain(exc)
     _no_store(response)
     username, _role = _identity(db, ident)
     try:
@@ -365,8 +459,19 @@ def applications(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(_beta_page_whitelist),
+    _page: None = Depends(_page_for('replenishment_request')),
+    identity=Depends(auth_transport.identity_for('replenishment_request')),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        try:
+            result = canonical.read(db, identity, entry_id=canonical.LIST, params={'page':page,'page_size':page_size},
+                authorization_view=_view(view), precondition=foundation.decode_precondition(authorization_precondition))
+        except replenishment.ReplenishmentError as exc:
+            _raise_domain(exc)
+        _no_store(response)
+        return result
     _no_store(response)
     username, role = _identity(db, ident)
     _require_price_data(ctx)
@@ -381,9 +486,18 @@ def create_application(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(_beta_page_whitelist),
-    _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
+    _page: None = Depends(_page_for('replenishment_project_commands')),
+    _action: None = Depends(auth_transport.legacy_gate(('replenishment_project_commands',), require_action("action_replenishment_create", require_data="data_pool_price_governance"))),
+    identity=Depends(auth_transport.identity_for('replenishment_project_commands')),
+    view: str | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        _no_store(response)
+        try:
+            return canonical.command(db, identity, entry_id=canonical.CREATE, params=body.model_dump(exclude={'authorization_precondition'}),
+                legacy_context=ctx, precondition=body.authorization_precondition, authorization_view=_view(view))
+        except replenishment.ReplenishmentError as exc:
+            _raise_domain(exc)
     _no_store(response)
     username, _role = _identity(db, ident)
     try:
@@ -408,8 +522,19 @@ def application_detail(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(_beta_page_whitelist),
+    _page: None = Depends(_page_for('replenishment_request')),
+    identity=Depends(auth_transport.identity_for('replenishment_request')),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        try:
+            result = canonical.read(db, identity, entry_id=canonical.READ, params={'application_id':application_id},
+                authorization_view=_view(view), precondition=foundation.decode_precondition(authorization_precondition))
+        except replenishment.ReplenishmentError as exc:
+            _raise_domain(exc)
+        _no_store(response)
+        return result
     _no_store(response)
     username, role = _identity(db, ident)
     _require_price_data(ctx)
@@ -490,9 +615,18 @@ def apply_application_revision(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(_beta_page_whitelist),
-    _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
+    _page: None = Depends(_page_for('replenishment_project_commands', 'replenishment_request')),
+    _action: None = Depends(auth_transport.legacy_gate(('replenishment_project_commands', 'replenishment_request'), require_action("action_replenishment_create", require_data="data_pool_price_governance"))),
+    identity=Depends(auth_transport.identity_for('replenishment_project_commands', 'replenishment_request')),
+    view: str | None = Query(None),
 ) -> dict:
+    if identity is not None:
+        _no_store(response)
+        try:
+            return canonical.command(db, identity, entry_id=canonical.REVISE, params={'application_id':application_id, **body.model_dump(exclude={'authorization_precondition'})},
+                legacy_context=ctx, precondition=body.authorization_precondition, authorization_view=_view(view))
+        except replenishment.ReplenishmentError as exc:
+            _raise_domain(exc)
     _no_store(response)
     username, _role = _identity(db, ident)
     for item in body.resolutions or []:
@@ -573,14 +707,21 @@ def export_system_screening(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(_beta_page_whitelist),
-    _action: None = Depends(
-        require_action(
-            "action_replenishment_create",
-            require_data="data_pool_price_governance",
-        )
-    ),
-) -> StreamingResponse:
+    _page: None = Depends(_page_for('replenishment_request')),
+    _action: None = Depends(auth_transport.legacy_gate(('replenishment_request',), require_action("action_replenishment_create", require_data="data_pool_price_governance"))),
+    identity=Depends(auth_transport.identity_for('replenishment_request')),
+    view: str | None = Query(None),
+    authorization_precondition: str | None = Query(None),
+):
+    if identity is not None:
+        try:
+            result = canonical.read(db, identity, entry_id=canonical.EXPORT, params={'application_id':application_id},
+                authorization_view=_view(view), precondition=foundation.decode_precondition(authorization_precondition))
+        except replenishment.ReplenishmentError as exc:
+            _raise_domain(exc)
+        if _view(view):
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
+        return _excel_response(*result)
     """AB-4：系统三查结果导出，交人工复核。系统不记录人工审核结论。"""
     username, role = _identity(db, ident)
     _require_price_data(ctx)
