@@ -1,3 +1,4 @@
+import { readMaintenanceWorkbookContext } from "../../../../components/maintenance/maintenancePermissions";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -137,7 +138,7 @@ const emptyProcurement = {
 
 function renderTab(contractNos = ["XSDD-1", "XSDD-2"], registerRefresh = vi.fn()) {
   return render(
-    <PartsOrdersTab
+    <PartsOrdersTab permissionContext={readMaintenanceWorkbookContext()}
         canDownload
       projectId="p1"
       exportBase="合成项目A"
@@ -558,7 +559,7 @@ describe("新增需求入口（v1.36 Phase E）", () => {
     localStorage.setItem("permissions", JSON.stringify({ action_maintenance_demand_manage: true }));
     const onChanged = vi.fn().mockResolvedValue(true);
     render(
-      <PartsOrdersTab
+      <PartsOrdersTab permissionContext={readMaintenanceWorkbookContext()}
         canDownload
         projectId="p1"
         exportBase="合成项目A"
@@ -577,7 +578,7 @@ describe("新增需求入口（v1.36 Phase E）", () => {
     localStorage.setItem("permissions", JSON.stringify({ action_maintenance_demand_manage: true }));
     const onChanged = vi.fn().mockResolvedValue(true);
     render(
-      <PartsOrdersTab
+      <PartsOrdersTab permissionContext={readMaintenanceWorkbookContext()}
         canDownload
         projectId="p1"
         exportBase="合成项目A"
@@ -598,7 +599,7 @@ describe("新增需求入口（v1.36 Phase E）", () => {
     localStorage.setItem("permissions", JSON.stringify({ action_maintenance_demand_manage: true }));
     const onChanged = vi.fn().mockResolvedValue(true);
     render(
-      <PartsOrdersTab
+      <PartsOrdersTab permissionContext={readMaintenanceWorkbookContext()}
         canDownload
         projectId="p1"
         exportBase="合成项目A"
@@ -627,7 +628,7 @@ describe("新增需求入口（v1.36 Phase E）", () => {
   it("切项目关闭未完成的新增对话框", async () => {
     localStorage.setItem("permissions", JSON.stringify({ action_maintenance_demand_manage: true }));
     const { rerender } = render(
-      <PartsOrdersTab
+      <PartsOrdersTab permissionContext={readMaintenanceWorkbookContext()}
         canDownload
         projectId="p1"
         exportBase="合成项目A"
@@ -643,7 +644,7 @@ describe("新增需求入口（v1.36 Phase E）", () => {
     // 路由切到项目 p2：对话框必须关闭（旧项目的表单不能带进新项目）
     mocks.getBoardProjectOrders.mockResolvedValue(ordersPayload([orderRow("WBDD-9", "XSDD-1")]));
     rerender(
-      <PartsOrdersTab
+      <PartsOrdersTab permissionContext={readMaintenanceWorkbookContext()}
         canDownload
         projectId="p2"
         exportBase="合成项目B"

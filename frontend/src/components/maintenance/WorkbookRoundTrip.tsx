@@ -14,7 +14,7 @@ import type {
 } from "../../api/maintenanceWorkbooks";
 import { saveBlob } from "../../api/maintenanceWorkbooks";
 import { useAsyncContext, type AsyncGuard } from "../../hooks/useAsyncContext";
-import { readMaintenancePermissionSnapshot } from "./maintenancePermissions";
+import { readMaintenancePermissionSnapshot, readMaintenanceWorkbookContext } from "./maintenancePermissions";
 
 const { Text } = Typography;
 const SITE_ISSUE_HEADER_LABELS: Record<string, string> = {
@@ -53,6 +53,8 @@ export interface WorkbookRoundTripProps {
   onValidate?: (file: File) => Promise<WorkbookValidateResult>;
   /** 当前用途的下载资格；项目负责人例外由调用方消费服务端判定。 */
   canDownload: boolean;
+  /** Account/permission context captured by the capability provider, passed unchanged. */
+  permissionContext: string;
   /** 上传是独立动作资格，同时必须保有该工作簿的下载资格。 */
   canUpload: boolean;
   size?: "small" | "middle";
@@ -114,7 +116,14 @@ function describeReassignment(row: WillReassignOrder, index: number): string {
   return `${order} · ${row.from_project_name || "未归属"} → 当前项目`;
 }
 
-export function WorkbookRoundTrip({
+export function WorkbookRoundTrip(props: WorkbookRoundTripProps) {
+  // A descendant render cannot renew capability: its owner comes from the
+  // page that acquired it, and passes unchanged through stateful tabs.
+  return <WorkbookRoundTripContent key={props.permissionContext} {...props} />;
+}
+
+function WorkbookRoundTripContent({
+  permissionContext,
   title,
   hint,
   filename,
@@ -134,10 +143,8 @@ export function WorkbookRoundTrip({
   const [retainedDraft, setRetainedDraft] = useState<{ file: File; session: string | null } | null>(null);
   const uploadSession = localStorage.getItem("token");
   const permissionSnapshot = readMaintenancePermissionSnapshot();
-  // Parent callers key the workbook/project by this snapshot. A local state
-  // update alone cannot adopt changed permissions while retaining old props.
-  const permissionOwner = useRef(permissionSnapshot).current;
-  const canRead = canDownload && permissionOwner === permissionSnapshot;
+  const ownsPermissionContext = () => permissionContext === readMaintenanceWorkbookContext();
+  const canRead = canDownload && ownsPermissionContext();
   const canApply = canRead && canUpload;
   const downloadAllowed = useRef(canRead);
   const uploadAllowed = useRef(canApply);
@@ -164,7 +171,7 @@ export function WorkbookRoundTrip({
     // 与上传同口径：请求返回时页面已卸载或已切换账号，就不再落文件、不再写反馈。
     const requestSession = localStorage.getItem("token");
     const requestCurrent = downloadContext.begin();
-    const isCurrent = () => requestCurrent() && downloadAllowed.current && requestSession === uploadSession
+    const isCurrent = () => ownsPermissionContext() && requestCurrent() && downloadAllowed.current && requestSession === uploadSession
       && readMaintenancePermissionSnapshot() === permissionSnapshot
       && localStorage.getItem("token") === requestSession;
     if (!isCurrent()) return;
@@ -339,7 +346,7 @@ export function WorkbookRoundTrip({
     if (!uploadAllowed.current || activeUpload.current?.()) return false;
     const requestSession = localStorage.getItem("token");
     const requestCurrent = uploadContext.begin();
-    const isCurrent = () => requestCurrent() && requestSession === uploadSession && uploadAllowed.current
+    const isCurrent = () => ownsPermissionContext() && requestCurrent() && requestSession === uploadSession && uploadAllowed.current
       && readMaintenancePermissionSnapshot() === permissionSnapshot
       && localStorage.getItem("token") === requestSession;
     if (!isCurrent()) return false;

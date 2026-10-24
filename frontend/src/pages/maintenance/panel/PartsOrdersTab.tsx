@@ -61,6 +61,7 @@ export function PartsOrdersTab({
   projectId,
   exportBase,
   canDownload,
+  permissionContext,
   canUpload,
   contractNos,
   onChanged,
@@ -69,6 +70,7 @@ export function PartsOrdersTab({
   projectId: string;
   exportBase: string;
   canDownload: boolean;
+  permissionContext: string;
   canUpload: boolean;
   onChanged: () => Promise<boolean>;
   registerRefresh: RegisterPanelRefresh;
@@ -319,6 +321,7 @@ export function PartsOrdersTab({
             size="small"
             title="备件成本"
             filename={`${exportBase}-${SHEETS.parts}.xlsx`}
+            permissionContext={permissionContext}
             canDownload={canDownload}
             canUpload={canUpload}
             onDownload={() => downloadProjectMaster(projectId, [SHEETS.parts])}

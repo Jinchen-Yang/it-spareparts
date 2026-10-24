@@ -79,6 +79,7 @@ export function CollectionTab({
   projectId,
   exportBase,
   canDownload,
+  permissionContext,
   canUpload,
   rows,
   loading,
@@ -88,6 +89,7 @@ export function CollectionTab({
   projectId: string;
   exportBase: string;
   canDownload: boolean;
+  permissionContext: string;
   canUpload: boolean;
   rows: MaintenanceCollectionSnapshotRow[];
   loading: boolean;
@@ -411,6 +413,7 @@ export function CollectionTab({
             size="small"
             title="回款"
             filename={`${exportBase}-${SHEETS.collection}.xlsx`}
+            permissionContext={permissionContext}
             canDownload={canDownload}
             canUpload={canUpload}
             onDownload={() => downloadProjectMaster(projectId, [SHEETS.collection])}

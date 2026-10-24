@@ -17,6 +17,7 @@ export function ExpenseTab({
   projectId,
   exportBase,
   canDownload,
+  permissionContext,
   canUpload,
   onChanged,
   registerRefresh,
@@ -24,6 +25,7 @@ export function ExpenseTab({
   projectId: string;
   exportBase: string;
   canDownload: boolean;
+  permissionContext: string;
   canUpload: boolean;
   onChanged: () => Promise<boolean>;
   registerRefresh: RegisterPanelRefresh;
@@ -69,6 +71,7 @@ export function ExpenseTab({
             size="small"
             title="报销"
             filename={`${exportBase}-${SHEETS.expense}.xlsx`}
+            permissionContext={permissionContext}
             canDownload={canDownload}
             canUpload={canUpload}
             onDownload={() => downloadProjectMaster(projectId, [SHEETS.expense])}

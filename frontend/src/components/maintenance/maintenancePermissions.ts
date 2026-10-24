@@ -64,6 +64,11 @@ export function readMaintenancePermissionSnapshot(): string {
   return JSON.stringify([localStorage.getItem("role"), localStorage.getItem("permissions")]);
 }
 
+/** Capture where capability is acquired; descendants pass this value unchanged. */
+export function readMaintenanceWorkbookContext(): string {
+  return JSON.stringify([localStorage.getItem("token"), readMaintenancePermissionSnapshot()]);
+}
+
 /** Only pass flags from successfully loaded, current-project responses. */
 export interface ProjectWorkbookPermission {
   detailCanEdit?: boolean;

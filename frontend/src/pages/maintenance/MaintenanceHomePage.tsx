@@ -41,7 +41,7 @@ import {
 } from "../../api/maintenanceBossBoard";
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
-import { readMaintenancePermissionSnapshot, readMaintenanceWorkbookCapabilities } from "../../components/maintenance/maintenancePermissions";
+import { readMaintenancePermissionSnapshot, readMaintenanceWorkbookContext, readMaintenanceWorkbookCapabilities } from "../../components/maintenance/maintenancePermissions";
 
 const GlobalMaintenanceRowWorkbench = lazy(() => import("../../components/maintenance/GlobalMaintenanceRowWorkbench"));
 
@@ -289,6 +289,7 @@ export function MaintenanceHomePage() {
               />
             ) : null}
             <WorkbookRoundTrip
+              permissionContext={readMaintenanceWorkbookContext()}
               key={readMaintenancePermissionSnapshot()}
               title="全项目备件行级表"
               filename={`spare-part-lines-${rangePreset}.xlsx`}
