@@ -134,7 +134,7 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
     });
   }, [token, betaFeatures, authz.status, authz.snapshot]);
 
-  // 带参详情路由（如 /pool-analysis/:groupId）：与母页共用同一权限门，无权限则不注册
+  // 带参详情路由独立按其 surface 授权；不要求同时获准母页或菜单入口。
   const allowedDetails = useMemo(() => {
     if (!token) return [];
     const isAdmin = (localStorage.getItem("role") || "") === "admin";
@@ -166,7 +166,7 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
     <AuthzUnavailable /><Button style={{ marginTop: 16 }} onClick={logout}>退出登录</Button>
   </div>;
 
-  if (allowed.length === 0) {
+  if (allowed.length === 0 && allowedDetails.length === 0) {
     return (
       <Result
         style={{ paddingTop: 120 }}
@@ -178,7 +178,8 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
     );
   }
 
-  const home = defaultPath(allowed);
+  // 仅有详情权限时不能从路由模板捏造对象 ID，也不能跳转到未获准的母页。
+  const home = allowed.length > 0 ? defaultPath(allowed) : null;
   const allowedKeys = new Set(allowed.map((it) => it.perm).filter(Boolean));
   // 兼容重定向只在对应权限具备时注册；无权限则不建，交给 * 回 home（不越权暴露目标页存在）
   const redirects = NAV_REDIRECTS.filter((r) => !r.perm || allowedKeys.has(r.perm));
@@ -197,8 +198,11 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
             {redirects.map((r) => (
               <Route key={r.from} path={r.from} element={<Navigate to={r.to} replace />} />
             ))}
-            {/* 根路径与无权限/不存在的地址一律回默认页 */}
-            <Route path="*" element={<Navigate to={home} replace />} />
+            {/* 没有导航入口时保留地址，等待用户使用真实且已授权的对象链接。 */}
+            <Route path="*" element={home ? <Navigate to={home} replace />
+              : <Result status="info" title="请使用具体对象链接"
+                subTitle="当前账号可访问部分对象详情，请使用已授权对象的完整链接。"
+                extra={<Button onClick={logout}>退出登录</Button>} />} />
           </Route>
         </Routes>
       </BrowserRouter>
