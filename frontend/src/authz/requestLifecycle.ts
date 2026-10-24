@@ -73,14 +73,18 @@ export function useCapturedQuery<T>({ active, identityKey, queryKey, query, onSt
   const [attempt, setAttempt] = useState(0);
   const nextAttempt = useRef(attempt);
   const retryWaiters = useRef(new Map<string, ((success: boolean) => void)[]>());
+  const mounted = useRef(true);
   const settleRetry = (key: string, success: boolean) => {
     retryWaiters.current.get(key)?.forEach(resolve => resolve(success));
     retryWaiters.current.delete(key);
   };
-  useEffect(() => () => {
-    latest.current.active = false;
-    retryWaiters.current.forEach(waiters => waiters.forEach(resolve => resolve(false)));
-    retryWaiters.current.clear();
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      retryWaiters.current.forEach(waiters => waiters.forEach(resolve => resolve(false)));
+      retryWaiters.current.clear();
+    };
   }, []);
   const requestKey = JSON.stringify(queryKey);
   const baseIdentity = JSON.stringify([authz.token, authz.snapshot?.version, authz.generation, requestKey, identityKey]);
@@ -97,7 +101,7 @@ export function useCapturedQuery<T>({ active, identityKey, queryKey, query, onSt
       token: authz.token, snapshotVersion: authz.snapshot.version, generation: authz.generation,
     };
     const controller = new AbortController(), unlink = linkAbort(authz.signal, controller);
-    const current = () => !controller.signal.aborted && latest.current.active &&
+    const current = () => mounted.current && !controller.signal.aborted && latest.current.active &&
       latest.current.identity === identity && authz.isCurrent(capture);
     const discard = () => {
       if (!controller.signal.aborted && latest.current.identity === identity &&
@@ -124,7 +128,7 @@ export function useCapturedQuery<T>({ active, identityKey, queryKey, query, onSt
   const refreshing = retainWhileRefreshing && state?.baseIdentity === baseIdentity && state?.identity !== identity;
   const visible = active && authz.status === "ready" && (state?.identity === identity || refreshing) ? state : undefined;
   const retry = useCallback(() => {
-      if (!latest.current.active) return Promise.resolve(false);
+      if (!mounted.current || !latest.current.active) return Promise.resolve(false);
       retryWaiters.current.forEach(waiters => waiters.forEach(resolve => resolve(false)));
       retryWaiters.current.clear();
       const next = ++nextAttempt.current;
