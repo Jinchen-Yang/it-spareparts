@@ -36,13 +36,14 @@ class MasterEditConflict(MasterEditError):
         self.detail = {"code": code, "message": message, "conflicts": conflicts}
 
 
-def _edit_state(db: Session, part: DimPart, specs=None) -> dict:
+def _edit_state(db: Session, part: DimPart, specs=None, *,
+                include_locked_fields: bool = False) -> dict:
     if specs is None:
         specs = db.execute(select(
             ProductSpec.spec_key, ProductSpec.spec_value, ProductSpec.spec_unit,
             ProductSpec.numeric_value, ProductSpec.source
         ).where(ProductSpec.part_id == part.id).order_by(ProductSpec.spec_key)).all()
-    return {
+    state = {
         "version_mode": "field_snapshot",  # M2 前的现值基线，不能作为单调版本或发布水位。
         # 对外集成用的不透明乐观并发版本（updated_at ISO）；与 version_mode 无关。
         "version": part.updated_at.isoformat() if part.updated_at else None,
@@ -54,18 +55,25 @@ def _edit_state(db: Session, part: DimPart, specs=None) -> dict:
                          "numeric_value": format(number.normalize(), "f") if number is not None else None,
                          "source": source} for key, value, unit, number, source in specs},
     }
+    if include_locked_fields:
+        # 与 fields/specs 同一次只读快照读取，供 shop 判断人工保护字段冲突。
+        state["locked_fields"] = list(part.locked_fields or [])
+    return state
 
 
-def get_part_edit_state(db: Session, part_id: int) -> dict | None:
+def get_part_edit_state(db: Session, part_id: int, *,
+                        include_locked_fields: bool = False) -> dict | None:
     # 鉴权可能已开启请求事务；独立短只读快照不改变调用方事务，也不阻挡写者。
     with Session(bind=db.get_bind()) as reader:
         reader.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         reader.execute(text("SET TRANSACTION READ ONLY"))
         part = reader.scalar(select(DimPart).where(DimPart.id == part_id))
-        return _edit_state(reader, part) if part is not None else None
+        return (_edit_state(reader, part, include_locked_fields=include_locked_fields)
+                if part is not None else None)
 
 
-def get_parts_edit_states(db: Session, part_ids: list[int]) -> dict[int, dict]:
+def get_parts_edit_states(db: Session, part_ids: list[int], *,
+                          include_locked_fields: bool = False) -> dict[int, dict]:
     """批量只读快照：同一 REPEATABLE READ 事务内取多个 part 的 edit_state。
 
     供 shop 首次全量同步的批量读取使用；不存在的 id 不产生条目，由调用方列入 missing。
@@ -88,7 +96,10 @@ def get_parts_edit_states(db: Session, part_ids: list[int]) -> dict[int, dict]:
             specs_by_part.setdefault(part_id, []).append(
                 (key, value, unit, number, source))
         return {
-            part.id: _edit_state(reader, part, specs_by_part.get(part.id, []))
+            part.id: _edit_state(
+                reader, part, specs_by_part.get(part.id, []),
+                include_locked_fields=include_locked_fields,
+            )
             for part in parts
         }
 

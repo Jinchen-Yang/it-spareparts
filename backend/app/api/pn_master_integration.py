@@ -405,6 +405,7 @@ def _part_detail_payload(state: dict, aliases: list[PartAlias],
         "version": state["version"],
         "fields": state["fields"],
         "specs": state["specs"],
+        "locked_fields": state["locked_fields"],
         "aliases": [_alias_item(a) for a in aliases],
         "master_source": master_source,
     }
@@ -412,7 +413,9 @@ def _part_detail_payload(state: dict, aliases: list[PartAlias],
 
 @router.get("/parts/{part_id}")
 def get_part(part_id: int, _actor: Actor, db: DbSession) -> dict:
-    state = master_edit.get_part_edit_state(db, part_id)
+    state = master_edit.get_part_edit_state(
+        db, part_id, include_locked_fields=True
+    )
     if state is None:
         raise HTTPException(404, "型号不存在")
     aliases = db.scalars(
@@ -428,7 +431,9 @@ def get_part(part_id: int, _actor: Actor, db: DbSession) -> dict:
 def batch_get_parts(body: BatchGetRequest, _actor: Actor, db: DbSession) -> dict:
     """批量读取，返回与 GET /parts/{id} 相同的单项结构；不存在的 id 单列 missing。"""
     ids = list(dict.fromkeys(body.part_ids))
-    states = master_edit.get_parts_edit_states(db, ids)
+    states = master_edit.get_parts_edit_states(
+        db, ids, include_locked_fields=True
+    )
     aliases_by_part: dict[int, list[PartAlias]] = {}
     master_sources: dict[int, str | None] = {}
     found_ids = [part_id for part_id in ids if part_id in states]

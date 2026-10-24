@@ -244,6 +244,37 @@ def test_batch_get_returns_same_shape_and_missing(client, db):
     ).status_code == 422
 
 
+def test_locked_fields_returned_by_get_and_batch(client, db):
+    part = _seed_part(db, "PN-LOCKED-FIELDS")
+    single = client.get(f"{BASE}/parts/{part.id}")
+    assert single.status_code == 200
+    assert single.json()["locked_fields"] == []
+
+    batch = client.post(
+        f"{BASE}/parts/batch-get", json={"part_ids": [part.id]}
+    )
+    assert batch.status_code == 200
+    assert batch.json()["items"][0]["locked_fields"] == []
+    assert batch.json()["items"][0] == single.json()
+
+    patched = client.patch(
+        f"{BASE}/parts/{part.id}",
+        json={"baseline_version": single.json()["version"], "brand": "HPE"},
+        headers=_write_headers(),
+    )
+    assert patched.status_code == 200, patched.text
+    db.expire_all()
+
+    reread = client.get(f"{BASE}/parts/{part.id}")
+    assert reread.status_code == 200
+    assert "brand" in reread.json()["locked_fields"]
+    batch_after = client.post(
+        f"{BASE}/parts/batch-get", json={"part_ids": [part.id]}
+    )
+    assert batch_after.status_code == 200
+    assert batch_after.json()["items"][0] == reread.json()
+
+
 def test_lookup_resolves_exact_alias_and_miss(client, db):
     part = _seed_part(db, "SUPER-4089-RT")
     _seed_alias(db, part, "SUPER 4089 RT")
