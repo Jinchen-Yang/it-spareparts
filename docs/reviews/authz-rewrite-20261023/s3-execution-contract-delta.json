@@ -1,0 +1,2400 @@
+{
+  "schema_version": 1,
+  "status": "recommended_execution_delta_docs_only",
+  "approval": "Root approved splitting resource contracts for mixed field/scope cases and closed collection refs; this file makes proposed names/wire concrete for final root freeze.",
+  "baseline_candidate_resources": 47,
+  "delta_new_resource_ids": [
+    "maintenance_general_workbook_write",
+    "maintenance_contract_amount_write",
+    "maintenance_managed_rows"
+  ],
+  "candidate_resource_count_after_this_delta": 50,
+  "not_claimed": "Remaining independent gaps in s3-resource-seed-gaps.json are not represented as completed executable contracts. This is not app catalog, code, tests, seed execution, or S3 rollout.",
+  "seed_protocol": {
+    "ast": {
+      "predicate": "one closed bool predicate from definitions",
+      "all": "all child expressions",
+      "any": "any child expressions",
+      "not": "negation of one expression"
+    },
+    "grant_input": "frozen persisted legacy effective graph with runtime_safe, explicit template snapshot/override existence, plus legacy role; never current canonical grants converted back to role",
+    "eligible": "origin true only; never overwrite existing grant/override/saved-snapshot resource keys including empty denial; inactive nondeleted preserves entitlements; deleted excluded",
+    "role_usage": "seed only; no old role/keys consulted by canonical runtime",
+    "rules": "matching rules union actions/fields only inside selected resource; scope cases first match; default empty explicit denial; nested scope cases are resolved recursively",
+    "deployment_switches": "not seed inputs; feature availability remains live and cannot reopen legacy after cutover",
+    "predicates": {
+      "P": "legacy ordinary page_maintenance evaluator for verified named account (admin shortcut retained in seed)",
+      "Beta": "legacy explicit page_maintenance_beta eligibility for named account; server enable flag excluded",
+      "admin": "legacy role == admin",
+      "full_scope": "legacy role in admin,boss,PHASE1_BYPASS_ROLE",
+      "maintenance_scoped": "not full_scope AND runtime_safe graph own_maintenance_projects_only",
+      "source_sales_scoped": "runtime_safe graph own_customers_only; do not substitute maintenance_scoped",
+      "C": "runtime_safe graph data_purchase_cost",
+      "F": "runtime_safe graph data_profit",
+      "K": "runtime_safe graph data_customer",
+      "upload_action": "runtime_safe graph action_maintenance_expense_collection_upload",
+      "project_manage_action": "runtime_safe graph action_maintenance_project_manage",
+      "roundtrip_apply_action": "runtime_safe graph action_maintenance_roundtrip_apply",
+      "manager_workbook_apply_action": "runtime_safe graph action_maintenance_manager_workbook_apply"
+    },
+    "input_admissibility": "Use actual frozen effective_for_user/runtime_safe semantics. Ordinary admin forces ordinary P/C/F/K/action graph true; constructed admin F=false contexts are defensive runtime vectors, not reachable persisted seed examples. Account canary/explicit whitelist keys retain their actual exception semantics."
+  },
+  "scopes": {
+    "all_projects": "true predicate but still real parent binding/existence/business-state check",
+    "assigned_projects": "live active assignment type primary_manager OR viewer to verified user",
+    "assigned_or_sales_projects": "assigned_projects OR nonempty exact current canonical salesperson match",
+    "canonical_sales_projects": "nonempty exact current canonical salesperson match only",
+    "primary_managed_projects": "live active primary_manager assignment only; archived project reading governed by endpoint business contract",
+    "primary_managed_active_projects": "primary_managed_projects AND project.is_active; monthly full set must be nonempty"
+  },
+  "fields": {
+    "data_purchase_cost": "row amount registry fields and all derived cost evidence for row resources; whole-document cost fields for workbook resources",
+    "data_profit": "contract/collection/expense/financial totals according to exact document format; never user-global",
+    "data_customer": "whole master/v2 editable-file customer content; no cross-resource inheritance"
+  },
+  "resources": [
+    {
+      "resource_id": "maintenance_managed_workbook",
+      "migration_state": "planned",
+      "actions": [
+        {
+          "id": "download",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "validate",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "apply",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "update_contract_amount",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        }
+      ],
+      "scopes": [
+        {
+          "id": "primary_managed_projects",
+          "requires_context": true
+        }
+      ],
+      "field_permissions": [
+        "data_customer",
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_dependencies": [
+        [
+          "data_profit",
+          "data_purchase_cost"
+        ]
+      ],
+      "denial_scope": "primary_managed_projects",
+      "seed": {
+        "eligible_only": true,
+        "scope": "primary_managed_projects",
+        "rules": [
+          {
+            "if": {
+              "predicate": "P"
+            },
+            "actions": [
+              "download",
+              "validate",
+              "apply",
+              "update_contract_amount"
+            ],
+            "field_permissions": [
+              "data_customer",
+              "data_purchase_cost",
+              "data_profit"
+            ]
+          }
+        ],
+        "otherwise": {
+          "actions": [],
+          "field_permissions": []
+        },
+        "merge_rule": "union actions and fields only within the one selected resource scope; never across resources"
+      },
+      "notes": [
+        "Only M qualifies. Current absence of an assignment is not encoded as permanent denial; membership stays live.",
+        "update_contract_amount is a signed-document operation; ordinary contract create/archive and project-note change are separate."
+      ]
+    },
+    {
+      "resource_id": "maintenance_general_workbook",
+      "migration_state": "planned",
+      "actions": [
+        {
+          "id": "download",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        }
+      ],
+      "scopes": [
+        {
+          "id": "all_projects",
+          "requires_context": true
+        },
+        {
+          "id": "assigned_or_sales_projects",
+          "requires_context": true
+        }
+      ],
+      "field_permissions": [
+        "data_customer",
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_dependencies": [
+        [
+          "data_profit",
+          "data_purchase_cost"
+        ]
+      ],
+      "denial_scope": "assigned_or_sales_projects",
+      "seed": {
+        "eligible_only": true,
+        "scope": {
+          "cases": [
+            {
+              "if": {
+                "predicate": "full_scope"
+              },
+              "scope": "all_projects"
+            }
+          ],
+          "else": "assigned_or_sales_projects"
+        },
+        "rules": [
+          {
+            "if": {
+              "all": [
+                {
+                  "predicate": "P"
+                },
+                {
+                  "any": [
+                    {
+                      "predicate": "admin"
+                    },
+                    {
+                      "predicate": "F"
+                    }
+                  ]
+                }
+              ]
+            },
+            "actions": [
+              "download"
+            ],
+            "field_permissions": [
+              "data_customer",
+              "data_purchase_cost",
+              "data_profit"
+            ]
+          }
+        ],
+        "otherwise": {
+          "actions": [],
+          "field_permissions": []
+        },
+        "merge_rule": "union actions and fields only within the one selected resource scope; never across resources"
+      },
+      "notes": [
+        "Read-only full document. Does not carry upload rights. Full field set is the file information contract, not a user-global permission map."
+      ]
+    },
+    {
+      "resource_id": "maintenance_general_workbook_write",
+      "migration_state": "planned",
+      "actions": [
+        {
+          "id": "validate",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "apply",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "reassign_source_orders",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        }
+      ],
+      "scopes": [
+        {
+          "id": "all_projects",
+          "requires_context": true
+        },
+        {
+          "id": "assigned_or_sales_projects",
+          "requires_context": true
+        },
+        {
+          "id": "canonical_sales_projects",
+          "requires_context": true
+        }
+      ],
+      "field_permissions": [
+        "data_customer",
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_dependencies": [
+        [
+          "data_profit",
+          "data_purchase_cost"
+        ]
+      ],
+      "denial_scope": "canonical_sales_projects",
+      "seed": {
+        "eligible_only": true,
+        "scope": {
+          "cases": [
+            {
+              "if": {
+                "any": [
+                  {
+                    "predicate": "admin"
+                  },
+                  {
+                    "all": [
+                      {
+                        "predicate": "upload_action"
+                      },
+                      {
+                        "predicate": "F"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "scope": {
+                "cases": [
+                  {
+                    "if": {
+                      "predicate": "full_scope"
+                    },
+                    "scope": "all_projects"
+                  }
+                ],
+                "else": "assigned_or_sales_projects"
+              }
+            }
+          ],
+          "else": "canonical_sales_projects"
+        },
+        "rules": [
+          {
+            "if": {
+              "all": [
+                {
+                  "predicate": "P"
+                },
+                {
+                  "any": [
+                    {
+                      "predicate": "admin"
+                    },
+                    {
+                      "predicate": "F"
+                    }
+                  ]
+                }
+              ]
+            },
+            "actions": [
+              "validate",
+              "apply"
+            ],
+            "field_permissions": [
+              "data_customer",
+              "data_purchase_cost",
+              "data_profit"
+            ]
+          },
+          {
+            "if": {
+              "all": [
+                {
+                  "predicate": "P"
+                },
+                {
+                  "predicate": "full_scope"
+                },
+                {
+                  "any": [
+                    {
+                      "predicate": "admin"
+                    },
+                    {
+                      "all": [
+                        {
+                          "predicate": "upload_action"
+                        },
+                        {
+                          "predicate": "F"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            "actions": [
+              "reassign_source_orders"
+            ],
+            "field_permissions": [
+              "data_customer",
+              "data_purchase_cost",
+              "data_profit"
+            ]
+          }
+        ],
+        "otherwise": {
+          "actions": [],
+          "field_permissions": []
+        },
+        "merge_rule": "union actions and fields only within the one selected resource scope; never across resources"
+      },
+      "notes": [
+        "Without admin/upload+F, F alone permits only current canonical sales projects. Never reuse broad read scope for write.",
+        "reassign_source_orders names the signed master-file operation; old inner full-scope check did not also require project_manage_action, so do not substitute the broader source-assignment HTTP action."
+      ]
+    },
+    {
+      "resource_id": "maintenance_contract_amount_write",
+      "migration_state": "planned",
+      "actions": [
+        {
+          "id": "validate",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_profit"
+          ]
+        },
+        {
+          "id": "apply",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_profit"
+          ]
+        }
+      ],
+      "scopes": [
+        {
+          "id": "all_projects",
+          "requires_context": true
+        },
+        {
+          "id": "assigned_or_sales_projects",
+          "requires_context": true
+        },
+        {
+          "id": "canonical_sales_projects",
+          "requires_context": true
+        }
+      ],
+      "field_permissions": [
+        "data_profit"
+      ],
+      "field_dependencies": [],
+      "denial_scope": "canonical_sales_projects",
+      "seed": {
+        "eligible_only": true,
+        "scope": {
+          "cases": [
+            {
+              "if": {
+                "all": [
+                  {
+                    "predicate": "project_manage_action"
+                  },
+                  {
+                    "predicate": "F"
+                  }
+                ]
+              },
+              "scope": {
+                "cases": [
+                  {
+                    "if": {
+                      "predicate": "full_scope"
+                    },
+                    "scope": "all_projects"
+                  }
+                ],
+                "else": "assigned_or_sales_projects"
+              }
+            }
+          ],
+          "else": "canonical_sales_projects"
+        },
+        "rules": [
+          {
+            "if": {
+              "all": [
+                {
+                  "predicate": "P"
+                },
+                {
+                  "predicate": "F"
+                }
+              ]
+            },
+            "actions": [
+              "validate",
+              "apply"
+            ],
+            "field_permissions": [
+              "data_profit"
+            ]
+          }
+        ],
+        "otherwise": {
+          "actions": [],
+          "field_permissions": []
+        },
+        "merge_rule": "union actions and fields only within the one selected resource scope; never across resources"
+      },
+      "notes": [
+        "Additional operation contract only, not authority to edit arbitrary contract metadata. M branch uses managed_workbook.update_contract_amount instead.",
+        "Scope is direct only with G+F, with no admin shortcut; otherwise canonical S. Base document write must also be authorized."
+      ]
+    },
+    {
+      "resource_id": "maintenance_managed_rows",
+      "migration_state": "planned",
+      "actions": [
+        {
+          "id": "read_fields",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        },
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        },
+        {
+          "id": "export",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ],
+      "scopes": [
+        {
+          "id": "primary_managed_projects",
+          "requires_context": true
+        }
+      ],
+      "field_permissions": [
+        "data_purchase_cost"
+      ],
+      "field_dependencies": [],
+      "denial_scope": "primary_managed_projects",
+      "seed": {
+        "eligible_only": true,
+        "scope": "primary_managed_projects",
+        "rules": [
+          {
+            "if": {
+              "predicate": "P"
+            },
+            "actions": [
+              "read_fields",
+              "read",
+              "export"
+            ],
+            "field_permissions": [
+              "data_purchase_cost"
+            ]
+          }
+        ],
+        "otherwise": {
+          "actions": [],
+          "field_permissions": []
+        },
+        "merge_rule": "union actions and fields only within the one selected resource scope; never across resources"
+      },
+      "notes": [
+        "Limited to exact project row-fields, project readonly export, and global rows/fields/export with explicit single project_id.",
+        "Does NOT authorize existing master-workbook/rows cost tab: its outer old profit visibility gate is stricter.",
+        "No automatic per-project managed monetary union on global queries without project_id."
+      ]
+    },
+    {
+      "resource_id": "maintenance_row_workbench",
+      "migration_state": "planned",
+      "actions": [
+        {
+          "id": "read_fields",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "export",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read_cost_rows",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_purchase_cost"
+          ]
+        }
+      ],
+      "scopes": [
+        {
+          "id": "all_projects",
+          "requires_context": true
+        },
+        {
+          "id": "assigned_or_sales_projects",
+          "requires_context": true
+        }
+      ],
+      "field_permissions": [
+        "data_purchase_cost"
+      ],
+      "field_dependencies": [],
+      "denial_scope": "assigned_or_sales_projects",
+      "seed": {
+        "eligible_only": true,
+        "scope": {
+          "cases": [
+            {
+              "if": {
+                "predicate": "full_scope"
+              },
+              "scope": "all_projects"
+            }
+          ],
+          "else": "assigned_or_sales_projects"
+        },
+        "rules": [
+          {
+            "if": {
+              "predicate": "P"
+            },
+            "actions": [
+              "read_fields",
+              "export"
+            ],
+            "field_permissions": []
+          },
+          {
+            "if": {
+              "all": [
+                {
+                  "predicate": "P"
+                },
+                {
+                  "any": [
+                    {
+                      "predicate": "admin"
+                    },
+                    {
+                      "predicate": "F"
+                    }
+                  ]
+                }
+              ]
+            },
+            "actions": [
+              "read_cost_rows"
+            ],
+            "field_permissions": [
+              "data_purchase_cost"
+            ]
+          }
+        ],
+        "otherwise": {
+          "actions": [],
+          "field_permissions": []
+        },
+        "merge_rule": "union actions and fields only within the one selected resource scope; never across resources"
+      },
+      "notes": [
+        "Ordinary direct project row contract. Optional cost field is seeded from old F qualification, not from old C alone.",
+        "read_cost_rows covers outer _require_profit_visibility on master-workbook/rows; metadata/export are independently available with costs redacted."
+      ]
+    },
+    {
+      "resource_id": "maintenance_global_rows",
+      "migration_state": "planned",
+      "actions": [
+        {
+          "id": "read_fields",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        },
+        {
+          "id": "export",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": []
+        }
+      ],
+      "scopes": [
+        {
+          "id": "all_projects",
+          "requires_context": true
+        },
+        {
+          "id": "assigned_projects",
+          "requires_context": true
+        },
+        {
+          "id": "assigned_or_sales_projects",
+          "requires_context": true
+        }
+      ],
+      "field_permissions": [
+        "data_purchase_cost"
+      ],
+      "field_dependencies": [],
+      "denial_scope": "assigned_or_sales_projects",
+      "seed": {
+        "eligible_only": true,
+        "scope": {
+          "cases": [
+            {
+              "if": {
+                "predicate": "full_scope"
+              },
+              "scope": "all_projects"
+            },
+            {
+              "if": {
+                "predicate": "maintenance_scoped"
+              },
+              "scope": "assigned_or_sales_projects"
+            }
+          ],
+          "else": "assigned_projects"
+        },
+        "rules": [
+          {
+            "if": {
+              "predicate": "P"
+            },
+            "actions": [
+              "read_fields",
+              "read",
+              "export"
+            ],
+            "field_permissions": []
+          },
+          {
+            "if": {
+              "all": [
+                {
+                  "predicate": "P"
+                },
+                {
+                  "any": [
+                    {
+                      "predicate": "admin"
+                    },
+                    {
+                      "predicate": "F"
+                    }
+                  ]
+                }
+              ]
+            },
+            "actions": [],
+            "field_permissions": [
+              "data_purchase_cost"
+            ]
+          }
+        ],
+        "otherwise": {
+          "actions": [],
+          "field_permissions": []
+        },
+        "merge_rule": "union actions and fields only within the one selected resource scope; never across resources"
+      },
+      "notes": [
+        "Ordinary directory query; explicit project_id must still intersect directory predicate.",
+        "Whole global queries never borrow M-dependent fields, including when result happens to have only one managed project."
+      ]
+    },
+    {
+      "resource_id": "maintenance_project_roundtrip",
+      "migration_state": "planned",
+      "actions": [
+        {
+          "id": "download_v2",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "download_v3",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "validate_v2",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "apply_v2",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        },
+        {
+          "id": "error_download_v2",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_customer",
+            "data_purchase_cost",
+            "data_profit"
+          ]
+        }
+      ],
+      "scopes": [
+        {
+          "id": "all_projects",
+          "requires_context": true
+        },
+        {
+          "id": "assigned_or_sales_projects",
+          "requires_context": true
+        }
+      ],
+      "field_permissions": [
+        "data_customer",
+        "data_purchase_cost",
+        "data_profit"
+      ],
+      "field_dependencies": [
+        [
+          "data_profit",
+          "data_purchase_cost"
+        ]
+      ],
+      "denial_scope": "assigned_or_sales_projects",
+      "seed": {
+        "eligible_only": true,
+        "scope": {
+          "cases": [
+            {
+              "if": {
+                "predicate": "full_scope"
+              },
+              "scope": "all_projects"
+            }
+          ],
+          "else": "assigned_or_sales_projects"
+        },
+        "rules": [
+          {
+            "if": {
+              "all": [
+                {
+                  "predicate": "P"
+                },
+                {
+                  "predicate": "Beta"
+                },
+                {
+                  "predicate": "C"
+                },
+                {
+                  "predicate": "F"
+                },
+                {
+                  "any": [
+                    {
+                      "predicate": "admin"
+                    },
+                    {
+                      "predicate": "K"
+                    }
+                  ]
+                },
+                {
+                  "not": {
+                    "predicate": "source_sales_scoped"
+                  }
+                }
+              ]
+            },
+            "actions": [
+              "download_v2"
+            ],
+            "field_permissions": [
+              "data_customer",
+              "data_purchase_cost",
+              "data_profit"
+            ]
+          },
+          {
+            "if": {
+              "all": [
+                {
+                  "predicate": "P"
+                },
+                {
+                  "predicate": "Beta"
+                },
+                {
+                  "predicate": "C"
+                },
+                {
+                  "predicate": "F"
+                },
+                {
+                  "any": [
+                    {
+                      "predicate": "admin"
+                    },
+                    {
+                      "predicate": "K"
+                    }
+                  ]
+                },
+                {
+                  "not": {
+                    "predicate": "source_sales_scoped"
+                  }
+                },
+                {
+                  "any": [
+                    {
+                      "predicate": "admin"
+                    },
+                    {
+                      "predicate": "roundtrip_apply_action"
+                    }
+                  ]
+                }
+              ]
+            },
+            "actions": [
+              "validate_v2",
+              "apply_v2",
+              "error_download_v2"
+            ],
+            "field_permissions": [
+              "data_customer",
+              "data_purchase_cost",
+              "data_profit"
+            ]
+          },
+          {
+            "if": {
+              "all": [
+                {
+                  "predicate": "P"
+                },
+                {
+                  "predicate": "Beta"
+                },
+                {
+                  "predicate": "C"
+                },
+                {
+                  "predicate": "F"
+                }
+              ]
+            },
+            "actions": [
+              "download_v3"
+            ],
+            "field_permissions": [
+              "data_purchase_cost",
+              "data_profit"
+            ]
+          }
+        ],
+        "otherwise": {
+          "actions": [],
+          "field_permissions": []
+        },
+        "merge_rule": "union actions and fields only within the one selected resource scope; never across resources"
+      },
+      "notes": [
+        "V2 source_sales_scoped restriction affects its action seeding; V3 remains independently available. All modes still check real project membership.",
+        "Fields are resource-local. Having K due to V2 does not grant a denied V2 action or allow another project."
+      ]
+    },
+    {
+      "resource_id": "maintenance_finance_workbook",
+      "migration_state": "planned",
+      "actions": [
+        {
+          "id": "download",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_profit"
+          ]
+        },
+        {
+          "id": "validate",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_profit"
+          ]
+        },
+        {
+          "id": "apply",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_profit"
+          ]
+        }
+      ],
+      "scopes": [
+        {
+          "id": "all_projects",
+          "requires_context": true
+        },
+        {
+          "id": "assigned_or_sales_projects",
+          "requires_context": true
+        }
+      ],
+      "field_permissions": [
+        "data_profit"
+      ],
+      "field_dependencies": [],
+      "denial_scope": "assigned_or_sales_projects",
+      "seed": {
+        "eligible_only": true,
+        "scope": {
+          "cases": [
+            {
+              "if": {
+                "predicate": "full_scope"
+              },
+              "scope": "all_projects"
+            }
+          ],
+          "else": "assigned_or_sales_projects"
+        },
+        "rules": [
+          {
+            "if": {
+              "all": [
+                {
+                  "predicate": "P"
+                },
+                {
+                  "any": [
+                    {
+                      "predicate": "admin"
+                    },
+                    {
+                      "predicate": "F"
+                    }
+                  ]
+                }
+              ]
+            },
+            "actions": [
+              "download"
+            ],
+            "field_permissions": [
+              "data_profit"
+            ]
+          },
+          {
+            "if": {
+              "all": [
+                {
+                  "predicate": "P"
+                },
+                {
+                  "any": [
+                    {
+                      "predicate": "admin"
+                    },
+                    {
+                      "all": [
+                        {
+                          "predicate": "upload_action"
+                        },
+                        {
+                          "predicate": "F"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            "actions": [
+              "validate",
+              "apply"
+            ],
+            "field_permissions": [
+              "data_profit"
+            ]
+          }
+        ],
+        "otherwise": {
+          "actions": [],
+          "field_permissions": []
+        },
+        "merge_rule": "union actions and fields only within the one selected resource scope; never across resources"
+      },
+      "notes": [
+        "Expense/collection format is governed by its own whole-document finance field, no M exception; do not infer extra customer/cost gates from generic draft field list."
+      ]
+    },
+    {
+      "resource_id": "maintenance_manager_workbook",
+      "migration_state": "planned",
+      "actions": [
+        {
+          "id": "download",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_profit"
+          ]
+        },
+        {
+          "id": "validate",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_profit"
+          ]
+        },
+        {
+          "id": "job_read",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_profit"
+          ]
+        },
+        {
+          "id": "apply",
+          "kind": "data",
+          "requires_actions": [],
+          "requires_any_actions": [],
+          "requires_fields": [
+            "data_profit"
+          ]
+        }
+      ],
+      "scopes": [
+        {
+          "id": "primary_managed_active_projects",
+          "requires_context": true
+        }
+      ],
+      "field_permissions": [
+        "data_profit"
+      ],
+      "field_dependencies": [],
+      "denial_scope": "primary_managed_active_projects",
+      "seed": {
+        "eligible_only": true,
+        "scope": "primary_managed_active_projects",
+        "rules": [
+          {
+            "if": {
+              "all": [
+                {
+                  "predicate": "P"
+                },
+                {
+                  "predicate": "Beta"
+                },
+                {
+                  "predicate": "F"
+                }
+              ]
+            },
+            "actions": [
+              "download",
+              "validate",
+              "job_read"
+            ],
+            "field_permissions": [
+              "data_profit"
+            ]
+          },
+          {
+            "if": {
+              "all": [
+                {
+                  "predicate": "P"
+                },
+                {
+                  "predicate": "Beta"
+                },
+                {
+                  "predicate": "F"
+                },
+                {
+                  "any": [
+                    {
+                      "predicate": "admin"
+                    },
+                    {
+                      "predicate": "manager_workbook_apply_action"
+                    }
+                  ]
+                }
+              ]
+            },
+            "actions": [
+              "apply"
+            ],
+            "field_permissions": [
+              "data_profit"
+            ]
+          }
+        ],
+        "otherwise": {
+          "actions": [],
+          "field_permissions": []
+        },
+        "merge_rule": "union actions and fields only within the one selected resource scope; never across resources"
+      },
+      "notes": [
+        "All endpoints call _owner and need F; scope is current nonempty active M set. Unlike D03 master."
+      ]
+    }
+  ],
+  "entry_mapping_deltas": [
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/master-workbook.xlsx",
+      "select_one_complete_contract": [
+        [
+          "maintenance_managed_workbook",
+          "download"
+        ],
+        [
+          "maintenance_general_workbook",
+          "download"
+        ]
+      ]
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/master-workbook/validate",
+      "select_one_complete_contract": [
+        [
+          "maintenance_managed_workbook",
+          "validate"
+        ],
+        [
+          "maintenance_general_workbook_write",
+          "validate"
+        ]
+      ],
+      "conditional_operations": "master_operations"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/master-workbook/apply",
+      "select_one_complete_contract": [
+        [
+          "maintenance_managed_workbook",
+          "apply"
+        ],
+        [
+          "maintenance_general_workbook_write",
+          "apply"
+        ]
+      ],
+      "conditional_operations": "master_operations"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/master-workbook/row-fields",
+      "select_one_complete_contract": [
+        [
+          "maintenance_managed_rows",
+          "read_fields"
+        ],
+        [
+          "maintenance_row_workbench",
+          "read_fields"
+        ]
+      ]
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/master-workbook/rows/export",
+      "select_one_complete_contract": [
+        [
+          "maintenance_managed_rows",
+          "export"
+        ],
+        [
+          "maintenance_row_workbench",
+          "export"
+        ]
+      ]
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/master-workbook/rows",
+      "require": [
+        "maintenance_row_workbench",
+        "read_cost_rows"
+      ],
+      "explicit_non_equivalence": "no managed_rows shortcut; old outer profit gate"
+    },
+    {
+      "entry_id": "GET /api/maintenance/spare-part-lines/fields",
+      "branches": [
+        {
+          "when": {
+            "request_project_id": "present"
+          },
+          "select_one_complete_contract": [
+            [
+              "maintenance_managed_rows",
+              "read_fields"
+            ],
+            [
+              "maintenance_global_rows",
+              "read_fields"
+            ]
+          ],
+          "additional_sql": "exact requested project AND directory scope; M is already a subset of D"
+        },
+        {
+          "when": {
+            "request_project_id": "absent"
+          },
+          "require": [
+            "maintenance_global_rows",
+            "read_fields"
+          ]
+        }
+      ]
+    },
+    {
+      "entry_id": "GET /api/maintenance/spare-part-lines/rows",
+      "branches": [
+        {
+          "when": {
+            "request_project_id": "present"
+          },
+          "select_one_complete_contract": [
+            [
+              "maintenance_managed_rows",
+              "read"
+            ],
+            [
+              "maintenance_global_rows",
+              "read"
+            ]
+          ],
+          "additional_sql": "exact requested project AND directory scope; M is already a subset of D"
+        },
+        {
+          "when": {
+            "request_project_id": "absent"
+          },
+          "require": [
+            "maintenance_global_rows",
+            "read"
+          ]
+        }
+      ]
+    },
+    {
+      "entry_id": "GET /api/maintenance/spare-part-lines/export",
+      "branches": [
+        {
+          "when": {
+            "request_project_id": "present"
+          },
+          "select_one_complete_contract": [
+            [
+              "maintenance_managed_rows",
+              "export"
+            ],
+            [
+              "maintenance_global_rows",
+              "export"
+            ]
+          ],
+          "additional_sql": "exact requested project AND directory scope; M is already a subset of D"
+        },
+        {
+          "when": {
+            "request_project_id": "absent"
+          },
+          "require": [
+            "maintenance_global_rows",
+            "export"
+          ]
+        }
+      ]
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/workbook",
+      "require": [
+        "maintenance_project_roundtrip",
+        "download_v2"
+      ]
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/workbook-v3.xlsx",
+      "require": [
+        "maintenance_project_roundtrip",
+        "download_v3"
+      ]
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/workbook/validate",
+      "require": [
+        "maintenance_project_roundtrip",
+        "validate_v2"
+      ]
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/workbook/apply",
+      "require": [
+        "maintenance_project_roundtrip",
+        "apply_v2"
+      ]
+    },
+    {
+      "entry_id": "GET /api/maintenance/workbook-validations/{validation_id}/errors.xlsx",
+      "require": [
+        "maintenance_project_roundtrip",
+        "error_download_v2"
+      ],
+      "resolve_parent": "validation stable owner and actual project_id; full file lineage"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/expense-collection-workbook.xlsx",
+      "require": [
+        "maintenance_finance_workbook",
+        "download"
+      ],
+      "mapping_status": "explicitly reaffirmed; previously unchanged mapping"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/expense-collection-workbook/apply",
+      "require": [
+        "maintenance_finance_workbook",
+        "apply"
+      ],
+      "mapping_status": "explicitly reaffirmed; previously unchanged mapping"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/expense-collection-workbook/validate",
+      "require": [
+        "maintenance_finance_workbook",
+        "validate"
+      ],
+      "mapping_status": "explicitly reaffirmed; previously unchanged mapping"
+    },
+    {
+      "entry_id": "GET /api/maintenance/project-manager/workbooks/v3",
+      "require": [
+        "maintenance_manager_workbook",
+        "download"
+      ],
+      "mapping_status": "explicitly reaffirmed; previously unchanged mapping"
+    },
+    {
+      "entry_id": "POST /api/maintenance/project-manager/workbooks/v3/apply",
+      "require": [
+        "maintenance_manager_workbook",
+        "apply"
+      ],
+      "mapping_status": "explicitly reaffirmed; previously unchanged mapping"
+    },
+    {
+      "entry_id": "GET /api/maintenance/project-manager/workbooks/v3/status",
+      "require": [
+        "maintenance_manager_workbook",
+        "job_read"
+      ],
+      "mapping_status": "explicitly reaffirmed; previously unchanged mapping"
+    },
+    {
+      "entry_id": "POST /api/maintenance/project-manager/workbooks/v3/validate",
+      "require": [
+        "maintenance_manager_workbook",
+        "validate"
+      ],
+      "mapping_status": "explicitly reaffirmed; previously unchanged mapping"
+    }
+  ],
+  "field_adapter_contract": {
+    "full_document": "Validate the complete action requirements before render/parse/apply; file content is indivisible unless an existing business format explicitly permits partial sheets. Never union fields from different matching contracts.",
+    "finance_only": "Finance workbook, manager monthly, and contract-amount operation expose data_profit only. Use direct registered ResourceAccess fields and domain projection. Do not pass an F-only grant through legacy hidden_groups/runtime_safe, which would silently require C; no C is emitted by these exact content contracts.",
+    "row_amounts": "Use canonical row amount registry with explicit ResourceAccess cost field. Do not call legacy can_view_amounts or role helpers after cutover. Old F controls seed only.",
+    "projection_failure": "If a reused helper still infers data permissions from role or legacy dependency closure, separate its pure computation from its authorization/projection before reuse; do not add unrelated fields as a shim."
+  },
+  "master_operations": [
+    {
+      "when": "parsed contract_amount_change exists (also saved receipt requires_amount)",
+      "require_any_complete_contract": [
+        [
+          "maintenance_managed_workbook",
+          "update_contract_amount"
+        ],
+        [
+          "maintenance_contract_amount_write",
+          "validate_or_apply_corresponding_to_command"
+        ]
+      ]
+    },
+    {
+      "when": "parsed project_note_change exists",
+      "require": [
+        "maintenance_project",
+        "update"
+      ],
+      "note": "Same exact project; D03 manager does not imply ordinary project-note authority."
+    },
+    {
+      "when": "parsed assignment_changes nonempty",
+      "require": [
+        "maintenance_general_workbook_write",
+        "reassign_source_orders"
+      ],
+      "note": "Resolve/lock old and new parent sets, preserve signed source assignment OCC and identity rules."
+    }
+  ],
+  "context_protocol": {
+    "authoritative_ref": "s3-execution-spec.json#/context_protocol",
+    "status": "superseded_by_complete_source_bound_registry",
+    "note": "This historical ten-resource delta does not define a second context wire, collection registry or operation-input allowlist. All exact action/context bindings, selectors, branch rules, batch quantifiers and RR/lock contracts are authoritative only in the full spec."
+  },
+  "required_differential_vectors": [
+    "A primary_manager/B canonical sales, F=false: managed A full, B denied; no cross-resource fields",
+    "global rows without project_id never auto promotes money for its managed subset",
+    "master cost-tab with M and F=false remains denied despite allowed metadata and readonly export",
+    "general reader F=true with no upload: read M/V/S, write only S; F+upload writer direct; admin full",
+    "general writer X+F without G and not S cannot change contract amount; general G+F but no X needs base document-write match too",
+    "custom admin with G=false/F=false may edit general master via old admin path but cannot change contract_amount outside actual M; admin is not a contract_amount shortcut",
+    "manager monthly F=false denied even actual primary manager; master manager file allowed",
+    "v3 C/F without K can download_v3 but not download_v2; own_customers_only true still blocks only legacy v2 action",
+    "manager assignment/source parent/revision changes after preview block publish/replay despite same account epoch"
+  ],
+  "semantic_vectors": {
+    "status": "design-only deterministic seed/scope vectors, not runtime SQL/PDP or migrations",
+    "vectors": [
+      {
+        "name": "mixed A primary manager full file",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": false,
+          "F": false,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_managed_workbook",
+        "action": "download",
+        "actual_object_relations": [
+          "M"
+        ],
+        "expected_allow": true
+      },
+      {
+        "name": "mixed B sales cannot borrow A fields",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": false,
+          "F": false,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_managed_workbook",
+        "action": "download",
+        "actual_object_relations": [
+          "S"
+        ],
+        "expected_allow": false
+      },
+      {
+        "name": "mixed A manager row export",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": false,
+          "F": false,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_managed_rows",
+        "action": "export",
+        "actual_object_relations": [
+          "M"
+        ],
+        "expected_allow": true,
+        "expected_fields": [
+          "data_purchase_cost"
+        ]
+      },
+      {
+        "name": "mixed B ordinary row export remains redacted",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": false,
+          "F": false,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_row_workbench",
+        "action": "export",
+        "actual_object_relations": [
+          "S"
+        ],
+        "expected_allow": true,
+        "expected_fields": []
+      },
+      {
+        "name": "M-only cost-tab outer profit gate",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": false,
+          "F": false,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_row_workbench",
+        "action": "read_cost_rows",
+        "actual_object_relations": [
+          "M"
+        ],
+        "expected_allow": false
+      },
+      {
+        "name": "M-only manager monthly not D03 master",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": false,
+          "F": false,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_manager_workbook",
+        "action": "download",
+        "actual_object_relations": [
+          "M",
+          "active"
+        ],
+        "expected_allow": false
+      },
+      {
+        "name": "manager contract operation A",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": false,
+          "F": false,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_managed_workbook",
+        "action": "update_contract_amount",
+        "actual_object_relations": [
+          "M"
+        ],
+        "expected_allow": true
+      },
+      {
+        "name": "manager contract operation does not extend B",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": false,
+          "F": false,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_contract_amount_write",
+        "action": "apply",
+        "actual_object_relations": [
+          "S"
+        ],
+        "expected_allow": false
+      },
+      {
+        "name": "general F reader on viewer project",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_general_workbook",
+        "action": "download",
+        "actual_object_relations": [
+          "V"
+        ],
+        "expected_allow": true
+      },
+      {
+        "name": "general F alone cannot upload viewer project",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_general_workbook_write",
+        "action": "apply",
+        "actual_object_relations": [
+          "V"
+        ],
+        "expected_allow": false
+      },
+      {
+        "name": "general F canonical salesperson upload",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_general_workbook_write",
+        "action": "apply",
+        "actual_object_relations": [
+          "S"
+        ],
+        "expected_allow": true
+      },
+      {
+        "name": "general F canonical salesperson contract amount",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_contract_amount_write",
+        "action": "apply",
+        "actual_object_relations": [
+          "S"
+        ],
+        "expected_allow": true
+      },
+      {
+        "name": "general F viewer cannot edit contract amount",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_contract_amount_write",
+        "action": "apply",
+        "actual_object_relations": [
+          "V"
+        ],
+        "expected_allow": false
+      },
+      {
+        "name": "ordinary cost-tab with F",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_row_workbench",
+        "action": "read_cost_rows",
+        "actual_object_relations": [
+          "V"
+        ],
+        "expected_allow": true,
+        "expected_fields": [
+          "data_purchase_cost"
+        ]
+      },
+      {
+        "name": "monthly active M financial file",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_manager_workbook",
+        "action": "download",
+        "actual_object_relations": [
+          "M",
+          "active"
+        ],
+        "expected_allow": true,
+        "expected_fields": [
+          "data_profit"
+        ]
+      },
+      {
+        "name": "monthly inactive project excluded",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_manager_workbook",
+        "action": "download",
+        "actual_object_relations": [
+          "M"
+        ],
+        "expected_allow": false
+      },
+      {
+        "name": "monthly viewer excluded",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_manager_workbook",
+        "action": "download",
+        "actual_object_relations": [
+          "V",
+          "active"
+        ],
+        "expected_allow": false
+      },
+      {
+        "name": "v3 no customer entitlement needed",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_project_roundtrip",
+        "action": "download_v3",
+        "actual_object_relations": [
+          "S"
+        ],
+        "expected_allow": true,
+        "expected_fields": [
+          "data_profit",
+          "data_purchase_cost"
+        ]
+      },
+      {
+        "name": "v2 requires customer entitlement",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_project_roundtrip",
+        "action": "download_v2",
+        "actual_object_relations": [
+          "S"
+        ],
+        "expected_allow": false
+      },
+      {
+        "name": "v2 source scoped remains denied",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": true,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": true,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_project_roundtrip",
+        "action": "download_v2",
+        "actual_object_relations": [
+          "S"
+        ],
+        "expected_allow": false
+      },
+      {
+        "name": "v3 source scoped independently allowed",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": true,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": true,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_project_roundtrip",
+        "action": "download_v3",
+        "actual_object_relations": [
+          "S"
+        ],
+        "expected_allow": true
+      },
+      {
+        "name": "upload financial key enables direct viewer",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": true
+        },
+        "resource_id": "maintenance_general_workbook_write",
+        "action": "apply",
+        "actual_object_relations": [
+          "V"
+        ],
+        "expected_allow": true
+      },
+      {
+        "name": "upload key does not grant contract changes",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": true
+        },
+        "resource_id": "maintenance_contract_amount_write",
+        "action": "apply",
+        "actual_object_relations": [
+          "V"
+        ],
+        "expected_allow": false
+      },
+      {
+        "name": "G+F contract operation on viewer",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": true,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_contract_amount_write",
+        "action": "apply",
+        "actual_object_relations": [
+          "V"
+        ],
+        "expected_allow": true
+      },
+      {
+        "name": "G+F is not base workbook upload",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": true,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_general_workbook_write",
+        "action": "apply",
+        "actual_object_relations": [
+          "V"
+        ],
+        "expected_allow": false
+      },
+      {
+        "name": "custom admin general master old shortcut",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": false,
+          "F": false,
+          "K": false,
+          "P": true,
+          "admin": true,
+          "full_scope": true,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_general_workbook_write",
+        "action": "apply",
+        "actual_object_relations": [],
+        "expected_allow": true,
+        "vector_class": "constructed_defensive_context_not_reachable_persisted_legacy_seed"
+      },
+      {
+        "name": "custom admin no contract amount shortcut",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": false,
+          "F": false,
+          "K": false,
+          "P": true,
+          "admin": true,
+          "full_scope": true,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_contract_amount_write",
+        "action": "apply",
+        "actual_object_relations": [],
+        "expected_allow": false,
+        "vector_class": "constructed_defensive_context_not_reachable_persisted_legacy_seed"
+      },
+      {
+        "name": "custom admin manager monthly still needs F",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": false,
+          "F": false,
+          "K": false,
+          "P": true,
+          "admin": true,
+          "full_scope": true,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_manager_workbook",
+        "action": "download",
+        "actual_object_relations": [
+          "M",
+          "active"
+        ],
+        "expected_allow": false,
+        "vector_class": "constructed_defensive_context_not_reachable_persisted_legacy_seed"
+      },
+      {
+        "name": "C alone does not seed old F row cost",
+        "legacy_predicates": {
+          "Beta": true,
+          "C": true,
+          "F": false,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_row_workbench",
+        "action": "read_cost_rows",
+        "actual_object_relations": [
+          "S"
+        ],
+        "expected_allow": false
+      },
+      {
+        "name": "finance stable workbook no Beta restriction",
+        "legacy_predicates": {
+          "Beta": false,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_finance_workbook",
+        "action": "download",
+        "actual_object_relations": [
+          "V"
+        ],
+        "expected_allow": true,
+        "expected_fields": [
+          "data_profit"
+        ]
+      },
+      {
+        "name": "monthly explicit Beta required",
+        "legacy_predicates": {
+          "Beta": false,
+          "C": true,
+          "F": true,
+          "K": false,
+          "P": true,
+          "admin": false,
+          "full_scope": false,
+          "maintenance_scoped": false,
+          "manager_workbook_apply_action": false,
+          "project_manage_action": false,
+          "roundtrip_apply_action": false,
+          "source_sales_scoped": false,
+          "upload_action": false
+        },
+        "resource_id": "maintenance_manager_workbook",
+        "action": "download",
+        "actual_object_relations": [
+          "M",
+          "active"
+        ],
+        "expected_allow": false
+      }
+    ],
+    "input_domain_note": "Admin F=false vectors are defensive context tests only. Normal persisted effective_for_user(admin) forces ordinary fields true; do not cite them as evidence requiring additional seed resource splits."
+  },
+  "superseded_by": "s3-execution-spec.json: complete73-resource executable-design closure; this document retains ten complex historical differential contracts.",
+  "frontend_route_clarifications": [
+    {
+      "surface_id": "maintenance_dashboard.orders",
+      "route_entry": true,
+      "reason": "Orders is an independently usable area in the consumption tab; no checks/consumption/options grant is required to enter."
+    },
+    {
+      "surface_id": "maintenance_global_rows.global_rows",
+      "route_entry": true,
+      "reason": "Independently usable global row workbench shell. The ordinary or managed complete contract admits its own rows/fields/export; cards, directory and workbook grants remain independent."
+    },
+    {
+      "surface_id": "maintenance_managed_rows.global_rows",
+      "route_entry": true,
+      "reason": "Independently usable global row workbench shell. The ordinary or managed complete contract admits its own rows/fields/export; cards, directory and workbook grants remain independent."
+    },
+    {
+      "surface_id": "maintenance_assignments.manager",
+      "route_entry": true,
+      "reason": "项目深链仅解析壳；维护负责人需要独立project.read提供真实关系/OCC，无read显示缺权且零写，不隐式授予read。"
+    }
+  ]
+}

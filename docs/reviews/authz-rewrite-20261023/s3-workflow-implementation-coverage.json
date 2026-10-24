@@ -1,0 +1,1183 @@
+{
+  "authority": "Implementation ledger only. Registry or metadata presence is never counted as runtime coverage. Verified is local test evidence, not stage acceptance.",
+  "entries": [
+    {
+      "entry_id": "POST /api/maintenance/acceptance-checklist/{batch_id}/apply",
+      "api_file": "backend/app/api/maintenance_acceptance_checklist.py",
+      "status": "verified",
+      "actual_gate": "read_context_snapshot / lock_context_batch + stable owner AND",
+      "tests": "test_authz_s3_checklist.py (5); test_maintenance_acceptance_checklist.py (10); test_authz_s3_workbook_bootstrap.py original4 red -> author combined45 green /tmp/itsp-s3-workbook-bootstrap-final.log; backend independent48 passed /tmp/itsp-s3-workbook-metadata-independent-final.log; checklist stored-input tamper3 original reds closed",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/acceptance-deliverables/search",
+      "api_file": "backend/app/api/maintenance_acceptance.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root actual file parent/owner/whole-byte manifest; domain locks then actor; independent compensation verified",
+      "tests": "root 10 + old 23; independent 2 publication/commit failures; combined 14 passed /tmp/itsp-s3-acceptance-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/acceptance-files/{file_id}",
+      "api_file": "backend/app/api/maintenance_acceptance.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root actual file parent/owner/whole-byte manifest; domain locks then actor; independent compensation verified",
+      "tests": "root 10 + old 23; independent 2 publication/commit failures; combined 14 passed /tmp/itsp-s3-acceptance-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/acceptance",
+      "api_file": "backend/app/api/maintenance_acceptance.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root actual file parent/owner/whole-byte manifest; domain locks then actor; independent compensation verified",
+      "tests": "root 10 + old 23; independent 2 publication/commit failures; combined 14 passed /tmp/itsp-s3-acceptance-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/acceptance/attachments",
+      "api_file": "backend/app/api/maintenance_acceptance.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root actual file parent/owner/whole-byte manifest; domain locks then actor; independent compensation verified",
+      "tests": "root 10 + old 23; independent 2 publication/commit failures; combined 14 passed /tmp/itsp-s3-acceptance-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "DELETE /api/maintenance/projects/stable/{project_id}/acceptance/attachments/{file_id}",
+      "api_file": "backend/app/api/maintenance_acceptance.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root actual file parent/owner/whole-byte manifest; domain locks then actor; independent compensation verified",
+      "tests": "root 10 + old 23; independent 2 publication/commit failures; combined 14 passed /tmp/itsp-s3-acceptance-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/acceptance/checklist",
+      "api_file": "backend/app/api/maintenance_acceptance_checklist.py",
+      "status": "verified",
+      "actual_gate": "read_context_snapshot / lock_context_batch + stable owner AND",
+      "tests": "test_authz_s3_checklist.py (5); test_maintenance_acceptance_checklist.py (10)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/acceptance/checklist/preview",
+      "api_file": "backend/app/api/maintenance_acceptance_checklist.py",
+      "status": "verified",
+      "actual_gate": "read_context_snapshot / lock_context_batch + stable owner AND",
+      "tests": "test_authz_s3_checklist.py (5); test_maintenance_acceptance_checklist.py (10)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/acceptance/checklist/template",
+      "api_file": "backend/app/api/maintenance_acceptance_checklist.py",
+      "status": "verified",
+      "actual_gate": "read_context_snapshot / lock_context_batch + stable owner AND",
+      "tests": "test_authz_s3_checklist.py (5); test_maintenance_acceptance_checklist.py (10)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/acceptance/submit",
+      "api_file": "backend/app/api/maintenance_acceptance.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root actual file parent/owner/whole-byte manifest; domain locks then actor; independent compensation verified",
+      "tests": "root 10 + old 23; independent 2 publication/commit failures; combined 14 passed /tmp/itsp-s3-acceptance-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/ai-fallback/proposals",
+      "api_file": "backend/app/api/maintenance_ai_fallback.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Actual stored doc_type selects current complete contract; SQL full immutable opaque digest before PDP, facts only after allow; stable proposal/acceptance receipt",
+      "tests": "root14new+12legacy=26; independent actual other acceptor/source revoke1passed /tmp/itsp-s3-ai-independent.log; reopened shared AI bootstrap: denied accept SELECTs complete proposal before current grant; test_authz_s3_independent.py::test_denied_ai_accept_reads_only_proposal_identity_and_opaque_digest red /tmp/itsp-s3-ai-bootstrap-sql-red.log; backend author fixing; bootstrap original SQL red now green, external author14+legacy12+independent1=27 /tmp/itsp-s3-ai-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/ai-fallback/propose",
+      "api_file": "backend/app/api/maintenance_ai_fallback.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Actual stored doc_type selects current complete contract; SQL full immutable opaque digest before PDP, facts only after allow; stable proposal/acceptance receipt",
+      "tests": "root14new+12legacy=26; independent actual other acceptor/source revoke1passed /tmp/itsp-s3-ai-independent.log; reopened shared AI bootstrap: denied accept SELECTs complete proposal before current grant; test_authz_s3_independent.py::test_denied_ai_accept_reads_only_proposal_identity_and_opaque_digest red /tmp/itsp-s3-ai-bootstrap-sql-red.log; backend author fixing; bootstrap original SQL red now green, external author14+legacy12+independent1=27 /tmp/itsp-s3-ai-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/ai-fallback/{proposal_id}/accept",
+      "api_file": "backend/app/api/maintenance_ai_fallback.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Actual stored doc_type selects current complete contract; SQL full immutable opaque digest before PDP, facts only after allow; stable proposal/acceptance receipt",
+      "tests": "root14new+12legacy=26; independent actual other acceptor/source revoke1passed /tmp/itsp-s3-ai-independent.log; reopened shared AI bootstrap: denied accept SELECTs complete proposal before current grant; test_authz_s3_independent.py::test_denied_ai_accept_reads_only_proposal_identity_and_opaque_digest red /tmp/itsp-s3-ai-bootstrap-sql-red.log; backend author fixing; bootstrap original SQL red now green, external author14+legacy12+independent1=27 /tmp/itsp-s3-ai-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/project-manager-assignments/search",
+      "api_file": "backend/app/api/maintenance_manager_directory.py",
+      "status": "verified_shared_service",
+      "actual_gate": "assignments.read_manager_directory RR collection; strict HTTP precondition, typed identity, no-store",
+      "tests": "test_authz_s3_assignment_commands.py::test_manager_directory_http_exact_read_precondition_and_no_store independent passed /tmp/itsp-s3-tail-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/project-manager-assignments/{assignment_id}/archive",
+      "api_file": "backend/app/api/maintenance_project_assignments.py",
+      "status": "verified_shared_service",
+      "actual_gate": "assignments.assignment_command actual target IDs + complete user locks",
+      "tests": "test_authz_s3_assignment_commands.py; test_maintenance_project_manager_assignments.py",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/manager-assignment",
+      "api_file": "backend/app/api/maintenance_project_assignments.py",
+      "status": "verified_shared_service",
+      "actual_gate": "assignments.assignment_command actual target IDs + complete user locks",
+      "tests": "test_authz_s3_assignment_commands.py; test_maintenance_project_manager_assignments.py",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/collection-milestones/restore",
+      "api_file": "backend/app/api/maintenance_project_master_workbook.py",
+      "status": "verified_shared_service",
+      "actual_gate": "actual complete uploaded row/parent metadata; domain lock closure then actor; independent restore action with same-grant fields",
+      "tests": "author6+legacy50=56; independent original6 re-run in /tmp/itsp-s3-demand-master-return-cross-review.log (35); new restore late-epoch rollback in test_authz_s3_tail_independent.py (3 passed /tmp/itsp-s3-tail-independent.log)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/master-workbook/collection-plan",
+      "api_file": "backend/app/api/maintenance_project_master_workbook.py",
+      "status": "verified",
+      "actual_gate": "maintenance_master_workbook_access RR; one complete alternative or exact finance grant before DTO/bytes",
+      "tests": "test_authz_s3_master_workbooks.py (7); test_maintenance_project_master_workbook.py (46): 53 passed",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/demands/delete-intents",
+      "api_file": "backend/app/api/maintenance_demands.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_demand_authorization: exact actual source/line/intent whole-parent closure; final actor; stable owner and complete read/replay manifest",
+      "tests": "author20+legacy82; independent original20 re-run /tmp/itsp-s3-demand-master-return-cross-review.log (35); independent history RR no DML/row locks test_authz_s3_tail_independent.py (3 passed)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/demands/delete-intents/{intent_id}",
+      "api_file": "backend/app/api/maintenance_demands.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_demand_authorization: exact actual source/line/intent whole-parent closure; final actor; stable owner and complete read/replay manifest",
+      "tests": "author20+legacy82; independent original20 re-run /tmp/itsp-s3-demand-master-return-cross-review.log (35); independent history RR no DML/row locks test_authz_s3_tail_independent.py (3 passed)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/demands/delete-intents/{intent_id}/arm",
+      "api_file": "backend/app/api/maintenance_demands.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_demand_authorization: exact actual source/line/intent whole-parent closure; final actor; stable owner and complete read/replay manifest",
+      "tests": "author20+legacy82; independent original20 re-run /tmp/itsp-s3-demand-master-return-cross-review.log (35); independent history RR no DML/row locks test_authz_s3_tail_independent.py (3 passed)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/demands/delete-intents/{intent_id}/cancel",
+      "api_file": "backend/app/api/maintenance_demands.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_demand_authorization: exact actual source/line/intent whole-parent closure; final actor; stable owner and complete read/replay manifest",
+      "tests": "author20+legacy82; independent original20 re-run /tmp/itsp-s3-demand-master-return-cross-review.log (35); independent history RR no DML/row locks test_authz_s3_tail_independent.py (3 passed)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/demands/delete-intents/{intent_id}/execute",
+      "api_file": "backend/app/api/maintenance_demands.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_demand_authorization: exact actual source/line/intent whole-parent closure; final actor; stable owner and complete read/replay manifest",
+      "tests": "author20+legacy82; independent original20 re-run /tmp/itsp-s3-demand-master-return-cross-review.log (35); independent history RR no DML/row locks test_authz_s3_tail_independent.py (3 passed)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/demands/lines",
+      "api_file": "backend/app/api/maintenance_demands.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_demand_authorization: exact actual source/line/intent whole-parent closure; final actor; stable owner and complete read/replay manifest",
+      "tests": "author20+legacy82; independent original20 re-run /tmp/itsp-s3-demand-master-return-cross-review.log (35); independent history RR no DML/row locks test_authz_s3_tail_independent.py (3 passed)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "PATCH /api/maintenance/demands/lines/{raw_line_id}",
+      "api_file": "backend/app/api/maintenance_demands.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_demand_authorization: exact actual source/line/intent whole-parent closure; final actor; stable owner and complete read/replay manifest",
+      "tests": "author20+legacy82; independent original20 re-run /tmp/itsp-s3-demand-master-return-cross-review.log (35); independent history RR no DML/row locks test_authz_s3_tail_independent.py (3 passed)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/demands/lines/{raw_line_id}/clear-override",
+      "api_file": "backend/app/api/maintenance_demands.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_demand_authorization: exact actual source/line/intent whole-parent closure; final actor; stable owner and complete read/replay manifest",
+      "tests": "author20+legacy82; independent original20 re-run /tmp/itsp-s3-demand-master-return-cross-review.log (35); independent history RR no DML/row locks test_authz_s3_tail_independent.py (3 passed)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/demands/manual-protection-review",
+      "api_file": "backend/app/api/maintenance_demands.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_demand_authorization: exact actual source/line/intent whole-parent closure; final actor; stable owner and complete read/replay manifest",
+      "tests": "author20+legacy82; independent original20 re-run /tmp/itsp-s3-demand-master-return-cross-review.log (35); independent history RR no DML/row locks test_authz_s3_tail_independent.py (3 passed)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/demands/orders/{source_order_id}/lines",
+      "api_file": "backend/app/api/maintenance_demands.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_demand_authorization: exact actual source/line/intent whole-parent closure; final actor; stable owner and complete read/replay manifest",
+      "tests": "author20+legacy82; independent original20 re-run /tmp/itsp-s3-demand-master-return-cross-review.log (35); independent history RR no DML/row locks test_authz_s3_tail_independent.py (3 passed)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/demands/search",
+      "api_file": "backend/app/api/maintenance_demands.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_demand_authorization: exact actual source/line/intent whole-parent closure; final actor; stable owner and complete read/replay manifest",
+      "tests": "author20+legacy82; independent original20 re-run /tmp/itsp-s3-demand-master-return-cross-review.log (35); independent history RR no DML/row locks test_authz_s3_tail_independent.py (3 passed)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/demands/void-fast",
+      "api_file": "backend/app/api/maintenance_demands.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_demand_authorization: exact actual source/line/intent whole-parent closure; final actor; stable owner and complete read/replay manifest",
+      "tests": "author20+legacy82; independent original20 re-run /tmp/itsp-s3-demand-master-return-cross-review.log (35); independent history RR no DML/row locks test_authz_s3_tail_independent.py (3 passed)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/demands/{source_order_id}/restore",
+      "api_file": "backend/app/api/maintenance_demands.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_demand_authorization: exact actual source/line/intent whole-parent closure; final actor; stable owner and complete read/replay manifest",
+      "tests": "author20+legacy82; independent original20 re-run /tmp/itsp-s3-demand-master-return-cross-review.log (35); independent history RR no DML/row locks test_authz_s3_tail_independent.py (3 passed)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/doc-imports/relink-projects",
+      "api_file": "backend/app/api/maintenance_doc_import.py",
+      "status": "verified",
+      "actual_gate": "maintenance_import_authorization: actual input rows/owner sidecar; complete batch AND each target; domain writes then final actor; exact no-target admission; RR read/whole response",
+      "tests": "10 real PG/PDP passed /tmp/itsp-s3-import-final-rerun.log; 62 imports/source/master/legacy combo passed /tmp/itsp-s3-import-source-master-combined.log; final independent review pending; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/doc-imports/{batch_id}",
+      "api_file": "backend/app/api/maintenance_doc_import.py",
+      "status": "verified",
+      "actual_gate": "maintenance_import_authorization: actual input rows/owner sidecar; complete batch AND each target; domain writes then final actor; exact no-target admission; RR read/whole response",
+      "tests": "10 real PG/PDP passed /tmp/itsp-s3-import-final-rerun.log; 62 imports/source/master/legacy combo passed /tmp/itsp-s3-import-source-master-combined.log; final independent review pending; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/doc-imports/{batch_id}/apply",
+      "api_file": "backend/app/api/maintenance_doc_import.py",
+      "status": "verified",
+      "actual_gate": "maintenance_import_authorization: actual input rows/owner sidecar; complete batch AND each target; domain writes then final actor; exact no-target admission; RR read/whole response",
+      "tests": "10 real PG/PDP passed /tmp/itsp-s3-import-final-rerun.log; 62 imports/source/master/legacy combo passed /tmp/itsp-s3-import-source-master-combined.log; final independent review pending; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/doc-imports/{doc_type}/preview",
+      "api_file": "backend/app/api/maintenance_doc_import.py",
+      "status": "verified",
+      "actual_gate": "maintenance_import_authorization: actual input rows/owner sidecar; complete batch AND each target; domain writes then final actor; exact no-target admission; RR read/whole response",
+      "tests": "10 real PG/PDP passed /tmp/itsp-s3-import-final-rerun.log; 62 imports/source/master/legacy combo passed /tmp/itsp-s3-import-source-master-combined.log; final independent review pending; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/expense-rows",
+      "api_file": "backend/app/api/maintenance_project_master_workbook.py",
+      "status": "verified",
+      "actual_gate": "maintenance_master_workbook_access RR; one complete alternative or exact finance grant before DTO/bytes",
+      "tests": "test_authz_s3_master_workbooks.py (7); test_maintenance_project_master_workbook.py (46): 53 passed",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/expense-collection-workbook.xlsx",
+      "api_file": "backend/app/api/maintenance_expense_collection_workbook.py",
+      "status": "verified",
+      "actual_gate": "RR whole finance read; apply domain callback -> current actor/PDP",
+      "tests": "test_authz_s3_workbooks.py finance (2) + test_maintenance_expense_collection_workbook.py (49)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/expense-collection-workbook/apply",
+      "api_file": "backend/app/api/maintenance_expense_collection_workbook.py",
+      "status": "verified",
+      "actual_gate": "RR whole finance read; apply domain callback -> current actor/PDP",
+      "tests": "test_authz_s3_workbooks.py finance (2) + test_maintenance_expense_collection_workbook.py (49)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/expense-collection-workbook/validate",
+      "api_file": "backend/app/api/maintenance_expense_collection_workbook.py",
+      "status": "verified",
+      "actual_gate": "RR whole finance read; apply domain callback -> current actor/PDP",
+      "tests": "test_authz_s3_workbooks.py finance (2) + test_maintenance_expense_collection_workbook.py (49)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/master-workbook.xlsx",
+      "api_file": "backend/app/api/maintenance_project_master_workbook.py",
+      "status": "verified",
+      "actual_gate": "maintenance_master_workbook_access RR; one complete alternative or exact finance grant before DTO/bytes",
+      "tests": "test_authz_s3_master_workbooks.py (7); test_maintenance_project_master_workbook.py (46): 53 passed",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/master-workbook/apply",
+      "api_file": "backend/app/api/maintenance_project_master_workbook.py",
+      "status": "verified",
+      "actual_gate": "V1/V2 same-RR complete preflight; full old/new domain closure capture; final actor+PDP+precondition; stable Operation/Audit whole receipt manifest in same TX",
+      "tests": "new master 18 + artifact14 + original master/receipts/locks:204 passed /tmp/itsp-s3-master-combined.log; formal precondition/unknown view1 passed; independent review ongoing; backend independent 2 passed and authz_phase_review rerun in 29-combo; test_authz_s3_workbook_bootstrap.py original4 red -> author combined45 green /tmp/itsp-s3-workbook-bootstrap-final.log; backend independent48 passed /tmp/itsp-s3-workbook-metadata-independent-final.log; checklist stored-input tamper3 original reds closed",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/master-workbook/validate",
+      "api_file": "backend/app/api/maintenance_project_master_workbook.py",
+      "status": "verified",
+      "actual_gate": "same RR complete alternatives; actual upload plan conditional actions; actual source + all old/new parent slots before foreign cost SQL",
+      "tests": "test_authz_s3_master_workbooks.py (11); original master/row/validation-error regressions (151); /tmp/itsp-s3-workbook-get-preconditions.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/spare-part-lines/export",
+      "api_file": "backend/app/api/maintenance_row_workbench.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root maintenance_row_workbench_access: RR SQL scope/count/fields and complete spool; exact per-resource grants",
+      "tests": "root6+legacy141=147 passed; independent CSV/XLSX spool2 passed /tmp/itsp-s3-row-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/spare-part-lines/fields",
+      "api_file": "backend/app/api/maintenance_row_workbench.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root maintenance_row_workbench_access: RR SQL scope/count/fields and complete spool; exact per-resource grants",
+      "tests": "root6+legacy141=147 passed; independent CSV/XLSX spool2 passed /tmp/itsp-s3-row-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/spare-part-lines/rows",
+      "api_file": "backend/app/api/maintenance_row_workbench.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root maintenance_row_workbench_access: RR SQL scope/count/fields and complete spool; exact per-resource grants",
+      "tests": "root6+legacy141=147 passed; independent CSV/XLSX spool2 passed /tmp/itsp-s3-row-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/spare-part-lines.xlsx",
+      "api_file": "backend/app/api/maintenance_project_master_workbook.py",
+      "status": "verified",
+      "actual_gate": "RR whole global_workbook download contract; actual collection predicate enters SQL before renderer; C/F/customer same Grant; exact precondition",
+      "tests": "test_authz_s3_master_workbooks.py (12 passed), /tmp/itsp-s3-global-workbook-read.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/spare-part-lines/apply",
+      "api_file": "backend/app/api/maintenance_project_master_workbook.py",
+      "status": "verified_shared_service",
+      "actual_gate": "actual complete uploaded row/parent metadata; domain lock closure then actor; independent restore action with same-grant fields",
+      "tests": "author6+legacy50=56; independent original6 re-run in /tmp/itsp-s3-demand-master-return-cross-review.log (35); new restore late-epoch rollback in test_authz_s3_tail_independent.py (3 passed /tmp/itsp-s3-tail-independent.log)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/spare-part-lines/validate",
+      "api_file": "backend/app/api/maintenance_project_master_workbook.py",
+      "status": "verified_shared_service",
+      "actual_gate": "actual complete uploaded row/parent metadata; domain lock closure then actor; independent restore action with same-grant fields",
+      "tests": "author6+legacy50=56; independent original6 re-run in /tmp/itsp-s3-demand-master-return-cross-review.log (35); new restore late-epoch rollback in test_authz_s3_tail_independent.py (3 passed /tmp/itsp-s3-tail-independent.log)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/ledger-imports/preview",
+      "api_file": "backend/app/api/maintenance_ledger.py",
+      "status": "verified",
+      "actual_gate": "input preview / actual batch owner / metadata-report split / final commit authorization",
+      "tests": "test_authz_s3_ledger.py (6) + test_maintenance_ledger.py",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/ledger-imports/{batch_id}",
+      "api_file": "backend/app/api/maintenance_ledger.py",
+      "status": "verified",
+      "actual_gate": "input preview / actual batch owner / metadata-report split / final commit authorization",
+      "tests": "test_authz_s3_ledger.py (6) + test_maintenance_ledger.py",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/ledger-imports/{batch_id}/apply",
+      "api_file": "backend/app/api/maintenance_ledger.py",
+      "status": "verified",
+      "actual_gate": "input preview / actual batch owner / metadata-report split / final commit authorization",
+      "tests": "test_authz_s3_ledger.py (6) + test_maintenance_ledger.py",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/project-manager/workbooks/v3",
+      "api_file": "backend/app/api/maintenance_manager_workbooks.py",
+      "status": "verified",
+      "actual_gate": "monthly actual owner/project collection + whole file + plan sidecar",
+      "tests": "test_authz_s3_monthly_workbooks.py (8); original adapter (10); PG lock-wait red/green",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/project-manager/workbooks/v3/apply",
+      "api_file": "backend/app/api/maintenance_manager_workbooks.py",
+      "status": "verified",
+      "actual_gate": "monthly actual owner/project collection + whole file + plan sidecar",
+      "tests": "test_authz_s3_monthly_workbooks.py (8); original adapter (10); PG lock-wait red/green; test_authz_s3_workbook_bootstrap.py original4 red -> author combined45 green /tmp/itsp-s3-workbook-bootstrap-final.log; backend independent48 passed /tmp/itsp-s3-workbook-metadata-independent-final.log; checklist stored-input tamper3 original reds closed",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/project-manager/workbooks/v3/status",
+      "api_file": "backend/app/api/maintenance_manager_workbooks.py",
+      "status": "verified",
+      "actual_gate": "monthly actual owner/project collection + whole file + plan sidecar",
+      "tests": "test_authz_s3_monthly_workbooks.py (8); original adapter (10); PG lock-wait red/green",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/project-manager/workbooks/v3/validate",
+      "api_file": "backend/app/api/maintenance_manager_workbooks.py",
+      "status": "verified",
+      "actual_gate": "monthly actual owner/project collection + whole file + plan sidecar",
+      "tests": "test_authz_s3_monthly_workbooks.py (8); original adapter (10); PG lock-wait red/green",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/migration-runs/preview",
+      "api_file": "backend/app/api/maintenance_migration.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_migration_authorization actual run/event sidecar + current grant, stable actor separation; locked command callback",
+      "tests": "root 9 new + 66 old; authz_phase_review independent 9 passed (/tmp/itsp-s3-migration-cross-review.log)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/migration-runs/search",
+      "api_file": "backend/app/api/maintenance_migration.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_migration_authorization actual run/event sidecar + current grant, stable actor separation; locked command callback",
+      "tests": "root 9 new + 66 old; authz_phase_review independent 9 passed (/tmp/itsp-s3-migration-cross-review.log)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/migration-runs/{run_id}",
+      "api_file": "backend/app/api/maintenance_migration.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_migration_authorization actual run/event sidecar + current grant, stable actor separation; locked command callback",
+      "tests": "root 9 new + 66 old; authz_phase_review independent 9 passed (/tmp/itsp-s3-migration-cross-review.log)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/migration-runs/{run_id}/approve",
+      "api_file": "backend/app/api/maintenance_migration.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_migration_authorization actual run/event sidecar + current grant, stable actor separation; locked command callback",
+      "tests": "root 9 new + 66 old; authz_phase_review independent 9 passed (/tmp/itsp-s3-migration-cross-review.log)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/migration-runs/{run_id}/manifest",
+      "api_file": "backend/app/api/maintenance_migration.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_migration_authorization actual run/event sidecar + current grant, stable actor separation; locked command callback",
+      "tests": "root 9 new + 66 old; authz_phase_review independent 9 passed (/tmp/itsp-s3-migration-cross-review.log)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/migration-runs/{run_id}/projects/{project_id}/evidence",
+      "api_file": "backend/app/api/maintenance_migration.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_migration_authorization actual run/event sidecar + current grant, stable actor separation; locked command callback",
+      "tests": "root 9 new + 66 old; authz_phase_review independent 9 passed (/tmp/itsp-s3-migration-cross-review.log)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/migration-runs/{run_id}/reconcile",
+      "api_file": "backend/app/api/maintenance_migration.py",
+      "status": "verified_shared_service",
+      "actual_gate": "maintenance_migration_authorization actual run/event sidecar + current grant, stable actor separation; locked command callback",
+      "tests": "root 9 new + 66 old; authz_phase_review independent 9 passed (/tmp/itsp-s3-migration-cross-review.log)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/workbook",
+      "api_file": "backend/app/api/maintenance_project_workbooks.py",
+      "status": "verified",
+      "actual_gate": "RR whole-file grant; actual persisted validation owner/digest; full domain locks then actor; independent producer/consumer format contract",
+      "tests": "test_authz_s3_project_workbooks.py (7); test_workbook_tasks.py (2); original API (29)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/workbook-v3.xlsx",
+      "api_file": "backend/app/api/maintenance_project_workbook_v3.py",
+      "status": "verified",
+      "actual_gate": "read_project_workbook: whole C+F same Grant, RR render",
+      "tests": "test_authz_s3_workbooks.py::test_v3_* + test_maintenance_project_workbook_v3.py",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/workbook/apply",
+      "api_file": "backend/app/api/maintenance_project_workbooks.py",
+      "status": "verified",
+      "actual_gate": "RR whole-file grant; actual persisted validation owner/digest; full domain locks then actor; independent producer/consumer format contract",
+      "tests": "test_authz_s3_project_workbooks.py (7); test_workbook_tasks.py (2); original API (29)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/workbook/validate",
+      "api_file": "backend/app/api/maintenance_project_workbooks.py",
+      "status": "verified",
+      "actual_gate": "RR whole-file grant; actual persisted validation owner/digest; full domain locks then actor; independent producer/consumer format contract",
+      "tests": "test_authz_s3_project_workbooks.py (7); test_workbook_tasks.py (2); original API (29)",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/workbook-validations/{validation_id}/errors.xlsx",
+      "api_file": "backend/app/api/maintenance_project_workbooks.py",
+      "status": "verified",
+      "actual_gate": "RR whole-file grant; actual persisted validation owner/digest; full domain locks then actor; independent producer/consumer format contract; formal precondition in same RR before byte read",
+      "tests": "test_authz_s3_project_workbooks.py (7); test_workbook_tasks.py (2); original API (29); artifact+v2 HTTP 21 passed /tmp/itsp-s3-artifact-precondition.log; test_authz_s3_workbook_bootstrap.py original4 red -> author combined45 green /tmp/itsp-s3-workbook-bootstrap-final.log; backend independent48 passed /tmp/itsp-s3-workbook-metadata-independent-final.log; checklist stored-input tamper3 original reds closed",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/project-batch-transfer/apply",
+      "api_file": "backend/app/api/maintenance_project_batch_transfer.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root actual input metadata + selected SQL projection; current exact complete scope; projects then contracts then actor; immutable input/receipt binding",
+      "tests": "author12 + frontend independent3 + cross-author tail4:19 passed /tmp/itsp-s3-transfer-final-independent.log; frozen tail4 passed /tmp/itsp-s3-transfer-frozen-tail.log; two original red SQL/lock cases now green, selected formal APPLY+replay projection verified",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/project-batch-transfer/download",
+      "api_file": "backend/app/api/maintenance_project_batch_transfer.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root actual input metadata + selected SQL projection; current exact complete scope; projects then contracts then actor; immutable input/receipt binding",
+      "tests": "author12 + frontend independent3 + cross-author tail4:19 passed /tmp/itsp-s3-transfer-final-independent.log; frozen tail4 passed /tmp/itsp-s3-transfer-frozen-tail.log; two original red SQL/lock cases now green, selected formal APPLY+replay projection verified",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/project-batch-transfer/options",
+      "api_file": "backend/app/api/maintenance_project_batch_transfer.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root actual input metadata + selected SQL projection; current exact complete scope; projects then contracts then actor; immutable input/receipt binding",
+      "tests": "author12 + frontend independent3 + cross-author tail4:19 passed /tmp/itsp-s3-transfer-final-independent.log; frozen tail4 passed /tmp/itsp-s3-transfer-frozen-tail.log; two original red SQL/lock cases now green, selected formal APPLY+replay projection verified",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/project-batch-transfer/preview",
+      "api_file": "backend/app/api/maintenance_project_batch_transfer.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root actual input metadata + selected SQL projection; current exact complete scope; projects then contracts then actor; immutable input/receipt binding",
+      "tests": "author12 + frontend independent3 + cross-author tail4:19 passed /tmp/itsp-s3-transfer-final-independent.log; frozen tail4 passed /tmp/itsp-s3-transfer-frozen-tail.log; two original red SQL/lock cases now green, selected formal APPLY+replay projection verified",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/project-batch-transfer/receipt-rulings",
+      "api_file": "backend/app/api/maintenance_project_batch_transfer.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root actual input metadata + selected SQL projection; current exact complete scope; projects then contracts then actor; immutable input/receipt binding",
+      "tests": "author12 + frontend independent3 + cross-author tail4:19 passed /tmp/itsp-s3-transfer-final-independent.log; frozen tail4 passed /tmp/itsp-s3-transfer-frozen-tail.log; two original red SQL/lock cases now green, selected formal APPLY+replay projection verified",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/doc-imports/return-receipts/jobs",
+      "api_file": "backend/app/api/maintenance_return_receipt_import.py",
+      "status": "verified",
+      "actual_gate": "return_import authorization actual bytes/complete targets; stable task owner + generation + current provenance; final worker/apply actor; raw publication guarded",
+      "tests": "author9+legacy36=45pass1skip /tmp/itsp-s3-return-import-final-combined.log; independent4 publication/multipart/metadata findings red then green, author9+independent4+global10=23 passed /tmp/itsp-s3-return-global-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/doc-imports/return-receipts/jobs/{batch_id}",
+      "api_file": "backend/app/api/maintenance_return_receipt_import.py",
+      "status": "verified",
+      "actual_gate": "return_import authorization actual bytes/complete targets; stable task owner + generation + current provenance; final worker/apply actor; raw publication guarded",
+      "tests": "author9+legacy36=45pass1skip /tmp/itsp-s3-return-import-final-combined.log; independent4 publication/multipart/metadata findings red then green, author9+independent4+global10=23 passed /tmp/itsp-s3-return-global-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/doc-imports/return-receipts/jobs/{batch_id}/apply",
+      "api_file": "backend/app/api/maintenance_return_receipt_import.py",
+      "status": "verified",
+      "actual_gate": "return_import authorization actual bytes/complete targets; stable task owner + generation + current provenance; final worker/apply actor; raw publication guarded",
+      "tests": "author9+legacy36=45pass1skip /tmp/itsp-s3-return-import-final-combined.log; independent4 publication/multipart/metadata findings red then green, author9+independent4+global10=23 passed /tmp/itsp-s3-return-global-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/doc-imports/return-receipts/jobs/{batch_id}/cancel",
+      "api_file": "backend/app/api/maintenance_return_receipt_import.py",
+      "status": "verified",
+      "actual_gate": "return_import authorization actual bytes/complete targets; stable task owner + generation + current provenance; final worker/apply actor; raw publication guarded",
+      "tests": "author9+legacy36=45pass1skip /tmp/itsp-s3-return-import-final-combined.log; independent4 publication/multipart/metadata findings red then green, author9+independent4+global10=23 passed /tmp/itsp-s3-return-global-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/doc-imports/return-receipts/jobs/{batch_id}/original",
+      "api_file": "backend/app/api/maintenance_return_receipt_import.py",
+      "status": "verified",
+      "actual_gate": "return_import authorization actual bytes/complete targets; stable task owner + generation + current provenance; final worker/apply actor; raw publication guarded",
+      "tests": "author9+legacy36=45pass1skip /tmp/itsp-s3-return-import-final-combined.log; independent4 publication/multipart/metadata findings red then green, author9+independent4+global10=23 passed /tmp/itsp-s3-return-global-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/doc-imports/return-receipts/jobs/{batch_id}/retry",
+      "api_file": "backend/app/api/maintenance_return_receipt_import.py",
+      "status": "verified",
+      "actual_gate": "return_import authorization actual bytes/complete targets; stable task owner + generation + current provenance; final worker/apply actor; raw publication guarded",
+      "tests": "author9+legacy36=45pass1skip /tmp/itsp-s3-return-import-final-combined.log; independent4 publication/multipart/metadata findings red then green, author9+independent4+global10=23 passed /tmp/itsp-s3-return-global-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/bad-returns",
+      "api_file": "backend/app/api/maintenance_bad_returns.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/bad-returns/search",
+      "api_file": "backend/app/api/maintenance_bad_returns.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/bad-returns/{return_id}/in-transit",
+      "api_file": "backend/app/api/maintenance_bad_returns.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/bad-returns/{return_id}/submit",
+      "api_file": "backend/app/api/maintenance_bad_returns.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/bad-returns/{return_id}/void",
+      "api_file": "backend/app/api/maintenance_bad_returns.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/bad-returns/{return_id}/warehouse-confirm",
+      "api_file": "backend/app/api/maintenance_bad_returns.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/return-rate",
+      "api_file": "backend/app/api/maintenance_bad_returns.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/return-categories",
+      "api_file": "backend/app/api/maintenance_bad_returns.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/return-obligations/search",
+      "api_file": "backend/app/api/maintenance_bad_returns.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/return-obligations/{obligation_id}/resolve-category",
+      "api_file": "backend/app/api/maintenance_bad_returns.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/return-receipt-demands",
+      "api_file": "backend/app/api/maintenance_return_receipts.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/return-receipt-summary",
+      "api_file": "backend/app/api/maintenance_return_receipts.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/return-receipts",
+      "api_file": "backend/app/api/maintenance_return_receipts.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/return-receipts",
+      "api_file": "backend/app/api/maintenance_return_receipts.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "PATCH /api/maintenance/return-receipts/{receipt_id}",
+      "api_file": "backend/app/api/maintenance_return_receipts.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/return-receipts/{receipt_id}/audit",
+      "api_file": "backend/app/api/maintenance_return_receipts.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/return-receipts/{receipt_id}/void",
+      "api_file": "backend/app/api/maintenance_return_receipts.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/master-workbook/row-fields",
+      "api_file": "backend/app/api/maintenance_row_workbench.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root maintenance_row_workbench_access: RR SQL scope/count/fields and complete spool; exact per-resource grants",
+      "tests": "root6+legacy141=147 passed; independent CSV/XLSX spool2 passed /tmp/itsp-s3-row-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/master-workbook/rows",
+      "api_file": "backend/app/api/maintenance_project_master_workbook.py",
+      "status": "verified",
+      "actual_gate": "same RR exact read_cost_rows grant + C field + actual project; SQL/page/DTO consume same ResourceAccess; current context precondition",
+      "tests": "test_authz_s3_master_workbooks.py::test_master_cost_rows_uses_exact_grant_before_query_and_checks_context; original master/row/validation-error regressions 151 passed",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/master-workbook/rows/export",
+      "api_file": "backend/app/api/maintenance_row_workbench.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root maintenance_row_workbench_access: RR SQL scope/count/fields and complete spool; exact per-resource grants",
+      "tests": "root6+legacy141=147 passed; independent CSV/XLSX spool2 passed /tmp/itsp-s3-row-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/stable/{project_id}/salvages",
+      "api_file": "backend/app/api/maintenance_bad_salvage.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/stable/{project_id}/salvages",
+      "api_file": "backend/app/api/maintenance_bad_salvage.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/salvages/{salvage_id}/void",
+      "api_file": "backend/app/api/maintenance_bad_salvage.py",
+      "status": "verified_shared_service",
+      "actual_gate": "Exact current child/all actual parents; same-RR full read; domain locks then current actor; stable complete receipt manifest",
+      "tests": "author19+legacy110=129; independent actual manifest publish failure rollback1pass /tmp/itsp-s3-return-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/ckd-imports/preview",
+      "api_file": "backend/app/api/maintenance_ckd_import.py",
+      "status": "verified",
+      "actual_gate": "maintenance_import_authorization: actual input rows/owner sidecar; complete batch AND each target; domain writes then final actor; exact no-target admission; RR read/whole response",
+      "tests": "10 real PG/PDP passed /tmp/itsp-s3-import-final-rerun.log; 62 imports/source/master/legacy combo passed /tmp/itsp-s3-import-source-master-combined.log; final independent review pending; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/ckd-imports/{batch_id}",
+      "api_file": "backend/app/api/maintenance_ckd_import.py",
+      "status": "verified",
+      "actual_gate": "maintenance_import_authorization: actual input rows/owner sidecar; complete batch AND each target; domain writes then final actor; exact no-target admission; RR read/whole response",
+      "tests": "10 real PG/PDP passed /tmp/itsp-s3-import-final-rerun.log; 62 imports/source/master/legacy combo passed /tmp/itsp-s3-import-source-master-combined.log; final independent review pending; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/ckd-imports/{batch_id}/apply",
+      "api_file": "backend/app/api/maintenance_ckd_import.py",
+      "status": "verified",
+      "actual_gate": "maintenance_import_authorization: actual input rows/owner sidecar; complete batch AND each target; domain writes then final actor; exact no-target admission; RR read/whole response",
+      "tests": "10 real PG/PDP passed /tmp/itsp-s3-import-final-rerun.log; 62 imports/source/master/legacy combo passed /tmp/itsp-s3-import-source-master-combined.log; final independent review pending; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/project-assignments/orders",
+      "api_file": "backend/app/api/maintenance_source_assignments.py",
+      "status": "verified",
+      "actual_gate": "same-RR SQL source/project scopes; exact actual source+all old/new parent context; domain closure then actor/PDP before commit",
+      "tests": "test_authz_s3_source_assignments.py 4; original candidate/XSDD plus master independent combo 29 passed /tmp/itsp-s3-source-and-master-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/project-assignments/orders/assign",
+      "api_file": "backend/app/api/maintenance_source_assignments.py",
+      "status": "verified",
+      "actual_gate": "same-RR SQL source/project scopes; exact actual source+all old/new parent context; domain closure then actor/PDP before commit",
+      "tests": "test_authz_s3_source_assignments.py 4; original candidate/XSDD plus master independent combo 29 passed /tmp/itsp-s3-source-and-master-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/project-assignments/orders/auto-assign",
+      "api_file": "backend/app/api/maintenance_source_assignments.py",
+      "status": "verified",
+      "actual_gate": "actual source/create/owner closure + pure RR plan + all domain locks then complete stable-user set + current PDP and post-create real parents",
+      "tests": "7 canonical + 61 legacy = 68 passed /tmp/itsp-s3-source-legacy-combined.log; final transport 7 passed; independent review pending; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/project-assignments/orders/unassign",
+      "api_file": "backend/app/api/maintenance_source_assignments.py",
+      "status": "verified",
+      "actual_gate": "same-RR SQL source/project scopes; exact actual source+all old/new parent context; domain closure then actor/PDP before commit",
+      "tests": "test_authz_s3_source_assignments.py 4; original candidate/XSDD plus master independent combo 29 passed /tmp/itsp-s3-source-and-master-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/{project_id}/source-cancellations",
+      "api_file": "backend/app/api/maintenance_source_cancel_cascade.py",
+      "status": "verified",
+      "actual_gate": "Same RR actual project/source/batch; full domain locks then final actor; stable ID receipt JSON + immutable binding",
+      "tests": "test_authz_s3_source_cancellation.py (3) + five old source_cancel files (45): 48 passed /tmp/itsp-s3-cancellation-combined.log; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/{project_id}/source-cancellations/{batch_id}/{source_order_id}",
+      "api_file": "backend/app/api/maintenance_source_cancel_cascade.py",
+      "status": "verified",
+      "actual_gate": "Same RR actual project/source/batch; full domain locks then final actor; stable ID receipt JSON + immutable binding",
+      "tests": "test_authz_s3_source_cancellation.py (3) + five old source_cancel files (45): 48 passed /tmp/itsp-s3-cancellation-combined.log; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/projects/{project_id}/source-cancellations/{batch_id}/{source_order_id}/confirm",
+      "api_file": "backend/app/api/maintenance_source_cancel_cascade.py",
+      "status": "verified",
+      "actual_gate": "Same RR actual project/source/batch; full domain locks then final actor; stable ID receipt JSON + immutable binding",
+      "tests": "test_authz_s3_source_cancellation.py (3) + five old source_cancel files (45): 48 passed /tmp/itsp-s3-cancellation-combined.log; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/projects/{project_id}/source-cancellations/{batch_id}/{source_order_id}/confirmation-status",
+      "api_file": "backend/app/api/maintenance_source_cancel_cascade.py",
+      "status": "verified",
+      "actual_gate": "Same RR actual project/source/batch; full domain locks then final actor; stable ID receipt JSON + immutable binding",
+      "tests": "test_authz_s3_source_cancellation.py (3) + five old source_cancel files (45): 48 passed /tmp/itsp-s3-cancellation-combined.log; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/wbdd-imports",
+      "api_file": "backend/app/api/maintenance_wbdd_import.py",
+      "status": "verified",
+      "actual_gate": "WBDD actual input/snapshot and stable receipt; same-action discovery SQL then every actual source/project; final actor after complete domain changes",
+      "tests": "test_authz_s3_wbdd.py 7 passed /tmp/itsp-s3-wbdd-final.log; prior 6+source cancel3+52legacy=61passed /tmp/itsp-s3-wbdd-combined.log; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/wbdd-imports/latest",
+      "api_file": "backend/app/api/maintenance_wbdd_import.py",
+      "status": "verified",
+      "actual_gate": "WBDD actual input/snapshot and stable receipt; same-action discovery SQL then every actual source/project; final actor after complete domain changes",
+      "tests": "test_authz_s3_wbdd.py 7 passed /tmp/itsp-s3-wbdd-final.log; prior 6+source cancel3+52legacy=61passed /tmp/itsp-s3-wbdd-combined.log; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/maintenance/wbdd-imports/latest/missing",
+      "api_file": "backend/app/api/maintenance_wbdd_import.py",
+      "status": "verified",
+      "actual_gate": "WBDD actual input/snapshot and stable receipt; same-action discovery SQL then every actual source/project; final actor after complete domain changes",
+      "tests": "test_authz_s3_wbdd.py 7 passed /tmp/itsp-s3-wbdd-final.log; prior 6+source cancel3+52legacy=61passed /tmp/itsp-s3-wbdd-combined.log; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/wbdd-imports/{batch_id}/reconcile",
+      "api_file": "backend/app/api/maintenance_wbdd_import.py",
+      "status": "verified",
+      "actual_gate": "WBDD actual input/snapshot and stable receipt; same-action discovery SQL then every actual source/project; final actor after complete domain changes",
+      "tests": "test_authz_s3_wbdd.py 7 passed /tmp/itsp-s3-wbdd-final.log; prior 6+source cancel3+52legacy=61passed /tmp/itsp-s3-wbdd-combined.log; independent closure: s3-workflow-independent-review.md; 41 passed /tmp/itsp-s3-workflow-cross-review-final.log; cross-author imports opaque-digest 14 passed /tmp/itsp-s3-import-metadata-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/warehouse-ambiguities/search",
+      "api_file": "backend/app/api/maintenance_warehouse.py",
+      "status": "verified_shared_service",
+      "actual_gate": "warehouse actual recursive closure before domain locks then actor; same predicate query; actual stable receipt owner and full immutable manifest",
+      "tests": "author16 new +42 legacy; independent late real manifest failure rollback1passed /tmp/itsp-s3-warehouse-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/warehouse-ambiguities/{ambiguity_id}/resolve",
+      "api_file": "backend/app/api/maintenance_warehouse.py",
+      "status": "verified_shared_service",
+      "actual_gate": "warehouse actual recursive closure before domain locks then actor; same predicate query; actual stable receipt owner and full immutable manifest",
+      "tests": "author16 new +42 legacy; independent late real manifest failure rollback1passed /tmp/itsp-s3-warehouse-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/warehouse-documents/search",
+      "api_file": "backend/app/api/maintenance_warehouse.py",
+      "status": "verified_shared_service",
+      "actual_gate": "warehouse actual recursive closure before domain locks then actor; same predicate query; actual stable receipt owner and full immutable manifest",
+      "tests": "author16 new +42 legacy; independent late real manifest failure rollback1passed /tmp/itsp-s3-warehouse-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/warehouse-imports/preview",
+      "api_file": "backend/app/api/maintenance_warehouse.py",
+      "status": "verified_shared_service",
+      "actual_gate": "warehouse actual recursive closure before domain locks then actor; same predicate query; actual stable receipt owner and full immutable manifest",
+      "tests": "author16 new +42 legacy; independent late real manifest failure rollback1passed /tmp/itsp-s3-warehouse-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/warehouse-imports/{import_id}/apply",
+      "api_file": "backend/app/api/maintenance_warehouse.py",
+      "status": "verified_shared_service",
+      "actual_gate": "warehouse actual recursive closure before domain locks then actor; same predicate query; actual stable receipt owner and full immutable manifest",
+      "tests": "author16 new +42 legacy; independent late real manifest failure rollback1passed /tmp/itsp-s3-warehouse-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/maintenance/warehouse-integrations/reconcile",
+      "api_file": "backend/app/api/maintenance_warehouse.py",
+      "status": "verified_shared_service",
+      "actual_gate": "warehouse actual recursive closure before domain locks then actor; same predicate query; actual stable receipt owner and full immutable manifest",
+      "tests": "author16 new +42 legacy; independent late real manifest failure rollback1passed /tmp/itsp-s3-warehouse-independent.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/applications",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root canonical replenishment facade: RR complete reads/exports; actual version stable owner + immutable sidecar; domain locks before actor",
+      "tests": "11 new + 58 legacy = 69 passed /tmp/itsp-s3-replenishment-combined-first.log; independent review pending; 2 independent real binding rollback/immutable whole record tests passed /tmp/itsp-s3-replenishment-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/replenishment-beta/applications",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root canonical replenishment facade: RR complete reads/exports; actual version stable owner + immutable sidecar; domain locks before actor",
+      "tests": "11 new + 58 legacy = 69 passed /tmp/itsp-s3-replenishment-combined-first.log; independent review pending; 2 independent real binding rollback/immutable whole record tests passed /tmp/itsp-s3-replenishment-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/applications/{application_id}",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root canonical replenishment facade: RR complete reads/exports; actual version stable owner + immutable sidecar; domain locks before actor",
+      "tests": "11 new + 58 legacy = 69 passed /tmp/itsp-s3-replenishment-combined-first.log; independent review pending; 2 independent real binding rollback/immutable whole record tests passed /tmp/itsp-s3-replenishment-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/applications/{application_id}/exports/system-screening.xlsx",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root canonical replenishment facade: RR complete reads/exports; actual version stable owner + immutable sidecar; domain locks before actor",
+      "tests": "11 new + 58 legacy = 69 passed /tmp/itsp-s3-replenishment-combined-first.log; independent review pending; 2 independent real binding rollback/immutable whole record tests passed /tmp/itsp-s3-replenishment-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/replenishment-beta/applications/{application_id}/revisions",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root canonical replenishment facade: RR complete reads/exports; actual version stable owner + immutable sidecar; domain locks before actor",
+      "tests": "11 new + 58 legacy = 69 passed /tmp/itsp-s3-replenishment-combined-first.log; independent review pending; 2 independent real binding rollback/immutable whole record tests passed /tmp/itsp-s3-replenishment-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/capabilities",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root canonical replenishment facade: RR complete reads/exports; actual version stable owner + immutable sidecar; domain locks before actor",
+      "tests": "11 new + 58 legacy = 69 passed /tmp/itsp-s3-replenishment-combined-first.log; independent review pending; 2 independent real binding rollback/immutable whole record tests passed /tmp/itsp-s3-replenishment-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "DELETE /api/replenishment-beta/cart-drafts/{project_id}",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root canonical replenishment facade: RR complete reads/exports; actual version stable owner + immutable sidecar; domain locks before actor",
+      "tests": "11 new + 58 legacy = 69 passed /tmp/itsp-s3-replenishment-combined-first.log; independent review pending; 2 independent real binding rollback/immutable whole record tests passed /tmp/itsp-s3-replenishment-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/cart-drafts/{project_id}",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root canonical replenishment facade: RR complete reads/exports; actual version stable owner + immutable sidecar; domain locks before actor",
+      "tests": "11 new + 58 legacy = 69 passed /tmp/itsp-s3-replenishment-combined-first.log; independent review pending; 2 independent real binding rollback/immutable whole record tests passed /tmp/itsp-s3-replenishment-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "PUT /api/replenishment-beta/cart-drafts/{project_id}",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root canonical replenishment facade: RR complete reads/exports; actual version stable owner + immutable sidecar; domain locks before actor",
+      "tests": "11 new + 58 legacy = 69 passed /tmp/itsp-s3-replenishment-combined-first.log; independent review pending; 2 independent real binding rollback/immutable whole record tests passed /tmp/itsp-s3-replenishment-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "POST /api/replenishment-beta/cart-drafts/{project_id}/submit",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root canonical replenishment facade: RR complete reads/exports; actual version stable owner + immutable sidecar; domain locks before actor",
+      "tests": "11 new + 58 legacy = 69 passed /tmp/itsp-s3-replenishment-combined-first.log; independent review pending; 2 independent real binding rollback/immutable whole record tests passed /tmp/itsp-s3-replenishment-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/catalog",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root canonical replenishment facade: RR complete reads/exports; actual version stable owner + immutable sidecar; domain locks before actor",
+      "tests": "11 new + 58 legacy = 69 passed /tmp/itsp-s3-replenishment-combined-first.log; independent review pending; 2 independent real binding rollback/immutable whole record tests passed /tmp/itsp-s3-replenishment-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/projects",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "verified_shared_service",
+      "actual_gate": "root canonical replenishment facade: RR complete reads/exports; actual version stable owner + immutable sidecar; domain locks before actor",
+      "tests": "11 new + 58 legacy = 69 passed /tmp/itsp-s3-replenishment-combined-first.log; independent review pending; 2 independent real binding rollback/immutable whole record tests passed /tmp/itsp-s3-replenishment-independent-final.log",
+      "classification": "human"
+    },
+    {
+      "entry_id": "PATCH /api/replenishment-beta/applications/{application_id}",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "retired_verified",
+      "actual_gate": "Fixed 410 retired handler; no canonical business execution and no writes",
+      "tests": "test_replenishment_atomic_api.py::test_retired_mutation_and_derived_routes_return_410_without_writes; test_retired_routes_do_not_validate_removed_workflow_inputs; root legacy58 passed",
+      "classification": "retired"
+    },
+    {
+      "entry_id": "POST /api/replenishment-beta/applications/{application_id}/lines",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "retired_verified",
+      "actual_gate": "Fixed 410 retired handler; no canonical business execution and no writes",
+      "tests": "test_replenishment_atomic_api.py::test_retired_mutation_and_derived_routes_return_410_without_writes; test_retired_routes_do_not_validate_removed_workflow_inputs; root legacy58 passed",
+      "classification": "retired"
+    },
+    {
+      "entry_id": "PATCH /api/replenishment-beta/applications/{application_id}/lines/{line_id}",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "retired_verified",
+      "actual_gate": "Fixed 410 retired handler; no canonical business execution and no writes",
+      "tests": "test_replenishment_atomic_api.py::test_retired_mutation_and_derived_routes_return_410_without_writes; test_retired_routes_do_not_validate_removed_workflow_inputs; root legacy58 passed",
+      "classification": "retired"
+    },
+    {
+      "entry_id": "DELETE /api/replenishment-beta/applications/{application_id}/lines/{line_id}",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "retired_verified",
+      "actual_gate": "Fixed 410 retired handler; no canonical business execution and no writes",
+      "tests": "test_replenishment_atomic_api.py::test_retired_mutation_and_derived_routes_return_410_without_writes; test_retired_routes_do_not_validate_removed_workflow_inputs; root legacy58 passed",
+      "classification": "retired"
+    },
+    {
+      "entry_id": "POST /api/replenishment-beta/applications/{application_id}/submit",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "retired_verified",
+      "actual_gate": "Fixed 410 retired handler; no canonical business execution and no writes",
+      "tests": "test_replenishment_atomic_api.py::test_retired_mutation_and_derived_routes_return_410_without_writes; test_retired_routes_do_not_validate_removed_workflow_inputs; root legacy58 passed",
+      "classification": "retired"
+    },
+    {
+      "entry_id": "POST /api/replenishment-beta/applications/{application_id}/revision",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "retired_verified",
+      "actual_gate": "Fixed 410 retired handler; no canonical business execution and no writes",
+      "tests": "test_replenishment_atomic_api.py::test_retired_mutation_and_derived_routes_return_410_without_writes; test_retired_routes_do_not_validate_removed_workflow_inputs; root legacy58 passed",
+      "classification": "retired"
+    },
+    {
+      "entry_id": "POST /api/replenishment-beta/applications/{application_id}/review-results",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "retired_verified",
+      "actual_gate": "Fixed 410 retired handler; no canonical business execution and no writes",
+      "tests": "test_replenishment_atomic_api.py::test_retired_mutation_and_derived_routes_return_410_without_writes; test_retired_routes_do_not_validate_removed_workflow_inputs; root legacy58 passed",
+      "classification": "retired"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/applications/{application_id}/exports/manual-review.xlsx",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "retired_verified",
+      "actual_gate": "Fixed 410 retired handler; no canonical business execution and no writes",
+      "tests": "test_replenishment_atomic_api.py::test_retired_mutation_and_derived_routes_return_410_without_writes; test_retired_routes_do_not_validate_removed_workflow_inputs; root legacy58 passed",
+      "classification": "retired"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/applications/{application_id}/exports/wbdd-subset.xlsx",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "retired_verified",
+      "actual_gate": "Fixed 410 retired handler; no canonical business execution and no writes",
+      "tests": "test_replenishment_atomic_api.py::test_retired_mutation_and_derived_routes_return_410_without_writes; test_retired_routes_do_not_validate_removed_workflow_inputs; root legacy58 passed",
+      "classification": "retired"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/applications/{application_id}/evidence",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "retired_verified",
+      "actual_gate": "Fixed 410 retired handler; no canonical business execution and no writes",
+      "tests": "test_replenishment_atomic_api.py::test_retired_mutation_and_derived_routes_return_410_without_writes; test_retired_routes_do_not_validate_removed_workflow_inputs; root legacy58 passed",
+      "classification": "retired"
+    },
+    {
+      "entry_id": "GET /api/replenishment-beta/applications/{application_id}/exports/purchase-list.xlsx",
+      "api_file": "backend/app/api/replenishment.py",
+      "status": "retired_verified",
+      "actual_gate": "Fixed 410 retired handler; no canonical business execution and no writes",
+      "tests": "test_replenishment_atomic_api.py::test_retired_mutation_and_derived_routes_return_410_without_writes; test_retired_routes_do_not_validate_removed_workflow_inputs; root legacy58 passed",
+      "classification": "retired"
+    }
+  ],
+  "counts": {
+    "live": 134,
+    "retired": 11,
+    "statuses": {
+      "verified": 51,
+      "verified_shared_service": 83,
+      "retired_verified": 11
+    }
+  },
+  "coverage_set": {
+    "other_ledger": "s3-project-read-finance-implementation-coverage.json",
+    "other_live": 94,
+    "intersection": 0,
+    "live_union": 228,
+    "spec_live": 228,
+    "missing_from_union": [],
+    "extra_live": []
+  }
+}
