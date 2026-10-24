@@ -43,6 +43,9 @@ class DimPart(Base):
     pn_raw_sample: Mapped[str | None] = mapped_column(String(256))
     description: Mapped[str | None] = mapped_column(Text)
     brand: Mapped[str | None] = mapped_column(String(128))
+    # 厂商与中文简介（shop 集成 P1）：与 description/brand 同级的人工可维护基础资料。
+    manufacturer: Mapped[str | None] = mapped_column(String(128))
+    summary: Mapped[str | None] = mapped_column(Text)
     category_major: Mapped[str | None] = mapped_column(String(64))   # 仅取自销售表（§7.5）
     category_minor: Mapped[str | None] = mapped_column(String(128))
     machine_or_part: Mapped[str | None] = mapped_column(String(16))

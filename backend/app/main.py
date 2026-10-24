@@ -56,6 +56,7 @@ from app.api import (
     maintenance_wbdd_import,
     maintenance_source_cancel_cascade,
     parts,
+    pn_master_integration,
     pool_analysis,
     pools,
     profit,
@@ -136,6 +137,7 @@ app.include_router(maintenance_row_workbench.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipts.router, prefix=settings.api_prefix)
 app.include_router(resale_export.router, prefix=settings.api_prefix)
 app.include_router(resale_catalog_export.router, prefix=settings.api_prefix)
+app.include_router(pn_master_integration.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipt_import.router, prefix=settings.api_prefix)
 app.include_router(
     maintenance_project_batch_transfer.router, prefix=settings.api_prefix

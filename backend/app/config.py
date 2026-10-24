@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     # Dedicated, default-off server-to-server export for the independent resale app.
     resale_export_token_sha256: SecretStr = SecretStr("")
     resale_catalog_token_sha256: SecretStr = SecretStr("")
+    # shop → itsp PN 主数据写接口的服务密钥（只存 SHA-256）；为空时整组接口 503。
+    pn_master_integration_token_sha256: SecretStr = SecretStr("")
 
     # ---- 商城销售参考价（2026-10-19 金臣口径：30 天窗口 + 时间衰减）----
     # 只作用于新 GET /integrations/resale/parts/price-reference，不改变任何既有分析口径。
@@ -60,7 +62,11 @@ class Settings(BaseSettings):
     )
     resale_price_reference_exclude_confirmed_source_error: bool = True
 
-    @field_validator("resale_export_token_sha256", "resale_catalog_token_sha256")
+    @field_validator(
+        "resale_export_token_sha256",
+        "resale_catalog_token_sha256",
+        "pn_master_integration_token_sha256",
+    )
     @classmethod
     def validate_resale_export_hash(
         cls, value: SecretStr, info: ValidationInfo

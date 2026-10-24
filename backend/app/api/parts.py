@@ -197,6 +197,8 @@ class PartCreate(BaseModel):
     pn_std: str
     description: str | None = None
     brand: str | None = None
+    manufacturer: str | None = None
+    summary: str | None = None
     category_major: str | None = None
     category_minor: str | None = None
     machine_or_part: str | None = "备件"
@@ -223,6 +225,8 @@ class PartSpecBaseline(BaseModel):
 class PartEditBaseline(BaseModel):
     model_config = ConfigDict(extra="forbid")
     version_mode: Literal["field_snapshot"]
+    # edit-state 快照会带对外集成版本；人工入口忽略它，保持旧客户端兼容。
+    version: str | None = None
     part_id: int = Field(gt=0)
     pn_std: str
     identity: PartEditIdentity
@@ -237,6 +241,8 @@ class PartEdit(BaseModel):
     base_snapshot: PartEditBaseline
     description: str | None = None
     brand: str | None = None
+    manufacturer: str | None = None
+    summary: str | None = None
     category_major: str | None = None
     category_minor: str | None = None
     machine_or_part: str | None = None
@@ -281,6 +287,7 @@ def master_create(
     try:
         res = master_edit.create_part(
             db, pn_std=body.pn_std, description=body.description, brand=body.brand,
+            manufacturer=body.manufacturer, summary=body.summary,
             category_major=body.category_major, category_minor=body.category_minor,
             machine_or_part=body.machine_or_part, unit=body.unit,
             force=body.force, operated_by=operated_by)
