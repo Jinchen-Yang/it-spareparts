@@ -120,7 +120,7 @@ describe("回款页面登记的合同选择", () => {
   it("登记时合同从 workspace 下拉选择而非手输 UUID", async () => {
     grantManage();
     mocks.workspace.mockResolvedValue(contractsWorkspace([contract]));
-    render(<CollectionTab {...props()} />);
+    render(<CollectionTab canDownload {...props()} />);
     fireEvent.click(await screen.findByRole("button", btn("登记回款")));
     const dialog = await screen.findByRole("dialog");
     await waitFor(() => expect(mocks.workspace).toHaveBeenCalledWith("p1", expect.anything()));
@@ -138,7 +138,7 @@ describe("回款页面登记的合同选择", () => {
   it("当前项目无合同关系时给空状态说明，未选合同不给提交", async () => {
     grantManage();
     mocks.workspace.mockResolvedValue(contractsWorkspace([]));
-    render(<CollectionTab {...props()} />);
+    render(<CollectionTab canDownload {...props()} />);
     fireEvent.click(await screen.findByRole("button", btn("登记回款")));
     expect(await screen.findByText("当前项目暂无合同关系")).toBeInTheDocument();
     const dialog = screen.getByRole("dialog");
@@ -151,7 +151,7 @@ describe("回款页面登记的合同选择", () => {
   it("合同读取失败显示原因与重试入口，重试成功后可选合同", async () => {
     grantManage();
     mocks.workspace.mockRejectedValueOnce(new Error("down"));
-    render(<CollectionTab {...props()} />);
+    render(<CollectionTab canDownload {...props()} />);
     fireEvent.click(await screen.findByRole("button", btn("登记回款")));
     expect(await screen.findByText("合同列表加载失败")).toBeInTheDocument();
     mocks.workspace.mockResolvedValue(contractsWorkspace([contract]));
@@ -162,7 +162,7 @@ describe("回款页面登记的合同选择", () => {
 
   it("权限关闭时不渲染操作列也不触发合同读取——不多读敏感信息", async () => {
     localStorage.setItem("permissions", JSON.stringify({ data_profit: true }));
-    render(<CollectionTab {...props({ rows: [snapshot()] })} />);
+    render(<CollectionTab canDownload {...props({ rows: [snapshot()] })} />);
     await screen.findByText("HT-2026-001");
     expect(screen.queryByRole("button", btn("登记回款"))).not.toBeInTheDocument();
     expect(screen.queryByRole("button", btn("修改"))).not.toBeInTheDocument();
@@ -176,7 +176,7 @@ describe("回款页面登记的合同选择", () => {
   it("非法月份（2026-13）不发给后端，create 上屏校验错误", async () => {
     grantManage();
     mocks.workspace.mockResolvedValue(contractsWorkspace([contract]));
-    render(<CollectionTab {...props()} />);
+    render(<CollectionTab canDownload {...props()} />);
     fireEvent.click(await screen.findByRole("button", btn("登记回款")));
     const dialog = await screen.findByRole("dialog");
     await pickContract(dialog, "HT-2026-001");
@@ -188,7 +188,7 @@ describe("回款页面登记的合同选择", () => {
 
   it("edit 路径同样拦截非法月份", async () => {
     grantManage();
-    render(<CollectionTab {...props({ rows: [snapshot()] })} />);
+    render(<CollectionTab canDownload {...props({ rows: [snapshot()] })} />);
     fireEvent.click(await screen.findByRole("button", btn("修改")));
     const dialog = await screen.findByRole("dialog");
     fireEvent.change(within(dialog).getByLabelText("报告月份（YYYY-MM）"), { target: { value: "2026-13" } });
@@ -202,7 +202,7 @@ describe("回款页面登记的合同选择", () => {
 describe("作废与恢复动作", () => {
   it("作废要求原因并带版本走 PATCH status=void；缺原因不提交", async () => {
     grantManage();
-    render(<CollectionTab {...props({ rows: [snapshot()] })} />);
+    render(<CollectionTab canDownload {...props({ rows: [snapshot()] })} />);
     fireEvent.click(await screen.findByRole("button", btn("作废")));
     const dialog = await screen.findByRole("dialog");
     expect(await screen.findByText(/软作废/)).toBeInTheDocument();
@@ -220,7 +220,7 @@ describe("作废与恢复动作", () => {
 
   it("void 行有恢复入口，恢复默认回待确认并带版本与原因", async () => {
     grantManage();
-    render(<CollectionTab {...props({ rows: [snapshot({ status: "void", cumulative_amount: 800 })] })} />);
+    render(<CollectionTab canDownload {...props({ rows: [snapshot({ status: "void", cumulative_amount: 800 })] })} />);
     fireEvent.click(await screen.findByRole("button", btn("恢复")));
     const dialog = await screen.findByRole("dialog");
     expect(await screen.findByText(/待确认/)).toBeInTheDocument();
@@ -237,7 +237,7 @@ describe("作废与恢复动作", () => {
     grantManage();
     // axios 形状错误：readError 透传 detail，页面展示服务端原因而非笼统 fallback
     mocks.patch.mockRejectedValueOnce({ response: { data: { detail: "回款快照已变化（当前版本 4），请刷新后重试" } } });
-    render(<CollectionTab {...props({ rows: [snapshot()] })} />);
+    render(<CollectionTab canDownload {...props({ rows: [snapshot()] })} />);
     fireEvent.click(await screen.findByRole("button", btn("作废")));
     const dialog = await screen.findByRole("dialog");
     fireEvent.change(within(dialog).getByLabelText(/作废原因/), { target: { value: "银行冲正" } });
@@ -251,7 +251,7 @@ describe("作废与恢复动作", () => {
 
   it("修改对话框预填行值，保存时带 OCC 版本", async () => {
     grantManage();
-    render(<CollectionTab {...props({ rows: [snapshot()] })} />);
+    render(<CollectionTab canDownload {...props({ rows: [snapshot()] })} />);
     fireEvent.click(await screen.findByRole("button", btn("修改")));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByLabelText("报告月份（YYYY-MM）")).toHaveValue("2026-08");
@@ -274,7 +274,7 @@ describe("快速切项目与在途提交隔离", () => {
     mocks.create.mockReturnValue(pending.promise);
     const onRefresh = vi.fn().mockResolvedValue(true);
 
-    const { unmount } = render(<CollectionTab {...props({ onRefresh })} />);
+    const { unmount } = render(<CollectionTab canDownload {...props({ onRefresh })} />);
     fireEvent.click(await screen.findByRole("button", btn("登记回款")));
     const dialog = await screen.findByRole("dialog");
     await pickContract(dialog, "HT-2026-001");
@@ -297,7 +297,7 @@ describe("快速切项目与在途提交隔离", () => {
     mocks.create.mockImplementation((id: string) => id === "p1" ? slowCreate.promise : Promise.resolve({ data: snapshot() }));
     const base = { exportBase: "项目", canUpload: false, rows: [] as MaintenanceCollectionSnapshotRow[], loading: false, registerRefresh: vi.fn() };
     const { rerender } = render(
-      <CollectionTab projectId="p1" {...base} onRefresh={refreshA} />,
+      <CollectionTab canDownload projectId="p1" {...base} onRefresh={refreshA} />,
     );
     fireEvent.click(await screen.findByRole("button", btn("登记回款")));
     const dialogA = await screen.findByRole("dialog");
@@ -306,7 +306,7 @@ describe("快速切项目与在途提交隔离", () => {
     fireEvent.click(within(dialogA).getByRole("button", btn("登记")));
     await waitFor(() => expect(mocks.create).toHaveBeenCalledWith("p1", expect.objectContaining({ report_month: "2026-09-01" })));
     // A 写请求在途：切到 B 并打开新登记表单
-    rerender(<CollectionTab projectId="p2" {...base} onRefresh={refreshB} />);
+    rerender(<CollectionTab canDownload projectId="p2" {...base} onRefresh={refreshB} />);
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     fireEvent.click(await screen.findByRole("button", btn("登记回款")));
     const dialogB = await screen.findByRole("dialog");
@@ -333,10 +333,10 @@ describe("快速切项目与在途提交隔离", () => {
     mocks.workspace.mockImplementation((id: string) =>
       id === "p1" ? slowWorkspace.promise : Promise.resolve(contractsWorkspace([{ ...contract, contract_no: "HT-B-002" }])));
     const base = { exportBase: "项目", canUpload: false, rows: [], loading: false, onRefresh: vi.fn().mockResolvedValue(true), registerRefresh: vi.fn() };
-    const { rerender } = render(<CollectionTab projectId="p1" {...base} />);
+    const { rerender } = render(<CollectionTab canDownload projectId="p1" {...base} />);
     fireEvent.click(await screen.findByRole("button", btn("登记回款")));
     await screen.findByRole("dialog");
-    rerender(<CollectionTab projectId="p2" {...base} />);
+    rerender(<CollectionTab canDownload projectId="p2" {...base} />);
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     fireEvent.click(await screen.findByRole("button", btn("登记回款")));
     const dialogB = await screen.findByRole("dialog");
@@ -362,7 +362,7 @@ describe("批量入口与列表勾选接线", () => {
       report_month: "2026-07-01",
       status: "void",
     });
-    render(<CollectionTab {...props({ rows: [active, voided] })} />);
+    render(<CollectionTab canDownload {...props({ rows: [active, voided] })} />);
 
     const modify = await screen.findByRole("button", { name: /批\s*量\s*修\s*改/ });
     expect(modify).toBeDisabled();

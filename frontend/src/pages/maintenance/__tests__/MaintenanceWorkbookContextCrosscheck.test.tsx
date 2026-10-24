@@ -72,7 +72,8 @@ const file = () => new File(["synthetic workbook"], "回填.xlsx", {
 });
 function allowUpload(allowed: boolean) {
   localStorage.setItem("permissions", JSON.stringify({
-    page_maintenance: true, action_maintenance_expense_collection_upload: allowed,
+    page_maintenance: true, data_purchase_cost: true, data_profit: true,
+    action_maintenance_expense_collection_upload: allowed,
   }));
 }
 function panel() {
@@ -221,20 +222,23 @@ describe("工作簿真实项目消费者的上下文交叉核验", () => {
     await waitFor(() => expect(api.apply).toHaveBeenCalledTimes(1));
     allowUpload(false);
     view.rerender(panel());
+    await waitForProject("A");
     expect(screen.queryByRole("button", { name: /上传覆盖/ })).toBeNull();
     allowUpload(true);
     view.rerender(panel());
+    await waitForProject("A");
     expect(screen.getAllByRole("button", { name: /上传覆盖/ })).toHaveLength(2);
+    const currentReads = [api.project.mock.calls.length, api.expense.mock.calls.length];
     await act(async () => oldApply.resolve(applied()));
-    expect(api.project).toHaveBeenCalledTimes(1);
-    expect(api.expense).toHaveBeenCalledTimes(1);
+    expect(api.project).toHaveBeenCalledTimes(currentReads[0]);
+    expect(api.expense).toHaveBeenCalledTimes(currentReads[1]);
     expect(localStorage.getItem(MAINTENANCE_CHANGED_STORAGE_KEY)).toBeNull();
     const currentFile = file();
     upload(view.container, currentFile, "expense");
     await confirm("报销");
     await screen.findByText("已覆盖并刷新：报销更新 1 行");
     expect(api.apply).toHaveBeenLastCalledWith("A", currentFile, undefined);
-    expect(api.expense).toHaveBeenCalledTimes(2);
+    expect(api.expense).toHaveBeenCalledTimes(currentReads[1] + 1);
   });
 
   it.each(["master", "expense"] as const)("%s 旧页面 token 已变但未重绘时，新下载也不能借新账号发请求；重绘后正常下载", async (target) => {
@@ -246,6 +250,7 @@ describe("工作簿真实项目消费者的上下文交叉核验", () => {
     expect(api.download).not.toHaveBeenCalled();
     expect(api.saveBlob).not.toHaveBeenCalled();
     view.rerender(panel());
+    await waitForProject("A");
     fireEvent.click(screen.getByRole("button", { name: buttonName }));
     await waitFor(() => expect(api.download).toHaveBeenCalledTimes(1));
     if (target === "master") expect(api.download).toHaveBeenCalledWith("A");
@@ -262,11 +267,65 @@ describe("工作簿真实项目消费者的上下文交叉核验", () => {
     expect(api.apply).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).toBeNull();
     view.rerender(panel());
+    await waitForProject("A");
     const currentFile = file();
     upload(view.container, currentFile, target);
     await confirm(target === "master" ? "本项目总表" : "报销");
     await waitFor(() => expect(api.apply).toHaveBeenCalledWith("A", currentFile, undefined));
     expect(api.validate).toHaveBeenCalledTimes(1);
     await screen.findByText("已覆盖并刷新：报销更新 1 行");
+  });
+
+  it("同项目切账号后不复用负责人资格；旧卡片迟到且新详情读取失败也不恢复入口", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ page_maintenance: true }));
+    api.project.mockResolvedValue({ data: { project: {
+      ...project("A").data.project, can_edit_master_workbook: true,
+    } } });
+    const oldCard = deferred<ReturnType<typeof board>>();
+    api.board.mockReturnValueOnce(oldCard.promise);
+    const view = render(panel());
+    await screen.findByRole("button", { name: /下载本项目总表/ });
+    expect(screen.getAllByRole("button", { name: /上传覆盖/ })).toHaveLength(2);
+    api.project.mockRejectedValue(new Error("当前账号无项目权限"));
+    localStorage.setItem("token", "session-B");
+    view.rerender(panel());
+    expect(screen.queryByRole("button", { name: /下载本项目总表|上传覆盖/ })).toBeNull();
+    await screen.findByText("项目面板加载失败");
+    const staleBoard = { data: { ...board("A").data, can_edit_master_workbook: true } };
+    await act(async () => oldCard.resolve(staleBoard));
+    expect(screen.queryByRole("button", { name: /下载本项目总表|上传覆盖/ })).toBeNull();
+    expect(api.validate).not.toHaveBeenCalled();
+    expect(api.apply).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("同账号权限变化后重新核对项目资格，最新负责人例外=%s", async (stillManager) => {
+    api.project.mockResolvedValue({ data: { project: {
+      ...project("A").data.project, can_edit_master_workbook: true,
+    } } });
+    const view = render(panel());
+    await waitForProject("A");
+    upload(view.container, file());
+    const oldConfirm = await screen.findByRole("button", { name: "确认回传" });
+    const refreshed = deferred<ReturnType<typeof project>>();
+    api.project.mockReturnValueOnce(refreshed.promise);
+    // 本地动作/金额被撤销，但是否仍是本人项目负责人只能由服务端重新确认。
+    localStorage.setItem("permissions", JSON.stringify({ page_maintenance: true }));
+    view.rerender(panel());
+    await waitFor(() => expect(api.project).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("button", { name: /下载本项目总表|上传覆盖/ })).toBeNull();
+    fireEvent.click(oldConfirm);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(api.apply).not.toHaveBeenCalled();
+    const latest = { data: { project: {
+      ...project("A").data.project, can_edit_master_workbook: stillManager,
+    } } };
+    await act(async () => refreshed.resolve(latest));
+    await waitForProject("A");
+    if (stillManager) {
+      expect(screen.getByRole("button", { name: /下载本项目总表/ })).toBeVisible();
+      expect(screen.getAllByRole("button", { name: /上传覆盖/ })).toHaveLength(2);
+    } else {
+      expect(screen.queryByRole("button", { name: /下载本项目总表|上传覆盖/ })).toBeNull();
+    }
   });
 });

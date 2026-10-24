@@ -18,7 +18,7 @@ afterEach(cleanup);
 describe("领用行要求以服务端快照为准", () => {
   it("整单作废时间按北京时间跨午夜换日", async () => {
     mocks.search.mockResolvedValue({ data: { total: 1, rows: [{ issue_id: "voided", issue_no: "VOID-1", workflow_status: "void", voided_at: "2026-10-01T16:05:00Z", lines: [] }] } });
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
     expect(await screen.findByText("作废于 2026-10-02 00:05")).toBeInTheDocument();
   });
   it("第3页切换品类后回到第1页，父级读回仍保留当前可见页", async () => {
@@ -28,7 +28,7 @@ describe("领用行要求以服务端快照为准", () => {
       })),
     }] } }));
     let refresh!: () => Promise<boolean>;
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()}
+    render(<SiteReturnTab canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()}
       registerRefresh={(_key, reader) => { if (reader) refresh = reader; }} />);
     await screen.findByText("OLD-PN-0");
     fireEvent.click(screen.getByTitle("3"));
@@ -46,7 +46,7 @@ describe("领用行要求以服务端快照为准", () => {
     let resolveOld!: (value: unknown) => void;
     const old = new Promise((resolve) => { resolveOld = resolve; });
     mocks.search.mockImplementation((input) => input.category_major ? Promise.resolve({ data: { total: 1, rows: [{ issue_id: "new", issue_no: "NEW-FILTER", workflow_status: "confirmed", lines: [{ issue_line_id: "new-line", pn: "NEW-PN", quantity: "1", no_return: null }] }] } }) : old);
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "领用一级品类" }));
     fireEvent.click(await screen.findByText("硬盘", { selector: ".ant-select-item-option-content" }));
     await screen.findByText("NEW-PN");
@@ -60,7 +60,7 @@ describe("领用行要求以服务端快照为准", () => {
       { issue_line_id: "l1", pn: "PN-1", quantity: "1", no_return: null },
     ] }] } });
     let refresh!: () => Promise<boolean>;
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()}
+    render(<SiteReturnTab canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()}
       registerRefresh={(_key, reader) => { if (reader) refresh = reader; }} />);
     await screen.findByText("PN-1");
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "领用一级品类" }));
@@ -73,7 +73,7 @@ describe("领用行要求以服务端快照为准", () => {
   });
   it("按返还操作、领用登记、领用明细和 Excel 批量维护的顺序展示", async () => {
     mocks.search.mockResolvedValue({ data: { total: 0, rows: [] } });
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
     const returnSection = screen.getByRole("heading", { name: "返还登记与台账" });
     const issueSection = screen.getByRole("heading", { name: "领用登记与单据" });
     const detailsSection = screen.getByRole("heading", { name: "领用明细与批量维护" });
@@ -92,7 +92,7 @@ describe("领用行要求以服务端快照为准", () => {
     mocks.search.mockResolvedValue({ data: { total: 1, rows: [{ issue_id: "issue-1", issue_no: "ISSUE-1", issue_date: "2026-09-12", workflow_status: "confirmed", lines: [
       { issue_line_id: "line-1", pn: "PN-1", quantity: "1", no_return, delivery_line_id: "delivery-1", return_requirement: { requirement_status: status } },
     ] }] } });
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
     expect(await screen.findByText(expected)).toBeInTheDocument();
     expect(screen.queryByText(absent)).not.toBeInTheDocument();
   });

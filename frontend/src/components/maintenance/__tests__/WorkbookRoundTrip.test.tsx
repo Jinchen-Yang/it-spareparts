@@ -43,10 +43,115 @@ describe("WorkbookRoundTrip", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
+  it("缺少下载资格时不显示上传；不能凭残留 action 上传含受限数据的文件", () => {
+    const onDownload = vi.fn();
+    const onApply = vi.fn();
+    const { container } = render(<WorkbookRoundTrip title="总表" filename="a.xlsx"
+      canDownload={false} canUpload onDownload={onDownload} onApply={onApply} />);
+    expect(screen.queryByRole("button", { name: /下载|上传覆盖/ })).toBeNull();
+    expect(container.querySelector('input[type="file"]')).toBeNull();
+    expect(onDownload).not.toHaveBeenCalled();
+    expect(onApply).not.toHaveBeenCalled();
+  });
+
+  describe.each([false, true])("下载权撤销后再恢复=%s", (restore) => {
+    it.each(["成功", "失败"])("旧下载%s不能落文件、报旧错误或复活", async (outcome) => {
+      const pending = deferred<Blob>();
+      const freshBlob = new Blob(["new qualified download"]);
+      const onDownload = vi.fn().mockReturnValueOnce(pending.promise).mockResolvedValue(freshBlob);
+      const props = { title: "总表", filename: "a.xlsx", canUpload: true, onDownload, onApply: vi.fn() };
+      const view = render(<WorkbookRoundTrip canDownload {...props} />);
+      fireEvent.click(screen.getByRole("button", { name: /下载/ }));
+      expect(onDownload).toHaveBeenCalledTimes(1);
+      view.rerender(<WorkbookRoundTrip canDownload={false} {...props} />);
+      expect(screen.queryByRole("button", { name: /下载|上传覆盖/ })).toBeNull();
+      if (restore) view.rerender(<WorkbookRoundTrip canDownload {...props} />);
+      await act(async () => {
+        if (outcome === "成功") pending.resolve(new Blob(["revoked workbook"]));
+        else pending.reject(new Error("private old error"));
+      });
+      expect(saveBlob).not.toHaveBeenCalled();
+      expect(screen.queryByRole("alert")).toBeNull();
+      if (restore) {
+        fireEvent.click(screen.getByRole("button", { name: /下载/ }));
+        await waitFor(() => expect(saveBlob).toHaveBeenCalledWith(freshBlob, "a.xlsx"));
+        expect(saveBlob).toHaveBeenCalledTimes(1);
+      }
+    });
+  });
+
+  it.each(["预检", "冲突"])("%s弹窗因下载权撤销而关闭，恢复权限也不能执行旧确认", async (kind) => {
+    const onValidate = vi.fn();
+    if (kind === "预检") onValidate.mockResolvedValue({ will_void_rows: [{ reason: "仅本次授权可见" }] });
+    else onValidate.mockRejectedValue({ response: { status: 409, data: { detail: {
+      conflicts: [{ sheet: "04", row: "BXD", field: "金额", old: "仅本次授权可见", new: "20", base: "10" }],
+    } } } });
+    const modal = vi.spyOn(Modal, "confirm");
+    const onApply = vi.fn().mockResolvedValue({ expense_updates: 1 });
+    const props = { title: "总表", filename: "a.xlsx", canUpload: true, onDownload: vi.fn(), onValidate, onApply };
+    try {
+      const view = render(<WorkbookRoundTrip canDownload {...props} />);
+      uploadFile(view.container, makeFile());
+      await screen.findByRole("dialog");
+      await waitFor(() => expect(screen.getByText(/仅本次授权可见/)).toBeVisible());
+      const oldConfirm = modal.mock.calls[modal.mock.calls.length - 1][0].onOk!;
+      view.rerender(<WorkbookRoundTrip canDownload={false} {...props} />);
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(screen.queryByText(/仅本次授权可见/)).toBeNull();
+      expect(screen.queryByText(/待处理文件/)).toBeNull();
+      view.rerender(<WorkbookRoundTrip canDownload {...props} />);
+      await act(async () => { await oldConfirm(); });
+      expect(onApply).not.toHaveBeenCalled();
+      onValidate.mockResolvedValue({ will_void_rows: [] });
+      uploadFile(view.container, makeFile());
+      fireEvent.click(await screen.findByRole("button", { name: "确认回传" }));
+      await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
+    } finally {
+      modal.mockRestore();
+    }
+  });
+
+  it("下载资格撤销后，已经提交的旧 apply 成功不刷新当前页面", async () => {
+    const pending = deferred<{ expense_updates: number }>();
+    const onApply = vi.fn().mockReturnValue(pending.promise);
+    const onAfterApply = vi.fn();
+    const props = { title: "总表", filename: "a.xlsx", canUpload: true, onDownload: vi.fn(), onApply, onAfterApply };
+    const view = render(<WorkbookRoundTrip canDownload {...props} />);
+    uploadFile(view.container, makeFile());
+    await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
+    view.rerender(<WorkbookRoundTrip canDownload={false} {...props} />);
+    await act(async () => pending.resolve({ expense_updates: 1 }));
+    expect(onAfterApply).not.toHaveBeenCalled();
+    expect(screen.queryByText(/已覆盖/)).toBeNull();
+  });
+
+  it("本地权限静默变化且父组件未重绘时，旧确认和下载都不得借新快照继续", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ data_profit: true }));
+    const download = deferred<Blob>();
+    const onDownload = vi.fn().mockReturnValue(download.promise);
+    const onValidate = vi.fn().mockResolvedValue({ will_void_rows: [] });
+    const onApply = vi.fn();
+    const props = { title: "总表", filename: "a.xlsx", canUpload: true, onDownload, onValidate, onApply };
+    const view = render(<WorkbookRoundTrip canDownload {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: /下载/ }));
+    uploadFile(view.container, makeFile());
+    const oldConfirm = await screen.findByRole("button", { name: "确认回传" });
+    localStorage.setItem("permissions", JSON.stringify({ data_profit: false }));
+    fireEvent.click(oldConfirm);
+    await act(async () => download.resolve(new Blob(["old privileged workbook"])));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(saveBlob).not.toHaveBeenCalled();
+    expect(onApply).not.toHaveBeenCalled();
+    // 旧操作的 finally 引起子组件重绘也不能把旧 canUpload 当作新授权。
+    view.rerender(<WorkbookRoundTrip canDownload {...props} />);
+    expect(screen.queryByRole("button", { name: /下载|上传覆盖/ })).toBeNull();
+    expect(onDownload).toHaveBeenCalledTimes(1);
+  });
+
   it("下载失败时在当前会话显示错误", async () => {
     localStorage.setItem("token", "synthetic-session-a");
     const onDownload = vi.fn().mockRejectedValue(new Error("network"));
-    render(<WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload={false} onDownload={onDownload} onApply={vi.fn()} />);
+    render(<WorkbookRoundTrip canDownload title="总表" filename="a.xlsx" canUpload={false} onDownload={onDownload} onApply={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: /下载/ }));
     expect(await screen.findByText("下载失败")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /下载/ })).not.toHaveClass("ant-btn-loading");
@@ -62,20 +167,20 @@ describe("WorkbookRoundTrip", () => {
         .mockReturnValueOnce(oldRequest.promise)
         .mockReturnValueOnce(currentRequest.promise);
       const props = { title: "总表", filename: "a.xlsx", canUpload: false, onDownload, onApply: vi.fn() };
-      const { rerender, unmount } = render(<WorkbookRoundTrip {...props} />);
+      const { rerender, unmount } = render(<WorkbookRoundTrip canDownload {...props} />);
       fireEvent.click(screen.getByRole("button", { name: /下载/ }));
       expect(onDownload).toHaveBeenCalledTimes(1);
       expect(screen.getByRole("button", { name: /下载/ })).toHaveClass("ant-btn-loading");
 
       if (transition === "卸载后重新进入") {
         unmount();
-        render(<WorkbookRoundTrip {...props} />);
+        render(<WorkbookRoundTrip canDownload {...props} />);
       } else {
         localStorage.setItem("token", "synthetic-session-b");
-        rerender(<WorkbookRoundTrip {...props} />);
+        rerender(<WorkbookRoundTrip canDownload {...props} />);
         if (transition === "账号 A→B→A") {
           localStorage.setItem("token", "synthetic-session-a");
-          rerender(<WorkbookRoundTrip {...props} />);
+          rerender(<WorkbookRoundTrip canDownload {...props} />);
         }
       }
       const currentButton = screen.getByRole("button", { name: /下载/ });
@@ -108,13 +213,13 @@ describe("WorkbookRoundTrip", () => {
     const request = deferred<Blob>();
     const onDownload = vi.fn(() => request.promise);
     const props = { title: "总表", filename: "a.xlsx", canUpload: false, onDownload, onApply: vi.fn() };
-    const { rerender } = render(<WorkbookRoundTrip {...props} />);
+    const { rerender } = render(<WorkbookRoundTrip canDownload {...props} />);
     fireEvent.click(screen.getByRole("button", { name: /下载/ }));
     expect(onDownload).toHaveBeenCalledTimes(1);
     localStorage.setItem("token", "synthetic-session-b");
-    rerender(<WorkbookRoundTrip {...props} />);
+    rerender(<WorkbookRoundTrip canDownload {...props} />);
     localStorage.setItem("token", "synthetic-session-a");
-    rerender(<WorkbookRoundTrip {...props} />);
+    rerender(<WorkbookRoundTrip canDownload {...props} />);
 
     await act(async () => {
       if (outcome === "成功") request.resolve(new Blob(["old workbook"]));
@@ -130,7 +235,7 @@ describe("WorkbookRoundTrip", () => {
     localStorage.setItem("token", "synthetic-session-a");
     const request = deferred<Blob>();
     const onDownload = vi.fn(() => request.promise);
-    render(<WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload={false} onDownload={onDownload} onApply={vi.fn()} />);
+    render(<WorkbookRoundTrip canDownload title="总表" filename="a.xlsx" canUpload={false} onDownload={onDownload} onApply={vi.fn()} />);
     const button = screen.getByRole("button", { name: /下载/ });
     fireEvent.click(button);
     expect(onDownload).toHaveBeenCalledTimes(1);
@@ -150,6 +255,7 @@ describe("WorkbookRoundTrip", () => {
   it("hides the upload button without the upload permission", () => {
     render(
       <WorkbookRoundTrip
+        canDownload
         title="总表"
         filename="a.xlsx"
         canUpload={false}
@@ -165,6 +271,7 @@ describe("WorkbookRoundTrip", () => {
     const onApply = vi.fn().mockResolvedValue({ cost_refills: 2 });
     const { container } = render(
       <WorkbookRoundTrip
+        canDownload
         title="备件表"
         filename="a.xlsx"
         canUpload
@@ -187,6 +294,7 @@ describe("WorkbookRoundTrip", () => {
     const onAfterApply = vi.fn().mockResolvedValue(false);
     const { container } = render(
       <WorkbookRoundTrip
+        canDownload
         title="总表"
         filename="a.xlsx"
         canUpload
@@ -207,6 +315,7 @@ describe("WorkbookRoundTrip", () => {
   it("项目备注更新回执显示具体数量", async () => {
     const { container } = render(
       <WorkbookRoundTrip
+        canDownload
         title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()}
         onApply={vi.fn().mockResolvedValue({ project_note_updates: 1 })}
       />,
@@ -229,6 +338,7 @@ describe("WorkbookRoundTrip", () => {
     const onApply = vi.fn().mockResolvedValue({ expense_updates: 1 });
     const { container } = render(
       <WorkbookRoundTrip
+        canDownload
         title="总表"
         filename="a.xlsx"
         canUpload
@@ -271,7 +381,7 @@ describe("WorkbookRoundTrip", () => {
       .mockResolvedValueOnce({ site_issue_merges: [merge], site_issue_merge_token: "second-preview" });
     const onApply = vi.fn().mockResolvedValue({ site_issue_merge_count: 1 });
     const { container } = render(
-      <WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()}
+      <WorkbookRoundTrip canDownload title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()}
         onValidate={onValidate} onApply={onApply} />,
     );
     const file = makeFile();
@@ -306,7 +416,7 @@ describe("WorkbookRoundTrip", () => {
       } } } })
       .mockResolvedValueOnce({ site_issue_merge_count: 1 });
     const { container } = render(
-      <WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()}
+      <WorkbookRoundTrip canDownload title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()}
         onValidate={onValidate} onApply={onApply} />,
     );
     const file = makeFile();
@@ -331,7 +441,7 @@ describe("WorkbookRoundTrip", () => {
       } } } })
       .mockResolvedValueOnce({ site_issue_merge_count: 1 });
     const { container } = render(
-      <WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()}
+      <WorkbookRoundTrip canDownload title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()}
         onValidate={onValidate} onApply={onApply} />,
     );
     const file = makeFile();
@@ -348,6 +458,7 @@ describe("WorkbookRoundTrip", () => {
     const onApply = vi.fn();
     const { container } = render(
       <WorkbookRoundTrip
+        canDownload
         title="总表"
         filename="a.xlsx"
         canUpload
@@ -378,6 +489,7 @@ describe("WorkbookRoundTrip", () => {
     const onApply = vi.fn();
     const { container } = render(
       <WorkbookRoundTrip
+        canDownload
         title="总表"
         filename="a.xlsx"
         canUpload
@@ -418,7 +530,7 @@ describe("WorkbookRoundTrip", () => {
     });
     const onApply = vi.fn();
     const { container } = render(
-      <WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()} onValidate={onValidate} onApply={onApply} />,
+      <WorkbookRoundTrip canDownload title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()} onValidate={onValidate} onApply={onApply} />,
     );
     const file = makeFile();
     const firstInput = uploadFile(container, file);
@@ -454,6 +566,7 @@ describe("WorkbookRoundTrip", () => {
     }));
     const { container } = render(
       <WorkbookRoundTrip
+        canDownload
         title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()} onApply={vi.fn()}
         onValidate={vi.fn().mockRejectedValue({ response: { status: 422, data: { detail: {
           code: "stale_site_replay", message: "共 203 行与已入库领用记录冲突", rows,
@@ -483,7 +596,7 @@ describe("WorkbookRoundTrip", () => {
       rows: [{ row_no: 8, entity_id: "manual-site:one", issue_no: "WBDD-1", pn: "PN-1", sn: "", differences: [{ field: "领用日期", old: "2026-08-05", new: "2026-09-01" }] }],
     } } } });
     const { container } = render(
-      <WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()} onApply={onApply} />,
+      <WorkbookRoundTrip canDownload title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()} onApply={onApply} />,
     );
     uploadFile(container, makeFile());
     if (path === "强制接管重传") {
@@ -511,6 +624,7 @@ describe("WorkbookRoundTrip", () => {
     const errorMessage = `第 12 行已入库，请重新下载再修改（${label}）`;
     const { container } = render(
       <WorkbookRoundTrip
+        canDownload
         title="总表" filename="a.xlsx" canUpload onDownload={vi.fn()} onApply={onApply}
         onValidate={vi.fn().mockRejectedValue({ response: { status: 422, data: { detail: {
           code: "stale_site_replay", message: errorMessage, rows,
@@ -534,14 +648,14 @@ describe("WorkbookRoundTrip", () => {
         rows: [{ row_no: 2, entity_id: "manual-site:private", issue_no: "WBDD-private", pn: "PN-private", sn: "", differences: [{ field: "地址", old: "原地址", new: "上传地址" }] }],
       } } } }),
     };
-    const { container, rerender, unmount } = render(<WorkbookRoundTrip {...props} />);
+    const { container, rerender, unmount } = render(<WorkbookRoundTrip canDownload {...props} />);
     uploadFile(container, makeFile());
     await screen.findByRole("dialog");
     if (action === "切换账号") {
       localStorage.setItem("token", "synthetic-session-b");
-      rerender(<WorkbookRoundTrip {...props} />);
+      rerender(<WorkbookRoundTrip canDownload {...props} />);
     } else if (action === "撤销权限") {
-      rerender(<WorkbookRoundTrip {...props} canUpload={false} />);
+      rerender(<WorkbookRoundTrip canDownload {...props} canUpload={false} />);
     } else {
       unmount();
     }
@@ -561,6 +675,7 @@ describe("WorkbookRoundTrip", () => {
     });
     const { container } = render(
       <WorkbookRoundTrip
+        canDownload
         title="总表" filename="a.xlsx" canUpload
         onDownload={vi.fn()} onValidate={onValidate} onApply={onApply}
       />,
@@ -584,23 +699,23 @@ describe("WorkbookRoundTrip", () => {
       response: { status: 409, data: { detail: "项目备注已被修改，整本未写入" } },
     });
     const props = { title: "总表", filename: "a.xlsx", canUpload: true, onDownload: vi.fn(), onApply };
-    const { container, rerender } = render(<WorkbookRoundTrip {...props} />);
+    const { container, rerender } = render(<WorkbookRoundTrip canDownload {...props} />);
     const firstInput = uploadFile(container, makeFile());
     expect(await screen.findByText("待处理文件：回填.xlsx")).toBeVisible();
     await waitFor(() => expect(container.querySelector('input[type="file"]')).not.toBe(firstInput));
     if (action === "取消") {
       fireEvent.click(screen.getByRole("button", { name: "取消文件草稿" }));
     } else if (action === "权限撤销") {
-      rerender(<WorkbookRoundTrip {...props} canUpload={false} />);
+      rerender(<WorkbookRoundTrip canDownload {...props} canUpload={false} />);
     } else {
       localStorage.setItem("token", "synthetic-session-b");
-      rerender(<WorkbookRoundTrip {...props} />);
+      rerender(<WorkbookRoundTrip canDownload {...props} />);
     }
     await waitFor(() => expect(screen.queryByText("待处理文件：回填.xlsx")).toBeNull());
     expect(screen.queryByRole("button", { name: "重试原文件" })).toBeNull();
     expect(onApply).toHaveBeenCalledTimes(1);
     if (action === "权限撤销") {
-      rerender(<WorkbookRoundTrip {...props} />);
+      rerender(<WorkbookRoundTrip canDownload {...props} />);
       expect(screen.queryByText("待处理文件：回填.xlsx")).toBeNull();
     }
   });
@@ -609,7 +724,7 @@ describe("WorkbookRoundTrip", () => {
     const pending = deferred<{ will_void_rows: [] }>();
     const onValidate = vi.fn().mockReturnValue(pending.promise);
     const onApply = vi.fn();
-    const { container } = render(<WorkbookRoundTrip title="总表" filename="a.xlsx"
+    const { container } = render(<WorkbookRoundTrip canDownload title="总表" filename="a.xlsx"
       canUpload onDownload={vi.fn()} onValidate={onValidate} onApply={onApply} />);
     act(() => {
       uploadFile(container, makeFile());
@@ -631,13 +746,13 @@ describe("WorkbookRoundTrip", () => {
     const onApply = vi.fn();
     const props = { title: "总表", filename: "a.xlsx", canUpload: true,
       onDownload: vi.fn(), onValidate, onApply };
-    const { container, rerender } = render(<WorkbookRoundTrip {...props} />);
+    const { container, rerender } = render(<WorkbookRoundTrip canDownload {...props} />);
     uploadFile(container, makeFile());
     await waitFor(() => expect(onValidate).toHaveBeenCalledOnce());
     localStorage.setItem("token", "synthetic-session-b");
-    rerender(<WorkbookRoundTrip {...props} />);
+    rerender(<WorkbookRoundTrip canDownload {...props} />);
     localStorage.setItem("token", "synthetic-session-a");
-    rerender(<WorkbookRoundTrip {...props} />);
+    rerender(<WorkbookRoundTrip canDownload {...props} />);
     uploadFile(container, makeFile());
     await waitFor(() => expect(onValidate).toHaveBeenCalledTimes(2));
     await act(async () => { old.resolve({ will_void_rows: [] }); });
@@ -654,11 +769,11 @@ describe("WorkbookRoundTrip", () => {
     let rejectOld!: (error: unknown) => void;
     const onApply = vi.fn(() => new Promise<never>((_, reject) => { rejectOld = reject; }));
     const props = { title: "总表", filename: "a.xlsx", canUpload: true, onDownload: vi.fn(), onApply };
-    const { container, rerender } = render(<WorkbookRoundTrip {...props} />);
+    const { container, rerender } = render(<WorkbookRoundTrip canDownload {...props} />);
     uploadFile(container, makeFile());
     await waitFor(() => expect(onApply).toHaveBeenCalledTimes(1));
     localStorage.setItem("token", "synthetic-session-b");
-    rerender(<WorkbookRoundTrip {...props} />);
+    rerender(<WorkbookRoundTrip canDownload {...props} />);
     await act(async () => rejectOld({ response: { status: 409, data: { detail: "旧请求版本冲突" } } }));
     expect(screen.queryByText("旧请求版本冲突")).toBeNull();
     expect(screen.queryByText("待处理文件：回填.xlsx")).toBeNull();
@@ -670,11 +785,11 @@ describe("WorkbookRoundTrip", () => {
     const onValidate = vi.fn(() => new Promise<{ will_void_rows: [] }>((resolve) => { resolvePreview = resolve; }));
     const onApply = vi.fn();
     const props = { title: "总表", filename: "a.xlsx", canUpload: true, onDownload: vi.fn(), onValidate, onApply };
-    const { container, rerender } = render(<WorkbookRoundTrip {...props} />);
+    const { container, rerender } = render(<WorkbookRoundTrip canDownload {...props} />);
     uploadFile(container, makeFile());
     await waitFor(() => expect(onValidate).toHaveBeenCalledTimes(1));
     localStorage.setItem("token", "synthetic-session-b");
-    rerender(<WorkbookRoundTrip {...props} />);
+    rerender(<WorkbookRoundTrip canDownload {...props} />);
     await act(async () => resolvePreview({ will_void_rows: [] }));
     expect(screen.queryByRole("button", { name: "确认回传" })).toBeNull();
     expect(onApply).not.toHaveBeenCalled();
@@ -685,14 +800,14 @@ describe("WorkbookRoundTrip", () => {
     const onValidate = vi.fn().mockResolvedValue({ will_void_rows: [] });
     const onApply = vi.fn();
     const props = { title: "总表", filename: "a.xlsx", canUpload: true, onDownload: vi.fn(), onValidate, onApply };
-    const { container, rerender, unmount } = render(<WorkbookRoundTrip {...props} />);
+    const { container, rerender, unmount } = render(<WorkbookRoundTrip canDownload {...props} />);
     uploadFile(container, makeFile());
     const confirm = await screen.findByRole("button", { name: "确认回传" });
     if (action === "切换账号") {
       localStorage.setItem("token", "synthetic-session-b");
-      rerender(<WorkbookRoundTrip {...props} />);
+      rerender(<WorkbookRoundTrip canDownload {...props} />);
     } else if (action === "撤销权限") {
-      rerender(<WorkbookRoundTrip {...props} canUpload={false} />);
+      rerender(<WorkbookRoundTrip canDownload {...props} canUpload={false} />);
     } else {
       unmount();
     }
@@ -734,6 +849,7 @@ describe("WorkbookRoundTrip · 2.7.0 行级冲突与强制接管", () => {
       });
     const { container } = render(
       <WorkbookRoundTrip
+        canDownload
         title="测试表" filename="t.xlsx"
         onDownload={vi.fn().mockResolvedValue(new Blob())}
         onApply={onApply}

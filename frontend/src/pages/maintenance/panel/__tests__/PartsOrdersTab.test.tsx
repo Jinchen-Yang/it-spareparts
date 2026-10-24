@@ -138,6 +138,7 @@ const emptyProcurement = {
 function renderTab(contractNos = ["XSDD-1", "XSDD-2"], registerRefresh = vi.fn()) {
   return render(
     <PartsOrdersTab
+        canDownload
       projectId="p1"
       exportBase="合成项目A"
       canUpload={false}
@@ -558,6 +559,7 @@ describe("新增需求入口（v1.36 Phase E）", () => {
     const onChanged = vi.fn().mockResolvedValue(true);
     render(
       <PartsOrdersTab
+        canDownload
         projectId="p1"
         exportBase="合成项目A"
         canUpload={false}
@@ -576,6 +578,7 @@ describe("新增需求入口（v1.36 Phase E）", () => {
     const onChanged = vi.fn().mockResolvedValue(true);
     render(
       <PartsOrdersTab
+        canDownload
         projectId="p1"
         exportBase="合成项目A"
         canUpload={false}
@@ -596,6 +599,7 @@ describe("新增需求入口（v1.36 Phase E）", () => {
     const onChanged = vi.fn().mockResolvedValue(true);
     render(
       <PartsOrdersTab
+        canDownload
         projectId="p1"
         exportBase="合成项目A"
         canUpload={false}
@@ -624,6 +628,7 @@ describe("新增需求入口（v1.36 Phase E）", () => {
     localStorage.setItem("permissions", JSON.stringify({ action_maintenance_demand_manage: true }));
     const { rerender } = render(
       <PartsOrdersTab
+        canDownload
         projectId="p1"
         exportBase="合成项目A"
         canUpload={false}
@@ -639,6 +644,7 @@ describe("新增需求入口（v1.36 Phase E）", () => {
     mocks.getBoardProjectOrders.mockResolvedValue(ordersPayload([orderRow("WBDD-9", "XSDD-1")]));
     rerender(
       <PartsOrdersTab
+        canDownload
         projectId="p2"
         exportBase="合成项目B"
         canUpload={false}

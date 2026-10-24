@@ -41,6 +41,7 @@ import {
 } from "../../api/maintenanceBossBoard";
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
+import { readMaintenancePermissionSnapshot, readMaintenanceWorkbookCapabilities } from "../../components/maintenance/maintenancePermissions";
 
 const GlobalMaintenanceRowWorkbench = lazy(() => import("../../components/maintenance/GlobalMaintenanceRowWorkbench"));
 
@@ -105,7 +106,7 @@ function readSortParam(spec: string | null, canViewCost: boolean): ProjectSort {
  */
 export function MaintenanceHomePage() {
   const permissions = readPermissionMap();
-  const canUpload = !!permissions.action_maintenance_expense_collection_upload;
+  const { global: workbook } = readMaintenanceWorkbookCapabilities();
   const canViewCost = localStorage.getItem("role") === "admin"
     || permissions.data_purchase_cost === true;
   // 回款已完成桶由合同额+回款推得，属于合同财务数据：无 data_profit 的账号
@@ -288,9 +289,11 @@ export function MaintenanceHomePage() {
               />
             ) : null}
             <WorkbookRoundTrip
+              key={readMaintenancePermissionSnapshot()}
               title="全项目备件行级表"
               filename={`spare-part-lines-${rangePreset}.xlsx`}
-              canUpload={canUpload}
+              canDownload={workbook.canDownload}
+              canUpload={workbook.canUpload}
               hint="下载 → 改价/补价 → 上传覆盖＝真实源"
               onDownload={async () => downloadSparePartLines(rangeParams())}
               onValidate={validateSparePartLines}

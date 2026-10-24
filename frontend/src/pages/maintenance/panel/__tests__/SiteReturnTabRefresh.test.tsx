@@ -40,7 +40,7 @@ function Harness() {
     const results = await Promise.allSettled([...readers.current.values()].map((refresh) => refresh()));
     return results.every((result) => result.status === "fulfilled" && result.value);
   }, []);
-  return <SiteReturnTab projectId="p1" exportBase="项目" canUpload onChanged={onChanged} registerRefresh={registerRefresh} />;
+  return <SiteReturnTab canDownload projectId="p1" exportBase="项目" canUpload onChanged={onChanged} registerRefresh={registerRefresh} />;
 }
 
 let revision = 0;
@@ -186,7 +186,7 @@ describe("领用返还统一读回", () => {
       if (refresh) readers.set(key, refresh);
       else readers.delete(key);
     };
-    const { unmount } = render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload onChanged={vi.fn()} registerRefresh={registerRefresh} />);
+    const { unmount } = render(<SiteReturnTab canDownload projectId="p1" exportBase="项目" canUpload onChanged={vi.fn()} registerRefresh={registerRefresh} />);
     await screen.findByText("RETURN-0");
     expect([...readers.keys()].sort()).toEqual(["return-receipts", "site", "site-workflow"]);
     unmount();

@@ -16,12 +16,14 @@ import { type RegisterPanelRefresh, raw, readError } from "./panelUtils";
 export function ExpenseTab({
   projectId,
   exportBase,
+  canDownload,
   canUpload,
   onChanged,
   registerRefresh,
 }: {
   projectId: string;
   exportBase: string;
+  canDownload: boolean;
   canUpload: boolean;
   onChanged: () => Promise<boolean>;
   registerRefresh: RegisterPanelRefresh;
@@ -67,6 +69,7 @@ export function ExpenseTab({
             size="small"
             title="报销"
             filename={`${exportBase}-${SHEETS.expense}.xlsx`}
+            canDownload={canDownload}
             canUpload={canUpload}
             onDownload={() => downloadProjectMaster(projectId, [SHEETS.expense])}
             onValidate={(file) => validateProjectMaster(projectId, file)}

@@ -6,6 +6,7 @@ interface LocalMaintenancePermissions {
   data_profit?: boolean;
   own_customers_only?: boolean;
   action_maintenance_roundtrip_apply?: boolean;
+  action_maintenance_expense_collection_upload?: boolean;
   action_maintenance_manager_workbook_apply?: boolean;
   action_maintenance_project_manage?: boolean;
   action_maintenance_demand_delete?: boolean;
@@ -51,6 +52,68 @@ function readLocalPermissions(): LocalMaintenancePermissions {
   } catch {
     return {};
   }
+}
+
+export interface WorkbookCapabilities {
+  canDownload: boolean;
+  canUpload: boolean;
+}
+
+/** The snapshot owns UI work; changed permissions must not reuse an older result. */
+export function readMaintenancePermissionSnapshot(): string {
+  return JSON.stringify([localStorage.getItem("role"), localStorage.getItem("permissions")]);
+}
+
+/** Only pass flags from successfully loaded, current-project responses. */
+export interface ProjectWorkbookPermission {
+  detailCanEdit?: boolean;
+  boardCanEdit?: boolean;
+}
+
+/** Presentation of the stable workbook APIs; this is not a server authorization gate. */
+export function resolveMaintenanceWorkbookCapabilities({
+  role,
+  permissions,
+  project,
+}: {
+  role: string;
+  permissions: LocalMaintenancePermissions;
+  project?: ProjectWorkbookPermission;
+}): { global: WorkbookCapabilities; project: WorkbookCapabilities } {
+  const isAdmin = role === "admin";
+  const canUsePage = isAdmin || permissions.page_maintenance === true;
+  // The token verifier applies runtime_safe: profit without purchase cost is closed.
+  const canViewProfit = isAdmin || (
+    permissions.data_profit === true && permissions.data_purchase_cost === true
+  );
+  const canUploadByAction = isAdmin
+    || permissions.action_maintenance_expense_collection_upload === true;
+  const globalDownload = canUsePage && canViewProfit;
+  // Both response fields come from can_edit_master_workbook. A denial must not
+  // be overridden by a stale positive response or a local action snapshot.
+  const serverEdit = project?.detailCanEdit === false || project?.boardCanEdit === false
+    ? false
+    : project?.detailCanEdit === true || project?.boardCanEdit === true ? true : undefined;
+  const projectUpload = !!project && canUsePage
+    && (serverEdit ?? (canViewProfit && canUploadByAction));
+  return {
+    global: {
+      canDownload: globalDownload,
+      canUpload: globalDownload && canUploadByAction,
+    },
+    project: {
+      canDownload: !!project && canUsePage && (canViewProfit || serverEdit === true),
+      canUpload: projectUpload,
+    },
+  };
+}
+
+export function readMaintenanceWorkbookCapabilities(project?: ProjectWorkbookPermission) {
+  return resolveMaintenanceWorkbookCapabilities({
+    role: localStorage.getItem("role") || "",
+    permissions: readLocalPermissions(),
+    project,
+  });
 }
 
 type ReminderFilterRequirement =

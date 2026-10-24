@@ -54,7 +54,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 async function openEditor(onChanged = vi.fn().mockResolvedValue(true)) {
-  render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false}
+  render(<SiteReturnTab canDownload projectId="p1" exportBase="项目" canUpload={false}
     onChanged={onChanged} registerRefresh={vi.fn()} />);
   fireEvent.click(await screen.findByRole("button", { name: "编辑领用行" }));
   const dialog = await screen.findByRole("dialog", { name: "编辑领用事实" });
@@ -176,11 +176,11 @@ describe("领用事实页内编辑", () => {
     mocks.search.mockResolvedValue({ data: { total: 3, rows: [issue(), native, delivery] } });
     const props = { projectId: "p1", exportBase: "项目", canUpload: false,
       onChanged: vi.fn().mockResolvedValue(true), registerRefresh: vi.fn() };
-    const { rerender } = render(<SiteReturnTab {...props} />);
+    const { rerender } = render(<SiteReturnTab canDownload {...props} />);
     await screen.findByRole("button", { name: "编辑领用行" });
     expect(screen.getAllByRole("button", { name: "编辑领用行" })).toHaveLength(1);
     localStorage.setItem("permissions", JSON.stringify({ data_purchase_cost: true }));
-    rerender(<SiteReturnTab {...props} />);
+    rerender(<SiteReturnTab canDownload {...props} />);
     expect(screen.queryByRole("button", { name: "编辑领用行" })).not.toBeInTheDocument();
   });
 
@@ -189,7 +189,7 @@ describe("领用事实页内编辑", () => {
     mocks.search.mockImplementation((input: { issue_id?: string }) => input.issue_id
       ? new Promise((resolve) => pending.push(resolve))
       : Promise.resolve({ data: { total: 1, rows: [issue()] } }));
-    render(<StrictMode><SiteReturnTab projectId="p1" exportBase="项目" canUpload={false}
+    render(<StrictMode><SiteReturnTab canDownload projectId="p1" exportBase="项目" canUpload={false}
       onChanged={vi.fn().mockResolvedValue(true)} registerRefresh={vi.fn()} /></StrictMode>);
     fireEvent.click(await screen.findByRole("button", { name: "编辑领用行" }));
     const dialog = await screen.findByRole("dialog", { name: "编辑领用事实" });

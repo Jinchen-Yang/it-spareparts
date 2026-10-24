@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { App, Alert, Button, List, Modal, Space, Typography, Upload } from "antd";
 import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
 import type {
@@ -14,6 +14,7 @@ import type {
 } from "../../api/maintenanceWorkbooks";
 import { saveBlob } from "../../api/maintenanceWorkbooks";
 import { useAsyncContext, type AsyncGuard } from "../../hooks/useAsyncContext";
+import { readMaintenancePermissionSnapshot } from "./maintenancePermissions";
 
 const { Text } = Typography;
 const SITE_ISSUE_HEADER_LABELS: Record<string, string> = {
@@ -50,7 +51,9 @@ export interface WorkbookRoundTripProps {
   onAfterApply?: () => Promise<boolean | void>;
   /** 传入即启用「预检 → 作废预览 → 确认 → 落库」两阶段（项目总表 2.1）。 */
   onValidate?: (file: File) => Promise<WorkbookValidateResult>;
-  /** 无上传动作键时只给下载（只读对账的人也该能把表拉下来核对）。 */
+  /** 当前用途的下载资格；项目负责人例外由调用方消费服务端判定。 */
+  canDownload: boolean;
+  /** 上传是独立动作资格，同时必须保有该工作簿的下载资格。 */
   canUpload: boolean;
   size?: "small" | "middle";
 }
@@ -119,6 +122,7 @@ export function WorkbookRoundTrip({
   onApply,
   onAfterApply,
   onValidate,
+  canDownload,
   canUpload,
   size = "middle",
 }: WorkbookRoundTripProps) {
@@ -129,30 +133,39 @@ export function WorkbookRoundTrip({
   const [uploadInputVersion, setUploadInputVersion] = useState(0);
   const [retainedDraft, setRetainedDraft] = useState<{ file: File; session: string | null } | null>(null);
   const uploadSession = localStorage.getItem("token");
-  const uploadAllowed = useRef(canUpload);
-  useLayoutEffect(() => { uploadAllowed.current = canUpload; }, [canUpload]);
-  const downloadContext = useAsyncContext(JSON.stringify([uploadSession]));
-  const uploadContext = useAsyncContext(JSON.stringify([uploadSession, canUpload]));
+  const permissionSnapshot = readMaintenancePermissionSnapshot();
+  // Parent callers key the workbook/project by this snapshot. A local state
+  // update alone cannot adopt changed permissions while retaining old props.
+  const permissionOwner = useRef(permissionSnapshot).current;
+  const canRead = canDownload && permissionOwner === permissionSnapshot;
+  const canApply = canRead && canUpload;
+  const downloadAllowed = useRef(canRead);
+  const uploadAllowed = useRef(canApply);
+  useLayoutEffect(() => { downloadAllowed.current = canRead; }, [canRead]);
+  useLayoutEffect(() => { uploadAllowed.current = canApply; }, [canApply]);
+  const downloadContext = useAsyncContext(JSON.stringify([uploadSession, permissionSnapshot, canDownload]));
+  const uploadContext = useAsyncContext(JSON.stringify([uploadSession, permissionSnapshot, canDownload, canUpload]));
   const activeUpload = useRef<AsyncGuard | null>(null);
   const retainedFile = retainedDraft?.session === uploadSession ? retainedDraft.file : null;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     // 新账号可立即下载；即使 token 切回原值，也不能接收旧会话的响应。
     setDownloading(false);
-  }, [uploadSession]);
+  }, [uploadSession, permissionSnapshot, canDownload]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     // 文件仅留在当前页面内存；账号或权限变化后不能复用上个操作上下文的草稿。
     setRetainedDraft(null);
     setApplying(false);
     setFeedback(null);
-  }, [canUpload, uploadSession]);
+  }, [canDownload, canUpload, uploadSession, permissionSnapshot]);
 
   const handleDownload = async () => {
     // 与上传同口径：请求返回时页面已卸载或已切换账号，就不再落文件、不再写反馈。
     const requestSession = localStorage.getItem("token");
     const requestCurrent = downloadContext.begin();
-    const isCurrent = () => requestCurrent() && requestSession === uploadSession
+    const isCurrent = () => requestCurrent() && downloadAllowed.current && requestSession === uploadSession
+      && readMaintenancePermissionSnapshot() === permissionSnapshot
       && localStorage.getItem("token") === requestSession;
     if (!isCurrent()) return;
     setDownloading(true);
@@ -327,6 +340,7 @@ export function WorkbookRoundTrip({
     const requestSession = localStorage.getItem("token");
     const requestCurrent = uploadContext.begin();
     const isCurrent = () => requestCurrent() && requestSession === uploadSession && uploadAllowed.current
+      && readMaintenancePermissionSnapshot() === permissionSnapshot
       && localStorage.getItem("token") === requestSession;
     if (!isCurrent()) return false;
     activeUpload.current = isCurrent;
@@ -435,15 +449,15 @@ export function WorkbookRoundTrip({
   return (
     <Space direction="vertical" size={2}>
       <Space size={8}>
-        <Button
+        {canRead ? <Button
           size={size}
           icon={<DownloadOutlined />}
           loading={downloading}
           onClick={handleDownload}
         >
           下载{title}
-        </Button>
-        {canUpload ? (
+        </Button> : null}
+        {canApply ? (
           <Upload
             key={`workbook-upload-${uploadInputVersion}`}
             accept=".xlsx"
@@ -459,7 +473,7 @@ export function WorkbookRoundTrip({
         ) : null}
       </Space>
       {feedback ? <Alert type={feedback.type} showIcon message={feedback.text} /> : null}
-      {canUpload && retainedFile ? (
+      {canApply && retainedFile ? (
         <Alert
           type="warning"
           showIcon

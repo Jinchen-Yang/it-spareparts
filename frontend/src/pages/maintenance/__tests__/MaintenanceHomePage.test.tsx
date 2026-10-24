@@ -74,6 +74,9 @@ const page = (rows: unknown[]) => ({
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  localStorage.setItem("permissions", JSON.stringify({
+    page_maintenance: true, data_purchase_cost: true, data_profit: true,
+  }));
   // IntersectionObserver 在 jsdom 里不存在：无限加载靠它，测试里给个惰性桩
   (globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver =
     class {
@@ -307,7 +310,7 @@ describe("维保主页（项目卡墙）", () => {
     expect(lastArg(getBoardProjects)).toMatchObject({ page: 2, card_status: "alert" });
   });
 
-  it("无上传动作键时只给下载按钮（#38 下载谁都能，上传要键）", async () => {
+  it("有金额阅读权但无上传动作键时只给下载按钮", async () => {
     renderPage();
     expect(await screen.findByRole("button", { name: /下载全项目备件行级表/ }))
       .toBeInTheDocument();
@@ -317,16 +320,31 @@ describe("维保主页（项目卡墙）", () => {
   it("有上传动作键时出现上传入口", async () => {
     localStorage.setItem(
       "permissions",
-      JSON.stringify({ action_maintenance_expense_collection_upload: true }),
+      JSON.stringify({ page_maintenance: true, data_purchase_cost: true, data_profit: true,
+        action_maintenance_expense_collection_upload: true }),
     );
     renderPage();
     expect(await screen.findByRole("button", { name: /上传覆盖/ })).toBeInTheDocument();
   });
 
+  it.each([
+    { page_maintenance: true, data_purchase_cost: true },
+    { page_maintenance: true, action_maintenance_expense_collection_upload: true },
+    { page_maintenance: true, data_profit: true, data_purchase_cost: false, action_maintenance_expense_collection_upload: true },
+  ])("无有效利润资格时不提供全局下载或上传：%j", async (permissions) => {
+    localStorage.setItem("permissions", JSON.stringify(permissions));
+    renderPage();
+    await waitFor(() => expect(getBoardProjects).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: /下载全项目备件行级表|上传覆盖/ })).toBeNull();
+    expect(downloadSparePartLines).not.toHaveBeenCalled();
+    expect(validateSparePartLines).not.toHaveBeenCalled();
+  });
+
   it("上传确认期间切换筛选，应用后只刷新最新筛选", async () => {
     localStorage.setItem(
       "permissions",
-      JSON.stringify({ action_maintenance_expense_collection_upload: true }),
+      JSON.stringify({ page_maintenance: true, data_purchase_cost: true, data_profit: true,
+        action_maintenance_expense_collection_upload: true }),
     );
     const { container } = renderPage();
     await waitFor(() => expect(getBoardProjects).toHaveBeenCalledTimes(1));

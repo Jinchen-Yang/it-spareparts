@@ -60,6 +60,7 @@ type SelectedOrder = Pick<BoardOrderRow, "order_no" | "source_order_id">;
 export function PartsOrdersTab({
   projectId,
   exportBase,
+  canDownload,
   canUpload,
   contractNos,
   onChanged,
@@ -67,6 +68,7 @@ export function PartsOrdersTab({
 }: {
   projectId: string;
   exportBase: string;
+  canDownload: boolean;
   canUpload: boolean;
   onChanged: () => Promise<boolean>;
   registerRefresh: RegisterPanelRefresh;
@@ -317,6 +319,7 @@ export function PartsOrdersTab({
             size="small"
             title="备件成本"
             filename={`${exportBase}-${SHEETS.parts}.xlsx`}
+            canDownload={canDownload}
             canUpload={canUpload}
             onDownload={() => downloadProjectMaster(projectId, [SHEETS.parts])}
             onValidate={(file) => validateProjectMaster(projectId, file)}
