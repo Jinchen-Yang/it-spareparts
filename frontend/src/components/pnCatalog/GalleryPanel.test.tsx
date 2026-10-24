@@ -11,6 +11,20 @@ afterEach(() => { cleanup(); api.defaults.adapter = original; });
 const entry = (id: string) => ({ entry_id: id, asset_id: `asset-${id}`, purpose: "common", status: "gallery", revision: 1, generation: 1, width: 10, height: 10, source: {}, derivatives: [] });
 const caps = { media: false, bundle: false, research: false, recognition: false };
 
+it("仅有正式图库读取权限时不展示候选或已删除入口", async () => {
+  const reads: string[] = [];
+  api.defaults.adapter = async config => {
+    reads.push(config.params?.status);
+    return { data: { data: { group_id: "group", part_id: 42, revision: 1, primary_entry_id: null, entries: [], ordered_entry_ids: [] }, meta: { identity_revision: 0 } }, config, headers: {}, status: 200, statusText: "OK" };
+  };
+  render(<GalleryPanel partId={42} capabilities={caps} />);
+  await screen.findByText("暂无图片");
+  fireEvent.mouseDown(screen.getByRole("combobox", { name: "图库状态" }));
+  expect(screen.queryByText("候选图片")).not.toBeInTheDocument();
+  expect(screen.queryByText("已删除")).not.toBeInTheDocument();
+  expect(reads).toEqual(["gallery"]);
+});
+
 it("分页未读完不能重排；全部读取后提交完整顺序和服务器版本", async () => {
   const writes: unknown[] = [];
   api.defaults.adapter = async config => {

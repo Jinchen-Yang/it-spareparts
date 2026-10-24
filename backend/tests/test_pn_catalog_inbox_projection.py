@@ -75,8 +75,9 @@ def test_inbox_recognition_hides_old_generation_and_malformed_results(db):
     assert media.get_inbox(db, item.id, context=context(), authorize=allow)["data"]["recognition"]["result"] is None
 
 
-def test_inbox_page_queries_are_bounded_independently_of_row_count(db):
-    items = [inbox(db) for _ in range(3)]
+@pytest.mark.parametrize("row_count", [1, 3, 20])
+def test_inbox_page_queries_are_bounded_independently_of_row_count(db, row_count):
+    items = [inbox(db) for _ in range(row_count)]
     recognition(db, items[0])
     statements = []
     def count(_conn, _cursor, statement, *_):
@@ -86,8 +87,10 @@ def test_inbox_page_queries_are_bounded_independently_of_row_count(db):
         page = media.list_inbox(db, context=context(), authorize=allow, limit=50)
     finally:
         event.remove(db.get_bind(), "before_cursor_execute", count)
-    assert len(page["data"]) == 3
-    assert len(statements) <= 4
+    assert len(page["data"]) == row_count
+    # One bounded history join preserves migrated recognition results; its cost
+    # stays constant as the page grows, like current recognition/upload joins.
+    assert len(statements) <= 5
 
 
 def test_fresh_inbox_links_check_owner_scope_ready_state_and_delete_before_signing(db):

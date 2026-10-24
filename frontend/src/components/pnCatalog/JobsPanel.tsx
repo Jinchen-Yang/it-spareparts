@@ -3,6 +3,7 @@ import { Alert, Button, List, Space, Tag } from "antd";
 import { catalogError, CommandIntent } from "../../api/pnCatalog";
 import { useCatalogAccess } from "./access";
 import { JOB_LABELS, STATUS_LABELS, jobGuard, type Job } from "./workflows";
+import LegacyHistoryPanel from "./LegacyHistoryPanel";
 
 interface Archive { number: number; filename: string; url: string; image_count: number; size_bytes: number }
 export default function JobsPanel({ partId, inboxId, latestJob }: { partId?: number; inboxId?: string; latestJob?: Job }) {
@@ -31,7 +32,7 @@ export default function JobsPanel({ partId, inboxId, latestJob }: { partId?: num
     try { const { data } = await client.get<{ archives: Archive[]; expires_in: number }>(`/jobs/${job.job_id}/bundle-downloads`); if (data.archives.some(a => new URL(a.url).protocol !== "https:")) throw new Error("下载地址无效"); setDownloads({ jobId: job.job_id, archives: data.archives, expires: Date.now() + data.expires_in * 1000 }); }
     catch (e) { setError(catalogError(e).message); } finally { setBusy(false); }
   };
-  if (!readable) return null;
+  if (!readable) return <LegacyHistoryPanel partId={partId} inboxId={inboxId} />;
   return <Space direction="vertical" style={{ width: "100%" }}>
     <Space><strong>我发起的任务</strong><Button disabled={busy} onClick={() => load()}>刷新任务状态</Button></Space>
     <small>刷新只读取状态，不会触发识别、研究或重新打包。</small>
@@ -47,5 +48,6 @@ export default function JobsPanel({ partId, inboxId, latestJob }: { partId?: num
       {downloads?.jobId === job.job_id && downloads.archives.map(a => <a key={a.number} href={a.url} target="_blank" rel="noopener noreferrer">{a.filename} · {a.image_count} 张 · {(a.size_bytes / 1024 / 1024).toFixed(1)} MiB</a>)}
     </Space></List.Item>} />
     {cursor && <Button onClick={() => load(true)} disabled={busy}>加载更多任务</Button>}
+    <LegacyHistoryPanel partId={partId} inboxId={inboxId} />
   </Space>;
 }

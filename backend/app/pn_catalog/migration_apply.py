@@ -12,6 +12,7 @@ from .migration_materialize import _arrange_imported, _content, _image
 from .migration_models import LegacySourceRecord, MigrationBatch
 from .media_models import GalleryEntry
 from .migration_profile import materialize_profile
+from .migration_history import HISTORY_KINDS, materialize_history
 from .migration_media import (
     materialize_upload,
     materialize_multipart,
@@ -216,6 +217,8 @@ def apply_source_records(
                     state, reason, target = materialize_upload_intent(db, row)
                 elif row.kind == "inbox":
                     state, reason, target = materialize_inbox(db, row, pid, identity)
+                elif row.kind in HISTORY_KINDS:
+                    state, reason, target = materialize_history(db, row, pid)
                 elif row.kind in {"image", "content"}:
                     # The immutable archive's initial mapping never changes. This
                     # temporary projection carries the separately approved reference.

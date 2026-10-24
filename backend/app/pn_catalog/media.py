@@ -12,6 +12,8 @@ from .media_gallery import (
     change_entry,
     entry_data,
     get_gallery,
+    list_suppressions,
+    suppression_scope,
     suppress_hash,
     suppression_data,
     unsuppress_hash,
@@ -183,9 +185,8 @@ def render_receipt(db, receipt, *, context, authorize, replayed):
         data = group_data(db, owned_group(db, identifier, context, authorize))
     elif resource == "media.suppression":
         item = load(db, GallerySuppression, identifier)
-        group = load(db, GalleryGroup, item.group_id)
-        access(db, context, authorize, "gallery.read", group.canonical_part_id)
-        data = suppression_data(item)
+        suppression_scope(db, item.group_id, context=context, authorize=authorize, operation=receipt.operation)
+        data = suppression_data(load(db, GallerySuppression, identifier))
     elif resource == "media.derivative":
         from .media_derivatives import derivative_data
 
@@ -206,6 +207,7 @@ __all__ = [
     "restore_entry",
     "patch_entry",
     "suppress_hash",
+    "list_suppressions",
     "unsuppress_hash",
     "create_derivative",
     "entry_links",

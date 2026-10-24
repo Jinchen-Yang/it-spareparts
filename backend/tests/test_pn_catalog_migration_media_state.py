@@ -411,3 +411,43 @@ def test_assigned_inbox_preserves_entry_but_cannot_invent_original_assignment_re
     application = db.get(MigrationRecordApplication, ids[-1])
     assert application.reason_code == "migration.assignment_receipt_recovery"
     assert not result["live_complete"] and not result["cutover_ready"]
+    from app.pn_catalog.migration_recovery import recover_record
+    from app.pn_catalog.migration_recovery_dto import ConfirmLegacyAssignment
+    from app.pn_catalog.media_dto import AssignInbox
+    from app.pn_catalog.models import AuditEvent
+    from app.pn_catalog.migration_state_models import MigrationRecoveryDecision
+
+    new_key = uuid4()
+    command = ConfirmLegacyAssignment(
+        decision="confirm_assignment",
+        expected_revision=1,
+        source_sha256=inbox_record.payload_sha256,
+        evidence_ref="isolated:assignment-reviewed",
+        reason="核对已归档图片，建立新的确认",
+        external_outcome="retained_effect_reviewed",
+        expected_identity_revision=0,
+        expected_inbox_revision=item.revision,
+        expected_entry_revision=1,
+        assignment_key=new_key,
+    )
+    recovered = recover_record(db, ids[-1], command, context=context(), authorize=allow)
+    assert recovered["data"]["state"] == "applied"
+    assert item.assignment_intent["recovery_source_record_id"] == ids[-1]
+    assert item.assignment_key == new_key and str(new_key) != inbox["assignment_key"]
+    audit_count = db.scalar(select(func.count()).select_from(AuditEvent))
+    outcome = media.assign_inbox(
+        db,
+        item.id,
+        AssignInbox(
+            part_id=part.id,
+            expected_identity_revision=0,
+            claim_revision=item.claim_revision,
+            purpose="common",
+            assignment_key=new_key,
+        ),
+        context=actor(int(item.owner_principal_id.split(":")[1])),
+        authorize=allow,
+    )
+    assert outcome["meta"]["replayed"]
+    assert db.scalar(select(func.count()).select_from(AuditEvent)) == audit_count
+    assert db.scalar(select(func.count()).select_from(MigrationRecoveryDecision)) == 1

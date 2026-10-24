@@ -148,6 +148,11 @@ class SuppressionSnapshot(WireModel):
     reason: str
 
 
+class SuppressionListResponse(WireModel):
+    data: list[SuppressionSnapshot]
+    meta: PageMeta
+
+
 class SuppressionResponse(WireModel):
     data: SuppressionSnapshot
     meta: MediaMeta
@@ -209,7 +214,7 @@ class InboxSnapshot(WireModel):
     asset_id: str | None
     group_id: str | None
     position: int = Field(ge=0)
-    client_order: int | None = Field(default=None, ge=0, le=1999)
+    client_order: int | None = Field(default=None, ge=0, le=2147483647)
     status: Literal["receiving", "ready", "assigned", "failed", "deleted"]
     revision: int = Field(ge=1)
     generation: int = Field(ge=1)

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Card, Empty, Image, Input, Popconfirm, Select, Space, Tag } from "antd";
 import { catalogError, CommandIntent, sendUpload, type Capabilities, type Entry, type Gallery, type UploadForm, type UploadTicket } from "../../api/pnCatalog";
 import { useCatalogAccess } from "./access";
+import SuppressionsPanel from "./SuppressionsPanel";
 
 function EntryImage({ entry }: { entry: Entry }) {
   const { client } = useCatalogAccess();
@@ -77,10 +78,12 @@ export default function GalleryPanel({ partId, capabilities }: { partId: number;
     void command("patch", `/parts/${partId}/gallery`, { expected_gallery_revision: gallery.revision, primary_entry_id: primary ? entry.entry_id : gallery.primary_entry_id, ordered_entry_ids: ordered });
   };
   const galleryWrite = (action: string) => field("part_gallery", "gallery", true) && can("part_gallery", action);
+  const statusOptions = [{ value: "gallery", label: "正式图库" }, { value: "candidate", label: "候选图片" }, { value: "deleted", label: "已删除" }]
+    .filter(option => option.value === "gallery" || can("part_gallery", `gallery.${option.value}.read`));
   return <Space direction="vertical" style={{ width: "100%" }}>
     {!capabilities.media && <Alert type="info" message="图片服务尚未启用，上传和缩略图任务暂不可用。" />}
     {error && <Alert type="warning" message={error} />}
-    <Space wrap><Select aria-label="图库状态" value={status} onChange={setStatus} options={[{ value: "gallery", label: "正式图库" }, { value: "candidate", label: "候选图片" }, { value: "deleted", label: "已删除" }]} /><Button onClick={() => load()} disabled={busy}>刷新图库</Button></Space>
+    <Space wrap><Select aria-label="图库状态" value={status} onChange={setStatus} options={statusOptions} /><Button onClick={() => load()} disabled={busy}>刷新图库</Button></Space>
     {capabilities.media && field("part_gallery", "uploads", true) && can("part_gallery", "uploads.create") && can("part_gallery", "uploads.complete") && <Card size="small" title="上传图片">
       <Space direction="vertical">
         <input aria-label="选择图片" type="file" accept="image/jpeg,image/png,image/webp" disabled={busy || !!ticket} onChange={e => { setFile(e.target.files?.[0]); uploadIntent.current = crypto.randomUUID(); }} />
@@ -107,5 +110,6 @@ export default function GalleryPanel({ partId, capabilities }: { partId: number;
     </Card>)}</Space>
     {gallery && !gallery.entries.length && <Empty description="暂无图片" />}
     {cursor && <Button onClick={() => load(true)} disabled={busy}>加载更多图片</Button>}
+    {gallery?.group_id && <SuppressionsPanel key={`${partId}:${gallery.group_id}`} gallery={gallery} onChanged={() => load()} />}
   </Space>;
 }

@@ -1,8 +1,9 @@
 """Gallery commands preserve origin, deletion intent and independent edit revisions."""
 
 import base64
+import hashlib
 import json
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import String, Text, cast, func, select
 from sqlalchemy.dialects.postgresql import JSONB
@@ -76,6 +77,7 @@ def entry_selection(group, *, status="gallery", purpose=None, origins=None):
         query = query.outerjoin(
             ordering, cast(GalleryEntry.id, String) == ordering.c.entry_id
         )
+    if status in ("gallery", "candidate"):
         query = query.where(
             ~select(GallerySuppression.id)
             .where(
@@ -85,6 +87,7 @@ def entry_selection(group, *, status="gallery", purpose=None, origins=None):
             )
             .exists()
         )
+    if status == "gallery":
         query = query.add_columns(
             func.row_number()
             .over(
@@ -219,6 +222,10 @@ def get_gallery(
     ):
         raise CatalogError("request.validation_failed", "图库筛选无效", status_code=422)
     access(db, context, authorize, "gallery.read", part_id)
+    # The first upload must not change whether a state-specific read is allowed.
+    # Check before the empty-group shortcut, as well as for every origin below.
+    if status != "gallery":
+        access(db, context, authorize, f"gallery.{status}.read", part_id)
     states = read_identity(db, [part_id])
     identity_revision = states[part_id].identity_revision if states[part_id] else 0
     member = db.get(GalleryMember, part_id)
@@ -263,8 +270,6 @@ def get_gallery(
             ) from error
     # Authorize origin IDs before selecting duplicates so an unreadable duplicate
     # cannot hide a readable source with the same hash and purpose.
-    if status != "gallery":
-        access(db, context, authorize, f"gallery.{status}.read", part_id)
     permitted_origins = []
     for origin in db.scalars(
         select(GalleryMember.part_id).where(GalleryMember.group_id == group.id)
@@ -708,6 +713,51 @@ def arrange_gallery(db, part_id, command, *, context, authorize):
     return result
 
 
+def suppression_scope(db, group_id, *, context, authorize, operation=None):
+    """A group-wide decision must include every current origin, not only its root."""
+    # Freeze topology before collecting members; always lock PN before media rows.
+    read_identity(db, [])
+    group = load(db, GalleryGroup, group_id)
+    members = list(db.scalars(select(GalleryMember.part_id).where(
+        GalleryMember.group_id == group_id).order_by(GalleryMember.part_id)))
+    if not members or group.canonical_part_id not in members:
+        raise CatalogError("catalog.identity_changed", "图库归属已变化，请重新打开当前 PN 图库")
+    read_identity(db, members)
+    decisions = []
+    for part_id in members:
+        decision = access(db, context, authorize, "gallery.read", part_id)
+        decisions.append([part_id, sorted(decision.readable_fields), decision.metadata])
+        if operation:
+            access(db, context, authorize, operation, part_id, write=True)
+    group = load(db, GalleryGroup, group_id, lock=True, shared=operation is None)
+    return group, decisions
+
+
+def list_suppressions(db, group_id, *, context, authorize, cursor=None, limit=20):
+    """Active suppression metadata only, bounded keyset pages under current grants."""
+    from .api import _decode_cursor, _encode_cursor
+
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise CatalogError("request.validation_failed", "分页数量无效", status_code=422)
+    group, decisions = suppression_scope(db, group_id, context=context, authorize=authorize)
+    fingerprint = hashlib.sha256(json.dumps([
+        "suppressions", str(group.id), group.revision, context.actor.principal_id,
+        context.actor.client_id, decisions,
+    ], sort_keys=True, default=str).encode()).hexdigest()
+    after = _decode_cursor(cursor, fingerprint)
+    if after >= 2 ** 128:
+        raise CatalogError("request.validation_failed", "分页游标无效", status_code=422)
+    statement = select(GallerySuppression).where(
+        GallerySuppression.group_id == group.id, GallerySuppression.active.is_(True))
+    if after:
+        statement = statement.where(GallerySuppression.id > UUID(int=after))
+    rows = list(db.scalars(statement.order_by(GallerySuppression.id).limit(limit + 1)))
+    result = {"data": [suppression_data(item) for item in rows[:limit]],
+              "meta": {"request_id": str(context.request_id), "replayed": False}}
+    result["meta"]["next_cursor"] = _encode_cursor(rows[limit - 1].id.int, fingerprint) if len(rows) > limit else None
+    return result
+
+
 def suppress_hash(db, group_id, command, *, context, authorize):
     group = load(db, GalleryGroup, group_id)
     handle = begin(
@@ -726,8 +776,7 @@ def suppress_hash(db, group_id, command, *, context, authorize):
         return render_receipt(
             db, handle.receipt, context=context, authorize=authorize, replayed=True
         )
-    identity(db, [group.canonical_part_id])
-    group = load(db, GalleryGroup, group_id, lock=True)
+    group, _ = suppression_scope(db, group_id, context=context, authorize=authorize, operation=handle.operation)
     revision(context, group.revision, command.expected_gallery_revision)
     item = db.scalar(
         select(GallerySuppression).where(
@@ -796,8 +845,7 @@ def unsuppress_hash(db, group_id, suppression_id, command, *, context, authorize
         return render_receipt(
             db, handle.receipt, context=context, authorize=authorize, replayed=True
         )
-    identity(db, [group.canonical_part_id])
-    group = load(db, GalleryGroup, group_id, lock=True)
+    group, _ = suppression_scope(db, group_id, context=context, authorize=authorize, operation=handle.operation)
     item = load(db, GallerySuppression, suppression_id, lock=True)
     if item.group_id != group.id:
         raise CatalogError("request.not_found", "隐藏记录不存在", status_code=404)
