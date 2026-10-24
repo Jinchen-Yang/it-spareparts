@@ -1,3 +1,4 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DemandLineRow } from "../../../api/maintenanceDemands";
@@ -68,8 +69,8 @@ describe("DemandLineBatchEdit", () => {
     setReason();
     fireEvent.click(screen.getByRole("button", { name: "提交整批修改" }));
     await waitFor(() => expect(mocks.patch).toHaveBeenCalledTimes(2));
-    expect(mocks.patch.mock.calls[0]).toEqual(["L1", { qty: 6 }, "现场批量更正", D1]);
-    expect(mocks.patch.mock.calls[1]).toEqual(["L2", { return_qty: 1 }, "现场批量更正", D2]);
+    expect(mocks.patch.mock.calls[0]).toEqual(["L1", { qty: 6 }, "现场批量更正", D1, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })]);
+    expect(mocks.patch.mock.calls[1]).toEqual(["L2", { return_qty: 1 }, "现场批量更正", D2, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })]);
 
     const failedCall = mocks.patch.mock.calls[1];
     fireEvent.click(screen.getByRole("button", { name: /提交可重试行/ }));
@@ -128,7 +129,7 @@ describe("DemandLineBatchEdit", () => {
     fireEvent.change(qty, { target: { value: "8" } });
     fireEvent.click(screen.getByRole("button", { name: /提交可重试行/ }));
     await waitFor(() => expect(mocks.patch).toHaveBeenCalledTimes(2));
-    expect(mocks.patch.mock.calls[1]).toEqual(["L1", { qty: 8 }, "现场批量更正", D2]);
+    expect(mocks.patch.mock.calls[1]).toEqual(["L1", { qty: 8 }, "现场批量更正", D2, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })]);
   });
 
   it("冲突重载发现行消失后禁用提交", async () => {
@@ -210,3 +211,10 @@ describe("DemandLineBatchEdit", () => {
     expect(mocks.patch).not.toHaveBeenCalled();
   });
 });
+
+// These existing business behavior fixtures intentionally exercise the legacy runtime.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(),
+  useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

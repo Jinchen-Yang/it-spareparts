@@ -1,3 +1,6 @@
+import { useContextTransport } from "../../../authz/domainTransport";
+import { withContextSurface, contextSurfaces } from "../../../authz/ContextSurface";
+import { useCollectionPermissions } from "./collectionAuthorization";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { App, Alert, Button, Card, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -12,13 +15,10 @@ import {
 } from "../../../api/maintenanceOperations";
 import {
   SHEETS,
-  applyProjectMaster,
-  downloadProjectMaster,
   getCollectionPlan,
-  validateProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
 import type { CollectionPlanRow } from "../../../api/maintenanceWorkbooks";
-import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
+import ProjectWorkbookRoundTrip from "../../../components/maintenance/ProjectWorkbookRoundTrip";
 import PanelActionBar from "./PanelActionBar";
 import CollectionBatchMaintenance from "./CollectionBatchMaintenance";
 import { readPermissionMap } from "../../../nav";
@@ -75,7 +75,7 @@ function contractOptionLabel(contract: MaintenanceContractSummary): string {
  * 内部 UUID）；作废/恢复走同一 PATCH + version(OCC) + reason 审计协议，恢复的安全
  * 默认是「待确认」——不直接回「已确认」，绕过单调性需要人工再走一次修改。
  */
-export function CollectionTab({
+function CollectionTabContent({
   projectId,
   exportBase,
   canUpload,
@@ -102,6 +102,8 @@ export function CollectionTab({
   const perms = readPermissionMap();
   const canManageCollections = !!perms.action_maintenance_roundtrip_apply
     && !!perms.data_profit;
+  const permits = useCollectionPermissions(canManageCollections);
+  const transport = useContextTransport(`collection:${projectId}`, true);
   const [form] = Form.useForm<CollectionFormValues>();
   const [editing, setEditing] = useState<MaintenanceCollectionSnapshotRow | null>(null);
   const [mode, setMode] = useState<DialogMode>("create");
@@ -117,6 +119,12 @@ export function CollectionTab({
    * 污染新视图，其 finally 也不许复位新表单的 submitting。
    */
   const dialogEpoch = useRef(0);
+  const submissionBusy = useRef(false);
+  const formValues = Form.useWatch([], form);
+  const commandTransport = useContextTransport(JSON.stringify([
+    "collection-command", projectId, createOpen, mode, editing?.collection_id, editing?.version, formValues,
+  ]), canManageCollections);
+  const contractsTransport = useContextTransport(`collection-contracts:${projectId}:${createOpen}:${mode}`, true);
 
   // ---- 登记时的合同候选：按需读 workspace.project.contracts（页面同源权限） ----
   const [contracts, setContracts] = useState<{
@@ -127,20 +135,22 @@ export function CollectionTab({
   const contractsEpoch = useRef(0);
 
   const loadPlan = useCallback(async () => {
+    if (!permits.canPlan || !transport.isCurrent()) { setPlanRows([]); return true; }
     const seq = ++requestSeq.current;
+    setPlanRows([]);
     try {
-      const resp = await getCollectionPlan(projectId);
-      if (seq !== requestSeq.current) return false;
+      const resp = await getCollectionPlan(projectId, transport);
+      if (!transport.isCurrent() || seq !== requestSeq.current) return false;
       setPlanRows(resp.rows);
       return true;
     } catch (err) {
-      if (seq === requestSeq.current) {
+      if (transport.isCurrent() && seq === requestSeq.current) {
         setPlanRows([]);
         message.error(readError(err, "回款计划加载失败"));
       }
       return false;
     }
-  }, [projectId]);
+  }, [projectId, permits.canPlan, transport]);
 
   useEffect(() => {
     registerRefresh("collection", loadPlan);
@@ -152,6 +162,7 @@ export function CollectionTab({
   }, [loadPlan, registerRefresh]);
 
   const loadContracts = useCallback(async () => {
+    if (!permits.canContracts || !contractsTransport.isCurrent()) return;
     const epoch = ++contractsEpoch.current;
     setContractsState("loading");
     try {
@@ -159,9 +170,10 @@ export function CollectionTab({
         collection_page_size: 1,
         requisition_page_size: 1,
         expense_page_size: 1,
-      });
+      }, contractsTransport);
+      if (!permits.legacy && resp.data.block_access?.contracts.effect !== "allow") throw new Error("无当前项目合同读取权限");
       // 过期响应（期间切了项目/重试了）直接丢弃，不写回状态。
-      if (epoch !== contractsEpoch.current) return;
+      if (!contractsTransport.isCurrent() || epoch !== contractsEpoch.current) return;
       setContracts({
         projectId,
         rows: Array.isArray(resp.data?.project?.contracts)
@@ -170,15 +182,16 @@ export function CollectionTab({
       });
       setContractsState("done");
     } catch {
-      if (epoch === contractsEpoch.current) setContractsState("error");
+      if (contractsTransport.isCurrent() && epoch === contractsEpoch.current) setContractsState("error");
     }
-  }, [projectId]);
+  }, [projectId, permits.canContracts, permits.legacy, contractsTransport]);
 
   useEffect(() => {
     // 快速切项目：作废旧世代（对话框 + 提交副作用 + 合同加载全部失效）。
     // 旧表单绝不提交给新项目，旧提交的迟到响应也不许碰新项目的 UI 状态。
     contractsEpoch.current += 1;
     dialogEpoch.current += 1;
+    submissionBusy.current = false;
     modalProjectRef.current = projectId;
     setContracts(null);
     setContractsState("idle");
@@ -202,23 +215,24 @@ export function CollectionTab({
   /** 每次打开新对话框都开新世代并复位提交态：旧提交的 finally 被 epoch 挡住，不复位新表单。 */
   const beginDialog = () => {
     dialogEpoch.current += 1;
+    submissionBusy.current = false;
     modalProjectRef.current = projectId;
     setSubmitting(false);
   };
 
   const openCreate = () => {
+    if (!permits.canCreate) return;
     beginDialog();
     setSubmitError(null);
     setEditing(null);
     setMode("create");
     form.resetFields();
     setCreateOpen(true);
-    if (contracts?.projectId !== projectId || contractsState === "error") {
-      void loadContracts();
-    }
+
   };
 
   const openEdit = (row: MaintenanceCollectionSnapshotRow) => {
+    if (!permits.canUpdate) return;
     beginDialog();
     setSubmitError(null);
     setEditing(row);
@@ -235,6 +249,7 @@ export function CollectionTab({
   };
 
   const openVoid = (row: MaintenanceCollectionSnapshotRow) => {
+    if (!permits.canUpdate) return;
     beginDialog();
     setSubmitError(null);
     setEditing(row);
@@ -244,6 +259,7 @@ export function CollectionTab({
   };
 
   const openRestore = (row: MaintenanceCollectionSnapshotRow) => {
+    if (!permits.canUpdate) return;
     beginDialog();
     setSubmitError(null);
     setEditing(row);
@@ -252,7 +268,12 @@ export function CollectionTab({
     setCreateOpen(true);
   };
 
+  useEffect(() => {
+    if (createOpen && mode === "create") void loadContracts();
+  }, [createOpen, mode, loadContracts]);
+
   const submitCollection = async () => {
+    if (!(mode === "create" ? permits.canCreate : permits.canUpdate) || !commandTransport.isCurrent()) return;
     // epoch 必须先于第一个 await 捕获：validateFields 期间切了项目，这里拿到的
     // 仍是旧世代，validate 返回后第一件事就是比较，过期直接退出——原因/月份
     // 校验、setSubmitting 和写请求全部不会发生，更不会关掉新项目的对话框。
@@ -261,7 +282,7 @@ export function CollectionTab({
     const submitProjectId = projectId;
     const submitModalProject = modalProjectRef.current;
     const values = await form.validateFields().catch(() => null);
-    if (epoch !== dialogEpoch.current || !values) return;
+    if (!commandTransport.isCurrent() || epoch !== dialogEpoch.current || !values || submissionBusy.current) return;
     if (!values.reason?.trim()) {
       setSubmitError("必须填写原因");
       return;
@@ -282,6 +303,7 @@ export function CollectionTab({
       setSubmitError("项目已切换，本次登记已中止；请在当前项目重新打开登记");
       return;
     }
+    submissionBusy.current = true;
     setSubmitting(true);
     setSubmitError(null);
     // 本函数闭包捕获的 loadPlan/onRefresh 即提交时项目的版本，await 后不漂移。
@@ -298,7 +320,7 @@ export function CollectionTab({
           receipt_reference: values.receipt_reference?.trim() || null,
           remark: values.remark?.trim() || null,
           reason,
-        });
+        }, commandTransport);
       } else {
         if (!target) return;
         if (submitMode === "edit") {
@@ -310,13 +332,13 @@ export function CollectionTab({
             status: values.status,
             receipt_reference: values.receipt_reference?.trim() || null,
             remark: values.remark?.trim() || null,
-          });
+          }, commandTransport);
         } else if (submitMode === "void") {
           await patchProjectCollection(target.collection_id, {
             version: target.version,
             reason,
             status: "void",
-          });
+          }, commandTransport);
         } else {
           // 恢复的安全默认：待确认。不直接回「已确认」，需要人工再改一次，
           // 避免恢复瞬间绕过 confirmed 的累计单调性语义。
@@ -324,22 +346,23 @@ export function CollectionTab({
             version: target.version,
             reason,
             status: "unconfirmed",
-          });
+          }, commandTransport);
         }
       }
       // 只对仍然当前的世代做 UI 副作用；两次读回之间再比较一次，防切项目
       // 恰好落在 loadPlan 与 onRefresh 之间。
-      if (epoch !== dialogEpoch.current) return;
+      if (!commandTransport.isCurrent() || epoch !== dialogEpoch.current) return;
       if (submitMode === "create") message.success("回款记录已登记");
       else if (submitMode === "edit") message.success("回款记录已修改");
       else if (submitMode === "void") message.success("回款记录已作废");
       else message.success("回款记录已恢复为待确认");
-      setCreateOpen(false);
       await refreshPlan();
-      if (epoch !== dialogEpoch.current) return;
+      if (!commandTransport.isCurrent() || epoch !== dialogEpoch.current) return;
       await refreshProject();
+      if (!commandTransport.isCurrent() || epoch !== dialogEpoch.current) return;
+      setCreateOpen(false);
     } catch (err) {
-      if (epoch !== dialogEpoch.current) return;
+      if (!commandTransport.isCurrent() || epoch !== dialogEpoch.current) return;
       setSubmitError(readError(err, submitMode === "create"
         ? "登记失败：请核对合同、月份（YYYY-MM）与金额；也可改用 Excel 批量入口。"
         : submitMode === "edit"
@@ -348,7 +371,7 @@ export function CollectionTab({
             ? "作废失败：版本冲突时请刷新后重试。"
             : "恢复失败：版本冲突时请刷新后重试。"));
     } finally {
-      if (epoch === dialogEpoch.current) setSubmitting(false);
+      if (commandTransport.isCurrent() && epoch === dialogEpoch.current) { submissionBusy.current = false; setSubmitting(false); }
     }
   };
 
@@ -359,17 +382,17 @@ export function CollectionTab({
     {
       title: "计划金额（含税）",
       dataIndex: "planned_amount",
-      render: (value) => value == null ? "—" : `¥${Number(value).toFixed(2)}`,
+      render: (value) => !permits.amountsVisible || value == null ? "—" : `¥${Number(value).toFixed(2)}`,
     },
     {
       title: "累计计划",
       dataIndex: "cumulative_planned",
-      render: (value) => `¥${Number(value || 0).toFixed(2)}`,
+      render: (value) => !permits.amountsVisible || value == null ? "—" : `¥${Number(value).toFixed(2)}`,
     },
     {
       title: "累计实收",
       dataIndex: "cumulative_actual",
-      render: (value) => `¥${Number(value || 0).toFixed(2)}`,
+      render: (value) => !permits.amountsVisible || value == null ? "—" : `¥${Number(value).toFixed(2)}`,
     },
     {
       title: "到款状态",
@@ -405,20 +428,16 @@ export function CollectionTab({
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       <PanelActionBar
         workbook={(
-          <WorkbookRoundTrip
-            size="small"
+          <ProjectWorkbookRoundTrip projectId={projectId} surface="collection_roundtrip" sheets={[SHEETS.collection]}
             title="回款"
             filename={`${exportBase}-${SHEETS.collection}.xlsx`}
             canUpload={canUpload}
-            onDownload={() => downloadProjectMaster(projectId, [SHEETS.collection])}
-            onValidate={(file) => validateProjectMaster(projectId, file)}
-            onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
             onAfterApply={onRefresh}
           />
         )}
-        actions={canManageCollections ? (
+        actions={permits.canCreate || permits.canUpdate ? (
           <Space size={4} wrap>
-            <Button type="primary" size="small" onClick={openCreate}>登记回款</Button>
+            {permits.canCreate && <Button type="primary" size="small" onClick={openCreate}>登记回款</Button>}
             <CollectionBatchMaintenance
               projectId={projectId}
               selectedRows={selectedCollectionRows}
@@ -428,7 +447,7 @@ export function CollectionTab({
         ) : undefined}
         hint="Excel 在左；页面支持单条登记/修改/作废/恢复，也支持批量登记及勾选多行后批量修改、批量作废"
       />
-      <Card
+      {permits.canPlan && <Card
         size="small"
         title="回款计划（应回未回在这里看）"
         extra={<Text type="secondary" style={{ fontSize: 12 }}>在总表 02_回款计划 里填写/维护；实收在 05 填写后状态自动更新</Text>}
@@ -441,11 +460,11 @@ export function CollectionTab({
           pagination={false}
           locale={{ emptyText: "暂无回款计划——在总表 02_回款计划 填写后会显示在这里" }}
         />
-      </Card>
-      <Card size="small" title="实收回款记录（05）">
+      </Card>}
+      {permits.canActuals && <Card size="small" title="实收回款记录（05）">
         <Table<MaintenanceCollectionSnapshotRow>
           rowKey="collection_id"
-          rowSelection={canManageCollections ? {
+          rowSelection={permits.canUpdate ? {
             selectedRowKeys: selectedCollectionIds,
             onChange: (keys) => setSelectedCollectionIds(keys.map(String)),
             getCheckboxProps: (row) => ({
@@ -477,7 +496,7 @@ export function CollectionTab({
             {
               title: "累计实收金额（含税）",
               dataIndex: "cumulative_amount",
-              render: (value) => value == null ? "—" : `¥${Number(value).toFixed(2)}`,
+              render: (value) => !permits.amountsVisible || value == null ? "—" : `¥${Number(value).toFixed(2)}`,
             },
             {
               title: "回款状态",
@@ -489,7 +508,7 @@ export function CollectionTab({
             },
             { title: "回款凭证号", dataIndex: "receipt_reference", render: raw },
             { title: "备注", dataIndex: "remark", render: raw },
-            ...(canManageCollections ? [{
+            ...(permits.canUpdate ? [{
               title: "操作",
               key: "ops",
               width: 170,
@@ -509,7 +528,7 @@ export function CollectionTab({
             }] : []),
           ]}
         />
-      </Card>
+      </Card>}
 
       <Modal
         open={createOpen}
@@ -637,4 +656,8 @@ export function CollectionTab({
   );
 }
 
+export const CollectionTab = withContextSurface(CollectionTabContent, contextSurfaces(
+  "maintenance_collection.actuals", "maintenance_collection.plans", "maintenance_collection.manage_actuals",
+  "maintenance_general_workbook.collection_roundtrip", "maintenance_managed_workbook.collection_roundtrip",
+), props => props.projectId);
 export default CollectionTab;

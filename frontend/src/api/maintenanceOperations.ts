@@ -1,3 +1,6 @@
+import { transportConfig, type CapturedTransport } from "../authz/transport";
+import type { Decision } from "./authz";
+import { domainApi, type ContextRequestTransport, type ContextualPayload } from "../authz/domainTransport";
 import { api } from "../api";
 import {
   readMaintenanceCapabilities,
@@ -140,7 +143,7 @@ export interface MaintenanceManagerTracking {
   };
 }
 
-export interface MaintenanceProjectOperationsDirectory {
+export interface MaintenanceProjectOperationsDirectory extends ContextualPayload {
   rows: MaintenanceProjectOperationsSummary[];
   total: number;
   page: number;
@@ -228,23 +231,35 @@ export interface MaintenanceWorkbookPreview {
   data_version: string;
 }
 
-export interface MaintenanceProjectWorkspace {
-  project: MaintenanceProjectOperationsSummary;
+export type MaintenanceWorkspaceProject = Partial<Omit<MaintenanceProjectOperationsSummary, "project_id" | "contracts" | "metrics" | "manager_tracking" | "task_summary" | "reminder_count">> & {
+  project_id: string;
+  contracts: MaintenanceContractSummary[];
+  metrics: MaintenanceOperationsMetrics | null;
+  manager_tracking?: MaintenanceManagerTracking | null;
+  task_summary?: MaintenanceProjectTaskSummary | null;
+  reminder_count?: number | null;
+};
+export interface MaintenanceProjectWorkspace extends ContextualPayload {
+  project: MaintenanceWorkspaceProject;
+  block_access?: Record<"project_identity" | "operation_summary" | "contracts" | "collection_snapshots" | "requisitions" | "approved_expenses", Decision>;
   collection_snapshots: {
     rows: MaintenanceCollectionSnapshotRow[];
-    total: number;
+    total: number | null;
+    restricted?: boolean;
     page: number;
     page_size: number;
   };
   requisitions: {
     rows: MaintenanceSiteRequisitionRow[];
-    total: number;
+    total: number | null;
+    restricted?: boolean;
     page: number;
     page_size: number;
   };
   approved_expenses: {
     rows: MaintenanceApprovedExpenseRow[];
-    total: number;
+    total: number | null;
+    restricted?: boolean;
     page: number;
     page_size: number;
   };
@@ -961,7 +976,7 @@ function normalizeProjectSummary(
 function normalizeOperationsDirectory(
   data: MaintenanceProjectOperationsDirectory,
 ): MaintenanceProjectOperationsDirectory {
-  if (!data || !Array.isArray(data.rows)) return data;
+  if (!data || !Array.isArray(data.rows) || data.authorization_context) return data;
   const visibility = readMaintenanceCapabilities();
   return {
     ...data,
@@ -970,9 +985,11 @@ function normalizeOperationsDirectory(
 }
 
 function normalizeWorkspace(data: MaintenanceProjectWorkspace): MaintenanceProjectWorkspace {
-  if (!data?.project) return data;
+  // Canonical fields and independent blocks have already been projected under their own grants.
+  // Legacy browser booleans must never rewrite that authorized response.
+  if (!data?.project || data.authorization_context) return data;
   const visibility = readMaintenanceCapabilities();
-  const project = normalizeProjectSummary(data.project, visibility);
+  const project = normalizeProjectSummary(data.project as MaintenanceProjectOperationsSummary, visibility);
   const costRestricted = !visibility.canViewCost;
   const contractRestricted = !visibility.canViewContract;
   const expenseRestricted = !visibility.canViewExpense;
@@ -1093,7 +1110,7 @@ export interface MaintenanceOperationsListParams {
 
 export const listMaintenanceProjectOperations = (
   params: MaintenanceOperationsListParams = {},
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal } = {}, capture?: ContextRequestTransport
 ) => {
   const request = {
     ...params,
@@ -1101,12 +1118,12 @@ export const listMaintenanceProjectOperations = (
     include_inactive: params.include_inactive ?? false,
   };
   const response = options.signal
-    ? api.post<MaintenanceProjectOperationsDirectory>(
+    ? domainApi(capture).post<MaintenanceProjectOperationsDirectory>(
       "/maintenance/projects/stable/operations/search",
       request,
       { signal: options.signal },
     )
-    : api.post<MaintenanceProjectOperationsDirectory>(
+    : domainApi(capture).post<MaintenanceProjectOperationsDirectory>(
       "/maintenance/projects/stable/operations/search",
       request,
     );
@@ -1144,7 +1161,7 @@ const projectBase = (projectId: string) =>
 
 export const searchMaintenanceManagerAccounts = (
   input: { q?: string; page?: number; page_size?: number } = {},
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal } = {}, capture?: ContextRequestTransport
 ) => {
   const request = {
     q: input.q?.trim() || "",
@@ -1152,12 +1169,12 @@ export const searchMaintenanceManagerAccounts = (
     page_size: input.page_size ?? 20,
   };
   return options.signal
-    ? api.post<MaintenanceManagerAccountDirectory>(
+    ? domainApi(capture).post<MaintenanceManagerAccountDirectory>(
       "/maintenance/project-manager-assignments/search",
       request,
       { signal: options.signal },
     )
-    : api.post<MaintenanceManagerAccountDirectory>(
+    : domainApi(capture).post<MaintenanceManagerAccountDirectory>(
       "/maintenance/project-manager-assignments/search",
       request,
     );
@@ -1165,16 +1182,16 @@ export const searchMaintenanceManagerAccounts = (
 
 export const assignMaintenanceProjectManager = (
   projectId: string,
-  input: MaintenanceManagerAssignmentInput,
-) => api.post<MaintenanceManagerAssignment>(
+  input: MaintenanceManagerAssignmentInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceManagerAssignment>(
   `${projectBase(projectId)}/manager-assignment`,
   input,
 );
 
 export const archiveMaintenanceProjectManager = (
   assignmentId: string,
-  input: { version: number; reason: string },
-) => api.post<MaintenanceManagerAssignment>(
+  input: { version: number; reason: string }, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceManagerAssignment>(
   `/maintenance/project-manager-assignments/${encodeURIComponent(assignmentId)}/archive`,
   input,
 );
@@ -1190,9 +1207,9 @@ export interface MaintenanceWorkspaceParams {
 
 export const getMaintenanceProjectWorkspace = (
   projectId: string,
-  params: MaintenanceWorkspaceParams = {},
+  params: MaintenanceWorkspaceParams = {}, capture?: ContextRequestTransport
 ) =>
-  api.get<MaintenanceProjectWorkspace>(`${projectBase(projectId)}/workspace`, { params })
+  domainApi(capture).get<MaintenanceProjectWorkspace>(`${projectBase(projectId)}/workspace`, { params })
     .then((response) => ({ ...response, data: normalizeWorkspace(response.data) }));
 
 /** v1.36：实收回款（05 快照）页面 CRUD——后端 operations_beta_router。 */
@@ -1218,32 +1235,32 @@ export interface CollectionPatchInput {
 
 export const createProjectCollection = (
   projectId: string,
-  input: CollectionCreateInput,
-) => api.post<MaintenanceCollectionSnapshotRow>(
+  input: CollectionCreateInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceCollectionSnapshotRow>(
   `${projectBase(projectId)}/collections`, input,
 );
 
 export const patchProjectCollection = (
   collectionId: string,
-  input: CollectionPatchInput,
-) => api.patch<MaintenanceCollectionSnapshotRow>(
+  input: CollectionPatchInput, capture?: ContextRequestTransport
+) => domainApi(capture).patch<MaintenanceCollectionSnapshotRow>(
   `/maintenance/projects/stable/collections/${encodeURIComponent(collectionId)}`,
   input,
 );
 
-export const downloadMaintenanceProjectWorkbook = (projectId: string) =>
-  api.get<Blob>(`${projectBase(projectId)}/workbook`, { responseType: "blob" });
+export const downloadMaintenanceProjectWorkbook = (projectId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<Blob>(`${projectBase(projectId)}/workbook`, { responseType: "blob" });
 
-export const downloadMaintenanceWorkbookValidationErrors = (validationToken: string) =>
-  api.get<Blob>(
+export const downloadMaintenanceWorkbookValidationErrors = (validationToken: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<Blob>(
     `/maintenance/workbook-validations/${encodeURIComponent(validationToken)}/errors.xlsx`,
     { responseType: "blob" },
   );
 
-export const validateMaintenanceProjectWorkbook = (projectId: string, file: File) => {
+export const validateMaintenanceProjectWorkbook = (projectId: string, file: File, capture?: ContextRequestTransport) => {
   const form = new FormData();
   form.append("file", file);
-  return api.post<MaintenanceWorkbookValidation>(
+  return domainApi(capture).post<MaintenanceWorkbookValidation>(
     `${projectBase(projectId)}/workbook/validate`,
     form,
     { timeout: 120000 },
@@ -1252,31 +1269,31 @@ export const validateMaintenanceProjectWorkbook = (projectId: string, file: File
 
 export const applyMaintenanceProjectWorkbook = (
   projectId: string,
-  input: MaintenanceWorkbookApplyInput,
-) => api.post<MaintenanceWorkbookApplyResult>(
+  input: MaintenanceWorkbookApplyInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceWorkbookApplyResult>(
   `${projectBase(projectId)}/workbook/apply`,
   input,
 );
 
-export const getMaintenanceManagerWorkbookStatus = (reportMonth: string) =>
-  api.get<MaintenanceManagerWorkbookStatus>(
+export const getMaintenanceManagerWorkbookStatus = (reportMonth: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<MaintenanceManagerWorkbookStatus>(
     "/maintenance/project-manager/workbooks/v3/status",
     { params: { report_month: reportMonth } },
   );
 
-export const downloadMaintenanceManagerWorkbook = (reportMonth: string) =>
-  api.get<Blob>("/maintenance/project-manager/workbooks/v3", {
+export const downloadMaintenanceManagerWorkbook = (reportMonth: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<Blob>("/maintenance/project-manager/workbooks/v3", {
     params: { report_month: reportMonth },
     responseType: "blob",
   });
 
 export const validateMaintenanceManagerWorkbook = (
   reportMonth: string,
-  file: File,
+  file: File, capture?: ContextRequestTransport
 ) => {
   const form = new FormData();
   form.append("file", file);
-  return api.post<MaintenanceManagerWorkbookValidation>(
+  return domainApi(capture).post<MaintenanceManagerWorkbookValidation>(
     "/maintenance/project-manager/workbooks/v3/validate",
     form,
     { params: { report_month: reportMonth }, timeout: 120000 },
@@ -1284,8 +1301,8 @@ export const validateMaintenanceManagerWorkbook = (
 };
 
 export const applyMaintenanceManagerWorkbook = (
-  input: { validation_token: string; data_version: string },
-) => api.post<MaintenanceManagerWorkbookApplyResult>(
+  input: { validation_token: string; data_version: string }, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceManagerWorkbookApplyResult>(
   "/maintenance/project-manager/workbooks/v3/apply",
   input,
 );
@@ -1297,8 +1314,8 @@ export const searchMaintenanceAcceptance = (
     approval_status?: "not_reviewed" | "approved" | "rejected";
     page?: number;
     page_size?: number;
-  } = {},
-) => api.post<MaintenanceAcceptanceDirectory>(
+  } = {}, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceAcceptanceDirectory>(
   "/maintenance/acceptance-deliverables/search",
   {
     q: input.q?.trim() || "",
@@ -1309,17 +1326,17 @@ export const searchMaintenanceAcceptance = (
   },
 );
 
-export const getMaintenanceAcceptance = (projectId: string) =>
-  api.get<MaintenanceAcceptanceDeliverable>(`${projectBase(projectId)}/acceptance`);
+export const getMaintenanceAcceptance = (projectId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<MaintenanceAcceptanceDeliverable>(`${projectBase(projectId)}/acceptance`);
 
 export const uploadMaintenanceAcceptanceAttachment = (
   projectId: string,
-  input: { file: File; idempotencyKey?: string },
+  input: { file: File; idempotencyKey?: string }, capture?: ContextRequestTransport
 ) => {
   // 2026-08-25 客户口径：一个上传口——只传文件本身（无版本握手）。
   const form = new FormData();
   form.append("file", input.file);
-  return api.post<MaintenanceAcceptanceMutationResult>(
+  return domainApi(capture).post<MaintenanceAcceptanceMutationResult>(
     `${projectBase(projectId)}/acceptance/attachments`,
     form,
     {
@@ -1333,22 +1350,22 @@ export const uploadMaintenanceAcceptanceAttachment = (
 
 export const deleteMaintenanceAcceptanceAttachment = (
   projectId: string,
-  fileId: string,
-) => api.delete<{ file_id: string; archived: boolean }>(
+  fileId: string, capture?: ContextRequestTransport
+) => domainApi(capture).delete<{ file_id: string; archived: boolean }>(
   `${projectBase(projectId)}/acceptance/attachments/${encodeURIComponent(fileId)}`,
 );
 
 export const submitMaintenanceAcceptance = (
   projectId: string,
-  input: { expected_version: number; idempotencyKey: string },
-) => api.post<MaintenanceAcceptanceMutationResult>(
+  input: { expected_version: number; idempotencyKey: string }, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceAcceptanceMutationResult>(
   `${projectBase(projectId)}/acceptance/submit`,
   { expected_version: input.expected_version },
   { headers: { "Idempotency-Key": input.idempotencyKey } },
 );
 
-export const downloadMaintenanceAcceptanceAttachment = (fileId: string) =>
-  api.get<Blob>(`/maintenance/acceptance-files/${encodeURIComponent(fileId)}`, {
+export const downloadMaintenanceAcceptanceAttachment = (fileId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<Blob>(`/maintenance/acceptance-files/${encodeURIComponent(fileId)}`, {
     responseType: "blob",
   });
 
@@ -1395,58 +1412,58 @@ export interface MaintenanceAcceptanceChecklistPreview {
   will_replace_rows: number;
 }
 
-export const getMaintenanceAcceptanceChecklist = (projectId: string) =>
-  api.get<MaintenanceAcceptanceChecklist>(
+export const getMaintenanceAcceptanceChecklist = (projectId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<MaintenanceAcceptanceChecklist>(
     `${projectBase(projectId)}/acceptance/checklist`);
 
-export const downloadAcceptanceChecklistTemplate = (projectId: string) =>
-  api.get<Blob>(
+export const downloadAcceptanceChecklistTemplate = (projectId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<Blob>(
     `${projectBase(projectId)}/acceptance/checklist/template`,
     { responseType: "blob" },
   );
 
 export const previewMaintenanceAcceptanceChecklist = (
   projectId: string,
-  input: { file: File; idempotencyKey: string },
+  input: { file: File; idempotencyKey: string }, capture?: ContextRequestTransport
 ) => {
   const form = new FormData();
   form.append("file", input.file);
-  return api.post<MaintenanceAcceptanceChecklistPreview>(
+  return domainApi(capture).post<MaintenanceAcceptanceChecklistPreview>(
     `${projectBase(projectId)}/acceptance/checklist/preview`,
     form,
     { headers: { "Idempotency-Key": input.idempotencyKey }, timeout: 120000 },
   );
 };
 
-export const applyMaintenanceAcceptanceChecklist = (batchId: string) =>
-  api.post<{ batch_id: string; item_rows: number; done_rows: number;
+export const applyMaintenanceAcceptanceChecklist = (batchId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).post<{ batch_id: string; item_rows: number; done_rows: number;
              todo_rows: number; replaced_batch_id: string | null }>(
     `/maintenance/acceptance-checklist/${encodeURIComponent(batchId)}/apply`);
 
 export const listMaintenanceCostGaps = (
   projectId: string,
-  params: { page?: number; page_size?: number } = {},
-) => api.get<MaintenanceCostGapDirectory>(`${projectBase(projectId)}/cost-gaps`, { params })
+  params: { page?: number; page_size?: number } = {}, capture?: ContextRequestTransport
+) => domainApi(capture).get<MaintenanceCostGapDirectory>(`${projectBase(projectId)}/cost-gaps`, { params })
   .then((response) => ({ ...response, data: normalizeCostGapDirectory(response.data) }));
 
 export const recomputeMaintenanceCostGaps = (
   projectId: string,
-  input: MaintenanceCostGapRecomputeInput,
-) => api.post<MaintenanceCostGapRecomputeResult>(
+  input: MaintenanceCostGapRecomputeInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceCostGapRecomputeResult>(
   `${projectBase(projectId)}/cost-gaps/recompute`,
   input,
 );
 
 export const updateMaintenanceCostGap = (
   projectId: string,
-  input: MaintenanceCostGapUpdate,
-) => api.patch<MaintenanceCostGapUpdateResult>(`${projectBase(projectId)}/cost-gaps`, input)
+  input: MaintenanceCostGapUpdate, capture?: ContextRequestTransport
+) => domainApi(capture).patch<MaintenanceCostGapUpdateResult>(`${projectBase(projectId)}/cost-gaps`, input)
   .then((response) => ({ ...response, data: normalizeCostGapUpdateResult(response.data) }));
 
 export const searchSiteIssueCandidates = (
   projectId: string,
-  input: { q?: string; page?: number; page_size?: number } = {},
-) => api.post<SiteIssueCandidateDirectory>(
+  input: { q?: string; page?: number; page_size?: number } = {}, capture?: ContextRequestTransport
+) => domainApi(capture).post<SiteIssueCandidateDirectory>(
   `/maintenance/site-issues/projects/${encodeURIComponent(projectId)}/candidates/search`,
   {
     ...(input.q?.trim() ? { q: input.q.trim() } : {}),
@@ -1475,8 +1492,8 @@ export interface SiteIssueDemandCandidateResult {
 /** 人工登记领用表单的关联维保需求单候选：收货地址建议预填的数据来源。 */
 export const getSiteIssueDemandCandidates = (
   projectId: string,
-  input: { partId?: number; q?: string; page?: number; pageSize?: number } = {},
-) => api.get<SiteIssueDemandCandidateResult>(
+  input: { partId?: number; q?: string; page?: number; pageSize?: number } = {}, capture?: ContextRequestTransport
+) => domainApi(capture).get<SiteIssueDemandCandidateResult>(
   `/maintenance/site-issues/projects/${encodeURIComponent(projectId)}/demand-candidates`,
   {
     params: {
@@ -1500,8 +1517,9 @@ export interface MaintenancePartCategory {
 }
 
 /** 只读当前主数据库品类；不使用需要主数据编辑权的分类管理端点。 */
-export const listMaintenancePartCategories = () =>
-  api.get<{ categories: MaintenancePartCategory[] }>("/parts/categories");
+export const listMaintenancePartCategories = (capture?: CapturedTransport) =>
+  capture ? api.get<{ categories: MaintenancePartCategory[] }>("/parts/categories", transportConfig(capture))
+    : api.get<{ categories: MaintenancePartCategory[] }>("/parts/categories");
 
 function categoryFilterParams(input: MaintenanceCategoryFilterInput): MaintenanceCategoryFilterInput {
   return {
@@ -1519,8 +1537,8 @@ export const searchSiteIssues = (
     workflow_statuses?: SiteIssueWorkflowStatus[];
     page?: number;
     page_size?: number;
-  } & MaintenanceCategoryFilterInput,
-) => api.post<SiteIssueDirectory>("/maintenance/site-issues/search", {
+  } & MaintenanceCategoryFilterInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<SiteIssueDirectory>("/maintenance/site-issues/search", {
   project_id: input.project_id,
   ...(input.issue_id ? { issue_id: input.issue_id } : {}),
   ...categoryFilterParams(input),
@@ -1533,8 +1551,8 @@ export const searchSiteIssues = (
 
 export const createSiteIssueDraft = (
   projectId: string,
-  input: SiteIssueDraftInput,
-) => api.post<SiteIssueDocument>(
+  input: SiteIssueDraftInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<SiteIssueDocument>(
   `/maintenance/site-issues/projects/${encodeURIComponent(projectId)}`,
   input,
 );
@@ -1574,8 +1592,8 @@ export interface SiteIssueLineCorrectionReceipt {
 export const correctSiteIssueLine = (
   issueId: string,
   issueLineId: string,
-  input: SiteIssueLineCorrectionInput,
-) => api.patch<SiteIssueLineCorrectionReceipt>(
+  input: SiteIssueLineCorrectionInput, capture?: ContextRequestTransport
+) => domainApi(capture).patch<SiteIssueLineCorrectionReceipt>(
   `${siteIssueBase(issueId)}/lines/${encodeURIComponent(issueLineId)}`,
   input,
 );
@@ -1608,57 +1626,57 @@ export interface SiteIssueHeaderCorrectionReceipt {
 /** 单头独立命令：地址影响整单；日期、内部单号修改按既有规则重算全单成本。 */
 export const correctSiteIssueHeader = (
   issueId: string,
-  input: SiteIssueHeaderCorrectionInput,
-) => api.patch<SiteIssueHeaderCorrectionReceipt>(`${siteIssueBase(issueId)}/header`, input);
+  input: SiteIssueHeaderCorrectionInput, capture?: ContextRequestTransport
+) => domainApi(capture).patch<SiteIssueHeaderCorrectionReceipt>(`${siteIssueBase(issueId)}/header`, input);
 
 export const patchSiteIssue = (
   issueId: string,
-  input: SiteIssuePatchInput,
-) => api.patch<SiteIssueDocument>(siteIssueBase(issueId), input);
+  input: SiteIssuePatchInput, capture?: ContextRequestTransport
+) => domainApi(capture).patch<SiteIssueDocument>(siteIssueBase(issueId), input);
 
 export const previewSiteIssue = (
   issueId: string,
-  input: Pick<SiteIssueCommandInput, "project_id" | "version">,
-) => api.post<SiteIssuePreview>(`${siteIssueBase(issueId)}/preview`, input);
+  input: Pick<SiteIssueCommandInput, "project_id" | "version">, capture?: ContextRequestTransport
+) => domainApi(capture).post<SiteIssuePreview>(`${siteIssueBase(issueId)}/preview`, input);
 
 export const confirmSiteIssue = (
   issueId: string,
-  input: SiteIssueCommandInput,
-) => api.post<SiteIssueDocument>(`${siteIssueBase(issueId)}/confirm`, input);
+  input: SiteIssueCommandInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<SiteIssueDocument>(`${siteIssueBase(issueId)}/confirm`, input);
 
 export const voidSiteIssue = (
   issueId: string,
-  input: SiteIssueCommandInput,
-) => api.post<SiteIssueDocument>(`${siteIssueBase(issueId)}/void`, input);
+  input: SiteIssueCommandInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<SiteIssueDocument>(`${siteIssueBase(issueId)}/void`, input);
 
 /** 页面人工登记领用（page_manual）：不依赖仓库发货候选，录入即确认。 */
 export const previewManualSiteIssue = (
   projectId: string,
-  input: Omit<ManualSiteIssueBaseInput, "idempotency_key" | "reason">,
-) => api.post<ManualSiteIssuePreview>(
+  input: Omit<ManualSiteIssueBaseInput, "idempotency_key" | "reason">, capture?: ContextRequestTransport
+) => domainApi(capture).post<ManualSiteIssuePreview>(
   `/maintenance/site-issues/manual/preview?project_id=${encodeURIComponent(projectId)}`,
   input,
 );
 
 export const createManualSiteIssue = (
   projectId: string,
-  input: ManualSiteIssueCreateInput,
-) => api.post<SiteIssueDocument>(
+  input: ManualSiteIssueCreateInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<SiteIssueDocument>(
   `/maintenance/site-issues/projects/${encodeURIComponent(projectId)}/manual`,
   input,
 );
 
 export const patchManualSiteIssue = (
   issueId: string,
-  input: ManualSiteIssuePatchInput,
-) => api.patch<SiteIssueDocument>(
+  input: ManualSiteIssuePatchInput, capture?: ContextRequestTransport
+) => domainApi(capture).patch<SiteIssueDocument>(
   `/maintenance/site-issues/manual/${encodeURIComponent(issueId)}`,
   input,
 );
 
 export const searchMaintenanceReturnObligations = (
-  input: MaintenanceReturnObligationSearchInput,
-) => api.post<MaintenanceReturnObligationDirectory>(
+  input: MaintenanceReturnObligationSearchInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceReturnObligationDirectory>(
   "/maintenance/return-obligations/search",
   {
     project_id: input.project_id,
@@ -1675,7 +1693,7 @@ export const searchMaintenanceBadReturns = (input: {
   statuses?: MaintenanceBadReturnStatus[];
   page?: number;
   page_size?: number;
-}) => api.post<MaintenanceBadReturnDirectory>("/maintenance/bad-returns/search", {
+}, capture?: ContextRequestTransport) => domainApi(capture).post<MaintenanceBadReturnDirectory>("/maintenance/bad-returns/search", {
   project_id: input.project_id,
   ...(input.statuses ? { statuses: input.statuses } : {}),
   page: input.page ?? 1,
@@ -1689,35 +1707,35 @@ export const createMaintenanceBadReturnDraft = (input: {
   lines: { obligation_id: string; quantity: number }[];
   note?: string;
   reason: string;
-}) => api.post<MaintenanceBadReturn>("/maintenance/bad-returns", input);
+}, capture?: ContextRequestTransport) => domainApi(capture).post<MaintenanceBadReturn>("/maintenance/bad-returns", input);
 
 const badReturnBase = (returnId: string) =>
   `/maintenance/bad-returns/${encodeURIComponent(returnId)}`;
 
 export const submitMaintenanceBadReturn = (
   returnId: string,
-  input: MaintenanceBadReturnCommandInput,
-) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/submit`, input);
+  input: MaintenanceBadReturnCommandInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/submit`, input);
 
 export const markMaintenanceBadReturnInTransit = (
   returnId: string,
-  input: MaintenanceBadReturnCommandInput & { logistics_reference: string },
-) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/in-transit`, input);
+  input: MaintenanceBadReturnCommandInput & { logistics_reference: string }, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/in-transit`, input);
 
 export const confirmMaintenanceBadReturnWarehouse = (
   returnId: string,
   input: MaintenanceBadReturnCommandInput & {
     warehouse_reference: string;
     inbound_reference?: string;
-  },
-) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/warehouse-confirm`, input);
+  }, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/warehouse-confirm`, input);
 
 export const voidMaintenanceBadReturn = (
   returnId: string,
-  input: MaintenanceBadReturnCommandInput,
-) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/void`, input);
+  input: MaintenanceBadReturnCommandInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/void`, input);
 
-export const listMaintenanceReturnCategories = () => api.get<{
+export const listMaintenanceReturnCategories = ( capture?: ContextRequestTransport) => domainApi(capture).get<{
   categories: MaintenanceReturnCategory[];
 }>("/maintenance/return-categories");
 
@@ -1729,8 +1747,8 @@ export const resolveMaintenanceReturnObligationCategory = (
     category_id: number;
     idempotency_key: string;
     reason: string;
-  },
-) => api.post<MaintenanceReturnObligation>(
+  }, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceReturnObligation>(
   `/maintenance/return-obligations/${encodeURIComponent(obligationId)}/resolve-category`,
   input,
 );
@@ -1775,12 +1793,12 @@ export interface MaintenanceFrontStockSummary {
   stale_90d_count: number;
 }
 
-export const getMaintenanceProjectFrontStock = (projectId: string) =>
-  api.get<MaintenanceFrontStockSummary>(`${projectBase(projectId)}/front-stock`);
+export const getMaintenanceProjectFrontStock = (projectId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<MaintenanceFrontStockSummary>(`${projectBase(projectId)}/front-stock`);
 
 /** 官方返还率（独立端点；与 workspace 内嵌的 return_rate 同源同形状）。 */
-export const getMaintenanceProjectReturnRate = (projectId: string) =>
-  api.get<MaintenanceReturnRate>(`${projectBase(projectId)}/return-rate`);
+export const getMaintenanceProjectReturnRate = (projectId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<MaintenanceReturnRate>(`${projectBase(projectId)}/return-rate`);
 
 export interface MaintenanceRecoveryGoodReturnedRow {
   source_ref: string;
@@ -1808,8 +1826,8 @@ export interface MaintenanceRecoverySummary {
   remaining_total_qty: number;
 }
 
-export const getMaintenanceProjectRecoverySummary = (projectId: string) =>
-  api.get<MaintenanceRecoverySummary>(`${projectBase(projectId)}/recovery-summary`);
+export const getMaintenanceProjectRecoverySummary = (projectId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<MaintenanceRecoverySummary>(`${projectBase(projectId)}/recovery-summary`);
 
 export interface MaintenanceSalvageRow {
   salvage_id: string;
@@ -1843,12 +1861,12 @@ export interface MaintenanceSalvageDirectory {
 }
 
 /** 坏件变卖清单：读端要求 data_profit（含成本与毛利），无权限 403。 */
-export const listMaintenanceSalvages = (projectId: string) =>
-  api.get<MaintenanceSalvageDirectory>(`${projectBase(projectId)}/salvages`);
+export const listMaintenanceSalvages = (projectId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<MaintenanceSalvageDirectory>(`${projectBase(projectId)}/salvages`);
 
 /** 项目工作簿 v3 导出（要求同时具备 data_profit 与 data_purchase_cost）。 */
-export const downloadMaintenanceProjectWorkbookV3 = (projectId: string) =>
-  api.get<Blob>(`${projectBase(projectId)}/workbook-v3.xlsx`, { responseType: "blob" });
+export const downloadMaintenanceProjectWorkbookV3 = (projectId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<Blob>(`${projectBase(projectId)}/workbook-v3.xlsx`, { responseType: "blob" });
 
 export interface MaintenanceCollectionEvidenceRow {
   evidence_id: string;
@@ -1884,18 +1902,18 @@ export interface MaintenanceCollectionEvidenceUploadResult {
   close_reason?: string | null;
 }
 
-export const listMaintenanceCollectionEvidence = (milestoneId: string) =>
-  api.get<MaintenanceCollectionEvidenceDirectory>(
+export const listMaintenanceCollectionEvidence = (milestoneId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<MaintenanceCollectionEvidenceDirectory>(
     `/maintenance/collection-milestones/${encodeURIComponent(milestoneId)}/evidence`,
   );
 
 export const uploadMaintenanceCollectionEvidence = (
   milestoneId: string,
-  file: File,
+  file: File, capture?: ContextRequestTransport
 ) => {
   const form = new FormData();
   form.append("file", file);
-  return api.post<MaintenanceCollectionEvidenceUploadResult>(
+  return domainApi(capture).post<MaintenanceCollectionEvidenceUploadResult>(
     `/maintenance/collection-milestones/${encodeURIComponent(milestoneId)}/evidence`,
     form,
     { timeout: 120000 },
@@ -1942,8 +1960,8 @@ export interface MaintenanceExpenseReconcileDirectory {
 
 /** 报销对账（仅 admin/boss + data_profit）。 */
 export const getMaintenanceExpenseReconcile = (
-  params: { limit?: number; offset?: number } = {},
-) => api.get<MaintenanceExpenseReconcileDirectory>(
+  params: { limit?: number; offset?: number } = {}, capture?: ContextRequestTransport
+) => domainApi(capture).get<MaintenanceExpenseReconcileDirectory>(
   "/maintenance/reconcile/expenses",
   { params },
 );
@@ -2070,15 +2088,15 @@ export interface ReturnReceiptDemandCandidate {
 
 export const getReturnReceiptDemands = (
   projectId: string,
-  input: { page?: number; page_size?: number; q?: string; part_id?: number; receipt_id?: string } = {},
+  input: { page?: number; page_size?: number; q?: string; part_id?: number; receipt_id?: string } = {}, capture?: ContextRequestTransport
 ) =>
-  api.get<{ rows: ReturnReceiptDemandCandidate[]; total: number; page: number; page_size: number }>(
+  domainApi(capture).get<{ rows: ReturnReceiptDemandCandidate[]; total: number; page: number; page_size: number }>(
     `/maintenance/projects/stable/${encodeURIComponent(projectId)}/return-receipt-demands`,
     { params: { page: input.page ?? 1, page_size: input.page_size ?? 100, ...(input.q?.trim() ? { q: input.q.trim() } : {}), ...(input.part_id ? { part_id: input.part_id } : {}), ...(input.receipt_id ? { receipt_id: input.receipt_id } : {}) } },
   );
 
-export const getReturnReceiptSummary = (projectId: string) =>
-  api.get<ReturnReceiptSummary>(`/maintenance/projects/stable/${encodeURIComponent(projectId)}/return-receipt-summary`);
+export const getReturnReceiptSummary = (projectId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<ReturnReceiptSummary>(`/maintenance/projects/stable/${encodeURIComponent(projectId)}/return-receipt-summary`);
 
 export const searchReturnReceipts = (
   projectId: string,
@@ -2090,8 +2108,8 @@ export const searchReturnReceipts = (
     source_order_id?: string;
     source?: "rkd_import" | "manual";
     unassigned?: boolean;
-  } & MaintenanceCategoryFilterInput = {},
-) => api.get<ReturnReceiptSearchResult>(returnReceiptBase(projectId), {
+  } & MaintenanceCategoryFilterInput = {}, capture?: ContextRequestTransport
+) => domainApi(capture).get<ReturnReceiptSearchResult>(returnReceiptBase(projectId), {
   params: {
     ...categoryFilterParams(input),
     page: input.page ?? 1,
@@ -2106,26 +2124,26 @@ export const searchReturnReceipts = (
 
 export const createReturnReceipt = (
   projectId: string,
-  input: ReturnReceiptCreateInput,
-) => api.post<ReturnReceipt & { replayed: boolean }>(returnReceiptBase(projectId), input);
+  input: ReturnReceiptCreateInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<ReturnReceipt & { replayed: boolean }>(returnReceiptBase(projectId), input);
 
 export const updateReturnReceipt = (
   receiptId: string,
-  input: ReturnReceiptUpdateInput,
-) => api.patch<ReturnReceipt>(
+  input: ReturnReceiptUpdateInput, capture?: ContextRequestTransport
+) => domainApi(capture).patch<ReturnReceipt>(
   `/maintenance/return-receipts/${encodeURIComponent(receiptId)}`,
   input,
 );
 
 export const voidReturnReceipt = (
   receiptId: string,
-  input: { version: number; reason: string },
-) => api.post<ReturnReceipt>(
+  input: { version: number; reason: string }, capture?: ContextRequestTransport
+) => domainApi(capture).post<ReturnReceipt>(
   `/maintenance/return-receipts/${encodeURIComponent(receiptId)}/void`,
   input,
 );
 
-export const getReturnReceiptAudit = (receiptId: string) =>
-  api.get<{ receipt_id: string; items: ReturnReceiptAuditEntry[] }>(
+export const getReturnReceiptAudit = (receiptId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<{ receipt_id: string; items: ReturnReceiptAuditEntry[] }>(
     `/maintenance/return-receipts/${encodeURIComponent(receiptId)}/audit`,
   );

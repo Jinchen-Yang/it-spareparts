@@ -1,3 +1,8 @@
+import { useContextTransport } from "../../../authz/domainTransport";
+import { withContextSurface } from "../../../authz/ContextSurface";
+import { surfaceRule } from "../../../authz/rules";
+import { useCollectionPermissions } from "./collectionAuthorization";
+import { readPermissionMap } from "../../../nav";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { App, Alert, Button, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -227,6 +232,11 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
   const sessionRef = useRef<{ projectId: string; token: number } | null>(null);
   const busyRef = useRef(false);
   const epochRef = useRef(0);
+  const [attempt, setAttempt] = useState(0);
+  const legacy = readPermissionMap();
+  const permits = useCollectionPermissions(!!legacy.action_maintenance_roundtrip_apply && !!legacy.data_profit);
+  const transport = useContextTransport(`collection-batch:${projectId}:${attempt}:${mode}:${open}`, true);
+  const readTransport = useContextTransport(`collection-verify:${projectId}`, true);
 
   const activeSelected = useMemo(() => selectedRows.filter((row) => row.status !== "void"), [selectedRows]);
   const hasUnknown = results.some((row) => row.outcome === "unknown"
@@ -254,6 +264,7 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
   }, []);
 
   const loadContracts = async () => {
+    if (!permits.canContracts || !transport.isCurrent()) return;
     const epoch = epochRef.current;
     setContractsState("loading");
     try {
@@ -261,16 +272,19 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
         collection_page_size: 1,
         requisition_page_size: 1,
         expense_page_size: 1,
-      });
-      if (epoch !== epochRef.current) return;
+      }, transport);
+      if (!permits.legacy && response.data.block_access?.contracts.effect !== "allow") throw new Error("无当前项目合同读取权限");
+      if (!transport.isCurrent() || epoch !== epochRef.current) return;
       setContracts(Array.isArray(response.data.project?.contracts) ? response.data.project.contracts : []);
       setContractsState("done");
     } catch {
-      if (epoch === epochRef.current) setContractsState("error");
+      if (transport.isCurrent() && epoch === epochRef.current) setContractsState("error");
     }
   };
 
   const initialize = (nextMode: BatchMode) => {
+    epochRef.current += 1;
+    setAttempt(value => value + 1);
     setMode(nextMode);
     setPhase("input");
     setReason("");
@@ -278,13 +292,17 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
     setError(null);
     if (nextMode === "create") {
       setCreateDrafts([newCreateDraft()]);
-      void loadContracts();
     } else {
       setEditDrafts(activeSelected.map(toEditDraft));
     }
   };
 
+  useEffect(() => {
+    if (open && mode === "create") void loadContracts();
+  }, [open, mode, projectId, attempt]);
+
   const openMode = (nextMode: BatchMode) => {
+    if (!(nextMode === "create" ? permits.canCreate : permits.canUpdate)) return;
     if (busyRef.current) return;
     if (hasUnknown) {
       setOpen(true);
@@ -311,13 +329,14 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
     const epoch = epochRef.current;
     try {
       const refreshed = await onRefresh();
-      if (epoch === epochRef.current && !refreshed) message.error(refreshFailure);
+      if (readTransport.isCurrent() && epoch === epochRef.current && !refreshed) message.error(refreshFailure);
     } catch {
-      if (epoch === epochRef.current) message.error(refreshFailure);
+      if (readTransport.isCurrent() && epoch === epochRef.current) message.error(refreshFailure);
     }
   };
 
   const readAllCollections = async (isCurrent: () => boolean) => {
+    if (!permits.canReadSnapshots) throw new Error("无当前项目实收记录读取权限");
     const all: MaintenanceCollectionSnapshotRow[] = [];
     let page = 1;
     while (isCurrent()) {
@@ -326,7 +345,9 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
         collection_page_size: COLLECTION_BATCH_LIMITS.pageSize,
         requisition_page_size: 1,
         expense_page_size: 1,
-      });
+      }, readTransport);
+      if (!permits.legacy && (response.data.block_access?.collection_snapshots.effect !== "allow"
+          || response.data.collection_snapshots.total == null)) throw new Error("无当前项目实收记录读取权限");
       if (!isCurrent()) return null;
       const block = response.data.collection_snapshots;
       all.push(...(Array.isArray(block?.rows) ? block.rows : []));
@@ -453,7 +474,7 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
   };
 
   const submitLines = async (retry: boolean) => {
-    if (busyRef.current) return;
+    if (busyRef.current || !transport.isCurrent() || !(mode === "create" ? permits.canCreate : permits.canUpdate)) return;
     let pending: ResultLine[];
     let ordered: ResultLine[];
     if (retry) {
@@ -476,7 +497,7 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
     sessionRef.current = session;
     const isCurrent = () => sessionRef.current === session
       && session.projectId === projectId
-      && session.token === epochRef.current;
+      && session.token === epochRef.current && transport.isCurrent();
     busyRef.current = true;
     setError(null);
     setResults([...ordered]);
@@ -498,13 +519,13 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
             receipt_reference: line.receipt_reference,
             remark: line.remark,
             reason: line.reason,
-          });
+          }, transport);
         } else {
           await patchProjectCollection(line.collection_id, {
             version: line.version,
             reason: line.reason,
             ...line.updates,
-          });
+          }, transport);
         }
         if (!isCurrent()) return;
         next = { ...pendingRow, outcome: "ok", detail: "已写入" };
@@ -573,6 +594,7 @@ export function useCollectionBatchMaintenance({ projectId, selectedRows, onRefre
   };
 
   return {
+    canCreate: permits.canCreate, canUpdate: permits.canUpdate,
     open,
     mode,
     phase,
@@ -606,7 +628,7 @@ const outcomeLabel: Record<LineOutcome, { text: string; color?: string }> = {
   unknown: { text: "结果未知", color: "orange" },
 };
 
-export default function CollectionBatchMaintenance(props: BatchHookArgs) {
+function CollectionBatchMaintenanceContent(props: BatchHookArgs) {
   const batch = useCollectionBatchMaintenance(props);
   const activeCount = props.selectedRows.filter((row) => row.status !== "void").length;
   const resultColumns: ColumnsType<ResultLine> = [
@@ -713,9 +735,9 @@ export default function CollectionBatchMaintenance(props: BatchHookArgs) {
   return (
     <>
       <Space size={4} wrap>
-        <Button size="small" onClick={() => batch.openMode("create")}>批量登记</Button>
-        <Button size="small" disabled={activeCount === 0} onClick={() => batch.openMode("edit")}>批量修改{activeCount ? `（${activeCount}）` : ""}</Button>
-        <Button size="small" danger disabled={activeCount === 0} onClick={() => batch.openMode("void")}>批量作废{activeCount ? `（${activeCount}）` : ""}</Button>
+        {batch.canCreate && <Button size="small" onClick={() => batch.openMode("create")}>批量登记</Button>}
+        {batch.canUpdate && <Button size="small" disabled={activeCount === 0} onClick={() => batch.openMode("edit")}>批量修改{activeCount ? `（${activeCount}）` : ""}</Button>}
+        {batch.canUpdate && <Button size="small" danger disabled={activeCount === 0} onClick={() => batch.openMode("void")}>批量作废{activeCount ? `（${activeCount}）` : ""}</Button>}
       </Space>
       <Modal
         open={batch.open}
@@ -782,3 +804,5 @@ export default function CollectionBatchMaintenance(props: BatchHookArgs) {
     </>
   );
 }
+
+export default withContextSurface(CollectionBatchMaintenanceContent, surfaceRule("maintenance_collection.manage_actuals"), props => props.projectId);

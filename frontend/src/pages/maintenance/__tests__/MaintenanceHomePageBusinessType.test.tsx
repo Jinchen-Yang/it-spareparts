@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -277,3 +278,8 @@ describe("维保主页 · 业务类型筛选", () => {
     expect(await screen.findByText(/请勾上「未标注」或清空业务类型筛选/)).toBeInTheDocument();
   });
 });
+
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

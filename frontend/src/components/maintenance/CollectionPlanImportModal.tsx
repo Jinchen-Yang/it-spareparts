@@ -1,3 +1,8 @@
+import { useContextAdmission } from "../../authz/access";
+import { actionRule } from "../../authz/rules";
+import { useContextTransport, withTransportSignal } from "../../authz/domainTransport";
+import { withContextSurface } from "../../authz/ContextSurface";
+import { authorizationErrorText } from "../../authz/requestLifecycle";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Card, ConfigProvider, Form, Input, Modal, Select, Space, Steps } from "antd";
 
@@ -51,11 +56,16 @@ function errorStatus(reason: unknown): number | null {
   return (reason as { response?: { status?: number } })?.response?.status ?? null;
 }
 
-export default function CollectionPlanImportModal({
+function CollectionPlanImportModalContent({
   open,
   onClose,
   onApplied,
 }: CollectionPlanImportModalProps) {
+  const admission = useContextAdmission();
+  const allowed = (resource: string, action: string) => admission.state(actionRule(resource, action), true) !== "deny";
+  const canPreview = allowed("maintenance_collection_plan_import", "preview");
+  const canApply = allowed("maintenance_collection_plan_import", "apply");
+  const canBindings = allowed("maintenance_collection_plan_import_read", "read");
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<CollectionPreviewResponse | null>(null);
   const [previewing, setPreviewing] = useState(false);
@@ -69,10 +79,16 @@ export default function CollectionPlanImportModal({
   const [applyResult, setApplyResult] = useState<CollectionApplyResponse | null>(null);
   const previewKeyRef = useRef<string | null>(null);
   const bindingSearchControllerRef = useRef<AbortController | null>(null);
+  const commandAbort = useRef(new AbortController());
   const sessionGenerationRef = useRef(0);
+
+  const transport = useContextTransport(JSON.stringify([open, sessionGenerationRef.current]), true);
+  useEffect(() => () => { sessionGenerationRef.current += 1; commandAbort.current.abort(); bindingSearchControllerRef.current?.abort(); }, []);
 
   const resetImportSession = useCallback(() => {
     sessionGenerationRef.current += 1;
+    commandAbort.current.abort();
+    commandAbort.current = new AbortController();
     bindingSearchControllerRef.current?.abort();
     bindingSearchControllerRef.current = null;
     previewKeyRef.current = null;
@@ -103,14 +119,14 @@ export default function CollectionPlanImportModal({
   };
 
   const runPreview = async () => {
-    if (!file || previewing) return;
+    if (!open || !canPreview || !transport.isCurrent() || !file || previewing) return;
     const sessionGeneration = sessionGenerationRef.current;
     if (!previewKeyRef.current) previewKeyRef.current = newPreviewKey();
     setPreviewing(true);
     setPreviewError(null);
     try {
-      const { data } = await previewCollectionPlan(file, previewKeyRef.current);
-      if (sessionGeneration !== sessionGenerationRef.current) return;
+      const { data } = await previewCollectionPlan(file, previewKeyRef.current, withTransportSignal(transport, commandAbort.current.signal));
+      if (!transport.isCurrent() || sessionGeneration !== sessionGenerationRef.current) return;
       setPreview(data);
       setBindings({});
       setBindingOptions({});
@@ -119,17 +135,17 @@ export default function CollectionPlanImportModal({
       setApplyResult(null);
       setCurrentStep(1);
     } catch (reason_) {
-      if (sessionGeneration !== sessionGenerationRef.current) return;
+      if (!transport.isCurrent() || sessionGeneration !== sessionGenerationRef.current) return;
       const status = errorStatus(reason_);
       setPreviewError(
         status === 409
           ? COLLECTION_IMPORT.versionConflict
           : status === 403
             ? COLLECTION_IMPORT.permissionDenied
-            : errorDetailMessage(reason_) || COLLECTION_IMPORT.previewFailed,
+            : authorizationErrorText(reason_, errorDetailMessage(reason_) || COLLECTION_IMPORT.previewFailed),
       );
     } finally {
-      if (sessionGeneration === sessionGenerationRef.current) setPreviewing(false);
+      if (transport.isCurrent() && sessionGeneration === sessionGenerationRef.current) setPreviewing(false);
     }
   };
 
@@ -139,6 +155,7 @@ export default function CollectionPlanImportModal({
   };
 
   const handleBindingSearch = (rowKey: string, value: string) => {
+    if (!open || !canBindings || !preview || !transport.isCurrent()) return;
     const query = value.trim();
     if (query.length < 2) return;
     bindingSearchControllerRef.current?.abort();
@@ -148,14 +165,14 @@ export default function CollectionPlanImportModal({
     void searchCollectionPlanBindingOptions(
       preview?.batch_id ?? "",
       { q: query, page: 1, page_size: BINDING_OPTIONS_PAGE_SIZE },
-      { signal: controller.signal },
+      { signal: controller.signal }, transport,
     )
       .then(({ data }) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || !transport.isCurrent()) return;
         setBindingOptions((current) => ({ ...current, [rowKey]: { options: data.rows, loading: false } }));
       })
       .catch(() => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || !transport.isCurrent()) return;
         setBindingOptions((current) => ({ ...current, [rowKey]: { options: [], loading: false } }));
       });
   };
@@ -182,7 +199,7 @@ export default function CollectionPlanImportModal({
   const canGoToApply = allPendingBound && reassignmentReasonOk;
 
   const handleApply = async () => {
-    if (!preview || !canGoToApply || applying) return;
+    if (!open || !canApply || !transport.isCurrent() || !preview || !canGoToApply || applying) return;
     const sessionGeneration = sessionGenerationRef.current;
     const body: CollectionApplyRequest = {
       expected_batch_version: preview.batch_version,
@@ -209,21 +226,21 @@ export default function CollectionPlanImportModal({
     setApplying(true);
     setApplyError(null);
     try {
-      const { data } = await applyCollectionPlan(preview.batch_id, body);
-      if (sessionGeneration !== sessionGenerationRef.current) return;
+      const { data } = await applyCollectionPlan(preview.batch_id, body, withTransportSignal(transport, commandAbort.current.signal));
+      if (!transport.isCurrent() || sessionGeneration !== sessionGenerationRef.current) return;
       setApplyResult(data);
     } catch (reason_) {
-      if (sessionGeneration !== sessionGenerationRef.current) return;
+      if (!transport.isCurrent() || sessionGeneration !== sessionGenerationRef.current) return;
       const status = errorStatus(reason_);
       setApplyError(
         status === 409
           ? COLLECTION_IMPORT.versionConflict
           : status === 403
             ? COLLECTION_IMPORT.permissionDenied
-            : errorDetailMessage(reason_) || COLLECTION_IMPORT.applyFailed,
+            : authorizationErrorText(reason_, errorDetailMessage(reason_) || COLLECTION_IMPORT.applyFailed),
       );
     } finally {
-      if (sessionGeneration === sessionGenerationRef.current) setApplying(false);
+      if (transport.isCurrent() && sessionGeneration === sessionGenerationRef.current) setApplying(false);
     }
   };
 
@@ -241,7 +258,7 @@ export default function CollectionPlanImportModal({
         title={COLLECTION_IMPORT.title}
         width={760}
         destroyOnHidden
-        onCancel={onClose}
+        onCancel={() => { resetImportSession(); onClose(); }}
         footer={null}
       >
         <Steps current={currentStep} size="small" items={steps} style={{ marginBottom: 16 }} />
@@ -263,7 +280,7 @@ export default function CollectionPlanImportModal({
           {previewError && <Alert type="error" showIcon message={previewError} />}
           <Button
             type="primary"
-            disabled={!file || previewing}
+            disabled={!canPreview || !file || previewing}
             loading={previewing}
             onClick={() => void runPreview()}
           >
@@ -329,7 +346,7 @@ export default function CollectionPlanImportModal({
             <Button onClick={handleRepreview}>{COLLECTION_IMPORT.repreview}</Button>
             <Button
               type="primary"
-              disabled={!canGoToBindingsReview}
+              disabled={!canApply || !canGoToBindingsReview}
               onClick={() => setCurrentStep(2)}
             >
               {COLLECTION_IMPORT.nextStep}
@@ -356,6 +373,7 @@ export default function CollectionPlanImportModal({
                     id={`mcr-binding-project-${row.row_key}`}
                     placeholder={COLLECTION_IMPORT.bindingSearchPlaceholder}
                     style={{ width: 280 }}
+                    disabled={!canBindings}
                     showSearch
                     filterOption={false}
                     virtual={false}
@@ -423,6 +441,7 @@ export default function CollectionPlanImportModal({
           <Button
             type="primary"
             onClick={() => {
+              if (!transport.isCurrent()) return;
               onApplied();
               onClose();
             }}
@@ -446,8 +465,8 @@ export default function CollectionPlanImportModal({
           })}
           {applyError && <Alert type="error" showIcon message={applyError} />}
           <Space>
-            <Button onClick={() => setCurrentStep(2)}>{COLLECTION_IMPORT.prevStep}</Button>
-            <Button type="primary" loading={applying} onClick={() => void handleApply()}>
+            <Button disabled={applying} onClick={() => setCurrentStep(2)}>{COLLECTION_IMPORT.prevStep}</Button>
+            <Button type="primary" disabled={!canApply} loading={applying} onClick={() => void handleApply()}>
               {COLLECTION_IMPORT.apply}
             </Button>
           </Space>
@@ -457,3 +476,6 @@ export default function CollectionPlanImportModal({
     </ConfigProvider>
   );
 }
+
+export default withContextSurface(CollectionPlanImportModalContent,
+  actionRule("maintenance_collection_plan_import", "preview"), props => props.open);

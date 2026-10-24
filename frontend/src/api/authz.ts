@@ -431,6 +431,7 @@ export function validateCatalog(v: AuthzCatalog): AuthzCatalog {
       !validResourceState(m) ||
       typeof m.id !== "string" ||
       typeof m.label !== "string" ||
+      !uniqueStrings(m.legacy_sources) ||
       !Array.isArray(m.actions) ||
       !Array.isArray(m.field_permissions) ||
       !Array.isArray(m.scopes) ||

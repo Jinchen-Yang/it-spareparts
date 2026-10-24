@@ -1,3 +1,8 @@
+import { contextInputKey } from "../../authz/context";
+import { withContextSurface, contextSurfaces } from "../../authz/ContextSurface";
+import { useContextAdmission } from "../../authz/access";
+import { useContextTransport, withTransportSignal } from "../../authz/domainTransport";
+import { actionRule } from "../../authz/rules";
 import { App, Alert, Button, Card, Checkbox, Empty, Input, InputNumber, List, Modal, Space, Spin, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -63,9 +68,9 @@ const emptyEditor = (): EditorValues => ({
   reason: "",
 });
 
-export default function SiteIssueWorkflowPanel({
+function SiteIssueWorkflowPanel({
   projectId,
-  canManage,
+  canManage: legacyCanManage,
   onChanged,
   registerRefresh,
 }: {
@@ -75,6 +80,14 @@ export default function SiteIssueWorkflowPanel({
   registerRefresh?: RegisterPanelRefresh;
 }) {
   const { message } = App.useApp();
+  const admission = useContextAdmission();
+  const canManage = admission.surface("maintenance_issue.workflow", legacyCanManage) !== "deny";
+  const canManual = admission.surface("maintenance_issue.manual", legacyCanManage) !== "deny";
+  const can = (action: string) => canManage && admission.state(actionRule("maintenance_issue", action), legacyCanManage) !== "deny";
+  const capture = useContextTransport(projectId, legacyCanManage);
+  const issueAbort = useRef<AbortController | null>(null), candidateAbort = useRef<AbortController | null>(null), previewAbort = useRef<AbortController | null>(null);
+  const issueContext = useRef<string>(), candidateContext = useRef<string>();
+  useEffect(() => () => { issueAbort.current?.abort(); candidateAbort.current?.abort(); previewAbort.current?.abort(); }, []);
   const [issues, setIssues] = useState<SiteIssueDocument[]>([]);
   const [candidates, setCandidates] = useState<SiteIssueCandidate[]>([]);
   const [issueTotal, setIssueTotal] = useState(0);
@@ -110,9 +123,16 @@ export default function SiteIssueWorkflowPanel({
   const [voiding, setVoiding] = useState(false);
   const [voidError, setVoidError] = useState<string | null>(null);
 
+  const editorCapture = useContextTransport(JSON.stringify([projectId, editorOpen, editing?.issue_id, editing?.version, editor, selected]), legacyCanManage);
+  const confirmCapture = useContextTransport(JSON.stringify([projectId, preview?.issue_id, preview?.version, confirmReason]), legacyCanManage);
+  const voidCapture = useContextTransport(JSON.stringify([projectId, voidTarget?.issue_id, voidTarget?.version, voidReason]), legacyCanManage);
   activeProject.current = projectId;
 
   const loadIssues = useCallback(async (q = "", page = 1, append = false, reloadVisible = false) => {
+    if (!canManage || !capture.isCurrent()) return false;
+    issueAbort.current?.abort(); issueAbort.current = new AbortController();
+    const readCapture = withTransportSignal(capture, issueAbort.current.signal);
+    if (!append && issueSearch.current !== q) setIssues([]);
     if (!reloadVisible) issueSearch.current = q;
     const request = ++issueGeneration.current;
     const requestedProject = projectId;
@@ -120,17 +140,22 @@ export default function SiteIssueWorkflowPanel({
     setIssueError(false);
     try {
       const rows: SiteIssueDocument[] = [];
+      let previousContext = append ? issueContext.current : undefined;
       let total = 0;
       let loadedPage = page;
       for (let nextPage = reloadVisible ? 1 : page; nextPage <= page; nextPage += 1) {
-        const { data } = await searchSiteIssues({ project_id: requestedProject, q, page: nextPage, page_size: 20 });
-        if (request !== issueGeneration.current || activeProject.current !== requestedProject) return false;
+        const { data } = await searchSiteIssues({ project_id: requestedProject, q, page: nextPage, page_size: 20 }, readCapture);
+        if (!readCapture.isCurrent() || request !== issueGeneration.current || activeProject.current !== requestedProject) return false;
+        const nextContext = contextInputKey({ body: data.authorization_context });
+        if (previousContext !== undefined && previousContext !== nextContext) throw new Error("项目权限范围已变化，请重新加载");
+        previousContext = nextContext;
         rows.push(...data.rows);
         total = data.total;
         loadedPage = data.page;
         if (!reloadVisible || rows.length >= total) break;
         if (!data.rows.length) throw new Error("Incomplete issue pagination");
       }
+      issueContext.current = previousContext;
       setIssues((current) => append
         ? [...current, ...rows.filter((row) => !current.some((item) => item.issue_id === row.issue_id))]
         : rows);
@@ -138,7 +163,7 @@ export default function SiteIssueWorkflowPanel({
       setIssuePage(loadedPage);
       return true;
     } catch {
-      if (request !== issueGeneration.current || activeProject.current !== requestedProject) return false;
+      if (!readCapture.isCurrent() || request !== issueGeneration.current || activeProject.current !== requestedProject) return false;
       if (!append) {
         setIssues([]);
         setIssueTotal(0);
@@ -147,13 +172,17 @@ export default function SiteIssueWorkflowPanel({
       setIssueError(true);
       return false;
     } finally {
-      if (request === issueGeneration.current && activeProject.current === requestedProject) {
+      if (readCapture.isCurrent() && request === issueGeneration.current && activeProject.current === requestedProject) {
         setIssueLoading(false);
       }
     }
-  }, [projectId]);
+  }, [projectId, capture, canManage]);
 
   const loadCandidates = useCallback(async (q = "", page = 1, append = false, reloadVisible = false) => {
+    if (!canManage || !capture.isCurrent()) return false;
+    candidateAbort.current?.abort(); candidateAbort.current = new AbortController();
+    const readCapture = withTransportSignal(capture, candidateAbort.current.signal);
+    if (!append && candidateSearch.current !== q) setCandidates([]);
     if (!reloadVisible) candidateSearch.current = q;
     const request = ++candidateGeneration.current;
     const requestedProject = projectId;
@@ -161,12 +190,16 @@ export default function SiteIssueWorkflowPanel({
     setCandidateError(false);
     try {
       const rows: SiteIssueCandidate[] = [];
+      let previousContext = append ? candidateContext.current : undefined;
       let total = 0;
       let loadedPage = page;
       let currentAdapter: SiteIssueAdapterState | null = null;
       for (let nextPage = reloadVisible ? 1 : page; nextPage <= page; nextPage += 1) {
-        const { data } = await searchSiteIssueCandidates(requestedProject, { q, page: nextPage, page_size: 50 });
-        if (request !== candidateGeneration.current || activeProject.current !== requestedProject) return false;
+        const { data } = await searchSiteIssueCandidates(requestedProject, { q, page: nextPage, page_size: 50 }, readCapture);
+        if (!readCapture.isCurrent() || request !== candidateGeneration.current || activeProject.current !== requestedProject) return false;
+        const nextContext = contextInputKey({ body: data.authorization_context });
+        if (previousContext !== undefined && previousContext !== nextContext) throw new Error("项目权限范围已变化，请重新加载");
+        previousContext = nextContext;
         rows.push(...data.rows);
         total = data.total;
         loadedPage = data.page;
@@ -174,6 +207,7 @@ export default function SiteIssueWorkflowPanel({
         if (!reloadVisible || rows.length >= total) break;
         if (!data.rows.length) throw new Error("Incomplete candidate pagination");
       }
+      candidateContext.current = previousContext;
       setCandidates((current) => append
         ? [...current, ...rows.filter((row) => !current.some((item) => item.delivery_line_id === row.delivery_line_id))]
         : rows);
@@ -183,7 +217,7 @@ export default function SiteIssueWorkflowPanel({
       return true;
     } catch {
       if (
-        request !== candidateGeneration.current
+        !readCapture.isCurrent() || request !== candidateGeneration.current
         || activeProject.current !== requestedProject
       ) return false;
       if (!append) {
@@ -196,11 +230,11 @@ export default function SiteIssueWorkflowPanel({
       return false;
     } finally {
       if (
-        request === candidateGeneration.current
+        readCapture.isCurrent() && request === candidateGeneration.current
         && activeProject.current === requestedProject
       ) setCandidateLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, capture, canManage]);
 
   const refresh = useCallback(async () => {
     if (!canManage) return true;
@@ -253,9 +287,11 @@ export default function SiteIssueWorkflowPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, canManage]);
 
-  if (!canManage) return null;
+  if (!canManage) return canManual ? <ManualSiteIssueSection projectId={projectId} canManage={legacyCanManage} issues={[]}
+    onChanged={() => undefined} reloadIssues={async () => { await onChanged(); }} /> : null;
 
   const openEditor = (issue: SiteIssueDocument | null) => {
+    setSaving(false);
     setEditing(issue);
     setEditor(issue ? {
       issueDate: issue.issue_date,
@@ -274,6 +310,7 @@ export default function SiteIssueWorkflowPanel({
   };
 
   const saveEditor = async () => {
+    if (!can(editing ? "update" : "create") || !editorCapture.isCurrent()) return;
     const clean = {
       issueDate: editor.issueDate.trim(),
       receiver: editor.receiver.trim(),
@@ -314,7 +351,7 @@ export default function SiteIssueWorkflowPanel({
           site_location: clean.siteLocation,
           lines,
           reason: clean.reason,
-        });
+        }, editorCapture);
       } else {
         await createSiteIssueDraft(requestedProject, {
           idempotency_key: commandKey("site-issue-draft"),
@@ -324,41 +361,45 @@ export default function SiteIssueWorkflowPanel({
           site_location: clean.siteLocation,
           lines,
           reason: clean.reason,
-        });
+        }, editorCapture);
       }
-      if (activeProject.current !== requestedProject) return;
+      if (!editorCapture.isCurrent() || activeProject.current !== requestedProject) return;
       setEditorOpen(false);
       message.success(editing?.workflow_status === "draft" ? "草稿已更新" : editing ? "领用单已更正" : "草稿已保存");
       await refreshAfterChange();
     } catch {
-      if (activeProject.current === requestedProject) {
+      if (editorCapture.isCurrent() && activeProject.current === requestedProject) {
         setEditorError(editing ? "现场领用单保存失败，请刷新后重试" : "现场领用草稿保存失败，请重试");
       }
     } finally {
-      if (activeProject.current === requestedProject) setSaving(false);
+      if (editorCapture.isCurrent() && activeProject.current === requestedProject) setSaving(false);
     }
   };
 
   const openPreview = async (issue: SiteIssueDocument) => {
+    if (!can("preview") || !capture.isCurrent()) return;
     const requestedProject = projectId;
-    setPreviewLoading(true);
+    previewAbort.current?.abort();
+    const controller = new AbortController(); previewAbort.current = controller;
+    const previewCapture = withTransportSignal(capture, controller.signal);
+    setPreview(null); setPreviewLoading(true); setConfirming(false);
     try {
       const { data } = await previewSiteIssue(issue.issue_id, {
         project_id: requestedProject,
         version: issue.version,
-      });
-      if (activeProject.current !== requestedProject) return;
+      }, previewCapture);
+      if (!previewCapture.isCurrent() || activeProject.current !== requestedProject) return;
       setPreview(data);
       setConfirmReason("确认现场实际领用");
     } catch {
-      if (activeProject.current === requestedProject) message.error("确认影响预览失败，请刷新后重试");
+      if (previewCapture.isCurrent() && activeProject.current === requestedProject) message.error("确认影响预览失败，请刷新后重试");
     } finally {
-      if (activeProject.current === requestedProject) setPreviewLoading(false);
+      if (previewCapture.isCurrent() && activeProject.current === requestedProject) setPreviewLoading(false);
     }
   };
 
   const confirmPreview = async () => {
-    if (!preview || !confirmReason.trim()) return;
+    if (!can("confirm") || !confirmCapture.isCurrent() || !preview || !confirmReason.trim()) return;
     const requestedProject = projectId;
     setConfirming(true);
     try {
@@ -367,26 +408,27 @@ export default function SiteIssueWorkflowPanel({
         version: preview.version,
         idempotency_key: commandKey("site-issue-confirm"),
         reason: confirmReason.trim(),
-      });
-      if (activeProject.current !== requestedProject) return;
+      }, confirmCapture);
+      if (!confirmCapture.isCurrent() || activeProject.current !== requestedProject) return;
       setPreview(null);
       message.success("现场领用已确认，成本证据与返还义务来源已冻结");
       await refreshAfterChange();
     } catch {
-      if (activeProject.current === requestedProject) message.error("确认失败，发货余额或版本可能已变化");
+      if (confirmCapture.isCurrent() && activeProject.current === requestedProject) message.error("确认失败，发货余额或版本可能已变化");
     } finally {
-      if (activeProject.current === requestedProject) setConfirming(false);
+      if (confirmCapture.isCurrent() && activeProject.current === requestedProject) setConfirming(false);
     }
   };
 
   const requestVoid = (issue: SiteIssueDocument) => {
+    setVoiding(false);
     setVoidTarget(issue);
     setVoidReason("");
     setVoidError(null);
   };
 
   const confirmVoid = async () => {
-    if (!voidTarget || !voidReason.trim()) return;
+    if (!can("void") || !voidCapture.isCurrent() || !voidTarget || !voidReason.trim()) return;
     const requestedProject = projectId;
     setVoiding(true);
     setVoidError(null);
@@ -396,18 +438,18 @@ export default function SiteIssueWorkflowPanel({
         version: voidTarget.version,
         idempotency_key: commandKey("site-issue-void"),
         reason: voidReason.trim(),
-      });
-      if (activeProject.current !== requestedProject) return;
+      }, voidCapture);
+      if (!voidCapture.isCurrent() || activeProject.current !== requestedProject) return;
       setVoidTarget(null);
       setVoidReason("");
       message.success("现场领用单已作废");
       await refreshAfterChange();
     } catch {
-      if (activeProject.current === requestedProject) {
+      if (voidCapture.isCurrent() && activeProject.current === requestedProject) {
         setVoidError("作废失败；若返还模块已生成下游事实，请改走更正并刷新后重试");
       }
     } finally {
-      if (activeProject.current === requestedProject) setVoiding(false);
+      if (voidCapture.isCurrent() && activeProject.current === requestedProject) setVoiding(false);
     }
   };
 
@@ -439,7 +481,7 @@ export default function SiteIssueWorkflowPanel({
     <Card
       data-testid="site-issue-workflow"
       title="现场备件领用单"
-      extra={<Button onClick={() => openEditor(null)}>从仓库发货领用</Button>}
+      extra={can("create") ? <Button onClick={() => openEditor(null)}>从仓库发货领用</Button> : null}
     >
       <Space direction="vertical" size={14} style={{ width: "100%" }}>
         <Alert
@@ -513,10 +555,10 @@ export default function SiteIssueWorkflowPanel({
                           ? <Tag color="orange">{missing} 行暂无价格成本，数量仍完整展示</Tag>
                           : <Tag color="green">价格成本已完整</Tag>}
                         <Space wrap>
-                          {issue.source === "site_issue_v2" && issue.workflow_status === "draft" && (
+                          {can("update") && issue.source === "site_issue_v2" && issue.workflow_status === "draft" && (
                             <Button aria-label="编辑草稿" size="small" onClick={() => openEditor(issue)}>编辑草稿</Button>
                           )}
-                          {issue.source === "site_issue_v2" && issue.workflow_status === "draft" && (
+                          {can("preview") && issue.source === "site_issue_v2" && issue.workflow_status === "draft" && (
                             <Button
                               size="small"
                               type="primary"
@@ -527,10 +569,10 @@ export default function SiteIssueWorkflowPanel({
                               预览并确认
                             </Button>
                           )}
-                          {issue.source === "site_issue_v2" && ["confirmed", "corrected"].includes(issue.workflow_status) && (
+                          {can("update") && issue.source === "site_issue_v2" && ["confirmed", "corrected"].includes(issue.workflow_status) && (
                             <Button aria-label="更正" size="small" onClick={() => openEditor(issue)}>更正</Button>
                           )}
-                          {issue.workflow_status !== "void" && (
+                          {can("void") && issue.workflow_status !== "void" && (
                             <Button aria-label="作废" size="small" danger onClick={() => requestVoid(issue)}>作废</Button>
                           )}
                         </Space>
@@ -553,7 +595,7 @@ export default function SiteIssueWorkflowPanel({
         )}
         <ManualSiteIssueSection
           projectId={projectId}
-          canManage={canManage}
+          canManage={legacyCanManage}
           issues={issues}
           onChanged={() => undefined}
           reloadIssues={async () => {
@@ -572,7 +614,7 @@ export default function SiteIssueWorkflowPanel({
         cancelText="取消"
         confirmLoading={saving}
         onOk={() => void saveEditor()}
-        onCancel={() => setEditorOpen(false)}
+        onCancel={() => { setEditorOpen(false); setSaving(false); }}
         destroyOnHidden
       >
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
@@ -722,13 +764,13 @@ export default function SiteIssueWorkflowPanel({
         title="确认影响预览"
         open={preview != null}
         width={980}
-        onCancel={() => setPreview(null)}
+        onCancel={() => { setPreview(null); setConfirming(false); }}
         footer={preview ? [
           <Button key="cancel" onClick={() => setPreview(null)}>返回草稿</Button>,
           <Button
             key="confirm"
             type="primary"
-            disabled={!preview.can_confirm || !productionConfirmationReady || !confirmReason.trim()}
+            disabled={!can("confirm") || !preview.can_confirm || !productionConfirmationReady || !confirmReason.trim()}
             loading={confirming}
             onClick={() => void confirmPreview()}
           >
@@ -800,3 +842,5 @@ export default function SiteIssueWorkflowPanel({
     </Card>
   );
 }
+
+export default withContextSurface(SiteIssueWorkflowPanel, contextSurfaces("maintenance_issue.workflow", "maintenance_issue.manual"), props => props.projectId);

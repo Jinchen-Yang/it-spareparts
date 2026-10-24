@@ -1,3 +1,10 @@
+import { useContextAdmission, useModuleAccess } from "../../authz/access";
+import { useContextTransport } from "../../authz/domainTransport";
+import { contextInputKey } from "../../authz/context";
+import { withContextSurface, contextSurfaces } from "../../authz/ContextSurface";
+import { actionRule, anyRule, routeRule } from "../../authz/rules";
+import type { AuthorizationContext } from "../../authz/contextTypes";
+import type { MaintenanceWorkspaceProject } from "../../api/maintenanceOperations";
 import PageHeader from "../../components/PageHeader";
 import { formatMoney } from "../../utils/format";
 import { COLORS } from "../../theme";
@@ -24,7 +31,7 @@ import type { MaintenanceProjectOperationsSummary } from "../../api/maintenanceO
 import { searchMaintenanceManagerAccounts } from "../../api/maintenanceOperations";
 import type { MaintenanceManagerAccount } from "../../api/maintenanceOperations";
 import ProjectManagerAssignmentControl from "../../components/maintenance/ProjectManagerAssignmentControl";
-import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
+import ProjectWorkbookRoundTrip from "../../components/maintenance/ProjectWorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
 import { maintenanceAnalyticsReturnPath, readProjectPanelTab } from "./analysisNavigation";
 import { publishMaintenanceChange } from "../../utils/maintenanceRefresh";
@@ -172,22 +179,43 @@ function HealthBand({ row, metrics }: { row: BoardProjectRow | null; metrics: He
  * 先查询展示板中是否仍有该稳定 ID，空集时不请求必然 404 的单卡。回款指标走
  * getMaintenanceProjectWorkspace。聚合行缺失时健康带「聚合数据暂缺」，不全页报错。
  */
-export function MaintenanceProjectPanelPage() {
+function MaintenanceProjectPanelPageBody() {
   const { projectId = "" } = useParams();
   // React Router 会复用同一个 route element。以项目 ID 强制重建内部状态，确保
   // A 项目的在途请求、tab 筛选和旧金额都不能进入 B 项目的操作上下文。
-  return <MaintenanceProjectPanelContent key={projectId} projectId={projectId} />;
+  return <BoundProjectPanel projectId={projectId} />;
 }
 
+const PROJECT_TABS: Record<string, string[]> = {
+  overview: ["maintenance_project.overview", "maintenance_source_assignment.sources", "maintenance_source_assignment_write.manage_sources"],
+  analytics: ["maintenance_analysis.project_focus"],
+  "parts-orders": ["maintenance_managed_workbook.parts_roundtrip", "maintenance_general_workbook.parts_roundtrip", "maintenance_general_workbook_write.parts_roundtrip", "maintenance_summary.project_orders", "maintenance_row_workbench.cost_rows", "maintenance_row_workbench.project_rows", "maintenance_managed_rows.project_rows", "maintenance_project_purchase.procurement"],
+  expense: ["maintenance_managed_workbook.expense_roundtrip", "maintenance_general_workbook.expense_roundtrip", "maintenance_general_workbook_write.expense_roundtrip", "maintenance_expense.records"],
+  collection: ["maintenance_managed_workbook.collection_roundtrip", "maintenance_general_workbook.collection_roundtrip", "maintenance_general_workbook_write.collection_roundtrip", "maintenance_collection.plans", "maintenance_collection.actuals", "maintenance_collection.manage_actuals"],
+  site: ["maintenance_managed_workbook.site_roundtrip", "maintenance_general_workbook.site_roundtrip", "maintenance_general_workbook_write.site_roundtrip", "maintenance_issue.facts", "maintenance_issue.workflow", "maintenance_issue.manual", "maintenance_return_receipt.ledger", "maintenance_return_receipt.summary", "maintenance_return_receipt.batch_create", "maintenance_return_import.import"],
+  acceptance: ["maintenance_acceptance.checklist", "maintenance_acceptance.checklist_import", "maintenance_acceptance.report", "maintenance_acceptance.attachments"],
+};
 function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const activeTab = readProjectPanelTab(searchParams.get("tab"));
+  const admission = useContextAdmission();
+  const projectModule = useModuleAccess("maintenance_project");
+  const readTransport = useContextTransport(projectId, true);
+  const availableTabs = Object.keys(PROJECT_TABS).filter(key => PROJECT_TABS[key].some(id => admission.surface(id, true) !== "deny"));
+  const requestedTab = readProjectPanelTab(searchParams.get("tab"));
+  const activeTab = availableTabs.includes(requestedTab) ? requestedTab : availableTabs[0];
+  const showOverview = admission.surface("maintenance_project.overview", true) !== "deny";
+  const showSummary = admission.surface("maintenance_summary.project_health", true) !== "deny";
+  const showOperationsHealth = admission.surface("maintenance_project_operations.project_health", true) !== "deny";
+  const readWorkspace = showOperationsHealth || admission.surface("maintenance_project_operations.workspace", true) !== "deny" ||
+    (activeTab === "collection" && admission.surface("maintenance_collection.actuals", true) !== "deny");
+  const masterVisible = admission.state(contextSurfaces("maintenance_managed_workbook.project_master", "maintenance_general_workbook.project_master", "maintenance_general_workbook_write.project_master"), true) !== "deny";
+  const workbookTransport = useContextTransport(`${projectId}:master-workbook`, true);
   const analyticsReturn = maintenanceAnalyticsReturnPath(searchParams.get("return"));
   const [row, setRow] = useState<BoardProjectRow | null>(null);
   const [project, setProject] = useState<MaintenanceProject | null>(null);
   const [operationsProject, setOperationsProject] =
-    useState<MaintenanceProjectOperationsSummary | null>(null);
+    useState<MaintenanceWorkspaceProject | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [aggregateError, setAggregateError] = useState<string | null>(null);
   const [projectLoading, setProjectLoading] = useState(false);
@@ -203,18 +231,25 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
   });
 
   const perms = readPermissionMap();
+  const canManageManagerAssignment = admission.surface("maintenance_assignments.manager",
+    localStorage.getItem("role") === "admin" && !!perms.action_maintenance_project_manage) !== "deny";
+  const canReadManagerRelationship = admission.state(actionRule("maintenance_project", "read"), true) !== "deny";
+  const readStableProject = showOverview || (canManageManagerAssignment && canReadManagerRelationship);
   // D-03（2026-09-02 拍板）：项目负责人/持利润键的销售对本人项目可传总表。后端上传门
   // 早已按此放行，入口显示跟服务端下发的 can_edit_master_workbook 走，不在前端复算
   // 挂靠关系。展示板单卡可能 404（无挂靠的停用项目 / 展示板关闭），稳定详情的
   // project 上带同一 flag 兜底。
-  const canUpload = !!perms.action_maintenance_expense_collection_upload
+  const legacyUpload = !!perms.action_maintenance_expense_collection_upload
     || !!row?.can_edit_master_workbook
     || !!project?.can_edit_master_workbook;
-  const canManageProject = !!perms.action_maintenance_project_manage;
-  const canEditBasics = canManageProject && project?.is_active !== false && (
+  const canUpload = admission.state(anyRule(actionRule("maintenance_managed_workbook", "validate"), actionRule("maintenance_general_workbook_write", "validate")), legacyUpload) !== "deny";
+  const canDownload = admission.state(anyRule(actionRule("maintenance_managed_workbook", "download"), actionRule("maintenance_general_workbook", "download")), true) !== "deny";
+  const canManageProject = admission.surface("maintenance_source_assignment_write.manage_sources", !!perms.action_maintenance_project_manage) !== "deny";
+  const legacyEditBasics = !!perms.action_maintenance_project_manage && project?.is_active !== false && (
     localStorage.getItem("role") === "admin"
     || (!!perms.page_maintenance && !!perms.data_profit)
   );
+  const canEditBasics = admission.surface("maintenance_project.edit_basics", legacyEditBasics) !== "deny";
   const editBasicsRef = useRef<{ open: () => void }>(null);
   // 验收清单导入 2026-08-22 起跟随维保页面权限（与 maintenancePermissions 同口径），
   // 不再看已停用的 action_maintenance_acceptance_checklist_import 旧键。
@@ -233,15 +268,21 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
     setAggregateError(null);
     setProjectLoading(true);
     try {
-      const detail = await getMaintenanceProject(projectId);
-      const stable = detail.data?.project ?? null;
-      if (seq !== projectRequestSeq.current) return false;
+      let stable: MaintenanceProject | null = null;
+      if (readStableProject) {
+        try { stable = (await getMaintenanceProject(projectId, readTransport)).data.project; }
+        catch (reason) {
+          if (!readTransport.isCurrent()) return false;
+          setError(readError(reason, "项目基本信息加载失败"));
+        }
+      }
+      if (seq !== projectRequestSeq.current || !readTransport.isCurrent()) return false;
       setProject(stable);
       let hit: BoardProjectRow | null = null;
       let aggregateReady = true;
-      if (stable) {
+      if (showSummary) {
         try {
-          if (stable.is_active === false) {
+          if (projectModule.legacy && stable?.is_active === false) {
             // 展示板只纳入仍带单的停用项目；搜索空集是正常状态。编号只缩小候选，
             // 必须遍历分页并按稳定 ID 取行，不能把同名项目或第一页当成身份。
             const pageSize = 200;
@@ -252,23 +293,23 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
                 page_size: pageSize,
                 lifecycle: "all",
                 business_type: "all",
-              });
-              if (seq !== projectRequestSeq.current) return false;
+              }, readTransport);
+              if (seq !== projectRequestSeq.current || !readTransport.isCurrent()) return false;
               hit = response.data.rows.find((item) => item.project_id === projectId) ?? null;
               if (hit || !response.data.rows.length || page * pageSize >= response.data.total) break;
             }
           } else {
-            hit = (await getBoardProject(projectId)).data;
+            hit = (await getBoardProject(projectId, readTransport)).data;
           }
         } catch (err) {
           // 稳定详情仍可使用；真正的读取失败独立显示重试入口。
-          if (seq !== projectRequestSeq.current) return false;
+          if (seq !== projectRequestSeq.current || !readTransport.isCurrent()) return false;
           hit = null;
           aggregateReady = false;
           setAggregateError(readError(err, "项目经营汇总加载失败"));
         }
       }
-      if (seq !== projectRequestSeq.current) return false;
+      if (seq !== projectRequestSeq.current || !readTransport.isCurrent()) return false;
       const costStat = hit?.known_apply_cost_inc_tax;
       const costValue = costStat?.value;
       const noLines = costValue?.known_amount == null;
@@ -290,10 +331,10 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
         },
       }));
       setRow(hit);
-      if (!hit && !stable) setError("项目不存在或无权查看");
-      return Boolean(stable) && aggregateReady;
+      if (!hit && !stable && readStableProject) setError("项目不存在或无权查看");
+      return (!readStableProject || Boolean(stable)) && aggregateReady;
     } catch (err) {
-      if (seq === projectRequestSeq.current) {
+      if (seq === projectRequestSeq.current && readTransport.isCurrent()) {
         // 读回失败必须失效旧项目快照；否则刚落库的新值旁边还会显示旧金额。
         setProject(null);
         setRow(null);
@@ -305,13 +346,14 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
       }
       return false;
     } finally {
-      if (seq === projectRequestSeq.current) setProjectLoading(false);
+      if (seq === projectRequestSeq.current && readTransport.isCurrent()) setProjectLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, readTransport, readStableProject, showSummary, projectModule.legacy]);
 
   // 回款指标 + 快照行：健康带与「回款」tab 共用同一份 workspace 数据。
   const loadWorkspace = useCallback(async () => {
     const seq = ++workspaceRequestSeq.current;
+    if (!readWorkspace) { setCollectionRows([]); setOperationsProject(null); return true; }
     setCollectionLoading(true);
     setWorkspaceError(null);
     try {
@@ -321,19 +363,19 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
         collection_page_size: pageSize,
         requisition_page_size: 1,
         expense_page_size: 1,
-      });
-      if (seq !== workspaceRequestSeq.current) return false;
+      }, readTransport);
+      if (seq !== workspaceRequestSeq.current || !readTransport.isCurrent()) return false;
       const collectionRows = [...response.data.collection_snapshots.rows];
       let collectionTotal = response.data.collection_snapshots.total;
       let page = 2;
-      while (collectionRows.length < collectionTotal) {
+      while (collectionTotal !== null && collectionRows.length < collectionTotal) {
         const next = await getMaintenanceProjectWorkspace(projectId, {
           collection_page: page,
           collection_page_size: pageSize,
           requisition_page_size: 1,
           expense_page_size: 1,
-        });
-        if (seq !== workspaceRequestSeq.current) return false;
+        }, readTransport);
+        if (seq !== workspaceRequestSeq.current || !readTransport.isCurrent()) return false;
         const nextRows = next.data.collection_snapshots.rows;
         collectionTotal = next.data.collection_snapshots.total;
         if (!nextRows.length) break;
@@ -342,24 +384,24 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
       }
       setCollectionRows(collectionRows);
       setOperationsProject(response.data.project);
-      const wsMetrics = response.data.project.metrics;
+      const wsMetrics = showOperationsHealth ? response.data.project.metrics : null;
       // 函数式更新：workspace 与 boss-board 并发完成时，绝不能用闭包里的初始
       // parts=0/null 覆盖 loadProject 刚写入的真实成本。
       setMetrics((prev) => ({
-        received: wsMetrics.received_amount,
-        progress: wsMetrics.collection_progress_pct,
+        received: wsMetrics?.received_amount ?? null,
+        progress: wsMetrics?.collection_progress_pct ?? null,
         costs: {
           ...prev.costs,
-          expense: wsMetrics.approved_expense_inc_tax == null
-            ? null : Number(wsMetrics.approved_expense_inc_tax),
-          issued: wsMetrics.site_requisition_known_cost_inc_tax == null
-            ? null : Number(wsMetrics.site_requisition_known_cost_inc_tax),
+          expense: wsMetrics?.approved_expense_inc_tax == null
+            ? null : Number(wsMetrics?.approved_expense_inc_tax),
+          issued: wsMetrics?.site_requisition_known_cost_inc_tax == null
+            ? null : Number(wsMetrics?.site_requisition_known_cost_inc_tax),
           returned: null,
         },
       }));
       return true;
     } catch (err) {
-      if (seq === workspaceRequestSeq.current) {
+      if (seq === workspaceRequestSeq.current && readTransport.isCurrent()) {
         setCollectionRows([]);
         setOperationsProject(null);
         setMetrics((prev) => ({
@@ -376,9 +418,9 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
       }
       return false;
     } finally {
-      if (seq === workspaceRequestSeq.current) setCollectionLoading(false);
+      if (seq === workspaceRequestSeq.current && readTransport.isCurrent()) setCollectionLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, readTransport, readWorkspace, showOperationsHealth]);
 
   const registerTabRefresh = useCallback<RegisterPanelRefresh>((key, refresh) => {
     if (refresh) tabRefreshers.current.set(key, refresh);
@@ -410,8 +452,7 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
   }, [loadProject, loadWorkspace]);
 
   const lifecycle = row?.lifecycle ?? project?.lifecycle_status;
-  const canManageManagerAssignment =
-    localStorage.getItem("role") === "admin" && canManageProject;
+  const managerProject = project?.manager_assignment !== undefined ? project : projectModule.legacy ? operationsProject : null;
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
@@ -437,37 +478,34 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
           >{analyticsReturn ? "← 返回分析 · 保留筛选" : "← 返回项目墙"}</a>
           {row?.is_archived ? <Tag>已归档</Tag> : null}
           {lifecycle ? <Tag>{LIFECYCLE_LABEL[lifecycle] ?? lifecycle}</Tag> : null}
-          <EditBasicsButton
+          {(projectModule.legacy || canEditBasics) && <EditBasicsButton
             key={projectId}
             ref={editBasicsRef}
             projectId={projectId}
             disabled={!canEditBasics}
             onSaved={refreshProject}
-          />
-          {operationsProject ? (
+          />}
+          {canManageManagerAssignment && managerProject ? (
             <ProjectManagerAssignmentControl
-              project={operationsProject}
+              project={{ project_id: projectId, project_manager_id: managerProject.project_manager_id ?? null, manager_assignment: managerProject.manager_assignment ?? null }}
               canManage={canManageManagerAssignment}
               onChanged={refreshProject}
             />
           ) : null}
         </Space>}
-        extra={<WorkbookRoundTrip
-          size="small"
-          title="本项目总表"
-          filename={`${exportBase}-总表.xlsx`}
-          canUpload={canUpload}
-          hint="六 sheet 一次下载，回填后整份上传覆盖"
-          onDownload={() => downloadProjectMaster(projectId)}
-          onValidate={(file) => validateProjectMaster(projectId, file)}
-          onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
-          onAfterApply={refreshProject}
-        />} />
+        extra={<ProjectWorkbookRoundTrip projectId={projectId} surface="project_master"
+          title="本项目总表" filename={`${exportBase}-总表.xlsx`} canUpload={legacyUpload}
+          hint="六 sheet 一次下载，回填后整份上传覆盖" onAfterApply={refreshProject} />} />
 
       {error ? (
         <Alert type="error" showIcon message={error}
           action={<Button size="small" loading={projectLoading} onClick={() => void loadProject()}>重试</Button>} />
       ) : null}
+      {canManageManagerAssignment && !canReadManagerRelationship && <Alert type="warning" showIcon
+        message="缺少项目关系核对权限，无法维护负责人"
+        description="负责人维护需要项目基本信息的读取权限，以核对当前关系和版本；请联系权限管理员。" />}
+      {canManageManagerAssignment && canReadManagerRelationship && project && !managerProject && <Alert type="error" showIcon
+        message="项目关系元数据未返回，无法维护负责人，请刷新后重试" />}
       {aggregateError ? (
         <Alert type="warning" showIcon message={aggregateError}
           action={<Button size="small" loading={projectLoading} onClick={() => void loadProject()}>重试</Button>} />
@@ -477,7 +515,7 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
           action={<Button size="small" loading={collectionLoading} onClick={() => void loadWorkspace()}>重试</Button>} />
       ) : null}
 
-      <HealthBand row={row} metrics={metrics} />
+      {(showSummary || showOperationsHealth) && <HealthBand row={row} metrics={metrics} />}
 
       <Tabs
         activeKey={activeTab}
@@ -583,9 +621,9 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
               />
             ),
           },
-        ].map((item) => ({
+        ].filter(item => availableTabs.includes(item.key)).map((item) => ({
           ...item,
-          children: <Suspense fallback={<Spin aria-label="正在加载项目明细" />}>{item.children}</Suspense>,
+          children: item.key === activeTab || projectModule.legacy ? <Suspense fallback={<Spin aria-label="正在加载项目明细" />}>{item.children}</Suspense> : null,
         }))}
       />
     </Space>
@@ -605,6 +643,11 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
   const { message } = App.useApp();
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
+  const currentValues = Form.useWatch([], form);
+  const readTransport = useContextTransport(`${projectId}:edit-basic-read`, true);
+  const writeTransport = useContextTransport(JSON.stringify([projectId, open, currentValues]), true);
+  const admission = useContextAdmission();
+  const canReadAccounts = admission.surface("maintenance_manager_directory.candidates", true) !== "deny";
   const [saving, setSaving] = useState(false);
   const [accounts, setAccounts] = useState<MaintenanceManagerAccount[]>([]);
   const salespersonEditedRef = useRef(false);
@@ -619,7 +662,7 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
     if (disabled) return;
     const seq = ++requestSeq.current;
     try {
-      const resp = await getMaintenanceProject(projectId);
+      const resp = await getMaintenanceProject(projectId, readTransport);
       if (seq !== requestSeq.current) return;
       // 后端契约是 {project: {...}}（MaintenanceProjectOverview）
       const proj = resp.data.project;
@@ -650,10 +693,11 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
       // 加载系统内账号供项目可见范围选择。负责人账号改派由页头独立的
       // primary_manager OCC 控件完成，不能伪装成基础字段更新。
       try {
+        if (!canReadAccounts) { setAccounts([]); setOpen(true); return; }
         // 评审阻塞点：账号列表只取前 100 无法选到后面的活跃账号——
         // 拉满 500（后端上限），超出极端规模再考虑远程搜索。
         const accountsResp = await searchMaintenanceManagerAccounts(
-          { page: 1, page_size: 500 });
+          { page: 1, page_size: 500 }, {}, readTransport);
         if (seq !== requestSeq.current) return;
         setAccounts(accountsResp.data.rows);
       } catch {
@@ -675,7 +719,7 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
       // Form 已显示字段错误；不要把校验拒绝抛成未处理 Promise。
       return;
     }
-    if (disabled) return;
+    if (disabled || !writeTransport.isCurrent()) return;
     const seq = requestSeq.current;
     const { period, salesperson, business_type, no_return_note, project_note, ...rest } = values as {
       period?: [Dayjs | null, Dayjs | null] | null;
@@ -704,15 +748,15 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
     try {
       await updateMaintenanceProject(
         projectId,
-        payload as Parameters<typeof updateMaintenanceProject>[1],
+        payload as Parameters<typeof updateMaintenanceProject>[1], writeTransport,
       );
     } catch (err) {
-      if (seq === requestSeq.current) message.error(readError(err, "保存失败"));
+      if (seq === requestSeq.current && writeTransport.isCurrent()) message.error(readError(err, "保存失败"));
       return;
     } finally {
       if (seq === requestSeq.current) setSaving(false);
     }
-    if (seq !== requestSeq.current) return;
+    if (seq !== requestSeq.current || !writeTransport.isCurrent()) return;
     setOpen(false);
     // PATCH 已提交，读回回调拒绝不能将成功的写入误报为“保存失败”。
     let refreshed = false;
@@ -839,4 +883,6 @@ const EditBasicsButton = forwardRef<{ open: () => void }, {
   );
 });
 
+const BoundProjectPanel = withContextSurface(MaintenanceProjectPanelContent, routeRule("/maintenance/projects/:projectId"), props => props.projectId);
+export const MaintenanceProjectPanelPage = MaintenanceProjectPanelPageBody;
 export default MaintenanceProjectPanelPage;

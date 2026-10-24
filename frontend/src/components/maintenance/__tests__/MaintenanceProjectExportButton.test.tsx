@@ -1,3 +1,5 @@
+import { legacyAuthorizationState } from "../../../test/legacyAuthorization";
+import { prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -105,7 +107,7 @@ describe("维保项目清单导出", () => {
       card_status: "alert",
       sort: "cost_ratio",
       q: "XSDD-001",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(saveBlob).toHaveBeenCalledWith(
       expect.any(Blob),
       "维保项目清单-20260827.xlsx",
@@ -160,6 +162,14 @@ describe("维保项目清单导出", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: /下载 Excel（7 项）/ }));
     await waitFor(() => expect(downloadBoardProjectsExport).toHaveBeenCalledWith(expect.objectContaining({
       fields: [...options.data.default_fields, "project_note"],
-    })));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 });
+
+// Existing behavior fixtures explicitly run before the canonical module cutover.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(),
+  useAuthz: () => legacyAuthorizationState(),
+}));
+
+beforeEach(() => prepareLegacyPageFixture());

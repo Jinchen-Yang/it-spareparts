@@ -1,3 +1,8 @@
+import { useContextQuery } from "../../../authz/contextQuery";
+import { useContextAdmission, useModuleAccess } from "../../../authz/access";
+import { surfaceRule } from "../../../authz/rules";
+import { ContextChanged } from "../../../authz/contextProtocol";
+import type { AuthorizationContext } from "../../../authz/contextTypes";
 import { useCallback, useEffect, useRef, useState } from "react";
 import ReturnStatusColumn from "../../../components/maintenance/ReturnStatusColumn";
 import { App, Alert, Button, Card, Select, Space, Table, Tag, Typography } from "antd";
@@ -8,13 +13,10 @@ import { listProjectPartsRows } from "../../../api/maintenanceWorkbooks";
 import type { ProjectPartsRow } from "../../../api/maintenanceWorkbooks";
 import {
   SHEETS,
-  applyProjectMaster,
-  downloadProjectMaster,
-  validateProjectMaster,
 } from "../../../api/maintenanceWorkbooks";
 import ProjectProcurementPanel from "../../../components/maintenance/ProjectProcurementPanel";
 import OrderContactInfo from "../../../components/maintenance/OrderContactInfo";
-import WorkbookRoundTrip from "../../../components/maintenance/WorkbookRoundTrip";
+import ProjectWorkbookRoundTrip from "../../../components/maintenance/ProjectWorkbookRoundTrip";
 import ProjectMaintenanceRowFilters from "../../../components/maintenance/ProjectMaintenanceRowFilters";
 import { serializeRowFilters } from "../../../api/maintenanceRowFilters";
 import type { MaintenanceRowFilter } from "../../../api/maintenanceRowFilters";
@@ -31,7 +33,6 @@ import {
   raw,
   readError,
   statText,
-  useLatestRead,
 } from "./panelUtils";
 
 const { Text } = Typography;
@@ -74,26 +75,19 @@ export function PartsOrdersTab({
   contractNos: string[];
 }) {
   const { message } = App.useApp();
-  const [orders, setOrders] = useState<BoardOrderRow[]>([]);
-  const [ordersLoading, setOrdersLoading] = useState(false);
+  const admission = useContextAdmission();
   const [ordersPage, setOrdersPage] = useState(1);
   const [contractFilter, setContractFilter] = useState<string | undefined>();
   // v1.36 Phase E：页面直建手工需求行（action_maintenance_demand_manage）
-  const canCreateDemandLine = !!readPermissionMap().action_maintenance_demand_manage;
+  const canCreateDemandLine = admission.surface("maintenance_demand.create_project", !!readPermissionMap().action_maintenance_demand_manage) !== "deny";
   const [creatingLine, setCreatingLine] = useState(false);
   const [creatingBatch, setCreatingBatch] = useState(false);
   /** 点选的需求单＝行过滤（再点一次取消）；默认展示项目全部备件行。 */
   const [selectedOrder, setSelectedOrder] = useState<SelectedOrder | null>(null);
   const selectedRef = useRef<SelectedOrder | null>(null);
-  const [lines, setLines] = useState<ProjectPartsRow[]>([]);
-  const [linesTotal, setLinesTotal] = useState<number | null>(null);
   const [linesPage, setLinesPage] = useState(1);
-  const [linesLoading, setLinesLoading] = useState(false);
   const [lineFilters, setLineFilters] = useState<MaintenanceRowFilter[]>([]);
-  const [linesError, setLinesError] = useState<string | null>(null);
   const filtersParam = serializeRowFilters(lineFilters);
-  const readOrders = useLatestRead();
-  const readLines = useLatestRead();
   /** 采购段自己的读回函数（由 ProjectProcurementPanel 登记），一起进落库后的读回屏障。 */
   const procurementRefresh = useRef<PanelRefresh | null>(null);
   const registerProcurementRefresh = useCallback((refresh: PanelRefresh | null) => {
@@ -107,85 +101,52 @@ export function PartsOrdersTab({
     setLinesPage(1);
   }, []);
 
-  const loadOrders = useCallback(() => readOrders(async (isCurrent) => {
-    setOrdersLoading(true);
-    try {
-      const pageSize = 200;
+  const ordersQuery = useContextQuery({
+    entryId: "GET /api/maintenance/boss-board/projects/{project_id}/orders",
+    rule: surfaceRule("maintenance_summary.project_orders"), queryKey: [projectId, contractFilter], legacyAllowed: true,
+    query: async capture => {
       const all: BoardOrderRow[] = [];
-      let page = 1;
-      let total = 0;
+      let page = 1, total = 0, authorization_context: AuthorizationContext | undefined;
       do {
-        const response = await getBoardProjectOrders(projectId, {
-          page,
-          page_size: pageSize,
-          contract_no: contractFilter,
-        });
-        if (!isCurrent()) return false;
+        if (!capture.isCurrent()) throw new Error("需求单查询已失效");
+        const response = await getBoardProjectOrders(projectId, { page, page_size: 200, contract_no: contractFilter }, capture);
+        if (!capture.isCurrent()) throw new Error("需求单查询已失效");
+        if (authorization_context && JSON.stringify(authorization_context) !== JSON.stringify(response.data.authorization_context)) throw new ContextChanged();
+        authorization_context = response.data.authorization_context;
         total = response.data.total;
         all.push(...response.data.rows);
         if (!response.data.rows.length) break;
         page += 1;
       } while (all.length < total);
-      setOrders(all);
-      // 成功读回后选中的单已不在列表（被改派/作废）：清范围并告知，不让 PN 明细与
-      // 采购段还按一张看不见的单过滤。读回失败时选中不动——范围不因失败漂移。
-      const stale = selectedRef.current;
-      if (stale && !all.some((order) => order.source_order_id === stale.source_order_id)) {
-        selectOrder(null);
-        message.info(`需求单 ${stale.order_no} 已不在当前列表，已取消按单过滤`);
-      }
-      return true;
-    } catch (err) {
-      if (isCurrent()) {
-        setOrders([]);
-        message.error(readError(err, "需求单加载失败"));
-      }
-      return false;
-    } finally {
-      if (isCurrent()) setOrdersLoading(false);
+      return { rows: all, total, authorization_context };
+    },
+  });
+  const linesQuery = useContextQuery({
+    entryId: "GET /api/maintenance/projects/stable/{project_id}/master-workbook/rows",
+    rule: surfaceRule("maintenance_row_workbench.cost_rows"),
+    queryKey: [projectId, contractFilter, selectedOrder?.order_no, linesPage, filtersParam], legacyAllowed: true,
+    query: capture => listProjectPartsRows(projectId, { page: linesPage, page_size: LINES_PAGE_SIZE,
+      order_no: selectedOrder?.order_no, contract_no: contractFilter, ...(filtersParam ? { filters: filtersParam } : {}) }, capture),
+  });
+  const orders = ordersQuery.data?.rows ?? [], ordersLoading = ordersQuery.loading;
+  const lines = linesQuery.data?.rows ?? [], linesTotal = linesQuery.data?.total ?? null, linesLoading = linesQuery.loading;
+  const linesError = linesQuery.error ? readError(linesQuery.error, "备件明细加载失败") : null;
+  const loadOrders = ordersQuery.retry, loadLines = linesQuery.retry;
+  const orderAmounts = useModuleAccess("maintenance_summary", ordersQuery.context).field("data_purchase_cost", true);
+  const lineAmounts = useModuleAccess("maintenance_row_workbench", linesQuery.context).field("data_purchase_cost", true);
+  useEffect(() => {
+    if (!ordersQuery.data) return;
+    const stale = selectedRef.current;
+    if (stale && !ordersQuery.data.rows.some(order => order.source_order_id === stale.source_order_id)) {
+      selectOrder(null);
+      message.info(`需求单 ${stale.order_no} 已不在当前列表，已取消按单过滤`);
     }
-  }), [projectId, contractFilter, readOrders, selectOrder]);
-
-  const loadLines = useCallback(() => readLines(async (isCurrent) => {
-    setLinesLoading(true);
-    setLinesTotal(null);
-    setLinesError(null);
-    try {
-      const params = {
-        page_size: LINES_PAGE_SIZE,
-        order_no: selectedOrder?.order_no,
-        contract_no: contractFilter,
-        ...(filtersParam ? { filters: filtersParam } : {}),
-      };
-      let page = linesPage;
-      let resp = await listProjectPartsRows(projectId, { page, ...params });
-      if (!isCurrent()) return false;
-      // 落库后总数收缩（改派 / 作废）时停留的页码可能已越界：服务端回空页但 total>0。
-      // 夹到最后一页重读并同步页码，否则受控表格停在一张空白页（Codex P2，#319）。
-      const lastPage = Math.max(1, Math.ceil(resp.total / LINES_PAGE_SIZE));
-      if (!resp.rows.length && resp.total > 0 && page > lastPage) {
-        page = lastPage;
-        resp = await listProjectPartsRows(projectId, { page, ...params });
-        if (!isCurrent()) return false;
-        setLinesPage(page);
-      }
-      setLines(resp.rows);
-      setLinesTotal(resp.total);
-      return true;
-    } catch (err) {
-      if (isCurrent()) {
-        setLines([]);
-        setLinesTotal(null);
-        setLinesError(readError(err, "备件明细加载失败"));
-      }
-      return false;
-    } finally {
-      if (isCurrent()) setLinesLoading(false);
-    }
-  }), [projectId, contractFilter, selectedOrder, linesPage, readLines, filtersParam]);
-
-  useEffect(() => { void loadOrders(); }, [loadOrders]);
-  useEffect(() => { void loadLines(); }, [loadLines]);
+  }, [ordersQuery.data, selectOrder]);
+  useEffect(() => {
+    if (!linesQuery.data) return;
+    const lastPage = Math.max(1, Math.ceil(linesQuery.data.total / LINES_PAGE_SIZE));
+    if (!linesQuery.data.rows.length && linesQuery.data.total > 0 && linesPage > lastPage) setLinesPage(lastPage);
+  }, [linesQuery.data, linesPage]);
 
   // 切项目时关闭未完成的新增对话框：旧项目的表单/在途请求不能用于新项目
   // （DemandLineCreate 内部也按 fixedProjectId 推进 epoch 兜底）。
@@ -201,12 +162,12 @@ export function PartsOrdersTab({
   // 而归属正是采购链唯一的输入。
   const refreshAll = useCallback(async () => {
     const [ordersOk, linesOk, procurementOk] = await Promise.all([
-      loadOrders(),
-      loadLines(),
+      ordersQuery.entryState === "deny" ? Promise.resolve(true) : loadOrders(),
+      linesQuery.entryState === "deny" ? Promise.resolve(true) : loadLines(),
       procurementRefresh.current?.() ?? Promise.resolve(true),
     ]);
     return ordersOk && linesOk && procurementOk;
-  }, [loadOrders, loadLines]);
+  }, [loadOrders, loadLines, ordersQuery.entryState, linesQuery.entryState]);
 
   useEffect(() => {
     registerRefresh("parts-orders", refreshAll);
@@ -249,6 +210,7 @@ export function PartsOrdersTab({
     { title: "数量核对（当前累计）", dataIndex: "return_summary", width: 215, render: (value, order) => <ReturnStatusColumn summary={value} error={order.return_summary_error} /> },
     {
       title: "已知申请估算成本(含税)",
+      key: "amount",
       render: (_: unknown, order) =>
         ["ready", "partial", "stale"].includes(order.known_apply_cost_inc_tax.state)
           ? (order.known_apply_cost_inc_tax.value?.quality === "incomplete"
@@ -304,6 +266,7 @@ export function PartsOrdersTab({
     },
     {
       title: "成本来源",
+      key: "amount",
       width: 150,
       render: (_: unknown, line) => <CostSourceTag row={line} />,
     },
@@ -313,14 +276,10 @@ export function PartsOrdersTab({
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       <PanelActionBar
         workbook={(
-          <WorkbookRoundTrip
-            size="small"
+          <ProjectWorkbookRoundTrip projectId={projectId} surface="parts_roundtrip" sheets={[SHEETS.parts]}
             title="备件成本"
             filename={`${exportBase}-${SHEETS.parts}.xlsx`}
             canUpload={canUpload}
-            onDownload={() => downloadProjectMaster(projectId, [SHEETS.parts])}
-            onValidate={(file) => validateProjectMaster(projectId, file)}
-            onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}
             onAfterApply={onChanged}
           />
         )}
@@ -382,7 +341,7 @@ export function PartsOrdersTab({
           }}
         />
       ) : null}
-      <Card
+      {(ordersQuery.entryState !== "deny" || linesQuery.entryState !== "deny") && <Card
         size="small"
         title="需求单"
         extra={contractNos.length > 1 ? (
@@ -397,12 +356,13 @@ export function PartsOrdersTab({
           />
         ) : null}
       >
-        <Table<BoardOrderRow>
+        {ordersQuery.error ? <Alert type="error" showIcon message={readError(ordersQuery.error, "需求单加载失败")} action={<Button onClick={() => void loadOrders()}>重试需求单</Button>} /> : null}
+        {ordersQuery.entryState !== "deny" && <Table<BoardOrderRow>
           rowKey="source_order_id"
           size="small"
           loading={ordersLoading}
           dataSource={orders}
-          columns={orderColumns}
+          columns={orderColumns.filter(column => orderAmounts || column.key !== "amount")}
           scroll={{ x: 1500 }}
           pagination={{
             current: ordersPage,
@@ -410,8 +370,8 @@ export function PartsOrdersTab({
             showSizeChanger: false,
             onChange: (page) => setOrdersPage(page),
           }}
-        />
-        <Space size={12} wrap>
+        />}
+        {lineAmounts && <Space size={12} wrap>
           {COST_CATEGORY_LEGEND.map((item) => (
             <Tag key={item.text} color={item.color}>{item.text}</Tag>
           ))}
@@ -419,7 +379,7 @@ export function PartsOrdersTab({
             成本来源：绿=系统关联（采购单挂接）｜橙=估算（窗口/历史/池/月均/销售参考）｜紫=人工回填｜红=缺失
             {selectedOrder ? `｜当前过滤：${selectedOrder.order_no}（再点单号取消）` : ""}
           </Text>
-        </Space>
+        </Space>}
         <Text type="secondary" style={{ display: "block", fontSize: 11.5 }}>
           已返数量、待返数量是 WBDD 源表流转状态，仅作展示；净量和成本仍只按需求数量减退货数量。
         </Text>
@@ -438,12 +398,12 @@ export function PartsOrdersTab({
         {linesError ? <Alert type="error" showIcon message={linesError}
           style={{ marginBottom: 12 }}
           action={<Button onClick={() => void loadLines()}>重试备件明细</Button>} /> : null}
-        <Table<ProjectPartsRow>
+        {linesQuery.entryState !== "deny" && <Table<ProjectPartsRow>
           rowKey="line_id"
           size="small"
           loading={linesLoading}
           dataSource={lines}
-          columns={lineColumns}
+          columns={lineColumns.filter(column => lineAmounts || (column.key !== "amount" && !("dataIndex" in column && ["unit_cost_ex_tax", "unit_cost_inc_tax", "cost_amount_inc_tax"].includes(String(column.dataIndex)))))}
           scroll={{ x: 1380 }}
           pagination={{
             current: linesPage,
@@ -453,8 +413,8 @@ export function PartsOrdersTab({
             onChange: (page) => setLinesPage(page),
           }}
           locale={{ emptyText: linesError ? "查询失败，请重试" : "当前筛选没有备件行" }}
-        />
-      </Card>
+        />}
+      </Card>}
       <ProjectProcurementPanel
         projectId={projectId}
         sourceOrderId={selectedOrder?.source_order_id ?? null}

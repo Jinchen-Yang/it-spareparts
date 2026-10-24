@@ -1,3 +1,7 @@
+import { useContextTransport } from "../../authz/domainTransport";
+import { useContextAdmission } from "../../authz/access";
+import { withContextSurface } from "../../authz/ContextSurface";
+import { actionRule, surfaceRule } from "../../authz/rules";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { App, Alert, Button, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -67,11 +71,11 @@ function firstOverrideField(row: DemandLineRow): string {
  * （opEpoch）：关闭/换 sourceOrderId/卸载推进代次，旧请求的成功/错误/finally
  * 一律不碰新对话框状态、不解锁；行数据读取用独立 seq，旧 GET 不回写。
  */
-export default function DemandLinesEditor({
+function DemandLinesEditor({
   sourceOrderId,
   orderNo,
   onClose,
-  readOnly = false,
+  readOnly: legacyReadOnly = false,
   onChanged,
 }: {
   sourceOrderId: string;
@@ -80,6 +84,13 @@ export default function DemandLinesEditor({
   readOnly?: boolean;
   onChanged?: () => Promise<boolean>;
 }) {
+  const transport = useContextTransport(sourceOrderId, true);
+  const admission = useContextAdmission();
+  const canEdit = admission.state(actionRule("maintenance_demand", "edit_line"), !legacyReadOnly) !== "deny";
+  const canClear = admission.surface("maintenance_demand.clear_override", !legacyReadOnly) !== "deny";
+  const canBatch = admission.surface("maintenance_demand.batch_edit", !legacyReadOnly) !== "deny";
+  const canSummary = admission.surface("maintenance_demand.return_summary", true) !== "deny";
+  const readOnly = !canEdit && !canClear;
   const { message } = App.useApp();
   const [rows, setRows] = useState<DemandLineRow[]>([]);
   const [returnSummary, setReturnSummary] = useState<DemandReturnSummary | null>(null);
@@ -112,17 +123,22 @@ export default function DemandLinesEditor({
   const opEpoch = useRef(0);
   /** 编辑/撤销共用的同步锁：任何 await 之前生效，防快速双击双写。 */
   const writeLock = useRef(false);
+  const writeTransport = useContextTransport(JSON.stringify([
+    sourceOrderId, opEpoch.current, editing?.raw_line_id, editing?.digest,
+    editQty, editReturnQty, editSn, editDesc, editPn, reason, clearAsk,
+  ]), true);
 
   /** 行数据读取：返回刚拿到的 rows（供 409 重载直接用，不依赖异步 render）。 */
   const load = useCallback(async (): Promise<DemandLineRow[] | null> => {
     const current = ++seq.current;
     setLoading(true);
+    setRows([]);
     setError(null);
     setReturnSummary(null);
     setReturnSummaryError(undefined);
     try {
-      const resp = await listDemandLines(sourceOrderId);
-      if (seq.current !== current) return null;
+      const resp = await listDemandLines(sourceOrderId, transport);
+      if ((seq.current !== current || !transport.isCurrent())) return null;
       setRows(resp.data.items);
       setReturnSummary(resp.data.return_summary ?? null);
       setReturnSummaryError(resp.data.return_summary_error);
@@ -130,20 +146,20 @@ export default function DemandLinesEditor({
         resp.data.items.some((row) => row.raw_line_id === key)));
       return resp.data.items;
     } catch (err) {
-      if (seq.current === current) {
+      if ((seq.current === current && transport.isCurrent())) {
         setError(readError(err, "明细行加载失败，请重试"));
       }
       return null;
     } finally {
-      if (seq.current === current) setLoading(false);
+      if ((seq.current === current && transport.isCurrent())) setLoading(false);
     }
-  }, [sourceOrderId]);
+  }, [sourceOrderId, transport]);
 
   const refreshAfterWrite = async () => {
     const epoch = opEpoch.current;
     const results = await Promise.allSettled([load(), Promise.resolve().then(() => onChanged?.())]);
     const refreshed = results.every((result) => result.status === "fulfilled" && result.value !== false && result.value !== null);
-    if (opEpoch.current === epoch && !refreshed) message.warning("修改已保存，但明细或需求单返还情况刷新失败，请重试刷新，不要重复提交");
+    if ((opEpoch.current === epoch && transport.isCurrent()) && !refreshed) message.warning("修改已保存，但明细或需求单返还情况刷新失败，请重试刷新，不要重复提交");
     return refreshed;
   };
 
@@ -211,7 +227,7 @@ export default function DemandLinesEditor({
     const epoch = opEpoch.current;
     try {
       const freshRows = await load();
-      if (opEpoch.current !== epoch) return;
+      if ((opEpoch.current !== epoch || !transport.isCurrent())) return;
       if (!freshRows) {
         setSaveError("重新加载失败，请重试或关闭后重新打开");
         return;
@@ -228,12 +244,12 @@ export default function DemandLinesEditor({
       setConflict(false);
       setSaveError("已重新加载最新数据；当前值是服务器最新值，请核对后重新修改提交");
     } finally {
-      if (opEpoch.current === epoch) writeLock.current = false;
+      if ((opEpoch.current === epoch && transport.isCurrent())) writeLock.current = false;
     }
   };
 
   const submit = async () => {
-    if (readOnly || !editing || writeLock.current) return;
+    if (!canEdit || !transport.isCurrent() || !editing || writeLock.current) return;
     if (editing.digest === "") {
       // 行已不存在/已作废（409 重载发现）：不能再发旧 snapshot。
       setSaveError("该行已不存在或已作废，请关闭后重新打开");
@@ -265,13 +281,13 @@ export default function DemandLinesEditor({
     setSaving(true);
     setSaveError(null);
     try {
-      await patchDemandLine(editing.raw_line_id, updates, reason.trim(), editing.digest);
-      if (opEpoch.current !== epoch) return;
+      await patchDemandLine(editing.raw_line_id, updates, reason.trim(), editing.digest, writeTransport);
+      if ((opEpoch.current !== epoch || !transport.isCurrent())) return;
       message.success("明细行已修改");
       setEditing(null);
       await refreshAfterWrite();
     } catch (err) {
-      if (opEpoch.current !== epoch) return;
+      if ((opEpoch.current !== epoch || !transport.isCurrent())) return;
       if (isConflict(err)) {
         setConflict(true);
         setSaveError(readError(err, "该明细行已被他人修改，请重新加载最新数据后重试"));
@@ -280,7 +296,7 @@ export default function DemandLinesEditor({
       }
     } finally {
       // 解锁必须与 loading 复位同代：旧请求的 finally 不能解锁新代的提交。
-      if (opEpoch.current === epoch) {
+      if ((opEpoch.current === epoch && transport.isCurrent())) {
         setSaving(false);
         writeLock.current = false;
       }
@@ -294,7 +310,7 @@ export default function DemandLinesEditor({
     const epoch = opEpoch.current;
     try {
       const freshRows = await load();
-      if (opEpoch.current !== epoch) return;
+      if ((opEpoch.current !== epoch || !transport.isCurrent())) return;
       if (!freshRows) {
         setClearAsk({
           ...clearAsk, conflict: false,
@@ -318,25 +334,25 @@ export default function DemandLinesEditor({
         error: "已重新加载最新数据；请核对后重新点「确认撤销」。",
       });
     } finally {
-      if (opEpoch.current === epoch) writeLock.current = false;
+      if ((opEpoch.current === epoch && transport.isCurrent())) writeLock.current = false;
     }
   };
 
   const confirmClear = async () => {
-    if (readOnly || !clearAsk || writeLock.current || clearAsk.gone) return;
+    if (!canClear || !transport.isCurrent() || !clearAsk || writeLock.current || clearAsk.gone) return;
     writeLock.current = true;
     const epoch = opEpoch.current;
     setClearing(true);
     try {
       await clearDemandLineOverride(
-        clearAsk.row.raw_line_id, clearAsk.field, clearAsk.reason.trim(), clearAsk.row.digest,
+        clearAsk.row.raw_line_id, clearAsk.field, clearAsk.reason.trim(), clearAsk.row.digest, writeTransport,
       );
-      if (opEpoch.current !== epoch) return;
+      if ((opEpoch.current !== epoch || !transport.isCurrent())) return;
       message.success(`${OVERRIDABLE_FIELDS.find((f) => f.field === clearAsk.field)?.label ?? clearAsk.field} 已恢复原值`);
       setClearAsk(null);
       await refreshAfterWrite();
     } catch (err) {
-      if (opEpoch.current !== epoch) return;
+      if ((opEpoch.current !== epoch || !transport.isCurrent())) return;
       if (isConflict(err)) {
         // 保留弹窗与已填原因：用户点「重新加载最新数据」换新 digest 后重新确认，
         // 禁止自动重试覆盖。
@@ -349,7 +365,7 @@ export default function DemandLinesEditor({
       }
     } finally {
       // 同 submit：旧代的 finally 不得触碰新代的 loading 与锁。
-      if (opEpoch.current === epoch) {
+      if ((opEpoch.current === epoch && transport.isCurrent())) {
         setClearing(false);
         writeLock.current = false;
       }
@@ -395,8 +411,8 @@ export default function DemandLinesEditor({
       title: "操作", key: "ops", width: 120,
       render: (_v, row) => (
         <Space size={8}>
-          <Button size="small" onClick={() => openEdit(row)}>编辑</Button>
-          {OVERRIDABLE_FIELDS.some((f) => row.manual_override?.[f.field]) ? (
+          {canEdit && <Button size="small" onClick={() => openEdit(row)}>编辑</Button>}
+          {canClear && OVERRIDABLE_FIELDS.some((f) => row.manual_override?.[f.field]) ? (
             <Button
               size="small"
               onClick={() => {
@@ -428,7 +444,7 @@ export default function DemandLinesEditor({
       maskClosable={false}
     >
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <ReturnStatusColumn summary={returnSummary} error={returnSummaryError} />
+        {canSummary && <ReturnStatusColumn summary={returnSummary} error={returnSummaryError} />}
         {!readOnly ? <Text type="secondary" style={{ fontSize: 12 }}>
           可修改数量、退货数量、SN、描述和型号；导入遇到已修改字段会按冲突规则处理；
           撤销可恢复该字段首次手工修改前的值。成本列与单头信息请走既有通道。
@@ -438,7 +454,7 @@ export default function DemandLinesEditor({
             <Button size="small" onClick={() => { void load(); }}>重试</Button>
           } />
         ) : null}
-        {!readOnly ? <div>
+        {canBatch ? <div>
           <Button
             type="primary"
             disabled={!selectedRowKeys.length || loading}
@@ -454,7 +470,7 @@ export default function DemandLinesEditor({
           loading={loading}
           dataSource={rows}
           columns={readOnly ? columns.filter((column) => column.key !== "ops") : columns}
-          rowSelection={readOnly ? undefined : {
+          rowSelection={!canBatch ? undefined : {
             selectedRowKeys,
             onChange: (keys) => setSelectedRowKeys(keys as string[]),
           }}
@@ -465,7 +481,7 @@ export default function DemandLinesEditor({
       </Space>
 
       <Modal
-        open={!readOnly && editing !== null}
+        open={canEdit && editing !== null}
         title={editing ? `编辑第 ${editing.line_no ?? "?"} 行（${editing.pn_std ?? ""}）` : ""}
         confirmLoading={saving}
         okText="保存修改"
@@ -525,7 +541,7 @@ export default function DemandLinesEditor({
       </Modal>
 
       <Modal
-        open={!readOnly && clearAsk !== null}
+        open={canClear && clearAsk !== null}
         title={clearAsk ? `撤销「${OVERRIDABLE_FIELDS.find((f) => f.field === clearAsk.field)?.label ?? clearAsk.field}」的页面直改` : ""}
         okText="确认撤销"
         cancelText="取消"
@@ -594,7 +610,7 @@ export default function DemandLinesEditor({
         </Space>
       </Modal>
 
-      {!readOnly && batchEditingRows ? (
+      {canBatch && batchEditingRows ? (
         <DemandLineBatchEdit
           sourceOrderId={sourceOrderId}
           rows={batchEditingRows}
@@ -605,3 +621,5 @@ export default function DemandLinesEditor({
     </Modal>
   );
 }
+
+export default withContextSurface(DemandLinesEditor, surfaceRule("maintenance_demand.lines"), props => props.sourceOrderId);

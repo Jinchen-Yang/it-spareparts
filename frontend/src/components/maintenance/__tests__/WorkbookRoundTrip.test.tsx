@@ -43,6 +43,20 @@ describe("WorkbookRoundTrip", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
+  it("预检可独立使用，缺 apply 时显示结果但不能确认回传", async () => {
+    const onApply = vi.fn();
+    const onValidate = vi.fn().mockResolvedValue({ will_void_rows: [], will_reassign_orders: [], changes: [] });
+    const view = render(<WorkbookRoundTrip title="总表" filename="a.xlsx" canUpload canApply={false}
+      onDownload={vi.fn()} onValidate={onValidate} onApply={onApply} />);
+    uploadFile(view.container, makeFile());
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect(within(dialog).getByText("预检已完成；当前没有确认回传权限")).toBeVisible());
+    const confirm = within(dialog).getByRole("button", { name: "确认回传" });
+    expect(confirm).toBeDisabled(); fireEvent.click(confirm);
+    expect(onValidate).toHaveBeenCalledOnce(); expect(onApply).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: /取\s*消/ }));
+  });
+
   it("下载失败时在当前会话显示错误", async () => {
     localStorage.setItem("token", "synthetic-session-a");
     const onDownload = vi.fn().mockRejectedValue(new Error("network"));

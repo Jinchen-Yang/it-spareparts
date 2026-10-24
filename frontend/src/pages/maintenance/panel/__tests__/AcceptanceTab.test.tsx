@@ -1,3 +1,4 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../../test/legacyAuthorization";
 import { cleanup, fireEvent, render, screen, waitFor } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -44,6 +45,7 @@ beforeEach(() => {
   vi.spyOn(Storage.prototype, "getItem").mockImplementation((key: string) => {
     if (key === "role") return "admin";
     if (key === "permissions") return "{}";
+    if (key === "token") return "legacy-acceptance-owner";
     return null;
   });
 });
@@ -230,9 +232,14 @@ describe("验收 tab（2026-08-21 客户反馈）", () => {
     fireEvent.click(await screen.findByRole("button", { name: /替换生效/ }));
 
     await waitFor(() =>
-      expect(mocks.applyMaintenanceAcceptanceChecklist).toHaveBeenCalledWith("preview-1"));
+      expect(mocks.applyMaintenanceAcceptanceChecklist).toHaveBeenCalledWith("preview-1", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
     expect(await screen.findByText(/验收清单已生效，但页面刷新失败/)).toBeInTheDocument();
     expect(screen.queryByText(/验收清单已生效并刷新/)).toBeNull();
   });
 });
+
+vi.mock("../../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

@@ -1,3 +1,9 @@
+import { useContextAdmission, useModuleAccess } from "../../authz/access";
+import { actionRule } from "../../authz/rules";
+import { useContextTransport, withTransportSignal } from "../../authz/domainTransport";
+import { withContextSurface, contextSurfaces } from "../../authz/ContextSurface";
+import { contextRefKey, type AuthorizationContext } from "../../authz/contextTypes";
+import { ContextChanged } from "../../authz/contextProtocol";
 import { App, Alert, Button, Card, Checkbox, Empty, Input, InputNumber, List, Modal, Progress, Select, Space, Spin, Tag, Typography } from "antd";
 import { useEffect, useRef, useState } from "react";
 
@@ -40,10 +46,10 @@ const returnStatusLabel: Record<string, { label: string; color?: string }> = {
   void: { label: "已作废", color: "default" },
 };
 
-export default function BadReturnPanel({
+function BadReturnPanel({
   projectId,
   returnRate,
-  canManage,
+  canManage: legacyManage,
   onChanged,
 }: {
   projectId: string;
@@ -101,7 +107,22 @@ export default function BadReturnPanel({
   const [categoryError, setCategoryError] = useState<string | null>(null);
   const [categoryLoading, setCategoryLoading] = useState(false);
   const [categorySaving, setCategorySaving] = useState(false);
-  const [canResolveCategory] = useState(() => localStorage.getItem("role") === "admin");
+  const admission = useContextAdmission();
+  const module = useModuleAccess("maintenance_return_obligation");
+  const can = (action: string) => admission.state(actionRule("maintenance_return_obligation", action), legacyManage) !== "deny";
+  const canResolveCategory = admission.state(actionRule("maintenance_return_obligation", "resolve_category"), localStorage.getItem("role") === "admin") !== "deny";
+  const canManage = ["create", "submit", "mark_in_transit", "warehouse_confirm", "void"].some(can);
+  const readCapture = useContextTransport(projectId, true);
+  const draftCapture = useContextTransport(JSON.stringify([projectId, draftOpen, replacementFor?.return_id, selected, draftNote, draftReason]), legacyManage);
+  const submitCapture = useContextTransport(JSON.stringify([projectId, submitTarget?.return_id, submitTarget?.version, submitReason]), legacyManage);
+  const transitCapture = useContextTransport(JSON.stringify([projectId, transitTarget?.return_id, transitTarget?.version, logisticsReference, transitReason]), legacyManage);
+  const warehouseCapture = useContextTransport(JSON.stringify([projectId, warehouseTarget?.return_id, warehouseTarget?.version, warehouseReference, inboundReference, warehouseReason]), legacyManage);
+  const voidCapture = useContextTransport(JSON.stringify([projectId, voidTarget?.return_id, voidTarget?.version, voidReason]), legacyManage);
+  const categoryCapture = useContextTransport(JSON.stringify([projectId, categoryTarget?.obligation_id, categoryTarget?.version, categoryId, categoryReason]), localStorage.getItem("role") === "admin");
+  const categoryAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => categoryAbort.current?.abort(), []);
+  const obligationContext = useRef<AuthorizationContext | undefined>(), returnsContext = useRef<AuthorizationContext | undefined>();
+
   const draftCommandKey = useRef<string | null>(null);
   const submitCommandKey = useRef<string | null>(null);
   const transitCommandKey = useRef<string | null>(null);
@@ -123,14 +144,15 @@ export default function BadReturnPanel({
           project_id: requestedProject,
           page: 1,
           page_size: 50,
-        }),
+        }, readCapture),
         searchMaintenanceBadReturns({
           project_id: requestedProject,
           page: 1,
           page_size: 20,
-        }),
+        }, readCapture),
       ]);
-      if (request !== generation.current) return;
+      if (!readCapture.isCurrent() || request !== generation.current) return;
+      obligationContext.current = obligationResponse.data.authorization_context; returnsContext.current = returnResponse.data.authorization_context;
       setObligations(obligationResponse.data.rows ?? []);
       setReturns(returnResponse.data.rows ?? []);
       setObligationPage(obligationResponse.data.page);
@@ -141,7 +163,7 @@ export default function BadReturnPanel({
       setReturnTotal(returnResponse.data.total);
       setLoadedRate(obligationResponse.data.return_rate ?? null);
     } catch {
-      if (request !== generation.current) return;
+      if (!readCapture.isCurrent() || request !== generation.current) return;
       setObligations([]);
       setReturns([]);
       setObligationPage(1);
@@ -151,7 +173,7 @@ export default function BadReturnPanel({
       setLoadedRate(null);
       setError(true);
     } finally {
-      if (request === generation.current) setLoading(false);
+      if (readCapture.isCurrent() && request === generation.current) setLoading(false);
     }
   };
 
@@ -163,11 +185,12 @@ export default function BadReturnPanel({
         project_id: requestedProject,
         page: 1,
         page_size: 50,
-      });
+      }, readCapture);
       if (
-        request !== factsGeneration.current
+        !readCapture.isCurrent() || request !== factsGeneration.current
         || activeProject.current !== requestedProject
       ) return;
+      obligationContext.current = data.authorization_context;
       setObligations(data.rows ?? []);
       setObligationPage(data.page);
       setObligationPageSize(data.page_size);
@@ -175,7 +198,7 @@ export default function BadReturnPanel({
       setLoadedRate(data.return_rate ?? null);
     } catch {
       if (
-        request === factsGeneration.current
+        readCapture.isCurrent() && request === factsGeneration.current
         && activeProject.current === requestedProject
       ) message.warning("返还数量刷新失败，请重试");
     }
@@ -239,7 +262,7 @@ export default function BadReturnPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
-  const rate = loadedRate ?? returnRate;
+  const rate = loadedRate ?? (module.legacy ? returnRate : null);
   const hasMoreObligations = obligationPage * obligationPageSize < obligationTotal;
   const hasMoreReturns = returnPage * returnPageSize < returnTotal;
   const eligibleObligations = obligations.filter((row) => (
@@ -250,6 +273,8 @@ export default function BadReturnPanel({
 
   const openCategoryResolution = async (row: MaintenanceReturnObligation) => {
     if (!canResolveCategory || row.classification !== "pending_category") return;
+    categoryAbort.current?.abort(); categoryAbort.current = new AbortController();
+    const categoryRead = withTransportSignal(readCapture, categoryAbort.current.signal);
     const request = ++categoryLoadGeneration.current;
     const requestedProject = projectId;
     setCategoryTarget(row);
@@ -260,20 +285,20 @@ export default function BadReturnPanel({
     setCategoryLoading(true);
     categoryCommandKey.current = commandKey("bad-return-category");
     try {
-      const { data } = await listMaintenanceReturnCategories();
+      const { data } = await listMaintenanceReturnCategories(categoryRead);
       if (
-        request !== categoryLoadGeneration.current
+        !categoryRead.isCurrent() || request !== categoryLoadGeneration.current
         || activeProject.current !== requestedProject
       ) return;
       setReturnCategories(data.categories ?? []);
     } catch {
       if (
-        request === categoryLoadGeneration.current
+        categoryRead.isCurrent() && request === categoryLoadGeneration.current
         && activeProject.current === requestedProject
       ) setCategoryError("标准品类加载失败，请重试");
     } finally {
       if (
-        request === categoryLoadGeneration.current
+        categoryRead.isCurrent() && request === categoryLoadGeneration.current
         && activeProject.current === requestedProject
       ) setCategoryLoading(false);
     }
@@ -281,12 +306,13 @@ export default function BadReturnPanel({
 
   const closeCategoryResolution = () => {
     if (categorySaving) return;
-    categoryLoadGeneration.current += 1;
+    categoryAbort.current?.abort(); categoryLoadGeneration.current += 1;
     setCategoryTarget(null);
     categoryCommandKey.current = null;
   };
 
   const resolveCategory = async () => {
+    if (!categoryCapture.isCurrent() || !canResolveCategory) return;
     const cleanReason = categoryReason.trim();
     const idempotencyKey = categoryCommandKey.current;
     if (!canResolveCategory || !categoryTarget || categoryId == null
@@ -303,9 +329,9 @@ export default function BadReturnPanel({
           category_id: categoryId,
           idempotency_key: idempotencyKey,
           reason: cleanReason,
-        },
+        }, categoryCapture
       );
-      if (activeProject.current !== requestedProject) return;
+      if (!categoryCapture.isCurrent() || activeProject.current !== requestedProject) return;
       setObligations((current) => current.map((row) => (
         row.obligation_id === data.obligation_id ? data : row
       )));
@@ -315,15 +341,17 @@ export default function BadReturnPanel({
       void refreshObligationFacts();
       onChanged();
     } catch {
-      if (activeProject.current === requestedProject) {
+      if (categoryCapture.isCurrent() && activeProject.current === requestedProject) {
         setCategoryError("品类处理失败，义务版本或标准品类可能已变化，请刷新后重试");
       }
     } finally {
-      if (activeProject.current === requestedProject) setCategorySaving(false);
+      if (categoryCapture.isCurrent() && activeProject.current === requestedProject) setCategorySaving(false);
     }
   };
 
   const openDraft = (source: MaintenanceBadReturn | null = null) => {
+    if (!can("create")) return;
+    setDraftSaving(false);
     const sourceSelection = source == null ? {} : Object.fromEntries(
       source.lines.flatMap((line) => {
         const obligation = eligibleObligations.find(
@@ -353,6 +381,7 @@ export default function BadReturnPanel({
   };
 
   const saveDraft = async () => {
+    if (!draftCapture.isCurrent() || !can("create")) return;
     const lines = Object.entries(selected)
       .filter(([, value]) => Number.isFinite(value) && value > 0)
       .map(([obligation_id, value]) => ({ obligation_id, quantity: value }));
@@ -373,8 +402,8 @@ export default function BadReturnPanel({
         lines,
         ...(draftNote.trim() ? { note: draftNote.trim() } : {}),
         reason: cleanReason,
-      });
-      if (activeProject.current !== requestedProject) return;
+      }, draftCapture);
+      if (!draftCapture.isCurrent() || activeProject.current !== requestedProject) return;
       setReturns((current) => [
         data,
         ...current.filter((item) => item.return_id !== data.return_id),
@@ -386,15 +415,17 @@ export default function BadReturnPanel({
       message.success("坏件返还草稿已保存");
       onChanged();
     } catch {
-      if (activeProject.current === requestedProject) {
+      if (draftCapture.isCurrent() && activeProject.current === requestedProject) {
         setDraftError("坏件返还草稿保存失败，义务余额可能已变化，请刷新后重试");
       }
     } finally {
-      if (activeProject.current === requestedProject) setDraftSaving(false);
+      if (draftCapture.isCurrent() && activeProject.current === requestedProject) setDraftSaving(false);
     }
   };
 
   const openSubmit = (item: MaintenanceBadReturn) => {
+    if (!can("submit")) return;
+    setSubmitSaving(false);
     setSubmitTarget(item);
     setSubmitReason("");
     setSubmitError(null);
@@ -402,6 +433,7 @@ export default function BadReturnPanel({
   };
 
   const submitReturn = async () => {
+    if (!submitCapture.isCurrent() || !can("submit")) return;
     const cleanReason = submitReason.trim();
     const idempotencyKey = submitCommandKey.current;
     if (!submitTarget || !cleanReason || !idempotencyKey) return;
@@ -414,8 +446,8 @@ export default function BadReturnPanel({
         version: submitTarget.version,
         idempotency_key: idempotencyKey,
         reason: cleanReason,
-      });
-      if (activeProject.current !== requestedProject) return;
+      }, submitCapture);
+      if (!submitCapture.isCurrent() || activeProject.current !== requestedProject) return;
       setReturns((current) => current.map((item) => (
         item.return_id === data.return_id ? data : item
       )));
@@ -425,15 +457,17 @@ export default function BadReturnPanel({
       void refreshObligationFacts();
       onChanged();
     } catch {
-      if (activeProject.current === requestedProject) {
+      if (submitCapture.isCurrent() && activeProject.current === requestedProject) {
         setSubmitError("提交失败，单据版本或返还义务余额可能已变化，请刷新后重试");
       }
     } finally {
-      if (activeProject.current === requestedProject) setSubmitSaving(false);
+      if (submitCapture.isCurrent() && activeProject.current === requestedProject) setSubmitSaving(false);
     }
   };
 
   const openTransit = (item: MaintenanceBadReturn) => {
+    if (!can("mark_in_transit")) return;
+    setTransitSaving(false);
     setTransitTarget(item);
     setLogisticsReference("");
     setTransitReason("");
@@ -442,6 +476,7 @@ export default function BadReturnPanel({
   };
 
   const markInTransit = async () => {
+    if (!transitCapture.isCurrent() || !can("mark_in_transit")) return;
     const cleanReference = logisticsReference.trim();
     const cleanReason = transitReason.trim();
     const idempotencyKey = transitCommandKey.current;
@@ -456,8 +491,8 @@ export default function BadReturnPanel({
         idempotency_key: idempotencyKey,
         logistics_reference: cleanReference,
         reason: cleanReason,
-      });
-      if (activeProject.current !== requestedProject) return;
+      }, transitCapture);
+      if (!transitCapture.isCurrent() || activeProject.current !== requestedProject) return;
       setReturns((current) => current.map((item) => (
         item.return_id === data.return_id ? data : item
       )));
@@ -466,15 +501,17 @@ export default function BadReturnPanel({
       message.success("坏件返还已标记在途");
       onChanged();
     } catch {
-      if (activeProject.current === requestedProject) {
+      if (transitCapture.isCurrent() && activeProject.current === requestedProject) {
         setTransitError("在途登记失败，单据版本可能已变化，请刷新后重试");
       }
     } finally {
-      if (activeProject.current === requestedProject) setTransitSaving(false);
+      if (transitCapture.isCurrent() && activeProject.current === requestedProject) setTransitSaving(false);
     }
   };
 
   const openWarehouseConfirm = (item: MaintenanceBadReturn) => {
+    if (!can("warehouse_confirm")) return;
+    setWarehouseSaving(false);
     setWarehouseTarget(item);
     setWarehouseReference("");
     setInboundReference("");
@@ -484,6 +521,7 @@ export default function BadReturnPanel({
   };
 
   const confirmWarehouse = async () => {
+    if (!warehouseCapture.isCurrent() || !can("warehouse_confirm")) return;
     const cleanWarehouseReference = warehouseReference.trim();
     const cleanInboundReference = inboundReference.trim();
     const cleanReason = warehouseReason.trim();
@@ -502,9 +540,9 @@ export default function BadReturnPanel({
           warehouse_reference: cleanWarehouseReference,
           ...(cleanInboundReference ? { inbound_reference: cleanInboundReference } : {}),
           reason: cleanReason,
-        },
+        }, warehouseCapture
       );
-      if (activeProject.current !== requestedProject) return;
+      if (!warehouseCapture.isCurrent() || activeProject.current !== requestedProject) return;
       setReturns((current) => current.map((item) => (
         item.return_id === data.return_id ? data : item
       )));
@@ -514,15 +552,17 @@ export default function BadReturnPanel({
       void refreshObligationFacts();
       onChanged();
     } catch {
-      if (activeProject.current === requestedProject) {
+      if (warehouseCapture.isCurrent() && activeProject.current === requestedProject) {
         setWarehouseError("仓库确认失败，单据版本或确认数量可能已变化，请刷新后重试");
       }
     } finally {
-      if (activeProject.current === requestedProject) setWarehouseSaving(false);
+      if (warehouseCapture.isCurrent() && activeProject.current === requestedProject) setWarehouseSaving(false);
     }
   };
 
   const openVoid = (item: MaintenanceBadReturn) => {
+    if (!can("void")) return;
+    setVoidSaving(false);
     setVoidTarget(item);
     setVoidReason("");
     setVoidError(null);
@@ -530,6 +570,7 @@ export default function BadReturnPanel({
   };
 
   const voidReturn = async () => {
+    if (!voidCapture.isCurrent() || !can("void")) return;
     const cleanReason = voidReason.trim();
     const idempotencyKey = voidCommandKey.current;
     if (!voidTarget || !cleanReason || !idempotencyKey) return;
@@ -542,23 +583,23 @@ export default function BadReturnPanel({
         version: voidTarget.version,
         idempotency_key: idempotencyKey,
         reason: cleanReason,
-      });
-      if (activeProject.current !== requestedProject) return;
+      }, voidCapture);
+      if (!voidCapture.isCurrent() || activeProject.current !== requestedProject) return;
       setReturns((current) => current.map((item) => (
         item.return_id === data.return_id ? data : item
       )));
       await refreshObligationFacts();
-      if (activeProject.current !== requestedProject) return;
+      if (!voidCapture.isCurrent() || activeProject.current !== requestedProject) return;
       setVoidTarget(null);
       voidCommandKey.current = null;
       message.success("坏件返还单已追加式作废");
       onChanged();
     } catch {
-      if (activeProject.current === requestedProject) {
+      if (voidCapture.isCurrent() && activeProject.current === requestedProject) {
         setVoidError("作废失败；如已关联正式入库或版本已变化，请刷新后核对");
       }
     } finally {
-      if (activeProject.current === requestedProject) setVoidSaving(false);
+      if (voidCapture.isCurrent() && activeProject.current === requestedProject) setVoidSaving(false);
     }
   };
 
@@ -572,8 +613,9 @@ export default function BadReturnPanel({
         project_id: requestedProject,
         page: obligationPage + 1,
         page_size: obligationPageSize,
-      });
-      if (request !== generation.current || activeProject.current !== requestedProject) return;
+      }, readCapture);
+      if (!readCapture.isCurrent() || request !== generation.current || activeProject.current !== requestedProject) return;
+      if (obligationContext.current && (!data.authorization_context || contextRefKey(obligationContext.current.context) !== contextRefKey(data.authorization_context.context))) throw new ContextChanged();
       setObligations((current) => {
         const rows = new Map(current.map((row) => [row.obligation_id, row]));
         for (const row of data.rows ?? []) rows.set(row.obligation_id, row);
@@ -584,11 +626,11 @@ export default function BadReturnPanel({
       setObligationTotal(data.total);
       setLoadedRate(data.return_rate ?? null);
     } catch {
-      if (request === generation.current && activeProject.current === requestedProject) {
+      if (readCapture.isCurrent() && request === generation.current && activeProject.current === requestedProject) {
         message.error("更多返还义务加载失败，请重试");
       }
     } finally {
-      if (request === generation.current && activeProject.current === requestedProject) {
+      if (readCapture.isCurrent() && request === generation.current && activeProject.current === requestedProject) {
         setObligationsLoadingMore(false);
       }
     }
@@ -604,8 +646,9 @@ export default function BadReturnPanel({
         project_id: requestedProject,
         page: returnPage + 1,
         page_size: returnPageSize,
-      });
-      if (request !== generation.current || activeProject.current !== requestedProject) return;
+      }, readCapture);
+      if (!readCapture.isCurrent() || request !== generation.current || activeProject.current !== requestedProject) return;
+      if (returnsContext.current && (!data.authorization_context || contextRefKey(returnsContext.current.context) !== contextRefKey(data.authorization_context.context))) throw new ContextChanged();
       setReturns((current) => {
         const rows = new Map(current.map((row) => [row.return_id, row]));
         for (const row of data.rows ?? []) rows.set(row.return_id, row);
@@ -615,11 +658,11 @@ export default function BadReturnPanel({
       setReturnPageSize(data.page_size);
       setReturnTotal(data.total);
     } catch {
-      if (request === generation.current && activeProject.current === requestedProject) {
+      if (readCapture.isCurrent() && request === generation.current && activeProject.current === requestedProject) {
         message.error("更多坏件返还单加载失败，请重试");
       }
     } finally {
-      if (request === generation.current && activeProject.current === requestedProject) {
+      if (readCapture.isCurrent() && request === generation.current && activeProject.current === requestedProject) {
         setReturnsLoadingMore(false);
       }
     }
@@ -629,7 +672,7 @@ export default function BadReturnPanel({
     <Card
       data-testid="bad-return-panel"
       title="坏件返还"
-      extra={canManage ? (
+      extra={can("create") ? (
         <Button
           type="primary"
           disabled={eligibleObligations.length === 0}
@@ -774,46 +817,46 @@ export default function BadReturnPanel({
                         )}
                         {canManage && item.status === "draft" && (
                           <Space wrap>
-                            <Button size="small" type="primary" onClick={() => openSubmit(item)}>
+                            <Button hidden={!can("submit")} size="small" type="primary" onClick={() => openSubmit(item)}>
                               提交返还单
                             </Button>
-                            <Button size="small" danger onClick={() => openVoid(item)}>
+                            <Button hidden={!can("void")} size="small" danger onClick={() => openVoid(item)}>
                               作废返还单
                             </Button>
                           </Space>
                         )}
                         {canManage && item.status === "submitted" && (
                           <Space wrap>
-                            <Button size="small" type="primary" onClick={() => openTransit(item)}>
+                            <Button hidden={!can("mark_in_transit")} size="small" type="primary" onClick={() => openTransit(item)}>
                               标记在途
                             </Button>
-                            <Button size="small" onClick={() => openWarehouseConfirm(item)}>
+                            <Button hidden={!can("warehouse_confirm")} size="small" onClick={() => openWarehouseConfirm(item)}>
                               仓库确认
                             </Button>
-                            <Button size="small" danger onClick={() => openVoid(item)}>
+                            <Button hidden={!can("void")} size="small" danger onClick={() => openVoid(item)}>
                               作废返还单
                             </Button>
                           </Space>
                         )}
                         {canManage && item.status === "in_transit" && (
                           <Space wrap>
-                            <Button size="small" type="primary" onClick={() => openWarehouseConfirm(item)}>
+                            <Button hidden={!can("warehouse_confirm")} size="small" type="primary" onClick={() => openWarehouseConfirm(item)}>
                               仓库确认
                             </Button>
-                            <Button size="small" danger onClick={() => openVoid(item)}>
+                            <Button hidden={!can("void")} size="small" danger onClick={() => openVoid(item)}>
                               作废返还单
                             </Button>
                           </Space>
                         )}
-                        {canManage && item.status === "warehouse_confirmed" && canVoid && (
-                          <Button size="small" danger onClick={() => openVoid(item)}>
+                        {can("void") && item.status === "warehouse_confirmed" && canVoid && (
+                          <Button hidden={!can("void")} size="small" danger onClick={() => openVoid(item)}>
                             作废返还单
                           </Button>
                         )}
                         {item.status === "warehouse_confirmed" && !canVoid && (
                           <Text type="secondary">已关联正式入库，不可直接作废</Text>
                         )}
-                        {canManage && item.status === "void" && !replacement && (
+                        {can("create") && item.status === "void" && !replacement && (
                           <Button size="small" type="primary" onClick={() => openDraft(item)}>
                             建立替代单
                           </Button>
@@ -1151,3 +1194,5 @@ export default function BadReturnPanel({
     </Card>
   );
 }
+
+export default withContextSurface(BadReturnPanel, contextSurfaces("maintenance_return_obligation.workflow"), props => props.projectId);

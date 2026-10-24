@@ -1,3 +1,4 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -195,7 +196,7 @@ describe("批量登记真实交互", () => {
     expect(await screen.findByText("已核对当前值")).toBeInTheDocument();
     expect(mocks.create.mock.calls[1][1]).toEqual(firstPayload);
     expect("idempotency_key" in firstPayload).toBe(false);
-    expect(mocks.workspace).toHaveBeenCalledWith("p-1", expect.objectContaining({ collection_page: 2 }));
+    expect(mocks.workspace).toHaveBeenCalledWith("p-1", expect.objectContaining({ collection_page: 2 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(mocks.patch).not.toHaveBeenCalled();
   });
 
@@ -238,7 +239,7 @@ describe("批量修改与作废", () => {
     fireEvent.click(screen.getByRole("button", { name: /保\s*存\s*批\s*量\s*修\s*改/ }));
     await waitFor(() => expect(mocks.patch).toHaveBeenCalledWith("c-1", {
       version: 3, reason: "核对", remark: "只改备注",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("两条不同 version 中只发送真正变化行，并把空凭据/备注显式发 null", async () => {
@@ -261,7 +262,7 @@ describe("批量修改与作废", () => {
       cumulative_amount: 150,
       receipt_reference: null,
       remark: null,
-    });
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it("共同作废原因必填；两行分别携带原 version，部分成功与 409 不升级版本重放", async () => {
@@ -363,3 +364,8 @@ describe("同步锁、项目隔离与父刷新", () => {
     expect(mocks.create).toHaveBeenCalledTimes(1);
   });
 });
+
+vi.mock("../../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture({action_maintenance_roundtrip_apply: true, data_profit: true}));

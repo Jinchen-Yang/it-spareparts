@@ -1,3 +1,5 @@
+import { useAuthorizedQuery } from "../../authz/access";
+import { actionRule } from "../../authz/rules";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Select, Space } from "antd";
 import {
@@ -12,28 +14,15 @@ export default function MaintenanceCategoryFilter({ value, onChange, labelPrefix
   onChange: (value: MaintenanceCategoryFilterInput) => void;
   labelPrefix: string;
 }) {
-  const [categories, setCategories] = useState<MaintenancePartCategory[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [failed, setFailed] = useState(false);
-  const requestSeq = useRef(0);
-  const load = useCallback(async () => {
-    const seq = ++requestSeq.current;
-    setLoading(true);
-    setFailed(false);
-    try {
-      const result = await listMaintenancePartCategories();
+  const query = useAuthorizedQuery({ rule: actionRule("part_lookup", "read"), legacy: { part_lookup: true },
+    queryKey: ["maintenance-category-filter"], query: async capture => {
+      const result = await listMaintenancePartCategories(capture);
       if (!Array.isArray(result.data.categories)) throw new Error("invalid_categories");
-      if (seq === requestSeq.current) setCategories(result.data.categories);
-    } catch {
-      if (seq === requestSeq.current) setFailed(true);
-    } finally {
-      if (seq === requestSeq.current) setLoading(false);
-    }
-  }, []);
-  useEffect(() => {
-    void load();
-    return () => { requestSeq.current += 1; };
-  }, [load]);
+      return result.data.categories;
+    },
+  });
+  const categories = query.data ?? [], loading = query.loading, failed = !!query.error;
+  const load = query.retry;
   const unlinked = value.category_state === "unlinked";
   const minorDisabled = unlinked || !value.category_major || value.category_state === "unclassified";
   const minors = categories.find((category) => category.major === value.category_major)?.minors ?? [];
@@ -64,7 +53,7 @@ export default function MaintenanceCategoryFilter({ value, onChange, labelPrefix
         optionFilterProp="label"
         placeholder="全部一级品类"
         loading={loading}
-        disabled={unlinked}
+        disabled={unlinked || !query.allowed}
         style={{ width: 165 }}
         options={categories.map((category) => ({ label: category.major, value: category.major }))}
         onChange={(major: string | undefined) => onChange({ ...value, category_major: major, category_minor: undefined })}
@@ -76,7 +65,7 @@ export default function MaintenanceCategoryFilter({ value, onChange, labelPrefix
         showSearch
         optionFilterProp="label"
         placeholder="全部二级品类"
-        disabled={minorDisabled}
+        disabled={minorDisabled || !query.allowed}
         style={{ width: 165 }}
         options={minors.map((minor) => ({ label: minor, value: minor }))}
         onChange={(minor: string | undefined) => onChange({ ...value, category_minor: minor })}

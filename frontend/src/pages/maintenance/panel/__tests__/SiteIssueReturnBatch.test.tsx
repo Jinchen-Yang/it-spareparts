@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ search: vi.fn(), categories: vi.fn(), correct: vi.fn() }));
@@ -62,10 +63,10 @@ describe("领用行返还要求批量", () => {
     expect(mocks.correct).toHaveBeenNthCalledWith(1, "i1", "i1-l0", {
       expected_issue_version: 7, expected_line_version: 2,
       changes: { no_return: true }, reason: "合同逐行核实", idempotency_key: expect.any(String),
-    });
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(mocks.correct).toHaveBeenNthCalledWith(2, "i1", "i1-l1", expect.objectContaining({
       expected_issue_version: 8, expected_line_version: 3, changes: { no_return: true },
-    }));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(await within(dialog).findByText("成功 2，未变化 1，冲突 0，失败 0，结果未知 0，未提交 0")).toBeInTheDocument();
     const skipped = within(dialog).getByText("PN-i1-2").closest("tr")!;
     expect(within(skipped).getByText("未变化")).toBeInTheDocument();
@@ -82,7 +83,7 @@ describe("领用行返还要求批量", () => {
     await selectAll();
     const dialog = await confirmBatch(action);
     expect(within(dialog).getByText(wording)).toBeInTheDocument();
-    await waitFor(() => expect(mocks.correct).toHaveBeenCalledWith("i1", "i1-l0", expect.objectContaining({ changes: { no_return: value } })));
+    await waitFor(() => expect(mocks.correct).toHaveBeenCalledWith("i1", "i1-l0", expect.objectContaining({ changes: { no_return: value } }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(await within(dialog).findByText("成功 1，未变化 0，冲突 0，失败 0，结果未知 0，未提交 0")).toBeInTheDocument();
   });
 
@@ -131,7 +132,7 @@ describe("领用行返还要求批量", () => {
     fireEvent.click(replay);
     expect(await within(dialog).findByText("成功 1，未变化 0，冲突 0，失败 0，结果未知 0，未提交 1")).toBeInTheDocument();
     expect(mocks.correct).toHaveBeenCalledTimes(2);
-    expect(mocks.correct.mock.calls[1]).toEqual(mocks.correct.mock.calls[0]);
+    expect(mocks.correct.mock.calls[1].slice(0, -1)).toEqual(mocks.correct.mock.calls[0].slice(0, -1));
   });
 
   it("关闭未知结果后仍可恢复同键核对入口，不能用新批次抹掉未知回执", async () => {
@@ -151,7 +152,7 @@ describe("领用行返还要求批量", () => {
     const restored = await screen.findByRole("dialog");
     fireEvent.click(within(restored).getByRole("button", { name: "原样核对回执" }));
     await waitFor(() => expect(mocks.correct).toHaveBeenCalledTimes(2));
-    expect(mocks.correct.mock.calls[1]).toEqual(mocks.correct.mock.calls[0]);
+    expect(mocks.correct.mock.calls[1].slice(0, -1)).toEqual(mocks.correct.mock.calls[0].slice(0, -1));
   });
 
   it.each([403, 422])("原样核对再次收到 %s 仍保留首次结果未知", async (status) => {
@@ -166,7 +167,7 @@ describe("领用行返还要求批量", () => {
     fireEvent.click(replay);
     expect(await within(dialog).findByText("尚未核对首次结果，请刷新核实：本次请求被拒绝")).toBeInTheDocument();
     expect(within(dialog).getByText("成功 0，未变化 0，冲突 0，失败 0，结果未知 1，未提交 0")).toBeInTheDocument();
-    expect(mocks.correct.mock.calls[1]).toEqual(mocks.correct.mock.calls[0]);
+    expect(mocks.correct.mock.calls[1].slice(0, -1)).toEqual(mocks.correct.mock.calls[0].slice(0, -1));
   });
 
   it("首行等待时登录会话变化，后续行不以新账号继续提交", async () => {
@@ -178,8 +179,9 @@ describe("领用行返还要求批量", () => {
     const dialog = await confirmBatch();
     localStorage.setItem("token", "another-session");
     await act(async () => resolveFirst({ data: { issue_version: 8, changed: true } }));
-    expect(await within(dialog).findByText("成功 1，未变化 0，冲突 0，失败 0，结果未知 0，未提交 1")).toBeInTheDocument();
-    expect(within(dialog).getByText("登录会话已变化，请重新加载后核对")).toBeInTheDocument();
+    // A completion owned by the previous session cannot become a success receipt for the new session.
+    expect(within(dialog).queryByText(/成功 1/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("返还要求已保存")).not.toBeInTheDocument();
     expect(mocks.correct).toHaveBeenCalledTimes(1);
   });
 
@@ -230,3 +232,8 @@ describe("领用行返还要求批量", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });
+
+vi.mock("../../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

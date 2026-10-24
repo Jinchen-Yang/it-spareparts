@@ -1,3 +1,6 @@
+import { useContextTransport } from "../../authz/domainTransport";
+import { withContextSurface } from "../../authz/ContextSurface";
+import { surfaceRule } from "../../authz/rules";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { App, Alert, Button, DatePicker, Form, Input, InputNumber, Modal, Select, Space, Typography } from "antd";
 import type { Dayjs } from "dayjs";
@@ -72,7 +75,7 @@ interface CreateFormValues {
  *   不回调（成功既成事实也只在同代内提示/关闭/回读）；
  * - 提交期间整个 Form disabled，旧请求的返回不能关闭新输入。
  */
-export default function DemandLineCreate({
+function DemandLineCreate({
   fixedProjectId,
   fixedProjectLabel,
   onClose,
@@ -86,8 +89,11 @@ export default function DemandLineCreate({
   /** 创建成功后的回读钩子（父级刷新列表/指标）。只在同代（未过期）时调用。 */
   onCreated: () => void;
 }) {
+  const transport = useContextTransport(fixedProjectId ?? "global-create", true);
   const { message } = App.useApp();
   const [form] = Form.useForm<CreateFormValues>();
+  const selectedProjectId = Form.useWatch("project_id", form);
+  const createTransport = useContextTransport(JSON.stringify([fixedProjectId, selectedProjectId]), true);
   const [submitting, setSubmitting] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   /** 已选型号主数据（PartPicker 只回传 part_id + item；提交用 pn_std 原文）。 */
@@ -113,8 +119,8 @@ export default function DemandLineCreate({
       if (q && q.trim()) {
         const resp = await searchMaintenanceProjects({
           q: q.trim(), page: 1, page_size: 50, include_inactive: false,
-        });
-        if (g !== projectGen.current) return;
+        }, transport);
+        if ((g !== projectGen.current || !transport.isCurrent())) return;
         setProjectOptions(resp.data.rows);
       } else {
         // 空搜索：拉全 active 项目（覆盖分页，后端单页上限 200）
@@ -125,26 +131,26 @@ export default function DemandLineCreate({
         do {
           const resp = await listMaintenanceProjects({
             page, page_size: pageSize, include_inactive: false,
-          });
-          if (g !== projectGen.current) return;
+          }, transport);
+          if ((g !== projectGen.current || !transport.isCurrent())) return;
           total = resp.data.total;
           all.push(...resp.data.rows);
           if (!resp.data.rows.length) break;
           page += 1;
         } while (all.length < total);
-        if (g !== projectGen.current) return;
+        if ((g !== projectGen.current || !transport.isCurrent())) return;
         setProjectOptions(all);
       }
     } catch (err) {
-      if (g === projectGen.current) {
+      if ((g === projectGen.current && transport.isCurrent())) {
         // 真实错误 + 重试：不能和「没搜到」混成一句空态提示
         setProjectOptions([]);
         setProjectError(readError(err, "项目列表加载失败"));
       }
     } finally {
-      if (g === projectGen.current) setProjectLoading(false);
+      if ((g === projectGen.current && transport.isCurrent())) setProjectLoading(false);
     }
-  }, []);
+  }, [transport]);
 
   useEffect(() => {
     if (fixedProjectId) return; // 面板模式不需要项目列表
@@ -196,7 +202,7 @@ export default function DemandLineCreate({
     setSubmitting(true);
     try {
       const values = await form.validateFields();
-      if (epochRef.current !== epoch) return;
+      if ((epochRef.current !== epoch || !transport.isCurrent())) return;
       if (!pickedPart) {
         setSaveError("请先选择型号（PN），从主数据搜索选中，不能手填");
         return;
@@ -218,17 +224,17 @@ export default function DemandLineCreate({
       }
       const resp = await createDemandLine({
         ...request, idempotency_key: attemptRef.current.key,
-      });
+      }, createTransport);
       // API 返回后第一件事：过期代不碰任何东西——不清 attempt（新代的尝试
       // 不能被旧代成功清掉）、不回调、不提示、不关闭。
-      if (epochRef.current !== epoch) return;
+      if ((epochRef.current !== epoch || !transport.isCurrent())) return;
       // 业务成功：清空尝试，下一次新增用新 key
       attemptRef.current = null;
       message.success(`已创建手工需求单 ${resp.data.order_no ?? ""}（独立新单，不参与氚云删单比对）`);
       onCreated();
       onClose();
     } catch (error) {
-      if (epochRef.current !== epoch) return;
+      if ((epochRef.current !== epoch || !transport.isCurrent())) return;
       if (isFormValidationError(error)) return; // 字段错误由 antd 行内展示
       if (isUnknownOutcome(error)) {
         // 结果未知：保留 key，同内容重试复用（后端指纹比对不会重复建行）
@@ -240,7 +246,7 @@ export default function DemandLineCreate({
         setSaveError(readError(error, "创建失败；请核对项目、PN 与字段范围"));
       }
     } finally {
-      if (epochRef.current === epoch) {
+      if ((epochRef.current === epoch && transport.isCurrent())) {
         setSubmitting(false);
         submitLockRef.current = false;
       }
@@ -394,4 +400,10 @@ export default function DemandLineCreate({
       </Space>
     </Modal>
   );
+}
+
+const GlobalCreate = withContextSurface(DemandLineCreate, surfaceRule("maintenance_demand.create"));
+const ProjectCreate = withContextSurface(DemandLineCreate, surfaceRule("maintenance_demand.create_project"), props => props.fixedProjectId);
+export default function ControlledDemandLineCreate(props: Parameters<typeof DemandLineCreate>[0]) {
+  return props.fixedProjectId ? <ProjectCreate {...props} /> : <GlobalCreate {...props} />;
 }

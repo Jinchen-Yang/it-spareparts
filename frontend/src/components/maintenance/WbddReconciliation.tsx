@@ -1,3 +1,6 @@
+import { useContextTransport } from "../../authz/domainTransport";
+import { withContextSurface } from "../../authz/ContextSurface";
+import { surfaceRule } from "../../authz/rules";
 import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Input, Modal, Space, Table, Typography } from "antd";
 import { reconcileWbdd, type WbddMissing, type WbddMissingLine, type WbddMissingOrder, type WbddReconcileRequest } from "../../api/maintenanceWbddImport";
@@ -14,8 +17,9 @@ interface Attempt { batchId: number; payload: WbddReconcileRequest; orders: numb
 const newKey = () => `wbdd-reconcile-${typeof globalThis.crypto?.randomUUID === "function" ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
 
 /** D-27: a candidate is applied only with its preview digest and an explicit reason. */
-export default function WbddReconciliation({ data, loading, canReconcile, onRefresh, onCommitted }: Props) {
+function WbddReconciliation({ data, loading, canReconcile, onRefresh, onCommitted }: Props) {
   const scope = `${data?.batch_id ?? ""}:${data?.candidate_digest ?? ""}`;
+  const transport = useContextTransport("wbdd-reconciliation-attempt", true);
   const [selection, setSelection] = useState<{ scope: string; orders: string[]; lines: number[] }>({ scope, orders: [], lines: [] });
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
@@ -42,12 +46,14 @@ export default function WbddReconciliation({ data, loading, canReconcile, onRefr
   const refresh = async () => {
     if (inFlight.current || attempt.current) return;
     try {
-      if (await onRefresh()) { setNeedsRefresh(false); setError(null); }
+      const refreshed = await onRefresh();
+      if (!transport.isCurrent()) return;
+      if (refreshed) { setNeedsRefresh(false); setError(null); }
       else setError("差异清单刷新失败，请重试。");
-    } catch { setError("差异清单刷新失败，请重试。"); }
+    } catch { if (transport.isCurrent()) setError("差异清单刷新失败，请重试。"); }
   };
   const submit = async () => {
-    if (inFlight.current || !canReconcile) return;
+    if (inFlight.current || !canReconcile || !transport.isCurrent()) return;
     if (!attempt.current) {
       if (!ready || locked || !total || !reason.trim() || reason.trim().length > 1000) return;
       attempt.current = {
@@ -60,8 +66,9 @@ export default function WbddReconciliation({ data, loading, canReconcile, onRefr
     inFlight.current = true;
     setBusy(true); setError(null); setSuccess(null);
     let result;
-    try { result = (await reconcileWbdd(current.batchId, current.payload)).data; }
+    try { result = (await reconcileWbdd(current.batchId, current.payload, transport)).data; }
     catch (failure) {
+      if (!transport.isCurrent()) return;
       const status = (failure as { response?: { status?: number } })?.response?.status;
       if (status != null && status >= 400 && status < 500) {
         attempt.current = null;
@@ -75,14 +82,17 @@ export default function WbddReconciliation({ data, loading, canReconcile, onRefr
       inFlight.current = false; setBusy(false);
       return;
     }
+    if (!transport.isCurrent()) return;
     attempt.current = null;
     setRetry(false); setOpen(false); setReason("");
     setSelection({ scope, orders: [], lines: [] });
     const summary = `同步${result.replayed ? "结果已确认" : "已完成"}：作废 ${result.voided_orders} 张需求单、${result.voided_lines} 条需求明细、${result.voided_site_lines} 条关联领用明细、${result.voided_site_issues} 张领用单`;
     try {
-      setSuccess(await onCommitted() ? `${summary}，页面已刷新。` : `${summary}；页面刷新失败，请刷新清单。`);
-    } catch { setSuccess(`${summary}；页面刷新失败，请刷新清单。`); }
-    finally { inFlight.current = false; setBusy(false); }
+      const refreshed = await onCommitted();
+      if (!transport.isCurrent()) return;
+      setSuccess(refreshed ? `${summary}，页面已刷新。` : `${summary}；页面刷新失败，请刷新清单。`);
+    } catch { if (transport.isCurrent()) setSuccess(`${summary}；页面刷新失败，请刷新清单。`); }
+    finally { if (transport.isCurrent()) { inFlight.current = false; setBusy(false); } }
   };
 
   const unavailable = data?.readiness === "snapshot_required" || (data !== null && (!data.readiness || (data.readiness === "ready" && !data.candidate_digest)));
@@ -121,3 +131,5 @@ export default function WbddReconciliation({ data, loading, canReconcile, onRefr
     </Space>
   </section>;
 }
+
+export default withContextSurface(WbddReconciliation, surfaceRule("maintenance_wbdd_reconciliation.reconcile"));

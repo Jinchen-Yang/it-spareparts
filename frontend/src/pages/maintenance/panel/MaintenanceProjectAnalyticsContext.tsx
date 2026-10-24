@@ -19,7 +19,7 @@ export default function MaintenanceProjectAnalyticsContext({ projectId, analytic
   }
   const pnKey = search.get("pnKey");
   if (pnKey && /^(part:[1-9]\d*|pn:.{1,300})$/.test(pnKey)) { params.dimension = "pn"; params.focus = pnKey; }
-  const { data, error, loading } = useMaintenanceExplorer(params);
+  const { data, error, loading } = useMaintenanceExplorer(params, 0, "maintenance_analysis.project_focus");
   const metric = params.metric || "issued";
   const selected = data?.focus.row;
   return <section aria-label="项目分析定位">

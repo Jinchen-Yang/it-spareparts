@@ -1,3 +1,6 @@
+import { useModuleAccess } from "../../../authz/access";
+import { useContextQuery } from "../../../authz/contextQuery";
+import { surfaceRule } from "../../../authz/rules";
 /** M01 期间下单 + M03 每日每项目已计消耗（R34 / D-0024）。
  *
  * - M01：制单日期入期的有效需求单原 qty + 去重单数（不扣退货/免返）；纯数量域，
@@ -57,53 +60,25 @@ const PAGE_SIZE_OPTIONS = [20, 50, 100];
 const DRAWER_PAGE_SIZE = 50;
 
 export default function DashboardConsumptionTab({
-  params, amountsVisible, page, pageSize, refreshKey, onPageChange, maxExportRows,
+  params, amountsVisible: amountsEligible, page, pageSize, refreshKey, onPageChange, maxExportRows,
   ownerToken, onSessionMismatch,
 }: DashboardTabProps) {
   // orders/consumption/issues 都是数量域端点：契约不收关键词 q 与试算比例，显式剥离。
   const baseParams = useMemo(() => qtyOnlyParams(params), [params]);
 
-  const [orders, setOrders] = useState<OrdersResponse | null>(null);
-  const [consumption, setConsumption] = useState<ConsumptionResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const seqRef = useRef(0);
+  const ordersQuery = useContextQuery({ entryId: "GET /api/maintenance/analytics/maintenance-dashboard/orders",
+    rule: surfaceRule("maintenance_dashboard.orders"), queryKey: [baseParams, refreshKey], legacyAllowed: true,
+    onStale: onSessionMismatch, query: capture => fetchDashboardOrders(baseParams, capture) });
+  const consumptionQuery = useContextQuery({ entryId: "GET /api/maintenance/analytics/maintenance-dashboard/consumption",
+    rule: surfaceRule("maintenance_dashboard.consumption"), queryKey: [baseParams, page, pageSize, refreshKey], legacyAllowed: true,
+    onStale: onSessionMismatch, query: capture => fetchDashboardConsumption({ ...baseParams, page, page_size: pageSize }, capture) });
+  const orders = ordersQuery.data, consumption = consumptionQuery.data;
+  const loading = ordersQuery.loading || consumptionQuery.loading;
+  const error = ordersQuery.error || consumptionQuery.error ? apiErrorMessage(ordersQuery.error || consumptionQuery.error) : null;
+  const load = () => { ordersQuery.retry(); consumptionQuery.retry(); };
 
-  const load = useCallback(async () => {
-    // 请求前绑定组件所属会话（B-F03/04）：失配即上报壳层停用，不发旧会话请求。
-    if (!sessionUnchanged(ownerToken)) {
-      onSessionMismatch();
-      return;
-    }
-    const seq = seqRef.current + 1;
-    seqRef.current = seq;
-    const token = sessionToken();
-    setLoading(true);
-    setError(null);
-    try {
-      const [ordersResp, consumptionResp] = await Promise.all([
-        fetchDashboardOrders(baseParams),
-        fetchDashboardConsumption({ ...baseParams, page, page_size: pageSize }),
-      ]);
-      if (seqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      setOrders(ordersResp);
-      setConsumption(consumptionResp);
-    } catch (err) {
-      if (seqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      setOrders(null);
-      setConsumption(null);
-      setError(apiErrorMessage(err));
-    } finally {
-      if (seqRef.current === seq && sessionUnchanged(token)) setLoading(false);
-    }
-  }, [baseParams, page, pageSize, ownerToken, onSessionMismatch]);
-
-  useEffect(() => {
-    void load();
-    return () => { seqRef.current += 1; };
-  }, [load, refreshKey]);
+  const fieldAccess = useModuleAccess("maintenance_dashboard", consumptionQuery.context);
+  const amountsVisible = amountsEligible && fieldAccess.field("data_profit", amountsEligible);
 
   const onTableChange: TableProps<ConsumptionDailyRow>["onChange"] = (pg) => {
     if (pg.pageSize && pg.pageSize !== pageSize) onPageChange(1, pg.pageSize);
@@ -113,55 +88,15 @@ export default function DashboardConsumptionTab({
   // ---- M03 下钻：issue_date × project_id 行级领用明细（Drawer） ----
   const [drillTarget, setDrillTarget] = useState<ConsumptionDailyRow | null>(null);
   const [drillPage, setDrillPage] = useState(1);
-  const [drillData, setDrillData] = useState<{
-    rows: ConsumptionIssueRow[]; total: number;
-  } | null>(null);
-  const [drillLoading, setDrillLoading] = useState(false);
-  const [drillError, setDrillError] = useState<string | null>(null);
-  const drillSeqRef = useRef(0);
-
-  const openDrill = useCallback((row: ConsumptionDailyRow) => {
-    setDrillTarget(row);
-    setDrillPage(1);
-  }, []);
-
-  const loadDrill = useCallback(async () => {
-    if (!drillTarget) return;
-    // 下钻同样绑定组件所属会话（B-F04）：旧会话组件不发新请求。
-    if (!sessionUnchanged(ownerToken)) {
-      onSessionMismatch();
-      return;
-    }
-    const seq = drillSeqRef.current + 1;
-    drillSeqRef.current = seq;
-    const token = sessionToken();
-    setDrillLoading(true);
-    setDrillError(null);
-    try {
-      const resp = await fetchDashboardConsumptionIssues({
-        ...baseParams,
-        issue_date: drillTarget.issue_date,
-        project_id: drillTarget.project_id,
-        page: drillPage,
-        page_size: DRAWER_PAGE_SIZE,
-      });
-      if (drillSeqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      setDrillData({ rows: resp.rows ?? [], total: resp.pagination.total });
-    } catch (err) {
-      if (drillSeqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      setDrillData(null);
-      setDrillError(apiErrorMessage(err));
-    } finally {
-      if (drillSeqRef.current === seq && sessionUnchanged(token)) setDrillLoading(false);
-    }
-  }, [baseParams, drillTarget, drillPage, ownerToken, onSessionMismatch]);
-
-  useEffect(() => {
-    if (drillTarget) void loadDrill();
-    return () => { drillSeqRef.current += 1; };
-  }, [drillTarget, loadDrill]);
+  const openDrill = useCallback((row: ConsumptionDailyRow) => { setDrillTarget(row); setDrillPage(1); }, []);
+  const drillQuery = useContextQuery({ entryId: "GET /api/maintenance/analytics/maintenance-dashboard/consumption/issues",
+    rule: surfaceRule("maintenance_dashboard.consumption_issues"), queryKey: [baseParams, drillTarget, drillPage], legacyAllowed: true,
+    enabled: !!drillTarget, onStale: onSessionMismatch,
+    query: capture => fetchDashboardConsumptionIssues({ ...baseParams, issue_date: drillTarget!.issue_date,
+      project_id: drillTarget!.project_id, page: drillPage, page_size: DRAWER_PAGE_SIZE }, capture) });
+  const drillData = drillQuery.data ? { rows: drillQuery.data.rows, total: drillQuery.data.pagination.total } : null;
+  const drillLoading = drillQuery.loading, drillError = drillQuery.error ? apiErrorMessage(drillQuery.error) : null;
+  const loadDrill = drillQuery.retry;
 
   const consumptionColumns: ColumnsType<ConsumptionDailyRow> = useMemo(() => {
     const base: ColumnsType<ConsumptionDailyRow> = [
@@ -186,7 +121,7 @@ export default function DashboardConsumptionTab({
       {
         title: "核对明细", key: "drill", width: 110,
         render: (_: unknown, row) => (
-          <Button size="small" onClick={() => openDrill(row)}>领用明细</Button>
+          drillQuery.entryState !== "deny" && <Button size="small" onClick={() => openDrill(row)}>领用明细</Button>
         ),
       },
     ];
@@ -241,7 +176,7 @@ export default function DashboardConsumptionTab({
       );
     }
     return base;
-  }, [amountsVisible, openDrill]);
+  }, [amountsVisible, openDrill, drillQuery.entryState]);
 
   const drillColumns: ColumnsType<ConsumptionIssueRow> = useMemo(() => {
     const base: ColumnsType<ConsumptionIssueRow> = [
@@ -297,7 +232,7 @@ export default function DashboardConsumptionTab({
         />
       ) : null}
 
-      <Card size="small" title="期间下单（M01：制单日期入期，原数量；不扣退货/免返）" style={{ minWidth: 0, maxWidth: "100%" }}>
+      {ordersQuery.entryState !== "deny" && <Card size="small" title="期间下单（M01：制单日期入期，原数量；不扣退货/免返）" style={{ minWidth: 0, maxWidth: "100%" }}>
         <div className="mdb-kpi-grid" data-testid="orders-cards">
           <KpiCard label="期间下单数量" loading={loading} testId="kpi-order-qty"
             value={orderCards
@@ -374,9 +309,9 @@ export default function DashboardConsumptionTab({
             locale={{ emptyText: "当前窗口没有下单记录" }}
           />
         </div>
-      </Card>
+      </Card>}
 
-      <Card
+      {consumptionQuery.entryState !== "deny" && <Card
         size="small"
         title="每日每项目实际领用与已计消耗成本（M03：未扣退库；不回算成本）"
       >
@@ -501,7 +436,7 @@ export default function DashboardConsumptionTab({
             locale={{ emptyText: dailyHasData ? "没有更多" : "当前窗口没有领用记录" }}
           />
         </div>
-      </Card>
+      </Card>}
 
       <Drawer
         rootStyle={{ "--mb-text-3": COLORS.text2 } as CSSProperties}

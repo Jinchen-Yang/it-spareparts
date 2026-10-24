@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 import { useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -49,3 +50,8 @@ describe("当前主数据库品类筛选", () => {
     expect(screen.getByRole("status")).toHaveTextContent('{"category_major":"内存"}');
   });
 });
+
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

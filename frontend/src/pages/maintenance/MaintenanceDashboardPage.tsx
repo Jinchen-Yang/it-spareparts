@@ -21,6 +21,7 @@ import {
 import type { ThemeConfig } from "antd";
 import { FundOutlined, ReloadOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
+import { useNavigate } from "react-router-dom";
 import { useUrlState, urlPageField } from "../../hooks/useUrlState";
 import {
   fetchDashboardOptions,
@@ -43,6 +44,11 @@ import ReceiptsDrillDrawer, { type ReceiptsDrill } from "./dashboard/ReceiptsDri
 import { apiErrorMessage, sessionToken, sessionUnchanged } from "./dashboard/dashboardShared";
 import { COLORS } from "../../theme";
 import "./dashboard/maintenanceDashboard.css";
+
+import { useContextAdmission, useModuleAccess } from "../../authz/access";
+import { useContextQuery } from "../../authz/contextQuery";
+import { withContextSurface } from "../../authz/ContextSurface";
+import { routeRule, surfaceRule } from "../../authz/rules";
 
 const { Text } = Typography;
 
@@ -178,7 +184,7 @@ function RetentionRatioControl({ ratio, usingDefault, quickOptions, onChange }: 
   );
 }
 
-export function MaintenanceDashboardPage() {
+function MaintenanceDashboardPageBody() {
   const [state, patch] = useUrlState({
     tab: { defaultValue: "overview", isValid: (v) => (TAB_KEYS as readonly string[]).includes(v) },
     range: {
@@ -199,61 +205,31 @@ export function MaintenanceDashboardPage() {
     },
   });
 
-  const tab = state.tab as TabKey;
+  const navigate = useNavigate();
+  const admission = useContextAdmission();
+  const module = useModuleAccess("maintenance_dashboard");
+  const availableTabs = TAB_KEYS.filter(key => admission.surface(`maintenance_dashboard.${key}`, true) !== "deny"
+    || (key === "parts" && admission.surface("maintenance_dashboard.valuation", true) !== "deny")
+    || (key === "consumption" && admission.surface("maintenance_dashboard.orders", true) !== "deny"));
+  const tab = availableTabs.includes(state.tab as TabKey) ? state.tab as TabKey : availableTabs[0] ?? "overview";
   const page = Number(state.page);
   const pageSize = Number(state.ps);
 
-  const [options, setOptions] = useState<DashboardOptions | null>(null);
-  const [optionsLoading, setOptionsLoading] = useState(true);
-  const [optionsError, setOptionsError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  // 会话所有权（B-F03/B-F04，DL-010）：options 落地时捕获所属 token；任何守卫
-  // 点检测到换号即整页失活（卸载各页签 = 清除旧金额/项目上下文），可刷新恢复。
-  const [ownerToken, setOwnerToken] = useState<string | null>(null);
   const [sessionMismatch, setSessionMismatch] = useState(false);
   const markSessionMismatch = useCallback(() => setSessionMismatch(true), []);
-  // M-AC09 返件明细下钻（R33 GET /receipts 的轻量入口）：Drawer 状态在壳层，
-  // 各页签只上抛「求交后的筛选 + 标题」；关闭即回原视图，不写 URL。
+  const ownerToken = module.token;
   const [receiptsDrill, setReceiptsDrill] = useState<ReceiptsDrill | null>(null);
-  const openReceiptsDrill = useCallback((drill: ReceiptsDrill) => {
-    setReceiptsDrill(drill);
-  }, []);
+  const openReceiptsDrill = useCallback((drill: ReceiptsDrill) => { setReceiptsDrill(drill); }, []);
   const closeReceiptsDrill = useCallback(() => setReceiptsDrill(null), []);
-  const optionsSeqRef = useRef(0);
-
-  const loadOptions = useCallback(async () => {
-    // 序号 + 原会话双保护：迟到 options 在换号后不得落地（金额控件/项目候选
-    // 属旧会话，不能因 options 先返回就绕过 DL-010）。
-    const seq = optionsSeqRef.current + 1;
-    optionsSeqRef.current = seq;
-    const token = sessionToken();
-    setOptionsLoading(true);
-    setOptionsError(null);
-    try {
-      const resp = await fetchDashboardOptions();
-      if (optionsSeqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) {
-        setSessionMismatch(true);
-        return;
-      }
-      setOptions(resp);
-      setOwnerToken(token);
-    } catch (err) {
-      if (optionsSeqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) {
-        setSessionMismatch(true);
-        return;
-      }
-      setOptions(null);
-      setOptionsError(apiErrorMessage(err));
-    } finally {
-      if (optionsSeqRef.current === seq) setOptionsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { void loadOptions(); }, [loadOptions]);
-
-  const amountsVisible = options?.amounts_visible ?? false;
+  const optionQuery = useContextQuery({ entryId: "GET /api/maintenance/analytics/maintenance-dashboard/options",
+    rule: surfaceRule("maintenance_dashboard.filters"), queryKey: [refreshKey], legacyAllowed: true,
+    onStale: markSessionMismatch, query: capture => fetchDashboardOptions(capture) });
+  const options = optionQuery.data;
+  const optionsLoading = optionQuery.loading;
+  const optionsError = optionQuery.error ? apiErrorMessage(optionQuery.error) : null;
+  const loadOptions = optionQuery.retry;
+  const amountsVisible = module.legacy ? options?.amounts_visible ?? false : module.field("data_profit");
 
   // 筛选集 → 请求参数（自定义区间补日期；空筛选项省略）。
   // 试算比例：金额可见账号一律携带（URL 无显式值时用默认 0.5，Sunny 01:20 裁定；
@@ -313,15 +289,6 @@ export function MaintenanceDashboardPage() {
     onSessionMismatch: markSessionMismatch,
   };
 
-  if (optionsLoading) {
-    return (
-      <Space direction="vertical" size={16} style={{ width: "100%" }}>
-        <Skeleton.Button active size="small" style={{ width: 220 }} />
-        <Card size="small"><Skeleton active paragraph={{ rows: 6 }} /></Card>
-      </Space>
-    );
-  }
-
   // 会话失活：任何守卫点（options 落地 / 各页签请求前后 / 导出 / 下钻）发现
   // 页面所属 token 已不是当前会话时，卸载全部旧会话内容（金额控件、项目候选、
   // 已渲染结果一并清除），提供按当前会话刷新恢复——不是禁用功能（B-F03/04）。
@@ -335,31 +302,24 @@ export function MaintenanceDashboardPage() {
         description="页面仍停留在旧会话的数据上下文，为避免跨会话请求已停用；请刷新页面或重新登录后继续。"
         action={(
           <Button onClick={() => {
-            setSessionMismatch(false);
-            setOwnerToken(null);
-            void loadOptions();
+            // A real page reload rebuilds the Provider for the current login; never recapture a token inside this stale request owner.
+            navigate(0);
           }}>刷新</Button>
         )}
       />
     );
   }
 
-  if (optionsError || !options) {
+  if (optionsLoading) {
     return (
-      <Alert
-        type="error" showIcon message="看板选项加载失败"
-        description={optionsError ?? "未知错误"}
-        action={(
-          <Button onClick={() => {
-            void loadOptions();
-            setRefreshKey((value) => value + 1);
-          }}>重试</Button>
-        )}
-      />
+      <Space direction="vertical" size={16} style={{ width: "100%" }}>
+        <Skeleton.Button active size="small" style={{ width: 220 }} />
+        <Card size="small"><Skeleton active paragraph={{ rows: 6 }} /></Card>
+      </Space>
     );
   }
 
-  const quickOptions = options.valuation_policy?.quick_options ?? ["0.5", "0.3", "0.2"];
+  const quickOptions = options?.valuation_policy?.quick_options ?? ["0.5", "0.3", "0.2"];
 
   const dashboardPage = (
     <Space direction="vertical" size={16} className="maintenance-dashboard-page" style={{ width: "100%", "--mb-text-3": COLORS.text2 } as CSSProperties}>
@@ -390,7 +350,7 @@ export function MaintenanceDashboardPage() {
         )}
       />
 
-      <div className="mdb-filterbar">
+      {admission.surface("maintenance_dashboard.filters", true) !== "deny" && <div className="mdb-filterbar">
         <div className="mdb-filterbar-row">
           <span className="mdb-filter-field">
             <span className="mdb-filter-label">时间</span>
@@ -443,7 +403,7 @@ export function MaintenanceDashboardPage() {
               value={projectIds}
               style={{ width: 280, maxWidth: "calc(100vw - 96px)" }}
               loading={optionsLoading}
-              options={options.projects.map((project) => ({
+              options={(options?.projects ?? []).map((project) => ({
                 value: project.project_id,
                 label: project.project_code
                   ? `${project.display_name}（${project.project_code}）`
@@ -468,7 +428,11 @@ export function MaintenanceDashboardPage() {
             </span>
           ) : null}
         </div>
-        {amountsVisible ? (
+        <div className="mdb-filterbar-hint">
+          默认近 7 天含今天（上海日历日）；下单按制单日期、领用按领用日期、返件按业务发生时间各自入期。
+        </div>
+      </div>}
+        {amountsVisible && admission.surface("maintenance_dashboard.valuation_parameters", true) !== "deny" ? (
           <div className="mdb-ratio-strip">
             <RetentionRatioControl
               ratio={ratio}
@@ -478,16 +442,13 @@ export function MaintenanceDashboardPage() {
             />
           </div>
         ) : null}
-        <div className="mdb-filterbar-hint">
-          默认近 7 天含今天（上海日历日）；下单按制单日期、领用按领用日期、返件按业务发生时间各自入期。
-        </div>
-      </div>
 
       {!amountsVisible ? (
         <Alert type="info" showIcon data-testid="amounts-restricted-banner"
           message="当前账号无金额查看权限：本页仅展示数量口径，金额卡片/列/试算参数/导出列不出现（需 data_profit 授权）" />
       ) : null}
 
+      {optionsError && <Alert type="warning" showIcon message="筛选选项不可用" description={optionsError} action={<Button onClick={loadOptions}>重试</Button>} />}
       <Tabs
         className="mdb-tabs"
         size="large"
@@ -497,31 +458,31 @@ export function MaintenanceDashboardPage() {
           // 按需挂载：切到哪页签才请求哪份数据（同维保数据分析页范式）。
           { key: "overview", label: TAB_LABELS.overview,
             children: tab === "overview"
-              ? <DashboardOverviewTab {...tabProps} onReceiptsDrill={openReceiptsDrill} />
+              ? <DashboardOverviewTab {...tabProps} onReceiptsDrill={admission.surface("maintenance_dashboard.receipt_drill", true) !== "deny" ? openReceiptsDrill : undefined} />
               : null },
           { key: "projects", label: TAB_LABELS.projects,
             children: tab === "projects"
-              ? <DashboardProjectsTab {...tabProps} onReceiptsDrill={openReceiptsDrill} />
+              ? <DashboardProjectsTab {...tabProps} onReceiptsDrill={admission.surface("maintenance_dashboard.receipt_drill", true) !== "deny" ? openReceiptsDrill : undefined} />
               : null },
           { key: "parts", label: TAB_LABELS.parts,
             children: tab === "parts"
-              ? <DashboardPartsTab {...tabProps} onReceiptsDrill={openReceiptsDrill} />
+              ? <DashboardPartsTab {...tabProps} onReceiptsDrill={admission.surface("maintenance_dashboard.receipt_drill", true) !== "deny" ? openReceiptsDrill : undefined} />
               : null },
           { key: "consumption", label: TAB_LABELS.consumption,
             children: tab === "consumption" ? <DashboardConsumptionTab {...tabProps} /> : null },
           { key: "checks", label: TAB_LABELS.checks,
             children: tab === "checks" ? <DashboardQuantityChecksTab {...tabProps} /> : null },
-        ]}
+        ].filter(item => availableTabs.includes(item.key as TabKey))}
       />
 
-      <ReceiptsDrillDrawer
+      {admission.surface("maintenance_dashboard.receipt_drill", true) !== "deny" && <ReceiptsDrillDrawer
         drill={receiptsDrill}
         onClose={closeReceiptsDrill}
         amountsVisible={amountsVisible}
-        maxExportRows={options.max_export_rows}
+        maxExportRows={options?.max_export_rows ?? 50000}
         ownerToken={ownerToken}
         onSessionMismatch={markSessionMismatch}
-      />
+      />}
     </Space>
   );
 
@@ -530,4 +491,5 @@ export function MaintenanceDashboardPage() {
   return <ConfigProvider theme={PAGE_CONTRAST_THEME}>{dashboardPage}</ConfigProvider>;
 }
 
+export const MaintenanceDashboardPage = withContextSurface(MaintenanceDashboardPageBody, routeRule("/maintenance/dashboard"));
 export default MaintenanceDashboardPage;

@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
 
 export interface SourceCancellationCandidate {
@@ -67,27 +68,27 @@ const candidatePath = (projectId: string, batchId: number, sourceOrderId: string
 export const listSourceCancellations = (projectId: string, params: {
   page: number;
   page_size: number;
-}) => api.get<{
+}, capture?: ContextRequestTransport) => domainApi(capture).get<{
   items: SourceCancellationCandidate[];
   total: number;
   page: number;
   page_size: number;
 }>(projectPath(projectId), { params });
 
-export const getSourceCancellation = (projectId: string, batchId: number, sourceOrderId: string) =>
-  api.get<SourceCancellationDetail>(candidatePath(projectId, batchId, sourceOrderId));
+export const getSourceCancellation = (projectId: string, batchId: number, sourceOrderId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<SourceCancellationDetail>(candidatePath(projectId, batchId, sourceOrderId));
 
 export const getSourceCancellationStatus = (
-  projectId: string, batchId: number, sourceOrderId: string, idempotencyKey: string, sessionToken: string,
-) => api.get<{ result: SourceCancellationResult | null }>(
+  projectId: string, batchId: number, sourceOrderId: string, idempotencyKey: string, sessionToken: string, capture?: ContextRequestTransport
+) => domainApi(capture).get<{ result: SourceCancellationResult | null }>(
   `${candidatePath(projectId, batchId, sourceOrderId)}/confirmation-status`,
   { params: { idempotency_key: idempotencyKey }, headers: { Authorization: `Bearer ${sessionToken}` } },
 );
 
 export const confirmSourceCancellation = (
   projectId: string, batchId: number, sourceOrderId: string, body: SourceCancellationConfirmation,
-  sessionToken: string,
-) => api.post<SourceCancellationResult>(`${candidatePath(projectId, batchId, sourceOrderId)}/confirm`, body, {
+  sessionToken: string, capture?: ContextRequestTransport
+) => domainApi(capture).post<SourceCancellationResult>(`${candidatePath(projectId, batchId, sourceOrderId)}/confirm`, body, {
   // 此请求属于用户查看并确认的账号；异步拦截器不能用新登录账号替换它。
   headers: { Authorization: `Bearer ${sessionToken}` },
 });

@@ -76,7 +76,7 @@ describe("领用事实页内编辑", () => {
     await waitFor(() => expect(mocks.correctLine).toHaveBeenCalledWith("i1", "l1", {
       expected_issue_version: 7, expected_line_version: 2, changes: { remark: "现场核实" },
       reason: "核对现场记录", idempotency_key: expect.any(String),
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(mocks.correctHeader).not.toHaveBeenCalled();
   });
 
@@ -101,7 +101,7 @@ describe("领用事实页内编辑", () => {
     mocks.search.mockResolvedValue({ data: { total: 1, rows: [latest] } });
     fireEvent.click(within(dialog).getByRole("button", { name: "重新读取并保留草稿" }));
     await waitFor(() => expect(within(dialog).getByRole("button", { name: save })).toBeEnabled());
-    expect(mocks.search).toHaveBeenLastCalledWith(expect.objectContaining({ project_id: "p1", issue_id: "i1" }));
+    expect(mocks.search).toHaveBeenLastCalledWith(expect.objectContaining({ project_id: "p1", issue_id: "i1" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(within(dialog).getByRole("textbox", { name: field })).toHaveValue("我的草稿");
     fireEvent.click(within(dialog).getByRole("button", { name: save }));
     await waitFor(() => expect(command).toHaveBeenCalledTimes(2));
@@ -123,7 +123,7 @@ describe("领用事实页内编辑", () => {
     await waitFor(() => expect(mocks.correctHeader).toHaveBeenCalledWith("i1", {
       expected_issue_version: 7, changes: { site_location: "" },
       reason: "核实地址留空", idempotency_key: expect.any(String),
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(mocks.correctLine).not.toHaveBeenCalled();
     expect(await within(dialog).findByText("单头修改影响整张领用单全部行")).toBeInTheDocument();
     mocks.search.mockResolvedValue({ data: { total: 1, rows: [issue({ version: 8, site_location: null })] } });
@@ -134,7 +134,7 @@ describe("领用事实页内编辑", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "保存行修改" }));
     await waitFor(() => expect(mocks.correctLine).toHaveBeenCalledWith("i1", "l1", expect.objectContaining({
       expected_issue_version: 8, changes: { remark: "尚未保存的行草稿" },
-    })));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it.each(["line", "header"] as const)("%s 网络结果未知冻结原请求，关闭后仍可原键核对，后续拒绝不能抹掉首次未知", async (kind) => {
@@ -156,8 +156,8 @@ describe("领用事实页内编辑", () => {
     fireEvent.click(within(restored).getByRole("button", { name: "原样核对回执" }));
     await within(restored).findByText(/保存成功/);
     expect(command).toHaveBeenCalledTimes(3);
-    expect(command.mock.calls[1]).toEqual(command.mock.calls[0]);
-    expect(command.mock.calls[2]).toEqual(command.mock.calls[0]);
+    expect(command.mock.calls[1].slice(0, -1)).toEqual(command.mock.calls[0].slice(0, -1));
+    expect(command.mock.calls[2].slice(0, -1)).toEqual(command.mock.calls[0].slice(0, -1));
   });
 
   it("数量按文本精度提交，SN 和需求单可显式清空，未知成本只读显示待补价格", async () => {
@@ -170,7 +170,7 @@ describe("领用事实页内编辑", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "保存行修改" }));
     await waitFor(() => expect(mocks.correctLine).toHaveBeenCalledWith("i1", "l1", expect.objectContaining({
       changes: { quantity: "3.125", serial_number: "", demand_order_no: "" },
-    })));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("无动作权限或非可编辑来源不显示通用编辑入口", async () => {
@@ -207,7 +207,7 @@ describe("领用事实页内编辑", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "保存行修改" }));
     await waitFor(() => expect(mocks.correctLine).toHaveBeenCalledWith("i1", "l1", expect.objectContaining({
       expected_issue_version: 8, changes: { remark: "严格模式更正" },
-    })));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it.each(["line", "header"] as const)("%s 已成功字段不会在重读后当作草稿覆盖别人的后续更正", async (kind) => {
@@ -259,7 +259,7 @@ describe("领用事实页内编辑", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "保存行修改" }));
     await waitFor(() => expect(mocks.correctLine).toHaveBeenCalledWith("i1", "l1", expect.objectContaining({
       changes: { part_id: 22, pn: "PN-2" },
-    })));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("整单重读发现筛选外发货关联行时，保留当前行编辑但隐藏单头保存", async () => {

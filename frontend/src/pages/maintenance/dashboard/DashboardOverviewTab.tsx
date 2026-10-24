@@ -1,3 +1,6 @@
+import { useModuleAccess, useSurface } from "../../../authz/access";
+import { useContextQuery } from "../../../authz/contextQuery";
+import { surfaceRule } from "../../../authz/rules";
 /** T1 回收与领用总览：期间下单 + 数量卡片 +（有权时）坏件试算价值卡 + 趋势/件况图 + Top 项目。
  *
  * 金额卡只对通过利润门的账号渲染（响应里本来就没有 valuation 键）；
@@ -166,53 +169,26 @@ function buildConditionOption(summary: SummaryResponse): ECOption {
 }
 
 export default function DashboardOverviewTab({
-  params, amountsVisible, refreshKey, ownerToken, onSessionMismatch, onReceiptsDrill,
+  params, amountsVisible: amountsEligible, refreshKey, ownerToken, onSessionMismatch, onReceiptsDrill,
 }: DashboardTabProps & {
   /** M-AC09：点击维度（项目/日期）→ 壳层返件明细 Drawer（求交下钻）。 */
   onReceiptsDrill?: (drill: ReceiptsDrill) => void;
 }) {
-  const [summary, setSummary] = useState<SummaryResponse | null>(null);
-  const [orderCards, setOrderCards] = useState<OrdersResponse["cards"] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const seqRef = useRef(0);
+  const summaryQuery = useContextQuery({ entryId: "GET /api/maintenance/analytics/maintenance-dashboard/summary",
+    rule: surfaceRule("maintenance_dashboard.overview"), queryKey: [params, refreshKey], legacyAllowed: true,
+    onStale: onSessionMismatch, query: capture => fetchDashboardSummary(params, capture) });
+  const ordersQuery = useContextQuery({ entryId: "GET /api/maintenance/analytics/maintenance-dashboard/orders",
+    rule: surfaceRule("maintenance_dashboard.orders"), queryKey: [qtyOnlyParams(params), refreshKey], legacyAllowed: true,
+    onStale: onSessionMismatch, query: capture => fetchDashboardOrders(qtyOnlyParams(params), capture) });
+  const summary = summaryQuery.data, orderCards = ordersQuery.data?.cards ?? null;
+  const loading = summaryQuery.loading || ordersQuery.loading;
+  const error = summaryQuery.error || ordersQuery.error ? apiErrorMessage(summaryQuery.error || ordersQuery.error) : null;
+  const load = () => { summaryQuery.retry(); ordersQuery.retry(); };
 
-  const load = useCallback(async () => {
-    // 请求前绑定组件所属会话（B-F03/04）：失配即上报壳层停用，不发旧会话请求。
-    if (!sessionUnchanged(ownerToken)) {
-      onSessionMismatch();
-      return;
-    }
-    const seq = seqRef.current + 1;
-    seqRef.current = seq;
-    const token = sessionToken();
-    setLoading(true);
-    setError(null);
-    try {
-      // M01 期间下单卡片是纯数量域：与总览一起取（orders 端点不收 q/ratio）。
-      const [summaryResp, ordersResp] = await Promise.all([
-        fetchDashboardSummary(params),
-        fetchDashboardOrders(qtyOnlyParams(params)),
-      ]);
-      if (seqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      setSummary(summaryResp);
-      setOrderCards(ordersResp.cards);
-    } catch (err) {
-      if (seqRef.current !== seq) return;
-      if (!sessionUnchanged(token)) { onSessionMismatch(); return; }
-      setSummary(null);
-      setOrderCards(null);
-      setError(apiErrorMessage(err));
-    } finally {
-      if (seqRef.current === seq && sessionUnchanged(token)) setLoading(false);
-    }
-  }, [params, ownerToken, onSessionMismatch]);
-
-  useEffect(() => {
-    void load();
-    return () => { seqRef.current += 1; };
-  }, [load, refreshKey]);
+  const fieldAccess = useModuleAccess("maintenance_dashboard", summaryQuery.context);
+  const valuationAccess = useSurface("maintenance_dashboard.valuation_summary", { context: summaryQuery.context, legacy: { maintenance_dashboard: true } });
+  const rankingAccess = useSurface("maintenance_dashboard.receipt_ranking", { context: summaryQuery.context, legacy: { maintenance_dashboard: true } });
+  const amountsVisible = amountsEligible && valuationAccess.allowed && fieldAccess.field("data_profit", amountsEligible);
 
   const cards = summary?.cards;
   const valuation = cards?.valuation; // 无金额权时后端不返回该键
@@ -333,7 +309,7 @@ export default function DashboardOverviewTab({
               ) : null}
             </Space>
           ) : undefined} />
-        <KpiCard label="期间下单数量" loading={loading} testId="kpi-orders" tone="warning"
+        {ordersQuery.entryState !== "deny" && <KpiCard label="期间下单数量" loading={loading} testId="kpi-orders" tone="warning"
           value={orderCards
             ? (orderCards.order_qty != null
               ? qtyText(orderCards.order_qty)
@@ -350,7 +326,7 @@ export default function DashboardOverviewTab({
               ) : null}
               <UnitBreakdown entries={orderCards.unit_breakdown} render={(e) => qtyText(e.order_qty)} />
             </Space>
-          ) : undefined} />
+          ) : undefined} />}
         <KpiCard label="涉及项目数" loading={loading} testId="kpi-projects"
           value={cards ? qtyText(String(cards.project_count)) : undefined}
           sub={summary ? `登记人 ${summary.registrants?.length ?? 0} 人` : undefined} />
@@ -460,12 +436,12 @@ export default function DashboardOverviewTab({
         </section>
       </div>
 
-      <ReceiptRankingPanel
+      {rankingAccess.allowed && <ReceiptRankingPanel
         summary={summary}
         loading={loading}
         params={params}
         onReceiptsDrill={onReceiptsDrill}
-      />
+      />}
     </Space>
   );
 }

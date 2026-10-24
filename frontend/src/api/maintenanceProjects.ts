@@ -1,4 +1,6 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
+import type { MaintenanceManagerAssignment } from "./maintenanceOperations";
 
 export interface MaintenanceProject {
   project_id: string;
@@ -7,6 +9,8 @@ export interface MaintenanceProject {
   salesperson: string | null;
   salesperson_override_active: boolean;
   project_manager_id: string | null;
+  /** Explicit null means no active relationship; omitted legacy metadata is not an unassigned account. */
+  manager_assignment?: MaintenanceManagerAssignment | null;
   /** 项目主档原值；空值表示未标注。 */
   business_type?: string | null;
   /** D-32：仅作提醒，不参与返还要求或收货计算。 */
@@ -25,7 +29,7 @@ export interface MaintenanceProject {
    * D-03：本人项目的负责人 / 持利润键的销售可传总表。稳定项目详情下发，与
    * master-workbook 上传门同一判定；展示板单卡 404 时面板靠它给上传入口。
    */
-  can_edit_master_workbook?: boolean;
+  can_edit_master_workbook?: boolean | null;
 }
 
 export interface MaintenanceProjectDirectory {
@@ -76,8 +80,8 @@ export const listMaintenanceProjects = (params: {
   page?: number;
   page_size?: number;
   include_inactive?: boolean;
-} = {}) =>
-  api.get<MaintenanceProjectDirectory>("/maintenance/projects/stable", {
+} = {}, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<MaintenanceProjectDirectory>("/maintenance/projects/stable", {
     params: { include_inactive: true, ...params },
   });
 
@@ -86,34 +90,34 @@ export const searchMaintenanceProjects = (body: {
   page?: number;
   page_size?: number;
   include_inactive?: boolean;
-}) => api.post<MaintenanceProjectDirectory>(
+}, capture?: ContextRequestTransport) => domainApi(capture).post<MaintenanceProjectDirectory>(
   "/maintenance/projects/stable/search",
   { include_inactive: true, ...body },
 );
 
-export const getMaintenanceProject = (projectId: string) =>
-  api.get<MaintenanceProjectOverview>(`/maintenance/projects/stable/${projectId}`);
+export const getMaintenanceProject = (projectId: string, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<MaintenanceProjectOverview>(`/maintenance/projects/stable/${projectId}`);
 
-export const createMaintenanceProject = (body: MaintenanceProjectCreateInput) =>
-  api.post<MaintenanceProject>("/maintenance/projects/stable", body);
+export const createMaintenanceProject = (body: MaintenanceProjectCreateInput, capture?: ContextRequestTransport) =>
+  domainApi(capture).post<MaintenanceProject>("/maintenance/projects/stable", body);
 
 export const updateMaintenanceProject = (
   projectId: string,
-  body: MaintenanceProjectUpdateInput,
-) => api.patch<MaintenanceProject>(`/maintenance/projects/stable/${projectId}`, body);
+  body: MaintenanceProjectUpdateInput, capture?: ContextRequestTransport
+) => domainApi(capture).patch<MaintenanceProject>(`/maintenance/projects/stable/${projectId}`, body);
 
 export const archiveMaintenanceProject = (
   projectId: string,
-  body: MaintenanceProjectLifecycleInput,
-) => api.post<MaintenanceProject>(
+  body: MaintenanceProjectLifecycleInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceProject>(
   `/maintenance/projects/stable/${projectId}/archive`,
   body,
 );
 
 export const restoreMaintenanceProject = (
   projectId: string,
-  body: MaintenanceProjectLifecycleInput,
-) => api.post<MaintenanceProject>(
+  body: MaintenanceProjectLifecycleInput, capture?: ContextRequestTransport
+) => domainApi(capture).post<MaintenanceProject>(
   `/maintenance/projects/stable/${projectId}/restore`,
   body,
 );

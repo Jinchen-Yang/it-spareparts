@@ -1,3 +1,6 @@
+import { ContextChanged } from "../authz/contextProtocol";
+import type { AuthorizationContext } from "../authz/contextTypes";
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
 
 /**
@@ -156,21 +159,21 @@ export interface WorkbookValidateResult extends Partial<WorkbookApplyResult> {
 
 const BASE = "/maintenance";
 
-async function download(path: string, params?: Record<string, unknown>): Promise<Blob> {
-  const resp = await api.get<Blob>(path, { params, responseType: "blob" });
+async function download(path: string, params?: Record<string, unknown>, capture?: ContextRequestTransport): Promise<Blob> {
+  const resp = await domainApi(capture).get<Blob>(path, { params, responseType: "blob" });
   return resp.data;
 }
 
 async function upload(
   path: string,
   file: File,
-  opts?: WorkbookApplyOptions,
+  opts?: WorkbookApplyOptions, capture?: ContextRequestTransport
 ): Promise<WorkbookApplyResult> {
   const body = new FormData();
   body.append("file", file);
   if (opts?.forceTakeover) body.append("force_takeover", "true");
   if (opts?.siteIssueMergeToken) body.append("site_issue_merge_token", opts.siteIssueMergeToken);
-  const resp = await api.post<WorkbookApplyResult>(path, body);
+  const resp = await domainApi(capture).post<WorkbookApplyResult>(path, body);
   return resp.data;
 }
 
@@ -179,30 +182,30 @@ export const downloadSparePartLines = (params: {
   range: RangePreset;
   from?: string;
   to?: string;
-}) => download(`${BASE}/spare-part-lines.xlsx`, params);
+}, capture?: ContextRequestTransport) => download(`${BASE}/spare-part-lines.xlsx`, params, capture);
 
-export const validateSparePartLines = async (file: File) => {
+export const validateSparePartLines = async (file: File, capture?: ContextRequestTransport) => {
   const body = new FormData();
   body.append("file", file);
-  const resp = await api.post<WorkbookValidateResult>(
+  const resp = await domainApi(capture).post<WorkbookValidateResult>(
     `${BASE}/spare-part-lines/validate`,
     body,
   );
   return resp.data;
 };
 
-export const applySparePartLines = (file: File) =>
-  upload(`${BASE}/spare-part-lines/apply`, file);
+export const applySparePartLines = (file: File, capture?: ContextRequestTransport) =>
+  upload(`${BASE}/spare-part-lines/apply`, file, undefined, capture);
 
 /** ②项目总表（六 sheet）／③各 tab 单 sheet（传 sheets）。 */
-export const downloadProjectMaster = (projectId: string, sheets?: string[]) =>
+export const downloadProjectMaster = (projectId: string, sheets?: string[], capture?: ContextRequestTransport) =>
   download(`${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook.xlsx`,
-    sheets && sheets.length ? { sheets: sheets.join(",") } : undefined);
+    sheets && sheets.length ? { sheets: sheets.join(",") } : undefined, capture);
 
-export const validateProjectMaster = async (projectId: string, file: File) => {
+export const validateProjectMaster = async (projectId: string, file: File, capture?: ContextRequestTransport) => {
   const body = new FormData();
   body.append("file", file);
-  const resp = await api.post<WorkbookValidateResult>(
+  const resp = await domainApi(capture).post<WorkbookValidateResult>(
     `${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/validate`,
     body,
   );
@@ -212,10 +215,10 @@ export const validateProjectMaster = async (projectId: string, file: File) => {
 export const applyProjectMaster = (
   projectId: string,
   file: File,
-  opts?: WorkbookApplyOptions,
+  opts?: WorkbookApplyOptions, capture?: ContextRequestTransport
 ) =>
   upload(`${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/apply`,
-    file, opts);
+    file, opts, capture);
 
 /** 项目面板「报销」tab 的只读行（含备注，#47）。改动仍只走下载→改→上传覆盖。 */
 export interface ProjectExpenseRow {
@@ -233,16 +236,17 @@ export interface ProjectExpenseRow {
   remark: string | null;
 }
 
-export const listProjectExpenseRows = async (projectId: string) => {
+export const listProjectExpenseRows = async (projectId: string, capture?: ContextRequestTransport) => {
   const pageSize = 200;
   const rows: ProjectExpenseRow[] = [];
   let page = 1;
   let total = 0;
+  let authorization_context: AuthorizationContext | undefined;
 
   // 项目报销并非天然少于一页。必须把服务端分页完整拉取，否则表格与下载的
   // 04 sheet 会使用不同母集，人工会误以为后半段报销“上传后没生效”。
   do {
-    const resp = await api.get<{
+    const resp = await domainApi(capture).get<{
       rows: ProjectExpenseRow[];
       total: number;
       page: number;
@@ -250,13 +254,15 @@ export const listProjectExpenseRows = async (projectId: string) => {
     }>(`${BASE}/projects/stable/${encodeURIComponent(projectId)}/expense-rows`, {
       params: { page, page_size: pageSize },
     });
+    if (authorization_context && JSON.stringify(authorization_context) !== JSON.stringify(resp.data.authorization_context)) throw new ContextChanged();
+    authorization_context = resp.data.authorization_context;
     total = resp.data.total;
     rows.push(...resp.data.rows);
     if (!resp.data.rows.length) break;
     page += 1;
   } while (rows.length < total);
 
-  return { rows, total };
+  return { rows, total, ...(authorization_context ? { authorization_context } : {}) };
 };
 
 /** 03 备件明细行级（PN）只读数据源——兼容 V1/V2 协议。 */
@@ -313,9 +319,9 @@ export interface ProjectPartsRows {
 
 export const listProjectPartsRows = async (
   projectId: string,
-  query?: ProjectPartsRowsQuery,
+  query?: ProjectPartsRowsQuery, capture?: ContextRequestTransport
 ) => {
-  const resp = await api.get<ProjectPartsRows>(
+  const resp = await domainApi(capture).get<ProjectPartsRows>(
     `${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/rows`,
     { params: { sheet: SHEETS.parts, ...(query ?? {}) } },
   );
@@ -352,8 +358,8 @@ export interface CollectionPlanRow {
   version: number;
 }
 
-export const getCollectionPlan = async (projectId: string) => {
-  const resp = await api.get<{ total: number; rows: CollectionPlanRow[] }>(
+export const getCollectionPlan = async (projectId: string, capture?: ContextRequestTransport) => {
+  const resp = await domainApi(capture).get<{ total: number; rows: CollectionPlanRow[] }>(
     `${BASE}/projects/stable/${encodeURIComponent(projectId)}/master-workbook/collection-plan`,
   );
   return resp.data;

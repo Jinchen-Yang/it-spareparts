@@ -772,15 +772,15 @@ describe("maintenance operations API", () => {
     expect(data.approved_expenses.rows[0].amount).toBe(8.8);
     expect(data.approved_expenses.rows[0].amount_ex_tax).toBe(7.79);
     expect(data.approved_expenses.rows[0].amount_inc_tax).toBe(8.8);
-    expect(data.project.metrics.actual_project_cost_known_ex_tax).toBe(37.26);
-    expect(data.project.metrics.actual_project_cost_known_inc_tax).toBe(42.1);
-    expect(data.project.metrics.site_requisition_priced_cost_ex_tax).toBe(29.47);
-    expect(data.project.metrics.site_requisition_priced_cost_inc_tax).toBe(33.3);
-    expect(data.project.metrics.sales_estimate_cost_ex_tax).toBe(8.41);
-    expect(data.project.metrics.sales_estimate_cost_inc_tax).toBe(9.5);
-    expect(data.project.metrics.sales_estimate_lines).toBe(1);
-    expect(data.project.metrics.cost_progress_includes_sales_estimate).toBe(true);
-    expect(data.project.metrics.cost_progress_label).toBe("priced_cost_including_sales_estimate");
+    expect(data.project.metrics!.actual_project_cost_known_ex_tax).toBe(37.26);
+    expect(data.project.metrics!.actual_project_cost_known_inc_tax).toBe(42.1);
+    expect(data.project.metrics!.site_requisition_priced_cost_ex_tax).toBe(29.47);
+    expect(data.project.metrics!.site_requisition_priced_cost_inc_tax).toBe(33.3);
+    expect(data.project.metrics!.sales_estimate_cost_ex_tax).toBe(8.41);
+    expect(data.project.metrics!.sales_estimate_cost_inc_tax).toBe(9.5);
+    expect(data.project.metrics!.sales_estimate_lines).toBe(1);
+    expect(data.project.metrics!.cost_progress_includes_sales_estimate).toBe(true);
+    expect(data.project.metrics!.cost_progress_label).toBe("priced_cost_including_sales_estimate");
     expect(data.collection_snapshots.rows[0].cumulative_amount).toBe(18.8);
   });
 
@@ -941,7 +941,7 @@ describe("maintenance operations API", () => {
 
     const directoryMetrics = (await listMaintenanceProjectOperations()).data.rows[0].metrics;
     const workspaceData = (await getMaintenanceProjectWorkspace("project-restricted")).data;
-    const workspaceMetrics = workspaceData.project.metrics;
+    const workspaceMetrics = workspaceData.project.metrics!;
     for (const metrics of [directoryMetrics, workspaceMetrics]) {
       expect(metrics.site_requisition_priced_cost_ex_tax).toBeNull();
       expect(metrics.site_requisition_priced_cost_inc_tax).toBeNull();
@@ -1161,12 +1161,12 @@ describe("maintenance operations API", () => {
       cost_is_estimate: true,
       cost_source_label: "估算（销售前后 7 天数量加权）",
     }));
-    expect(data.project.metrics.site_requisition_known_cost_inc_tax).toBe(113);
-    expect(data.project.metrics.approved_expense).toBeNull();
-    expect(data.project.metrics.approved_expense_inc_tax).toBeNull();
-    expect(data.project.metrics.actual_project_cost_known_inc_tax).toBeNull();
-    expect(data.project.metrics.cost_rate_lower_bound_pct).toBeNull();
-    expect(data.project.metrics.cost_status).toBeNull();
+    expect(data.project.metrics!.site_requisition_known_cost_inc_tax).toBe(113);
+    expect(data.project.metrics!.approved_expense).toBeNull();
+    expect(data.project.metrics!.approved_expense_inc_tax).toBeNull();
+    expect(data.project.metrics!.actual_project_cost_known_inc_tax).toBeNull();
+    expect(data.project.metrics!.cost_rate_lower_bound_pct).toBeNull();
+    expect(data.project.metrics!.cost_status).toBeNull();
     expect(data.collection_snapshots.rows[0]).toEqual(expect.objectContaining({
       cumulative_amount: null,
       receipt_reference: null,

@@ -1,9 +1,11 @@
+import { legacyAuthorizationState } from "../../../test/legacyAuthorization";
+import { prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanupAntd, renderWithoutMotion } from "../../../test/antdRender";
 
 const get = vi.hoisted(() => vi.fn());
-vi.mock("../../../api", () => ({ api: { get } }));
+vi.mock("../../../api", () => ({ api: { get, request: (config: { url: string; method: string; [key: string]: unknown }) => { const { url, method: _method, ...options } = config; return get(url, options); } } }));
 
 import GlobalMaintenanceRowWorkbench from "../GlobalMaintenanceRowWorkbench";
 
@@ -89,7 +91,7 @@ describe("全项目行级筛选工作台", () => {
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "行级表项目范围" }));
     fireEvent.click(await screen.findByText("本人负责项目", { selector: ".ant-select-item-option-content" }));
     await waitFor(() => expect(get).toHaveBeenCalledWith(
-      "/maintenance/spare-part-lines/fields", { params: { project_id: "p-owned" } },
+      "/maintenance/spare-part-lines/fields", expect.objectContaining({ params: { project_id: "p-owned" }, headers: { Authorization: "Bearer legacy-page-fixture-owner" }, signal: expect.any(AbortSignal) }),
     ));
     await waitFor(() => expect(screen.queryByText(/当前范围不可使用金额条件/)).not.toBeInTheDocument());
     await screen.findByText("共 45 行");
@@ -158,3 +160,11 @@ describe("全项目行级筛选工作台", () => {
     expect(screen.queryByText(/当前范围不可使用金额条件/)).not.toBeInTheDocument();
   });
 });
+
+// Existing behavior fixtures explicitly run before the canonical module cutover.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(),
+  useAuthz: () => legacyAuthorizationState(),
+}));
+
+beforeEach(() => prepareLegacyPageFixture());

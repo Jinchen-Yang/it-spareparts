@@ -1,4 +1,4 @@
-import { hasControlledRoute, routeRule, ruleAllowed, type Rule } from "./authz/rules";
+import { hasControlledRoute, routeRule, ruleState, type Rule } from "./authz/rules";
 import { AuthzProvider, AuthorizationBoundary, AuthzUnavailable, actorAllowed, resourceAllowed, resourceUsesLegacy, useAuthz } from "./authz/AuthzProvider";
 import { AUTHZ_SESSION_INVALIDATED } from "./authz/events";
 import { useEffect, useMemo, useState } from "react";
@@ -108,7 +108,7 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
   const allowedRoute = (rule: Rule, legacyPageAllowed: boolean) => {
     // Legacy is considered per resource in each complete clause, never as an OR bypass.
     const legacy = Object.fromEntries(rule.anyOf.flat().map(need => [need.resource_id, legacyPageAllowed]));
-    return ruleAllowed(authz.snapshot, rule, legacy);
+    return ruleState(authz.snapshot, rule, legacy) !== "deny";
   };
 
   // 旧模块继续使用登录权限；已迁移模块由服务端刷新后的能力快照决定入口。
@@ -119,6 +119,7 @@ function AppContent({ token, setToken }: { token: string | null; setToken: (toke
     const perms = readPerms();
     // admin 全通；组合能力入口优先按完整能力判断；其余沿用单权限/任一权限规则。
     return NAV_ITEMS.filter((it) => {
+      if (it.betaFeature && betaFeatures[it.betaFeature] !== true) return false;
       if (hasControlledRoute(it.path)) {
         const oldAllowed = isAdmin || (it.visibleWhen ? it.visibleWhen() : it.perm ? !!perms[it.perm] : it.anyPerm ? it.anyPerm.some(p => !!perms[p]) : false);
         return authz.status === "ready" && allowedRoute(routeRule(it.path), oldAllowed);

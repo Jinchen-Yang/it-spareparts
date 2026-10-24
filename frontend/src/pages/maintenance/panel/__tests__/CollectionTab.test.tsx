@@ -1,3 +1,4 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../../test/legacyAuthorization";
 import { cleanupAntd, renderWithoutMotion as render } from "../../../../test/antdRender";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -123,7 +124,7 @@ describe("回款页面登记的合同选择", () => {
     render(<CollectionTab {...props()} />);
     fireEvent.click(await screen.findByRole("button", btn("登记回款")));
     const dialog = await screen.findByRole("dialog");
-    await waitFor(() => expect(mocks.workspace).toHaveBeenCalledWith("p1", expect.anything()));
+    await waitFor(() => expect(mocks.workspace).toHaveBeenCalledWith("p1", expect.anything(), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await pickContract(dialog, "HT-2026-001");
     fillCreate(dialog);
     fireEvent.click(within(dialog).getByRole("button", btn("登记")));
@@ -132,7 +133,7 @@ describe("回款页面登记的合同选择", () => {
       report_month: "2026-09-01",
       cumulative_amount: 500,
       reason: "补录 9 月回款",
-    })));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("当前项目无合同关系时给空状态说明，未选合同不给提交", async () => {
@@ -215,7 +216,7 @@ describe("作废与恢复动作", () => {
       version: 3,
       reason: "银行冲正",
       status: "void",
-    })));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("void 行有恢复入口，恢复默认回待确认并带版本与原因", async () => {
@@ -230,7 +231,7 @@ describe("作废与恢复动作", () => {
       version: 3,
       reason: "误作废",
       status: "unconfirmed",
-    })));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("作废失败时错误上屏且表单值不丢，可直接重试", async () => {
@@ -262,7 +263,7 @@ describe("作废与恢复动作", () => {
       version: 3,
       reason: "核对回单修正",
       cumulative_amount: 1200,
-    })));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 });
 
@@ -304,13 +305,13 @@ describe("快速切项目与在途提交隔离", () => {
     await pickContract(dialogA, "HT-2026-001");
     fillCreate(dialogA);
     fireEvent.click(within(dialogA).getByRole("button", btn("登记")));
-    await waitFor(() => expect(mocks.create).toHaveBeenCalledWith("p1", expect.objectContaining({ report_month: "2026-09-01" })));
+    await waitFor(() => expect(mocks.create).toHaveBeenCalledWith("p1", expect.objectContaining({ report_month: "2026-09-01" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     // A 写请求在途：切到 B 并打开新登记表单
     rerender(<CollectionTab projectId="p2" {...base} onRefresh={refreshB} />);
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     fireEvent.click(await screen.findByRole("button", btn("登记回款")));
     const dialogB = await screen.findByRole("dialog");
-    await waitFor(() => expect(mocks.workspace).toHaveBeenCalledWith("p2", expect.anything()));
+    await waitFor(() => expect(mocks.workspace).toHaveBeenCalledWith("p2", expect.anything(), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     await pickContract(dialogB, "HT-2026-001");
     // A 的写请求此刻才完成：不得关掉 B 的表单、不得触发任何项目的刷新链。
     // act 等待这次响应对应的微任务与 React 更新，无须依赖固定延时。
@@ -321,7 +322,7 @@ describe("快速切项目与在途提交隔离", () => {
     // B 的表单仍可正常提交（A 的 finally 没有把 B 的 submitting 或表单搞坏）
     fillCreate(dialogB);
     fireEvent.click(within(dialogB).getByRole("button", btn("登记")));
-    await waitFor(() => expect(mocks.create).toHaveBeenCalledWith("p2", expect.anything()));
+    await waitFor(() => expect(mocks.create).toHaveBeenCalledWith("p2", expect.anything(), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     // B 成功后走 B 的刷新闭包（不是 A 的）
     await waitFor(() => expect(refreshB).toHaveBeenCalled());
     expect(refreshA).not.toHaveBeenCalled();
@@ -375,3 +376,8 @@ describe("批量入口与列表勾选接线", () => {
     expect(within(dialog).getByText("v3")).toBeInTheDocument();
   });
 });
+
+vi.mock("../../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

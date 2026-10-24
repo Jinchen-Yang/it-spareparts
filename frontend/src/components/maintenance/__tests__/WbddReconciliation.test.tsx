@@ -1,3 +1,4 @@
+import { legacyAuthorizationState, prepareLegacyPageFixture } from "../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WbddMissing } from "../../../api/maintenanceWbddImport";
@@ -46,7 +47,7 @@ describe("原件差集确认同步", () => {
     const dialog = await begin();
     fireEvent.click(within(dialog).getByRole("button", { name: "确认同步" }));
     await waitFor(() => expect(reconcile).toHaveBeenCalledTimes(1));
-    expect(reconcile.mock.calls[0]).toEqual([8, { expected_digest: "digest-8", source_order_ids: ["private-source-id"], line_ids: [12], reason: "核对原件已删除", idempotency_key: expect.stringMatching(/^wbdd-reconcile-/) }]);
+    expect(reconcile.mock.calls[0]).toEqual([8, { expected_digest: "digest-8", source_order_ids: ["private-source-id"], line_ids: [12], reason: "核对原件已删除", idempotency_key: expect.stringMatching(/^wbdd-reconcile-/) }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })]);
     await waitFor(() => expect(p.onCommitted).toHaveBeenCalledTimes(1));
     expect(await screen.findByText(/同步已完成：作废 1 张需求单、4 条需求明细、3 条关联领用明细/)).toBeInTheDocument();
   });
@@ -114,3 +115,10 @@ describe("原件差集确认同步", () => {
     expect(reconcile).toHaveBeenCalledTimes(1);
   });
 });
+
+// These existing business behavior fixtures intentionally exercise the legacy runtime.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(),
+  useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

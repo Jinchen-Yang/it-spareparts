@@ -1,3 +1,8 @@
+import { useContextAdmission } from "../../authz/access";
+import { actionRule } from "../../authz/rules";
+import { useContextTransport, withTransportSignal } from "../../authz/domainTransport";
+import { withContextSurface } from "../../authz/ContextSurface";
+import { authorizationErrorText } from "../../authz/requestLifecycle";
 import { useEffect, useRef, useState } from "react";
 import { Alert, ConfigProvider, Form, Input, Modal } from "antd";
 import type { RefObject } from "react";
@@ -35,7 +40,7 @@ function errorMessage(reason: unknown, fallback: string): string {
   return response || fallback;
 }
 
-export default function CollectionMilestoneFollowUpModal({
+function CollectionMilestoneFollowUpModalContent({
   open,
   milestone,
   action,
@@ -43,6 +48,17 @@ export default function CollectionMilestoneFollowUpModal({
   onClose,
   onSubmitted,
 }: CollectionMilestoneFollowUpModalProps) {
+  const admission = useContextAdmission();
+  const canSubmit = admission.state(actionRule("maintenance_collection_followup", "record"), true) !== "deny";
+  const [formGeneration, setFormGeneration] = useState(0);
+  const transport = useContextTransport(JSON.stringify([open, milestone?.milestone_id, milestone?.version, action, formGeneration]), true);
+  const commandAbort = useRef(new AbortController());
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    if (commandAbort.current.signal.aborted) commandAbort.current = new AbortController();
+    return () => { alive.current = false; commandAbort.current.abort(); };
+  }, []);
   const [note, setNote] = useState("");
   const [plannedMonth, setPlannedMonth] = useState("");
   const [reason, setReason] = useState("");
@@ -75,10 +91,11 @@ export default function CollectionMilestoneFollowUpModal({
 
   const invalidateIdempotencyKey = () => {
     idempotencyKeyRef.current = null;
+    setFormGeneration(value => value + 1);
   };
 
   const handleSubmit = async () => {
-    if (!milestone || !action || submitting) return;
+    if (!open || !canSubmit || !transport.isCurrent() || !alive.current || !milestone || !action || submitting) return;
     if (action === "reschedule" && !MONTH_PATTERN.test(plannedMonth.trim())) {
       setMonthError(COLLECTION_FOLLOW_UP.monthRequired);
       return;
@@ -109,25 +126,30 @@ export default function CollectionMilestoneFollowUpModal({
     }
     setSubmitting(true);
     try {
-      await followUpCollectionMilestone(milestone.milestone_id, request);
+      await followUpCollectionMilestone(milestone.milestone_id, request, withTransportSignal(transport, commandAbort.current.signal));
+      if (!alive.current || !transport.isCurrent()) return;
       // 同一幂等键（同一操作重试）成功后只通知父级一次。
       if (!submittedKeysRef.current.has(request.idempotency_key)) {
         submittedKeysRef.current.add(request.idempotency_key);
         onSubmitted();
       }
     } catch (reason_) {
+      if (!alive.current || !transport.isCurrent()) return;
       const status = (reason_ as { response?: { status?: number } })?.response?.status;
       setSubmitError(
         status === 409
           ? errorMessage(reason_, COLLECTION_FOLLOW_UP.versionConflict)
-          : errorMessage(reason_, COLLECTION_FOLLOW_UP.submitFailed),
+          : authorizationErrorText(reason_, errorMessage(reason_, COLLECTION_FOLLOW_UP.submitFailed)),
       );
     } finally {
-      setSubmitting(false);
+      if (alive.current && transport.isCurrent()) setSubmitting(false);
     }
   };
 
   const handleCancel = () => {
+    alive.current = false;
+    commandAbort.current.abort();
+    setSubmitting(false);
     triggerRef.current?.focus();
     onClose();
   };
@@ -149,7 +171,7 @@ export default function CollectionMilestoneFollowUpModal({
         onOk={handleSubmit}
         okText={COLLECTION_FOLLOW_UP.submit}
         cancelText={COLLECTION_FOLLOW_UP.cancel}
-        confirmLoading={submitting}
+        okButtonProps={{ loading: submitting, disabled: !canSubmit }}
         aria-labelledby={titleId}
         getContainer={false}
         width={480}
@@ -173,6 +195,7 @@ export default function CollectionMilestoneFollowUpModal({
           <Input.TextArea
             id="collection-follow-up-note"
             aria-label={COLLECTION_FOLLOW_UP.noteLabel}
+            disabled={submitting}
             maxLength={1000}
             rows={2}
             placeholder={COLLECTION_FOLLOW_UP.notePlaceholder}
@@ -188,6 +211,7 @@ export default function CollectionMilestoneFollowUpModal({
           <Input
             id="collection-follow-up-month"
             aria-label={COLLECTION_FOLLOW_UP.plannedMonthLabel}
+            disabled={submitting}
             maxLength={7}
             placeholder={COLLECTION_FOLLOW_UP.plannedMonthPlaceholder}
             onChange={(event) => {
@@ -203,6 +227,7 @@ export default function CollectionMilestoneFollowUpModal({
           <Input.TextArea
             id="collection-follow-up-reason"
             aria-label={COLLECTION_FOLLOW_UP.reasonLabel}
+            disabled={submitting}
             maxLength={1000}
             rows={2}
             onChange={(event) => {
@@ -218,3 +243,7 @@ export default function CollectionMilestoneFollowUpModal({
     </ConfigProvider>
   );
 }
+
+export default withContextSurface(CollectionMilestoneFollowUpModalContent,
+  actionRule("maintenance_collection_followup", "record"),
+  props => [props.open, props.milestone?.milestone_id, props.milestone?.version, props.action]);

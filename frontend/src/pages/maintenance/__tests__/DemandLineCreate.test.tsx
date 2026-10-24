@@ -362,7 +362,7 @@ describe("DemandLineCreate 全局模式（项目可选可搜）", () => {
     });
     fireEvent.click(realOpt);
     expect(mocks.listProjects).toHaveBeenCalledWith(
-      expect.objectContaining({ include_inactive: false, page_size: 200 }),
+      expect.objectContaining({ include_inactive: false, page_size: 200 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }),
     );
     // 真实选中动作后：Select 展示区回显该项目的 label（下拉浮层可能仍开着，
     // 断言限定在 .ant-select-selection-item，不与浮层里的选项文本相撞）
@@ -388,7 +388,7 @@ describe("DemandLineCreate 全局模式（项目可选可搜）", () => {
     fireEvent.mouseDown(projCombo);
     fireEvent.change(projCombo, { target: { value: "乙" } });
     await waitFor(() => expect(mocks.searchProjects).toHaveBeenCalledWith(
-      expect.objectContaining({ q: "乙", include_inactive: false }),
+      expect.objectContaining({ q: "乙", include_inactive: false }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }),
     ), { timeout: 3000 });
   });
 

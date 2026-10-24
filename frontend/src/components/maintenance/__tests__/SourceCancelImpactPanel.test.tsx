@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -58,7 +59,7 @@ describe("已取消影响人工确认", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "确认连带作废" }));
     await waitFor(() => expect(api.confirm).toHaveBeenCalledWith("project-1", 8, "private-order-id", {
       expected_digest: "digest-8", reason: "已核对源单取消", idempotency_key: expect.stringMatching(/^source-cancel-/),
-    }, ""));
+    }, "legacy-page-fixture-owner", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(await screen.findByText(/已确认作废：1 张需求单、1 条需求明细、1 条精确关联领用/)).toBeInTheDocument();
     expect(p.onChanged).toHaveBeenCalledTimes(1);
   });
@@ -133,7 +134,8 @@ describe("已取消影响人工确认", () => {
     const original = api.confirm.mock.calls[0];
     fireEvent.click(within(dialog).getByRole("button", { name: "重试同一次确认" }));
     await waitFor(() => expect(api.confirm).toHaveBeenCalledTimes(2));
-    expect(api.confirm.mock.calls[1]).toEqual(original);
+    expect(api.confirm.mock.calls[1].slice(0, 5)).toEqual(original.slice(0, 5));
+    expect(api.confirm.mock.calls[1][5]).toEqual(expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(await screen.findByText(/已返回原确认结果.*不代表当前状态/)).toBeInTheDocument();
   });
 
@@ -164,7 +166,7 @@ describe("已取消影响人工确认", () => {
     fireEvent.click(screen.getByRole("button", { name: "重新查询确认状态" }));
     const reopened = await screen.findByRole("dialog");
     await within(reopened).findByText("PN-需求");
-    expect(api.status).toHaveBeenCalledWith("project-1", 8, candidate.source_order_id, original[3].idempotency_key, "original-account");
+    expect(api.status).toHaveBeenCalledWith("project-1", 8, candidate.source_order_id, original[3].idempotency_key, "original-account", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(api.detail).toHaveBeenCalledTimes(2);
     expect(api.list).toHaveBeenCalledTimes(2);
     expect(api.confirm).toHaveBeenCalledTimes(2);
@@ -172,8 +174,10 @@ describe("已取消影响人工确认", () => {
     expect(within(reopened).getByRole("textbox", { name: "作废原因" })).toBeDisabled();
     fireEvent.click(within(reopened).getByRole("button", { name: "重试同一次确认" }));
     await waitFor(() => expect(api.confirm).toHaveBeenCalledTimes(3));
-    expect(api.confirm.mock.calls[1]).toEqual(original);
-    expect(api.confirm.mock.calls[2]).toEqual(original);
+    expect(api.confirm.mock.calls[1].slice(0, 5)).toEqual(original.slice(0, 5));
+    expect(api.confirm.mock.calls[1][5]).toEqual(expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
+    expect(api.confirm.mock.calls[2].slice(0, 5)).toEqual(original.slice(0, 5));
+    expect(api.confirm.mock.calls[2][5]).toEqual(expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it("候选已消失且详情 409 时重新打开仍可读取历史回执，不自动提交确认", async () => {
@@ -315,7 +319,8 @@ describe("已取消影响人工确认", () => {
     expect(retry).toBeEnabled();
     fireEvent.click(retry);
     await waitFor(() => expect(api.confirm).toHaveBeenCalledTimes(2));
-    expect(api.confirm.mock.calls[1]).toEqual(original);
+    expect(api.confirm.mock.calls[1].slice(0, 5)).toEqual(original.slice(0, 5));
+    expect(api.confirm.mock.calls[1][5]).toEqual(expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it("双击只发一次，写入成功但刷新失败时保留成功及警告，不重发确认", async () => {
@@ -387,7 +392,7 @@ describe("已取消影响人工确认", () => {
     await screen.findByText(candidate.order_no);
     fireEvent.click(screen.getByTitle("Next Page"));
     expect(await screen.findByText("当前没有已取消候选或未知非生效状态告警")).toBeInTheDocument();
-    expect(api.list).toHaveBeenLastCalledWith("project-1", { page: 2, page_size: 10 });
+    expect(api.list).toHaveBeenLastCalledWith("project-1", { page: 2, page_size: 10 }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it("切换项目后旧详情的迟到响应不能进入新项目确认上下文", async () => {
@@ -407,7 +412,7 @@ describe("已取消影响人工确认", () => {
     await within(dialog).findByText("无需求明细");
     await act(async () => finishOld({ data: detail }));
     expect(within(dialog).queryByText("PN-需求")).toBeNull();
-    expect(api.detail).toHaveBeenLastCalledWith("project-2", 8, "order-2");
+    expect(api.detail).toHaveBeenLastCalledWith("project-2", 8, "order-2", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it("账号 token 已改变时旧对话框不能向新账号提交", async () => {
@@ -473,13 +478,18 @@ describe("已取消影响人工确认", () => {
     render(<SourceCancelImpactPanel {...p} />);
     await screen.findByText(candidate.order_no);
     fireEvent.click(screen.getByTitle("Next Page"));
-    await waitFor(() => expect(api.list).toHaveBeenLastCalledWith("project-1", { page: 2, page_size: 10 }));
+    await waitFor(() => expect(api.list).toHaveBeenLastCalledWith("project-1", { page: 2, page_size: 10 }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     fireEvent.click(screen.getByRole("button", { name: "查看影响" }));
     const dialog = await screen.findByRole("dialog");
     fireEvent.change(await within(dialog).findByRole("textbox", { name: "作废原因" }), { target: { value: "核对取消" } });
     fireEvent.click(within(dialog).getByRole("button", { name: "确认连带作废" }));
     expect(await screen.findByText(first.order_no)).toBeInTheDocument();
-    expect(api.list).toHaveBeenLastCalledWith("project-1", { page: 1, page_size: 10 });
+    expect(api.list).toHaveBeenLastCalledWith("project-1", { page: 1, page_size: 10 }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(screen.queryByText("当前没有已取消候选或未知非生效状态告警")).toBeNull();
   });
 });
+
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

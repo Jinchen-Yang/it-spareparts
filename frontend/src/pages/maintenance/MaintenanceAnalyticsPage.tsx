@@ -44,6 +44,11 @@ import { raw } from "../maintenance/panel/panelUtils";
 import { moneyExact, qty as qtyFmt } from "../../utils/format";
 import { useVisibleMaintenanceRefresh } from "../../utils/maintenanceRefresh";
 
+import { useAccess, useContextAdmission, useModuleAccess } from "../../authz/access";
+import { useContextTransport } from "../../authz/domainTransport";
+import { withContextSurface } from "../../authz/ContextSurface";
+import { actionRule, routeRule } from "../../authz/rules";
+
 const { Text } = Typography;
 
 /** 六态信封渲染：restricted 🔒、not_imported ●、绝不渲染 0（铁律 5）。 */
@@ -169,15 +174,35 @@ function KpiCard({ label, value, sub, loading }: {
   );
 }
 
+const restrictedCost = { state: "restricted" as const, value: null };
+function redactPnCosts(data: PnRanking): PnRanking {
+  return { ...data, summary: { ...data.summary, total_cost_inc: restrictedCost, total_cost_ex: restrictedCost },
+    rows: data.rows.map(row => ({ ...row, cost_inc: restrictedCost, cost_ex: restrictedCost, cost_share_pct: null })) };
+}
+function redactSpendCosts(data: SpendTrendResponse): SpendTrendResponse {
+  const row = <T extends { cost_inc: unknown; cost_ex: unknown }>(value: T) =>
+    ({ ...value, cost_inc: restrictedCost, cost_ex: restrictedCost, cost_share_pct: null });
+  return { ...data, summary: { ...data.summary, total_cost_inc: restrictedCost, total_cost_ex: restrictedCost },
+    by_business_type: data.by_business_type.map(row), by_project: data.by_project.map(row), by_salesperson: data.by_salesperson.map(row),
+    buckets: data.buckets.map(value => ({ ...row(value), by_business_type: Object.fromEntries(
+      Object.keys(value.by_business_type).map(key => [key, restrictedCost])) })) };
+}
+
 /**
  * 维保数据分析看板：PN 成本排名与同期间实际领用、返还。
  * URL 即筛选状态（PoolAnalysis 范式）：range/sort/q/business_type/page/ps/from/to 与
  * 全字段筛选（project/customer/sp/order_no/demand_type/warehouse/cost_source）全入 query，
  * 刷新/分享不丢上下文。
  */
-export function MaintenanceAnalyticsPage() {
+function MaintenanceAnalyticsPageBody() {
   const { message } = App.useApp();
   const [sp, setSp] = useSearchParams();
+  const admission = useContextAdmission();
+  const module = useModuleAccess("maintenance_analysis");
+  const shellTransport = useContextTransport("analytics-filter-options", true);
+  const directoryAccess = useAccess(actionRule("maintenance_project_directory", "read"), { legacy: { maintenance_project_directory: true } });
+  const projectAccess = useAccess(actionRule("maintenance_project", "read"), { legacy: { maintenance_project: true } });
+  const permittedViews = ["rankings", "pn-compact", "pn", "spend"].filter(key => admission.surface(`maintenance_analysis.${({ "pn-compact": "pn_compact", pn: "pn_detail" } as Record<string,string>)[key] ?? key}`, true) !== "deny");
   const rangeKey = sp.get("range") ?? "ytd";
   const sortSpec = sp.get("sort") ?? "cost_inc";
   const sort = sortSpec === "bad_qty" ? "receipt_qty" : sortSpec === "bad_rate" ? "receipt_rate" : sortSpec;
@@ -214,9 +239,13 @@ export function MaintenanceAnalyticsPage() {
   );
   const costSourceParam = csvParam(costSources, COST_SOURCE_CODES);
   /** 默认多维排名；旧 view=pn / spend 链接继续指向原明细与开支统计。 */
-  const view = sp.get("view") === "spend" ? "spend" : sp.get("view") === "pn" ? "pn" : sp.get("view") === "pn-compact" ? "pn-compact" : "rankings";
+  const requestedView = sp.get("view") === "spend" ? "spend" : sp.get("view") === "pn" ? "pn" : sp.get("view") === "pn-compact" ? "pn-compact" : "rankings";
+  const view = permittedViews.includes(requestedView) ? requestedView : permittedViews[0];
   const [explorerRefresh, setExplorerRefresh] = useState(0);
   const granularity = readGranularity(sp.get("granularity"));
+  const requestKey = JSON.stringify([rangeKey, sort, q, page, pageSize, customFrom, customTo, businessType,
+    projectIds, customer, sales, orderNo, demandTypeParam, warehouses, costSourceParam, granularity]);
+  const transport = useContextTransport(requestKey, true);
 
   const [customerDraft, setCustomerDraft] = useState(customer);
   useEffect(() => { setCustomerDraft(customer); }, [customer]);
@@ -226,8 +255,8 @@ export function MaintenanceAnalyticsPage() {
   useEffect(() => { setOrderNoDraft(orderNo); }, [orderNo]);
 
   const perms = readPermissionMap();
-  const canCost = !!perms.data_purchase_cost;
-  const canCustomer = !!perms.data_customer;
+  const canCost = module.field("data_purchase_cost", !!perms.data_purchase_cost);
+  const canCustomer = module.field("data_customer", !!perms.data_customer);
 
   const patch = useCallback((next: Record<string, string | null>) => {
     setSp((prev) => {
@@ -271,11 +300,12 @@ export function MaintenanceAnalyticsPage() {
 
   // URL 已选项目回填标签：并发取详情，失败退回短 id（页面照常可用）。
   useEffect(() => {
+    if (projectAccess.entryState === "deny") return;
     const missing = projectIds.filter((id) => !projectLabels[id]);
     if (!missing.length) return;
     let cancelled = false;
-    void Promise.allSettled(missing.map((id) => getMaintenanceProject(id))).then((results) => {
-      if (cancelled) return;
+    void Promise.allSettled(missing.map((id) => getMaintenanceProject(id, shellTransport))).then((results) => {
+      if (cancelled || !shellTransport.isCurrent()) return;
       cacheProjectLabels(results.map((result, index) => ({
         project_id: missing[index],
         display_name: result.status === "fulfilled"
@@ -288,6 +318,7 @@ export function MaintenanceAnalyticsPage() {
 
   const onProjectSearch = useCallback((keyword: string) => {
     if (projectSearchTimer.current) clearTimeout(projectSearchTimer.current);
+    if (directoryAccess.entryState === "deny") return;
     const term = keyword.trim();
     if (term.length < 2) {
       projectSearchGen.current += 1;
@@ -298,18 +329,18 @@ export function MaintenanceAnalyticsPage() {
     projectSearchTimer.current = setTimeout(() => {
       const gen = ++projectSearchGen.current;
       setProjectSearching(true);
-      void searchMaintenanceProjects({ q: term, page_size: 20 })
+      void searchMaintenanceProjects({ q: term, page_size: 20 }, shellTransport)
         .then((resp) => {
-          if (gen !== projectSearchGen.current) return;
+          if (gen !== projectSearchGen.current || !shellTransport.isCurrent()) return;
           const rows = resp.data.rows ?? [];
           setProjectOptions(rows.map((p) => ({ value: p.project_id, label: p.display_name })));
           cacheProjectLabels(rows);
         })
         .catch(() => {
-          if (gen === projectSearchGen.current) setProjectOptions([]);
+          if (gen === projectSearchGen.current && shellTransport.isCurrent()) setProjectOptions([]);
         })
         .finally(() => {
-          if (gen === projectSearchGen.current) setProjectSearching(false);
+          if (gen === projectSearchGen.current && shellTransport.isCurrent()) setProjectSearching(false);
         });
     }, 300);
   }, [cacheProjectLabels]);
@@ -338,9 +369,10 @@ export function MaintenanceAnalyticsPage() {
   const [warehouseOptions, setWarehouseOptions] = useState<string[]>([]);
   useEffect(() => {
     let cancelled = false;
-    void fetchAnalyticsFilterOptions()
-      .then((data) => { if (!cancelled) setWarehouseOptions(data.warehouses ?? []); })
-      .catch(() => { if (!cancelled) message.error("仓库选项加载失败"); });
+    if (admission.surface("maintenance_analysis.filters", true) === "deny") return;
+    void fetchAnalyticsFilterOptions(shellTransport)
+      .then((data) => { if (!cancelled && shellTransport.isCurrent()) setWarehouseOptions(data.warehouses ?? []); })
+      .catch(() => { if (!cancelled && shellTransport.isCurrent()) message.error("仓库选项加载失败"); });
     return () => { cancelled = true; };
   }, []);
 
@@ -355,13 +387,17 @@ export function MaintenanceAnalyticsPage() {
     return merged;
   }, [warehouses, warehouseOptions]);
 
-  const [data, setData] = useState<PnRanking | null>(null);
+  const [storedData, setData] = useState<(PnRanking & { authorization_context?: import("../../authz/contextTypes").AuthorizationContext }) | null>(null);
+  const [dataOwner, setDataOwner] = useState("");
+  const rawData = dataOwner === requestKey ? storedData : null;
+  const data = rawData && (module.legacy || rawData.authorization_context?.resources.maintenance_analysis?.field_permissions.includes("data_purchase_cost")) ? rawData : rawData ? redactPnCosts(rawData) : null;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const seqRef = useRef(0);
   const pnRequests = useRef(0);
 
   const load = useCallback(async (mode: "initial" | "manual" | "background" = "initial") => {
+    if (admission.surface("maintenance_analysis.pn_detail", true) === "deny") return false;
     if (mode !== "initial" && pnRequests.current > 0) return false;
     const background = mode === "background";
     pnRequests.current += 1;
@@ -389,12 +425,13 @@ export function MaintenanceAnalyticsPage() {
         if (customFrom) payload.date_from = customFrom;
         if (customTo) payload.date_to = customTo;
       }
-      const resp = await fetchPnRanking(payload);
-      if (seqRef.current !== seq) return true; // 代次守卫：旧响应不覆盖新请求
+      const resp = await fetchPnRanking(payload, transport);
+      if (seqRef.current !== seq || !transport.isCurrent()) return true; // 代次守卫：旧响应不覆盖新请求
+      setDataOwner(requestKey);
       setData(resp);
       setError(null);
     } catch (err) {
-      if (seqRef.current !== seq) return true;
+      if (seqRef.current !== seq || !transport.isCurrent()) return true;
       setData(null);
       const msg = apiErrorMessage(err);
       setError(msg);
@@ -406,7 +443,7 @@ export function MaintenanceAnalyticsPage() {
     return true;
   }, [
     rangeKey, sort, q, page, pageSize, customFrom, customTo, businessType,
-    projectIds, customer, sales, orderNo, demandTypeParam, warehouses, costSourceParam,
+    projectIds, customer, sales, orderNo, demandTypeParam, warehouses, costSourceParam, transport, requestKey,
   ]);
 
   useEffect(() => {
@@ -416,13 +453,17 @@ export function MaintenanceAnalyticsPage() {
   }, [load, view]);
 
   // 开支统计：独立请求 + 独立代次守卫；切粒度/筛选只影响 spend，不碰 PN 状态。
-  const [spendData, setSpendData] = useState<SpendTrendResponse | null>(null);
+  const [storedSpendData, setSpendData] = useState<(SpendTrendResponse & { authorization_context?: import("../../authz/contextTypes").AuthorizationContext }) | null>(null);
+  const [spendOwner, setSpendOwner] = useState("");
+  const rawSpendData = spendOwner === requestKey ? storedSpendData : null;
+  const spendData = rawSpendData && (module.legacy || rawSpendData.authorization_context?.resources.maintenance_analysis?.field_permissions.includes("data_purchase_cost")) ? rawSpendData : rawSpendData ? redactSpendCosts(rawSpendData) : null;
   const [spendLoading, setSpendLoading] = useState(false);
   const [spendError, setSpendError] = useState<string | null>(null);
   const spendSeqRef = useRef(0);
   const spendRequests = useRef(0);
 
   const loadSpend = useCallback(async (mode: "initial" | "manual" | "background" = "initial") => {
+    if (admission.surface("maintenance_analysis.spend", true) === "deny") return false;
     if (mode !== "initial" && spendRequests.current > 0) return false;
     const background = mode === "background";
     spendRequests.current += 1;
@@ -448,12 +489,13 @@ export function MaintenanceAnalyticsPage() {
         if (customFrom) payload.date_from = customFrom;
         if (customTo) payload.date_to = customTo;
       }
-      const resp = await fetchSpendTrend(payload);
-      if (spendSeqRef.current !== seq) return true; // 代次守卫：旧响应不覆盖新粒度
+      const resp = await fetchSpendTrend(payload, transport);
+      if (spendSeqRef.current !== seq || !transport.isCurrent()) return true; // 代次守卫：旧响应不覆盖新粒度
+      setSpendOwner(requestKey);
       setSpendData(resp);
       setSpendError(null);
     } catch (err) {
-      if (spendSeqRef.current !== seq) return true;
+      if (spendSeqRef.current !== seq || !transport.isCurrent()) return true;
       setSpendData(null);
       const msg = apiErrorMessage(err);
       setSpendError(msg);
@@ -465,7 +507,7 @@ export function MaintenanceAnalyticsPage() {
     return true;
   }, [
     rangeKey, granularity, businessType, projectIds, customer, sales, orderNo,
-    demandTypeParam, warehouses, costSourceParam, customFrom, customTo,
+    demandTypeParam, warehouses, costSourceParam, customFrom, customTo, transport, requestKey,
   ]);
 
   useEffect(() => {
@@ -490,7 +532,9 @@ export function MaintenanceAnalyticsPage() {
     }
   };
 
-  const columns: ColumnsType<PnRankingRow> = useMemoColumns(sort);
+  const pnCostVisible = module.legacy || rawData?.authorization_context?.resources.maintenance_analysis?.field_permissions.includes("data_purchase_cost") === true;
+  const spendCostVisible = module.legacy || rawSpendData?.authorization_context?.resources.maintenance_analysis?.field_permissions.includes("data_purchase_cost") === true;
+  const columns: ColumnsType<PnRankingRow> = useMemoColumns(sort).filter(column => pnCostVisible || !("dataIndex" in column && column.dataIndex === "missing_lines"));
 
   const summary = data?.summary;
   const activeError = view === "spend" ? spendError : view === "pn" ? error : null;
@@ -598,7 +642,7 @@ export function MaintenanceAnalyticsPage() {
         )}
       />
 
-      <Card size="small">
+      {admission.surface("maintenance_analysis.filters", true) !== "deny" && <Card size="small">
         <Space wrap size={12}>
           <Segmented options={RANGE_OPTIONS} value={rangeKey}
             onChange={(v) => patch({ range: String(v), page: null })} />
@@ -697,7 +741,7 @@ export function MaintenanceAnalyticsPage() {
             onChange={(values) => patch({ cost_source: csvParam(values, COST_SOURCE_CODES), page: null })}
           />
         </Space>
-      </Card>
+      </Card>}
 
       {activeError ? <Alert type="error" showIcon message={activeError} /> : null}
       {showWbddWarning ? (
@@ -783,7 +827,7 @@ export function MaintenanceAnalyticsPage() {
                     value={qtyFmt(spendData?.summary.bucket_count ?? null)}
                     sub={`按${SPEND_GRANULARITY_LABELS[granularity]}分桶`} />
                   <KpiCard label="缺价行" loading={spendLoading}
-                    value={qtyFmt(spendData?.summary.missing_lines ?? null)}
+                    value={spendCostVisible ? qtyFmt(spendData?.summary.missing_lines ?? null) : "无权限"}
                     sub="未计入金额" />
                 </Row>
 
@@ -804,7 +848,7 @@ export function MaintenanceAnalyticsPage() {
                       size="small"
                       loading={spendLoading}
                       dataSource={spendData?.by_business_type ?? []}
-                      columns={spendByBusinessColumns}
+                      columns={spendByBusinessColumns.filter(column => spendCostVisible || !("dataIndex" in column && column.dataIndex === "missing_lines"))}
                       pagination={false}
                       scroll={{ x: 900 }}
                       locale={{ emptyText: "当前窗口没有开支数据" }}
@@ -853,7 +897,7 @@ export function MaintenanceAnalyticsPage() {
                       size="small"
                       loading={spendLoading}
                       dataSource={spendData?.buckets ?? []}
-                      columns={spendBucketColumns}
+                      columns={spendBucketColumns.filter(column => spendCostVisible || !("dataIndex" in column && column.dataIndex === "missing_lines"))}
                       scroll={{ x: 1560 }}
                       pagination={{
                         pageSize: 20,
@@ -867,7 +911,7 @@ export function MaintenanceAnalyticsPage() {
               </Space>
             ),
           },
-        ]}
+        ].filter(item => permittedViews.includes(item.key))}
       />
     </Space>
   );
@@ -919,4 +963,5 @@ function useMemoColumns(_sort: string): ColumnsType<PnRankingRow> {
   ], []);
 }
 
+export const MaintenanceAnalyticsPage = withContextSurface(MaintenanceAnalyticsPageBody, routeRule("/maintenance/analytics"));
 export default MaintenanceAnalyticsPage;

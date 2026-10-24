@@ -1,3 +1,8 @@
+import { useContextTransport } from "../authz/domainTransport";
+import { useContextAdmission, useModuleAccess } from "../authz/access";
+import { withContextSurface, contextSurfaces } from "../authz/ContextSurface";
+import { actionRule } from "../authz/rules";
+import { AuthorizationCancelled } from "../authz/requestLifecycle";
 import { COLORS, TAG_STYLES } from "../theme";
 import { formatBusinessDateTime } from "../utils/date";
 import { useEffect, useRef, useState } from "react";
@@ -257,119 +262,16 @@ function newRevisionRequestId(): string {
   return `revision-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function RevisionPanel({
-  application,
-  onUpdated,
-}: {
-  application: ReplenishmentApplication;
-  onUpdated: (next: ReplenishmentApplication) => void;
-}) {
-  const { message } = App.useApp();
-  const version = application.versions[0];
-  const rejected = version?.lines.filter((line) => line.review?.decision === "rejected") || [];
-  const [choices, setChoices] = useState<Record<string, {
-    action: "replace" | "remove";
-    part_id?: number;
-    quantity?: number;
-    special_note?: string;
-  }>>({});
-  const [saving, setSaving] = useState(false);
-  const revisionRequestId = useRef(newRevisionRequestId());
-  if (application.status !== "needs_revision" || !version || !rejected.length) return null;
-  const setChoice = (requestLineId: string, patch: Partial<{ action: "replace" | "remove"; part_id?: number; quantity?: number; special_note?: string }>) => {
-    setChoices((prev) => ({ ...prev, [requestLineId]: { ...prev[requestLineId], ...patch } }));
-  };
-  const submit = async () => {
-    if (rejected.some((line) => !choices[line.request_line_id])) return;
-    setSaving(true);
-    try {
-      const { data } = await applyReplenishmentRevision(application.application_id, {
-        expected_application_version: application.version,
-        client_request_id: revisionRequestId.current,
-        resolutions: rejected.map((line) => {
-          const choice = choices[line.request_line_id];
-          // remove 只传 action；replace 传 part_id + 可调数量/特殊情况备注
-          if (choice.action === "remove") return { request_line_id: line.request_line_id, action: "remove" };
-          return {
-            request_line_id: line.request_line_id,
-            action: "replace",
-            part_id: choice.part_id,
-            quantity: choice.quantity ?? line.quantity,
-            special_note: choice.special_note?.trim() ? choice.special_note.trim() : null,
-          };
-        }),
-      });
-      onUpdated(data);
-      message.success("打回行已重新提交");
-    } catch (error) {
-      message.error(errorText(error));
-    } finally {
-      setSaving(false);
-    }
-  };
-  return (
-    <Card size="small" title="处理自动审核打回行" style={{ marginTop: 12 }}>
-      <Space direction="vertical" style={{ width: "100%" }}>
-        {rejected.map((line) => {
-          const candidates = line.screening?.recommendations || [];
-          const choice = choices[line.request_line_id];
-          return (
-            <div key={line.request_line_id} className="replenishment-cart-line is-revision">
-              <Space wrap style={{ width: "100%" }}>
-                <Text strong>{line.pn_std}</Text>
-                <Text type="danger">{line.review?.reason || "无近182天采购/销售记录"}</Text>
-                {candidates.slice(0, 3).map((candidate) => (
-                  <Button key={candidate.part_id} size="small"
-                    type={choice?.part_id === candidate.part_id ? "primary" : "default"}
-                    onClick={() => setChoice(line.request_line_id, {
-                      action: "replace", part_id: candidate.part_id, quantity: line.quantity,
-                    })}>
-                    替换为 {candidate.pn_std}
-                  </Button>
-                ))}
-                <Button size="small" danger
-                  type={choice?.action === "remove" ? "primary" : "default"}
-                  onClick={() => setChoice(line.request_line_id, { action: "remove" })}>
-                  移除
-                </Button>
-              </Space>
-              {choice?.action === "replace" && (
-                <Space wrap style={{ marginTop: 8 }}>
-                  <InputNumber
-                    min={1}
-                    max={999999}
-                    precision={0}
-                    value={choice.quantity ?? line.quantity}
-                    onChange={(value) => setChoice(line.request_line_id, { quantity: Number(value || 1) })}
-                    placeholder="数量"
-                    style={{ width: 100 }}
-                  />
-                  <Input
-                    value={choice.special_note ?? ""}
-                    maxLength={4000}
-                    onChange={(event) => setChoice(line.request_line_id, { special_note: event.target.value })}
-                    placeholder="特殊情况说明（选填，替换后需说明使用原因）"
-                    style={{ width: 320 }}
-                  />
-                </Space>
-              )}
-              {choice && <Tag style={{ ...TAG_STYLES.success, marginTop: 8 }}>
-                {choice.action === "remove" ? "将移除" : `将替换为 ${choice.part_id ? candidates.find((c) => c.part_id === choice.part_id)?.pn_std ?? "已选 PN" : ""}`}
-              </Tag>}
-            </div>
-          );
-        })}
-        <Button type="primary" loading={saving} disabled={rejected.some((line) => !choices[line.request_line_id])} onClick={() => void submit()}>
-          提交处理结果
-        </Button>
-      </Space>
-    </Card>
-  );
-}
-
-export default function ReplenishmentBetaPage() {
+function ReplenishmentBetaPage() {
   const { message } = App.useApp();
   const navigate = useNavigate();
+  const transport = useContextTransport("replenishment", true);
+  const admission = useContextAdmission();
+  const legacyRequests = useModuleAccess("replenishment_request").legacy;
+  const legacyCatalog = useModuleAccess("replenishment_catalog").legacy;
+  const legacyCommands = useModuleAccess("replenishment_project_commands").legacy;
+  const legacyPage = legacyRequests && legacyCatalog && legacyCommands;
+  const canReadCapabilities = admission.state(actionRule("replenishment_capabilities", "read"), true) !== "deny";
   const [capabilities, setCapabilities] = useState<ReplenishmentCapabilities | null>(null);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
@@ -381,6 +283,7 @@ export default function ReplenishmentBetaPage() {
   const [requestNote, setRequestNote] = useState("");
   const [draftLines, setDraftLines] = useState<DraftLine[]>([]);
   const [draftVersion, setDraftVersion] = useState<number | null>(null);
+  const [draftClientRequestId, setDraftClientRequestId] = useState<string | null>(null);
   const [cartHydrating, setCartHydrating] = useState(false);
   const [editingRevision, setEditingRevision] = useState<ReplenishmentApplication | null>(null);
   const hydratingCart = useRef(false);
@@ -405,8 +308,32 @@ export default function ReplenishmentBetaPage() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyDetail, setHistoryDetail] = useState<ReplenishmentApplication | null>(null);
 
+  const canCatalog = admission.surface("replenishment_catalog.candidate_catalog", !!capabilities?.can_view_price) !== "deny";
+  const canProjects = admission.surface("replenishment_project_directory.project_selector", !!capabilities?.can_view_price) !== "deny";
+  const canDraft = admission.surface("replenishment_project_commands.draft", !!capabilities?.can_view_price) !== "deny";
+  const canVersions = admission.surface("replenishment_request.versions", !!capabilities?.can_view_price) !== "deny";
+  const canExport = admission.surface("replenishment_request.exports", !!capabilities?.can_create) !== "deny";
+  const canRevise = admission.surface("replenishment_project_commands.revise", !!capabilities?.can_create) !== "deny";
+  const canCreate = admission.state(actionRule("replenishment_project_commands", "submit"), !!capabilities?.can_create) !== "deny";
+  const canCartUpdate = admission.state(actionRule("replenishment_project_commands", "cart_update"), !!capabilities?.can_create) !== "deny";
+  const canCartDelete = admission.state(actionRule("replenishment_project_commands", "cart_delete"), !!capabilities?.can_create) !== "deny";
+  const canEditDraft = editingRevision ? canRevise : canCartUpdate;
+  const canSubmitNow = () => editingRevision
+    ? admission.surface("replenishment_project_commands.revise", !!capabilities?.can_create) !== "deny"
+    : admission.state(actionRule("replenishment_project_commands", "submit"), !!capabilities?.can_create) !== "deny";
+  const cartTransport = useContextTransport(JSON.stringify([selectedProjectId, editingRevision?.application_id]), true);
+  const listSequence = useRef(0), catalogSequence = useRef(0), detailSequence = useRef(0);
+  const cartInput = JSON.stringify([selectedProjectId, requestNote, draftLines]);
+  const cartCommandTransport = useContextTransport(JSON.stringify([cartInput, editingRevision?.application_id, editingRevision?.version]), true);
+  const latestCartInput = useRef(cartInput);
+  latestCartInput.current = cartInput;
+  const selectProject = (projectId: string) => {
+    setSelectedProjectId(projectId); setDraftLines([]); setDraftVersion(null); setDraftClientRequestId(null); setRequestNote("");
+    pendingCartSubmit.current = null;
+  };
+
   const exportCurrent = async (application?: ReplenishmentApplication) => {
-    if (!capabilities?.can_create) {
+    if (admission.surface("replenishment_request.exports", !!capabilities?.can_create) === "deny" || !transport.isCurrent()) {
       message.warning("当前账号无导出权限，仅可查看");
       return;
     }
@@ -414,13 +341,15 @@ export default function ReplenishmentBetaPage() {
     if (!target) return;
     setExporting(true);
     try {
-      const response = await downloadSystemScreeningWorkbook(target.application_id);
+      const response = await downloadSystemScreeningWorkbook(target.application_id, transport);
+      if (!transport.isCurrent()) return;
       saveBlob(response.data, `${target.application_no}-复核包.xlsx`);
       message.success("复核包已导出，可发给领导/采购过目");
     } catch (error) {
+      if (!transport.isCurrent()) return;
       message.error(errorText(error));
     } finally {
-      setExporting(false);
+      if (transport.isCurrent()) setExporting(false);
     }
   };
 
@@ -428,7 +357,7 @@ export default function ReplenishmentBetaPage() {
   currentProjectIds.current = new Set(projects.map((project) => project.project_id));
 
   useEffect(() => {
-    if (!selectedProjectId) {
+    if (!canDraft || !selectedProjectId) {
       setCartHydrating(false);
       return;
     }
@@ -441,13 +370,15 @@ export default function ReplenishmentBetaPage() {
     hydratingCart.current = true;
     setCartHydrating(true);
     setDraftVersion(null);
+    setDraftClientRequestId(null);
     setRequestNote("");
     setDraftLines([]);
-    void getReplenishmentCartDraft(selectedProjectId)
+    void getReplenishmentCartDraft(selectedProjectId, cartTransport)
       .then(({ data }) => {
-        if (!active) return;
+        if (!active || !transport.isCurrent()) return;
         const draft = data.draft;
         setDraftVersion(draft?.version ?? null);
+        setDraftClientRequestId(draft?.client_request_id ?? null);
         setRequestNote(draft?.request_note ?? "");
         setDraftLines((draft?.lines ?? []).map((line) => ({
           part_id: line.part_id,
@@ -459,10 +390,10 @@ export default function ReplenishmentBetaPage() {
         })));
       })
       .catch((error) => {
-        if (active) message.error(errorText(error));
+        if (active && transport.isCurrent()) message.error(errorText(error));
       })
       .finally(() => {
-        if (!active) return;
+        if (!active || !transport.isCurrent()) return;
         hydratingCart.current = false;
         setCartHydrating(false);
       });
@@ -471,7 +402,7 @@ export default function ReplenishmentBetaPage() {
       hydratingCart.current = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedProjectId, editingRevision]);
+  }, [selectedProjectId, editingRevision, canDraft, cartTransport]);
 
   useEffect(() => {
     // #10：退回编辑模式不写云端草稿（编辑的是申请行，提交走 revisions）
@@ -480,7 +411,7 @@ export default function ReplenishmentBetaPage() {
       cartSaveTimer.current = null;
     }
     if (
-      !capabilities?.can_create
+      !canCartUpdate
       || !selectedProject
       || hydratingCart.current
       || editingRevision
@@ -491,11 +422,11 @@ export default function ReplenishmentBetaPage() {
     // response-loss retry does not rerun this effect, so it keeps the same key.
     pendingCartSubmit.current = null;
     if (!draftLines.length) {
-      if (draftVersion == null) return undefined;
+      if (draftVersion == null || !canCartDelete) return undefined;
       cartSaveTimer.current = setTimeout(() => {
-        void deleteReplenishmentCartDraft(selectedProjectId, draftVersion)
-          .then(() => setDraftVersion(null))
-          .catch((error) => message.error(errorText(error)));
+        void deleteReplenishmentCartDraft(selectedProjectId, draftVersion, cartCommandTransport)
+          .then(() => { if (cartCommandTransport.isCurrent() && latestCartInput.current === cartInput) setDraftVersion(null); })
+          .catch((error) => { if (cartCommandTransport.isCurrent() && latestCartInput.current === cartInput) message.error(errorText(error)); });
       }, 500);
       return () => {
         if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
@@ -510,16 +441,16 @@ export default function ReplenishmentBetaPage() {
           quantity: line.quantity,
           special_note: line.special_note || null,
         })),
-      }).then(({ data }) => setDraftVersion(data.draft.version))
-        .catch((error) => message.error(errorText(error)));
+      }, cartCommandTransport).then(({ data }) => { if (cartCommandTransport.isCurrent() && latestCartInput.current === cartInput) setDraftVersion(data.draft.version); })
+        .catch((error) => { if (cartCommandTransport.isCurrent() && latestCartInput.current === cartInput) message.error(errorText(error)); });
     }, 500);
     return () => {
       if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
     };
-  }, [capabilities?.can_create, selectedProject?.project_id, selectedProjectId, draftLines, requestNote]);
+  }, [canCartUpdate, canCartDelete, selectedProject?.project_id, selectedProjectId, draftLines, requestNote, cartCommandTransport]);
 
   const flushCart = async (): Promise<{ version: number; clientRequestId: string }> => {
-    if (!selectedProject || !currentProjectIds.current.has(selectedProjectId)) {
+    if (!canCartUpdate || !cartCommandTransport.isCurrent() || !selectedProject || !currentProjectIds.current.has(selectedProjectId)) {
       throw new Error("所选项目已不在当前维保范围，请刷新后重选");
     }
     if (cartSaveTimer.current) clearTimeout(cartSaveTimer.current);
@@ -531,7 +462,8 @@ export default function ReplenishmentBetaPage() {
         quantity: line.quantity,
         special_note: line.special_note || null,
       })),
-    });
+    }, cartCommandTransport);
+    if (!cartCommandTransport.isCurrent() || latestCartInput.current !== cartInput) throw new AuthorizationCancelled();
     setDraftVersion(data.draft.version);
     return {
       version: data.draft.version,
@@ -540,13 +472,18 @@ export default function ReplenishmentBetaPage() {
   };
 
   const refreshList = async (preferredId?: string, page = applicationPage) => {
-    const { data } = await listReplenishmentApplications(page, 20);
+    if (!canVersions || !transport.isCurrent()) return;
+    const seq = ++listSequence.current;
+    setApplications([]); setApplicationTotal(0); setCurrent(null);
+    const { data } = await listReplenishmentApplications(page, 20, transport);
+    if (!transport.isCurrent() || seq !== listSequence.current) return;
     setApplications(data.items);
     setApplicationPage(data.page);
     setApplicationTotal(data.total);
     const targetId = preferredId || current?.application_id || data.items[0]?.application_id;
     if (targetId) {
-      const detail = await getReplenishmentApplication(targetId);
+      const detail = await getReplenishmentApplication(targetId, transport);
+      if (!transport.isCurrent() || seq !== listSequence.current) return;
       setCurrent(detail.data);
     } else {
       setCurrent(null);
@@ -554,16 +491,21 @@ export default function ReplenishmentBetaPage() {
   };
 
   const loadCatalog = async (page = 1, q = query) => {
-    const { data } = await searchReplenishmentCatalog(q, page);
+    if (!canCatalog || !transport.isCurrent()) return;
+    const seq = ++catalogSequence.current;
+    setCatalog([]); setCatalogTotal(0);
+    const { data } = await searchReplenishmentCatalog(q, page, undefined, transport);
+    if (!transport.isCurrent() || seq !== catalogSequence.current) return;
     setCatalog(data.items);
     setCatalogTotal(data.total);
     setCatalogPage(data.page);
   };
 
   const refreshProjects = async () => {
+    if (!canProjects || !transport.isCurrent()) return [];
     const requestSequence = ++projectRequestSequence.current;
-    const { data } = await getReplenishmentProjects();
-    if (requestSequence !== projectRequestSequence.current) return data.items;
+    const { data } = await getReplenishmentProjects(transport);
+    if (requestSequence !== projectRequestSequence.current || !transport.isCurrent()) return data.items;
     setProjects(data.items);
     setSelectedProjectId((currentId) => (
       currentId && !data.items.some((project) => project.project_id === currentId)
@@ -577,30 +519,27 @@ export default function ReplenishmentBetaPage() {
     try {
       await Promise.all([refreshProjects(), refreshList()]);
     } catch (error) {
+      if (!transport.isCurrent()) return;
       message.error(errorText(error));
     }
   };
 
   useEffect(() => {
+    if (!canReadCapabilities) { setLoading(false); return; }
     let active = true;
     void (async () => {
       try {
-        const { data } = await getReplenishmentCapabilities();
-        if (!active) return;
+        const { data } = await getReplenishmentCapabilities(transport);
+        if (!active || !transport.isCurrent()) return;
         setCapabilities(data);
-        if (data.enabled && data.can_view_price) {
-          const [projectsResponse] = await Promise.all([
-            getReplenishmentProjects(),
-            loadCatalog(1, ""),
-            refreshList(),
-          ]);
-          if (!active) return;
-          setProjects(projectsResponse.data.items);
-        }
+        if (!data.enabled) return;
+        // Each panel starts only if its own explicit display and data grants admit resolution.
+        // The next render uses the returned legacy capabilities for legacy-only resources.
+
       } catch (error) {
-        if (active) message.error(errorText(error));
+        if (active && transport.isCurrent()) message.error(errorText(error));
       } finally {
-        if (active) setLoading(false);
+        if (active && transport.isCurrent()) setLoading(false);
       }
     })();
     return () => { active = false; };
@@ -608,8 +547,21 @@ export default function ReplenishmentBetaPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (legacyPage ? !capabilities?.enabled : capabilities?.enabled === false) return;
+    const requests: Promise<unknown>[] = [];
+    if (canProjects) requests.push(refreshProjects());
+    if (canCatalog) requests.push(loadCatalog(1, ""));
+    if (canVersions) requests.push(refreshList());
+    void Promise.allSettled(requests).then(results => {
+      if (transport.isCurrent() && results.some(result => result.status === "rejected")) message.error("部分面板读取失败，请刷新后重试");
+    });
+  // Access snapshot changes remount this page. A capability response starts independent panels once.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [capabilities?.enabled, canProjects, canCatalog, canVersions, legacyPage]);
+
   const addDraftLine = (part: CatalogPart, quantity: number) => {
-    if (!capabilities?.can_create || !selectedProject || cartHydrating) return;
+    if (!canEditDraft || !selectedProject || cartHydrating) return;
     if (draftLines.some((line) => line.part_id === part.part_id)) {
       message.info(`${part.pn_std} 已在申请中`);
       return;
@@ -628,19 +580,19 @@ export default function ReplenishmentBetaPage() {
   };
 
   const updateDraftLine = (partId: number, patch: Partial<Pick<DraftLine, "quantity" | "special_note">>) => {
-    if (!capabilities?.can_create || !selectedProject) return;
+    if (!canEditDraft || !selectedProject) return;
     setDraftLines((lines) => lines.map((line) => (
       line.part_id === partId ? { ...line, ...patch } : line
     )));
   };
 
   const removeDraftLine = (partId: number) => {
-    if (!capabilities?.can_create || !selectedProject) return;
+    if (!canEditDraft || !selectedProject) return;
     setDraftLines((lines) => lines.filter((line) => line.part_id !== partId));
   };
 
   const submitApplication = () => {
-    if (!capabilities?.can_create) {
+    if (!canSubmitNow() || !cartTransport.isCurrent()) {
       message.warning("当前账号无提交权限，仅可查看");
       return;
     }
@@ -667,7 +619,7 @@ export default function ReplenishmentBetaPage() {
   };
 
   const runSubmit = async () => {
-    if (!capabilities?.can_create) {
+    if (!canSubmitNow() || !cartCommandTransport.isCurrent() || latestCartInput.current !== cartInput) {
       message.warning("当前账号无提交权限，仅可查看");
       return;
     }
@@ -696,7 +648,8 @@ export default function ReplenishmentBetaPage() {
             quantity: line.quantity,
             special_note: line.special_note?.trim() ? line.special_note.trim() : null,
           })),
-        });
+        }, cartCommandTransport);
+        if (!cartCommandTransport.isCurrent() || latestCartInput.current !== cartInput) return;
         setCurrent(data);
         pendingRevisionRequestId.current = null;
         setEditingRevision(null);
@@ -704,12 +657,19 @@ export default function ReplenishmentBetaPage() {
         setRequestNote("");
         setSelectedProjectId("");
         await refreshList(data.application_id);
+        if (!transport.isCurrent()) return;
         message.success(data.idempotent ? "已返回既有申请" : `已重新提交 ${data.application_no}`);
         return;
       }
       let pending = pendingCartSubmit.current;
       if (!pending || pending.projectId !== selectedProjectId) {
-        const saved = await flushCart();
+        // Submitting an unchanged saved draft needs submit permission only.
+        // Editing/flushing its content remains a separate cart_update command.
+        const saved = canCartUpdate ? await flushCart() : draftVersion !== null && draftClientRequestId
+          ? { version: draftVersion, clientRequestId: draftClientRequestId }
+          : null;
+        if (!saved) { message.warning("尚无可提交的已保存草稿"); return; }
+        if (!cartCommandTransport.isCurrent() || latestCartInput.current !== cartInput) return;
         pending = {
           projectId: selectedProjectId,
           version: saved.version,
@@ -720,25 +680,28 @@ export default function ReplenishmentBetaPage() {
       const { data } = await submitReplenishmentCartDraft(
         pending.projectId,
         pending.version,
-        pending.clientRequestId,
+        pending.clientRequestId, cartCommandTransport,
       );
+      if (!cartCommandTransport.isCurrent() || latestCartInput.current !== cartInput) return;
       pendingCartSubmit.current = null;
       setCurrent(data);
       setDraftLines([]);
       setRequestNote("");
       setSelectedProjectId("");
       await refreshList(data.application_id);
+      if (!transport.isCurrent()) return;
       message.success(data.idempotent ? "已返回既有申请" : `已提交 ${data.application_no}`);
     } catch (error) {
+      if (!transport.isCurrent()) return;
       message.error(errorText(error));
     } finally {
-      setWorking(false);
+      if (transport.isCurrent()) setWorking(false);
     }
   };
 
   /** #10：打回申请「退回编辑」——把原申请行载入购物车编辑态（打回行标红+推荐）。 */
   const startEditingRevision = (application: ReplenishmentApplication) => {
-    if (!capabilities?.can_create) {
+    if (admission.surface("replenishment_project_commands.revise", !!capabilities?.can_create) === "deny" || !transport.isCurrent()) {
       message.warning("当前账号无提交权限，仅可查看");
       return;
     }
@@ -776,9 +739,9 @@ export default function ReplenishmentBetaPage() {
     setSelectedProjectId("");
   };
 
-  if (loading) return <Spin fullscreen tip="正在打开补库申请…" />;
-  if (!capabilities) return <Result status="error" title="无法读取补库申请状态" />;
-  if (!capabilities.enabled) {
+  if (legacyPage && loading) return <Spin fullscreen tip="正在打开补库申请…" />;
+  if (legacyPage && !capabilities) return <Result status="error" title="无法读取补库申请状态" />;
+  if (capabilities?.enabled === false) {
     return (
       <Result
         status="info"
@@ -788,19 +751,12 @@ export default function ReplenishmentBetaPage() {
       />
     );
   }
-  if (!capabilities.can_view_price) {
-    return (
-      <Result
-        status="403"
-        title="补库申请暂不可用"
-        subTitle="当前账号没有半年采购/销售价格事实的查看权限，请联系管理员授权。"
-        extra={<Button type="primary" icon={<ArrowLeftOutlined />} onClick={() => navigate(MAINTENANCE_HOME_PATH)}>返回维保主页</Button>}
-      />
-    );
-  }
+
+  if (legacyCatalog && capabilities && !capabilities.can_view_price) return <Result status="403" title="补库申请暂不可用"
+    subTitle="当前账号没有半年采购/销售价格事实的查看权限，请联系管理员授权。" />;
 
   const canReviseHistory = Boolean(
-    capabilities.can_create
+    canRevise
     && historyDetail?.project
     && projects.some(
       (project) => project.project_id === historyDetail.project?.project_id,
@@ -821,7 +777,7 @@ export default function ReplenishmentBetaPage() {
 
       <div className="replenishment-layout">
         {/* 左栏：选购 PN（宽，独立列高度随内容） */}
-        <div className="replenishment-catalog-col">
+        {canCatalog && <div className="replenishment-catalog-col">
           <Card
             title={<Space><SearchOutlined />选购 PN</Space>}
             extra={<Text type="secondary">没有所属池或半年价格的 PN 仍会完整显示</Text>}
@@ -841,7 +797,7 @@ export default function ReplenishmentBetaPage() {
                 <CatalogCard
                   key={part.part_id}
                   part={part}
-                  disabled={!capabilities.can_create || working || cartHydrating || !selectedProject}
+                  disabled={!canEditDraft || working || cartHydrating || !selectedProject}
                   onAdd={(quantity) => addDraftLine(part, quantity)}
                 />
               ))}
@@ -860,10 +816,12 @@ export default function ReplenishmentBetaPage() {
           </Card>
         </div>
 
+        }
+
         {/* 右栏：购物车 + 历史记录（垂直堆叠，记录紧跟购物车下方） */}
         <div className="replenishment-right">
       {/* ① 新建补库申请：决断层（选项目 → 组明细 → 一次性提交） */}
-      <Card
+      {canDraft && <Card
         className="replenishment-cart-card"
         title={(
           <Space>
@@ -879,6 +837,7 @@ export default function ReplenishmentBetaPage() {
               <Button onClick={cancelEditingRevision} disabled={working}>取消编辑</Button>
             )}
             <Button
+              hidden={!canVersions}
               icon={<HistoryOutlined />}
               onClick={() => setHistoryOpen(true)}
             >
@@ -896,13 +855,13 @@ export default function ReplenishmentBetaPage() {
               showIcon
               type="warning"
               message="当前账号没有可选的维保项目"
-              description="项目范围按统一维保口径提供：负责人/viewer 挂靠可见；启用“只看自己维保项目”的账号再并入销售映射项目；老板和管理员按既有规则查看全范围。"
+              description="请联系管理员检查项目归属与当前账号的项目访问范围。"
             />
           ) : (
             <>
               <Space direction="vertical" size={12} style={{ width: "100%" }}>
                 <div className="replenishment-cart-head">
-                  <Select
+                  {canProjects && <Select
                     showSearch
                     value={selectedProjectId || undefined}
                     placeholder="选择维保项目（必选）"
@@ -911,12 +870,12 @@ export default function ReplenishmentBetaPage() {
                       value: project.project_id,
                       label: `${project.project_code} · ${project.display_name}`,
                     }))}
-                    onChange={setSelectedProjectId}
+                    onChange={selectProject}
                     disabled={working}
-                  />
+                  />}
                   <Input.TextArea
                     value={requestNote}
-                    disabled={!capabilities.can_create || !selectedProject || working || cartHydrating}
+                    disabled={!canEditDraft || !selectedProject || working || cartHydrating}
                     maxLength={4000}
                     autoSize={{ minRows: 1, maxRows: 4 }}
                     placeholder="整单备注（选填）"
@@ -948,7 +907,7 @@ export default function ReplenishmentBetaPage() {
                               size="small"
                               type="primary"
                               ghost
-                              disabled={!capabilities.can_create || !selectedProject || working}
+                              disabled={!canEditDraft || !selectedProject || working}
                               onClick={() => {
                                 const source = draftLines.find((d) => d.part_id === line.part_id);
                                 setDraftLines((lines) => {
@@ -979,7 +938,7 @@ export default function ReplenishmentBetaPage() {
                             max={999999}
                             precision={0}
                             value={line.quantity}
-                            disabled={!capabilities.can_create || !selectedProject || working}
+                            disabled={!canEditDraft || !selectedProject || working}
                             onChange={(value) => updateDraftLine(line.part_id, { quantity: Number(value || 1) })}
                             style={{ width: 96 }}
                           />
@@ -988,7 +947,7 @@ export default function ReplenishmentBetaPage() {
                         <Input
                           value={line.special_note}
                           maxLength={4000}
-                          disabled={!capabilities.can_create || !selectedProject || working}
+                          disabled={!canEditDraft || !selectedProject || working}
                           placeholder="特殊情况说明（选填）"
                           onChange={(event) => updateDraftLine(line.part_id, { special_note: event.target.value })}
                         />
@@ -996,7 +955,7 @@ export default function ReplenishmentBetaPage() {
                           danger
                           type="text"
                           icon={<DeleteOutlined />}
-                          disabled={!capabilities.can_create || !selectedProject || working}
+                          disabled={!canEditDraft || !selectedProject || working}
                           onClick={() => removeDraftLine(line.part_id)}
                         />
                       </div>
@@ -1014,13 +973,13 @@ export default function ReplenishmentBetaPage() {
                   <Button
                     type="primary"
                     icon={<SendOutlined />}
-                    disabled={!capabilities.can_create || !selectedProject || !draftLines.length || working || cartHydrating}
+                    disabled={!(editingRevision ? canRevise : canCreate) || (!editingRevision && !canCartUpdate && (!draftClientRequestId || draftVersion === null)) || !selectedProject || !draftLines.length || working || cartHydrating}
                     title={!selectedProject ? "先选择当前范围内的维保项目" : !draftLines.length ? "先加入至少一个 PN" : undefined}
                     onClick={submitApplication}
                   >
                     提交补库申请
                   </Button>
-                  {!capabilities.can_create && (
+                  {!canCreate && (
                     <Text type="secondary">当前账号无提交权限，仅可查看</Text>
                   )}
                 </Space>
@@ -1028,13 +987,14 @@ export default function ReplenishmentBetaPage() {
             </>
           )}
         </Spin>
-      </Card>
+      </Card>}
+      {!canDraft && canVersions && <Button icon={<HistoryOutlined />} onClick={() => setHistoryOpen(true)}>申请记录</Button>}
 
         </div>{/* .replenishment-right */}
       </div>
 
       {/* 申请记录：全屏可展开子页面（购物车右上角「申请记录」打开） */}
-      <Drawer
+      {canVersions && <Drawer
         title={historyDetail ? (
           <Space>
             <Button type="text" icon={<ArrowLeftOutlined />} onClick={() => setHistoryDetail(null)} />
@@ -1061,7 +1021,8 @@ export default function ReplenishmentBetaPage() {
             type="primary"
             icon={<DownloadOutlined />}
             loading={exporting}
-            disabled={!capabilities.can_create}
+            disabled={!canExport}
+            hidden={!canExport && !legacyRequests}
             onClick={() => void exportCurrent(historyDetail)}
           >
             导出复核包 Excel
@@ -1133,11 +1094,14 @@ export default function ReplenishmentBetaPage() {
                       key="view"
                       type="link"
                       onClick={() => {
-                        void getReplenishmentApplication(item.application_id)
+                        const seq = ++detailSequence.current;
+                        setHistoryDetail(null);
+                        void getReplenishmentApplication(item.application_id, transport)
                           .then((response) => {
+                            if (!transport.isCurrent() || seq !== detailSequence.current) return;
                             setCurrent(response.data);
                             setHistoryDetail(response.data);
-                          });
+                          }).catch(error => { if (transport.isCurrent() && seq === detailSequence.current) message.error(errorText(error)); });
                       }}
                     >
                       查看详情
@@ -1174,12 +1138,14 @@ export default function ReplenishmentBetaPage() {
             )}
           </>
         )}
-      </Drawer>
+      </Drawer>}
 
       {/* 口径边界：依据层，页尾小字 */}
-      <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 12 }}>
+      {capabilities?.data_contract && <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 12 }}>
         口径边界：{capabilities.data_contract}
-      </Text>
+      </Text>}
     </div>
   );
 }
+
+export default withContextSurface(ReplenishmentBetaPage, contextSurfaces("replenishment_catalog.candidate_catalog", "replenishment_project_commands.draft", "replenishment_request.versions"));

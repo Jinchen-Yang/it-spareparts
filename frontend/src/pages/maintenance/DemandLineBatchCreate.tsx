@@ -1,3 +1,6 @@
+import { useContextTransport } from "../../authz/domainTransport";
+import { withContextSurface } from "../../authz/ContextSurface";
+import { surfaceRule } from "../../authz/rules";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert, Button, DatePicker, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography,
@@ -69,7 +72,7 @@ const statusTag: Record<CreateStatus, { color: string; text: string }> = {
  * 页面批量直建：每一行调用一次既有 create API，因此每行都是独立 PAGE 需求单。
  * 首次提交会冻结整批 normalized payload 与逐行幂等键；失败重试只重放原请求。
  */
-export default function DemandLineBatchCreate({
+function DemandLineBatchCreate({
   fixedProjectId,
   fixedProjectLabel,
   onClose,
@@ -80,6 +83,7 @@ export default function DemandLineBatchCreate({
   onClose: () => void;
   onCommitted: () => void | Promise<unknown>;
 }) {
+  const transport = useContextTransport(fixedProjectId ?? "global-create", true);
   const [projectId, setProjectId] = useState<string | undefined>(fixedProjectId);
   const [orderDate, setOrderDate] = useState<Dayjs | null>(dayjs());
   const [reason, setReason] = useState("");
@@ -106,8 +110,8 @@ export default function DemandLineBatchCreate({
       if (query?.trim()) {
         const response = await searchMaintenanceProjects({
           q: query.trim(), page: 1, page_size: 50, include_inactive: false,
-        });
-        if (generation === projectGen.current) setProjects(response.data.rows);
+        }, transport);
+        if ((generation === projectGen.current && transport.isCurrent())) setProjects(response.data.rows);
         return;
       }
       const all: MaintenanceProject[] = [];
@@ -116,23 +120,23 @@ export default function DemandLineBatchCreate({
       do {
         const response = await listMaintenanceProjects({
           page, page_size: 200, include_inactive: false,
-        });
-        if (generation !== projectGen.current) return;
+        }, transport);
+        if ((generation !== projectGen.current || !transport.isCurrent())) return;
         total = response.data.total;
         all.push(...response.data.rows);
         if (!response.data.rows.length) break;
         page += 1;
       } while (all.length < total);
-      if (generation === projectGen.current) setProjects(all);
+      if ((generation === projectGen.current && transport.isCurrent())) setProjects(all);
     } catch (cause) {
-      if (generation === projectGen.current) {
+      if ((generation === projectGen.current && transport.isCurrent())) {
         setProjects([]);
         setProjectError(readError(cause, "项目列表加载失败"));
       }
     } finally {
-      if (generation === projectGen.current) setProjectsLoading(false);
+      if ((generation === projectGen.current && transport.isCurrent())) setProjectsLoading(false);
     }
-  }, []);
+  }, [transport]);
 
   useEffect(() => {
     if (!fixedProjectId) void loadProjects();
@@ -171,18 +175,18 @@ export default function DemandLineBatchCreate({
   const runRows = async (epoch: number, targets: FrozenRow[]) => {
     let wroteAny = false;
     for (const target of targets) {
-      if (epochRef.current !== epoch) return;
+      if ((epochRef.current !== epoch || !transport.isCurrent())) return;
       syncFrozen(target.id, { status: "running", error: undefined });
       try {
-        const response = await createDemandLine(target.payload);
-        if (epochRef.current !== epoch) return;
+        const response = await createDemandLine(target.payload, transport);
+        if ((epochRef.current !== epoch || !transport.isCurrent())) return;
         wroteAny = true;
         syncFrozen(target.id, {
           status: "succeeded", orderNo: response.data.order_no,
           error: undefined, unknown: false,
         });
       } catch (cause) {
-        if (epochRef.current !== epoch) return;
+        if ((epochRef.current !== epoch || !transport.isCurrent())) return;
         // 后续拒绝只能说明本次重试未写入，不能否定此前丢失响应的写入。
         const unknown = Boolean(target.unknown) || isUnknownOutcome(cause);
         syncFrozen(target.id, {
@@ -194,13 +198,13 @@ export default function DemandLineBatchCreate({
         });
       }
     }
-    if (epochRef.current !== epoch || !wroteAny) return;
+    if ((epochRef.current !== epoch || !transport.isCurrent()) || !wroteAny) return;
     try {
       const refreshed = await onCommitted();
-      if (epochRef.current !== epoch) return;
+      if ((epochRef.current !== epoch || !transport.isCurrent())) return;
       if (refreshed === false) setError("需求已保存，但列表刷新失败；请稍后手动刷新查看最新数据");
     } catch {
-      if (epochRef.current === epoch) {
+      if ((epochRef.current === epoch && transport.isCurrent())) {
         setError("需求已保存，但列表刷新失败；请稍后手动刷新查看最新数据");
       }
     }
@@ -266,7 +270,7 @@ export default function DemandLineBatchCreate({
       }
       await runRows(epoch, targets);
     } finally {
-      if (epochRef.current === epoch) {
+      if ((epochRef.current === epoch && transport.isCurrent())) {
         setRunning(false);
         writeLock.current = false;
       }
@@ -441,4 +445,10 @@ export default function DemandLineBatchCreate({
       </Space>
     </Modal>
   );
+}
+
+const GlobalCreate = withContextSurface(DemandLineBatchCreate, surfaceRule("maintenance_demand.create"));
+const ProjectCreate = withContextSurface(DemandLineBatchCreate, surfaceRule("maintenance_demand.create_project"), props => props.fixedProjectId);
+export default function ControlledDemandLineBatchCreate(props: Parameters<typeof DemandLineBatchCreate>[0]) {
+  return props.fixedProjectId ? <ProjectCreate {...props} /> : <GlobalCreate {...props} />;
 }

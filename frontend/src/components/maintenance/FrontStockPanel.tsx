@@ -1,3 +1,7 @@
+import { useContextQuery } from "../../authz/contextQuery";
+import { withContextSurface, contextSurfaces } from "../../authz/ContextSurface";
+import { useModuleAccess } from "../../authz/access";
+import { authorizationErrorText } from "../../authz/requestLifecycle";
 import { useEffect, useRef, useState } from "react";
 import { App, Alert, Card, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -55,32 +59,16 @@ const columns: ColumnsType<MaintenanceFrontStockRow> = [
   },
 ];
 
-export default function FrontStockPanel({ projectId }: { projectId: string }) {
-  const { message } = App.useApp();
-  const [data, setData] = useState<MaintenanceFrontStockSummary | null>(null);
-  const [loading, setLoading] = useState(true);
-  const generation = useRef(0);
-
-  useEffect(() => {
-    const request = ++generation.current;
-    setLoading(true);
-    getMaintenanceProjectFrontStock(projectId)
-      .then(({ data: response }) => {
-        if (request === generation.current) setData(response);
-      })
-      .catch((error: unknown) => {
-        if (request === generation.current) {
-          setData(null);
-          message.error(errorText(error));
-        }
-      })
-      .finally(() => {
-        if (request === generation.current) setLoading(false);
-      });
-    return () => { generation.current += 1; };
-  }, [projectId]);
-
-  const amountVisible = data?.cost_visible === true;
+function FrontStockPanel({ projectId }: { projectId: string }) {
+  const query = useContextQuery({
+    entryId: "GET /api/maintenance/projects/stable/{project_id}/front-stock", rule: contextSurfaces("maintenance_front_stock.stock"),
+    queryKey: [projectId], legacyAllowed: true,
+    query: async capture => (await getMaintenanceProjectFrontStock(projectId, capture)).data,
+  });
+  const data = query.data, loading = query.loading;
+  const permissionDenied = (query.error as { response?: { status?: number } })?.response?.status === 403;
+  const module = useModuleAccess("maintenance_front_stock", query.context);
+  const amountVisible = data?.cost_visible === true && module.field("data_purchase_cost", true);
 
   return (
     <Card
@@ -90,6 +78,7 @@ export default function FrontStockPanel({ projectId }: { projectId: string }) {
         ? <Tag>{`${data.rows.length} 行 · 超90天未领用 ${data.stale_90d_count}`}</Tag>
         : <Tag>尚未接入</Tag>}
     >
+      {query.error && <Alert type="error" showIcon message={authorizationErrorText(query.error, "前置库加载失败")} />}
       {data && !amountVisible && (
         <Alert
           showIcon
@@ -120,7 +109,7 @@ export default function FrontStockPanel({ projectId }: { projectId: string }) {
       <Table
         rowKey="stock_id"
         size="small"
-        columns={columns}
+        columns={columns.filter(column => amountVisible || !("dataIndex" in column) || column.dataIndex !== "value_inc_tax")}
         dataSource={data?.rows ?? []}
         loading={loading}
         scroll={{ x: 960 }}
@@ -130,3 +119,5 @@ export default function FrontStockPanel({ projectId }: { projectId: string }) {
     </Card>
   );
 }
+
+export default withContextSurface(FrontStockPanel, contextSurfaces("maintenance_front_stock.stock"), props => props.projectId);

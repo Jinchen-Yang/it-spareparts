@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -57,7 +58,7 @@ describe("ProjectProcurementPanel（#259 挂到备件与需求单 tab 第三段�
     expect(await screen.findByText("PO-1")).toBeInTheDocument();
     expect(api.getProjectProcurement).toHaveBeenCalledWith("p1", {
       page: 1, page_size: 10, source_order_id: "RAW-1",
-    });
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     // 范围提示在卡体里而不是 extra：375px 下长 extra 会把标题挤成省略号
     expect(screen.getByText(/当前范围：需求单 WBDD-1/).closest(".ant-card-body")).not.toBeNull();
     expect(container.querySelector(".ant-card-extra")).toBeNull();
@@ -86,7 +87,7 @@ describe("ProjectProcurementPanel（#259 挂到备件与需求单 tab 第三段�
     expect(api.getProjectProcurement).toHaveBeenCalledTimes(2);
     expect(api.getProjectProcurement).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 10, source_order_id: undefined,
-    });
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it("服务端分页：翻页带 page 参数；范围一换页码回到 1", async () => {
@@ -96,12 +97,12 @@ describe("ProjectProcurementPanel（#259 挂到备件与需求单 tab 第三段�
     fireEvent.click(screen.getByTitle("2"));
     await waitFor(() => expect(api.getProjectProcurement).toHaveBeenLastCalledWith("p1", {
       page: 2, page_size: 10, source_order_id: undefined,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
 
     rerender(<ProjectProcurementPanel projectId="p1" sourceOrderId="RAW-2" sourceOrderNo="WBDD-2" />);
     await waitFor(() => expect(api.getProjectProcurement).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 10, source_order_id: "RAW-2",
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("向所在 tab 登记读回函数：调用即按当前范围重读，失败 resolve false；卸载登记 null", async () => {
@@ -114,21 +115,25 @@ describe("ProjectProcurementPanel（#259 挂到备件与需求单 tab 第三段�
     const registered = registerRefresh.mock.calls.filter(([fn]) => fn);
     const refresh = registered[registered.length - 1][0] as () => Promise<boolean>;
 
-    await act(async () => {
-      expect(await refresh()).toBe(true);
-    });
+    let readback!: Promise<boolean>;
+    act(() => { readback = refresh(); });
+    await act(async () => { expect(await readback).toBe(true); });
     expect(api.getProjectProcurement).toHaveBeenCalledTimes(2);
     expect(api.getProjectProcurement).toHaveBeenLastCalledWith("p1", {
       page: 1, page_size: 10, source_order_id: "RAW-1",
-    });
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
 
     api.getProjectProcurement.mockRejectedValueOnce(new Error("boom"));
-    await act(async () => {
-      expect(await refresh()).toBe(false);
-    });
+    act(() => { readback = refresh(); });
+    await act(async () => { expect(await readback).toBe(false); });
     expect(await screen.findByText("采购订单关联数据加载失败")).toBeInTheDocument();
 
     unmount();
     expect(registerRefresh).toHaveBeenLastCalledWith(null);
   });
 });
+
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../test/legacyAuthorization";
 /** 维保数据分析页：URL 状态、金额千分位、表头排序联动（2026-08-21 视觉升级）。 */
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
@@ -290,7 +291,7 @@ describe("维保数据分析页", () => {
     renderPage("/maintenance/analytics?page=2&q=ST");
     await screen.findByText("ST1800MM0129");
     fireEvent.click(screen.getByRole("columnheader", { name: new RegExp(label) }));
-    await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ sort: key, page: 1, q: "ST" })));
+    await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ sort: key, page: 1, q: "ST" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(query().get("sort")).toBe(key);
   });
 
@@ -301,7 +302,7 @@ describe("维保数据分析页", () => {
     expect(query().get("range")).toBe("all");
     expect(query().get("page")).toBe("2");
     expect(fetchPnRanking).toHaveBeenCalledTimes(1);
-    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ sort: current, range: "all", page: 2, page_size: 50, q: "ST" }));
+    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ sort: current, range: "all", page: 2, page_size: 50, q: "ST" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it("跨tab变更通知静默刷新当前筛选和页码，取数期间保留已显示表格", async () => {
@@ -313,7 +314,7 @@ describe("维保数据分析页", () => {
     window.dispatchEvent(new StorageEvent("storage", { key: MAINTENANCE_CHANGED_STORAGE_KEY, newValue: "123" }));
     await waitFor(() => expect(fetchPnRanking).toHaveBeenCalledTimes(2));
     expect(screen.getByText("ST1800MM0129")).toBeInTheDocument();
-    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ q: "ST", page: 2, page_size: 50 }));
+    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ q: "ST", page: 2, page_size: 50 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(query().get("page")).toBe("2");
     expect(screen.getByRole("button", { name: /刷新/ })).not.toHaveClass("ant-btn-loading");
     await act(async () => resolve({ ...initial, rows: [{ ...mockRow, pn: "REFRESHED-PN" }] }));
@@ -407,7 +408,7 @@ describe("维保数据分析页", () => {
     await screen.findAllByText("ST1800MM0129");
     fireEvent.click(screen.getAllByText("行次数")[0].closest("th")!);
     await waitFor(() =>
-      expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ sort: "occurrences" })));
+      expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ sort: "occurrences" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("URL 恢复多选及其他条件；修改类型持久化 URL 并重置页码", async () => {
@@ -417,19 +418,19 @@ describe("维保数据分析页", () => {
     expect(fetchPnRanking).toHaveBeenLastCalledWith({
       business_type: "overall,spare", range: "custom", date_from: "2026-06-01", date_to: "2026-06-30",
       q: "disk", sort: "qty", page: 3, page_size: 50,
-    });
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     await toggleBusinessType("算力运维");
     await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith({
       business_type: "computing,overall,spare", range: "custom", date_from: "2026-06-01", date_to: "2026-06-30",
       q: "disk", sort: "qty", page: 1, page_size: 50,
-    }));
+    }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(query().get("business_type")).toBe("computing,overall,spare");
     expect(query().has("page")).toBe(false);
     const saved = `/maintenance/analytics${screen.getByTestId("location").textContent}`;
     cleanup();
     renderPage(saved);
     expect(await selectedLabels()).toEqual(["整体维保", "备件维保", "算力运维"]);
-    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ business_type: "computing,overall,spare", page: 1 }));
+    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ business_type: "computing,overall,spare", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it("清空类型等于全选；全部六档 URL 也按 all 请求", async () => {
@@ -437,12 +438,12 @@ describe("维保数据分析页", () => {
     await waitFor(() => expect(fetchPnRanking).toHaveBeenCalled());
     const select = screen.getByRole("combobox", { name: "业务类型筛选" }).closest(".ant-select")!;
     fireEvent.mouseDown(select.querySelector(".ant-select-clear")!);
-    await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ business_type: "all", page: 1 })));
+    await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ business_type: "all", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(await selectedLabels()).toHaveLength(6);
     expect(query().get("business_type")).toBe("all");
     cleanup();
     renderPage("/maintenance/analytics?business_type=overall,spare,computing,refit,other,unlabeled");
-    await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ business_type: "all" })));
+    await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ business_type: "all" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(await selectedLabels()).toHaveLength(6);
   });
 
@@ -466,7 +467,7 @@ describe("维保数据分析页", () => {
     expect(fetchPnRanking).toHaveBeenCalledTimes(1);
     if (submitted) {
       fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13 });
-      await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ q: "QA-SECOND-PN" })));
+      await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ q: "QA-SECOND-PN" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
       expect(query().get("q")).toBe("QA-SECOND-PN");
     }
     fireEvent.click(screen.getByRole("button", { name: "重置筛选" }));
@@ -486,15 +487,15 @@ describe("维保数据分析页", () => {
     expect(query().get("q")).toBe("QA-FIRST-PN");
     fireEvent.click(screen.getByRole("button", { name: "跳转搜索" }));
     await waitFor(() => expect(input).toHaveValue("QA-SECOND-PN"));
-    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ q: "QA-SECOND-PN", business_type: "spare" }));
+    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ q: "QA-SECOND-PN", business_type: "spare" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     fireEvent.click(screen.getByRole("button", { name: "后退" }));
     await waitFor(() => expect(input).toHaveValue("QA-FIRST-PN"));
-    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ q: "QA-FIRST-PN", business_type: "overall" }));
+    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ q: "QA-FIRST-PN", business_type: "overall" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     fireEvent.click(screen.getByRole("button", { name: "前进" }));
     await waitFor(() => expect(input).toHaveValue("QA-SECOND-PN"));
     fireEvent.click(screen.getByRole("button", { name: "跳转备件分类" }));
     await waitFor(() => expect(input).toHaveValue(""));
-    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.not.objectContaining({ q: expect.anything() }));
+    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.not.objectContaining({ q: expect.anything() }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it("类型请求失败时清空旧表格、汇总和图表数据，刷新可恢复", async () => {
@@ -504,7 +505,7 @@ describe("维保数据分析页", () => {
     fetchPnRanking.mockRejectedValueOnce(new Error("network"));
     fireEvent.click(screen.getByRole("button", { name: "跳转备件分类" }));
     await screen.findByText("加载失败");
-    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ business_type: "spare" }));
+    expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({ business_type: "spare" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(screen.queryByText("ST1800MM0129")).not.toBeInTheDocument();
     expect(screen.queryByText("¥11,335,390,694.72")).not.toBeInTheDocument();
     expect(screen.queryAllByTestId("chart")).toHaveLength(0);
@@ -533,12 +534,12 @@ describe("维保数据分析页", () => {
     expect(fetchPnRanking).toHaveBeenLastCalledWith(expect.objectContaining({
       project: "p1,p2", customer: "客户A", sp: "张三", order_no: "REQ-001",
       demand_type: "repair", warehouse: "广州仓", cost_source: "linked,missing", page: 3,
-    }));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(screen.getByPlaceholderText("客户")).toHaveValue("客户A");
     expect(screen.getByPlaceholderText("销售")).toHaveValue("张三");
     expect(screen.getByPlaceholderText("需求单号")).toHaveValue("REQ-001");
-    expect(getMaintenanceProject).toHaveBeenCalledWith("p1");
-    expect(getMaintenanceProject).toHaveBeenCalledWith("p2");
+    expect(getMaintenanceProject).toHaveBeenCalledWith("p1", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
+    expect(getMaintenanceProject).toHaveBeenCalledWith("p2", expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(await screen.findByText("项目-p1")).toBeInTheDocument();
     expect(await screen.findByText("项目-p2")).toBeInTheDocument();
   });
@@ -549,18 +550,18 @@ describe("维保数据分析页", () => {
     openSelect("需求类型筛选");
     await clickOption("报修供货");
     await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(
-      expect.objectContaining({ demand_type: "repair", page: 1 })));
+      expect.objectContaining({ demand_type: "repair", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(query().get("demand_type")).toBe("repair");
     await clickOption("补库供货");
     await waitFor(() => expect(query().has("demand_type")).toBe(false));
     expect(fetchPnRanking).toHaveBeenLastCalledWith(
-      expect.not.objectContaining({ demand_type: expect.anything() }));
+      expect.not.objectContaining({ demand_type: expect.anything() }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     fireEvent.keyDown(screen.getByRole("combobox", { name: "需求类型筛选" }),
       { key: "Escape", code: "Escape", keyCode: 27 });
     openSelect("成本来源筛选");
     await clickOption("系统关联");
     await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(
-      expect.objectContaining({ cost_source: "linked", page: 1 })));
+      expect.objectContaining({ cost_source: "linked", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(query().get("cost_source")).toBe("linked");
   });
 
@@ -573,20 +574,20 @@ describe("维保数据分析页", () => {
     expect(fetchPnRanking).toHaveBeenCalledTimes(1);
     fireEvent.keyDown(customerInput, { key: "Enter", code: "Enter", keyCode: 13 });
     await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(
-      expect.objectContaining({ customer: "客户A", page: 1 })));
+      expect.objectContaining({ customer: "客户A", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(query().get("customer")).toBe("客户A");
 
     const salesInput = screen.getByPlaceholderText("销售");
     fireEvent.change(salesInput, { target: { value: "张三" } });
     fireEvent.keyDown(salesInput, { key: "Enter", code: "Enter", keyCode: 13 });
     await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(
-      expect.objectContaining({ customer: "客户A", sp: "张三", page: 1 })));
+      expect.objectContaining({ customer: "客户A", sp: "张三", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
 
     const orderInput = screen.getByPlaceholderText("需求单号");
     fireEvent.change(orderInput, { target: { value: "REQ-9" } });
     fireEvent.keyDown(orderInput, { key: "Enter", code: "Enter", keyCode: 13 });
     await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(
-      expect.objectContaining({ customer: "客户A", sp: "张三", order_no: "REQ-9", page: 1 })));
+      expect.objectContaining({ customer: "客户A", sp: "张三", order_no: "REQ-9", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(query().get("order_no")).toBe("REQ-9");
   });
 
@@ -604,10 +605,10 @@ describe("维保数据分析页", () => {
     fireEvent.change(input, { target: { value: "项目" } });
     fireEvent.change(input, { target: { value: "项目甲" } });
     await waitFor(() => expect(searchMaintenanceProjects).toHaveBeenCalledTimes(1));
-    expect(searchMaintenanceProjects).toHaveBeenCalledWith({ q: "项目甲", page_size: 20 });
+    expect(searchMaintenanceProjects).toHaveBeenCalledWith({ q: "项目甲", page_size: 20 }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     await clickOption("项目甲");
     await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(
-      expect.objectContaining({ project: "p-100", page: 1 })));
+      expect.objectContaining({ project: "p-100", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(query().get("project")).toBe("p-100");
   });
 
@@ -621,7 +622,7 @@ describe("维保数据分析页", () => {
     expect(await screen.findByText("项目甲")).toBeInTheDocument();
     expect(await screen.findByText("p-missin…")).toBeInTheDocument();
     expect(fetchPnRanking).toHaveBeenLastCalledWith(
-      expect.objectContaining({ project: "p-ok,p-missing-very-long" }));
+      expect.objectContaining({ project: "p-ok,p-missing-very-long" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
   });
 
   it("filter-options 失败提示错误但页面仍可用", async () => {
@@ -639,7 +640,7 @@ describe("维保数据分析页", () => {
     openSelect("仓库筛选");
     await clickOption("广州仓");
     await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(
-      expect.objectContaining({ warehouse: "广州仓", page: 1 })));
+      expect.objectContaining({ warehouse: "广州仓", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(query().get("warehouse")).toBe("广州仓");
     expect(fetchAnalyticsFilterOptions).toHaveBeenCalledTimes(1);
   });
@@ -647,7 +648,7 @@ describe("维保数据分析页", () => {
   it("带空格的历史仓库值原样透传，不去空白（否则选不中库内原值）", async () => {
     renderPage(`/maintenance/analytics?warehouse=${encodeURIComponent(" 广州仓 ")}`);
     await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(
-      expect.objectContaining({ warehouse: " 广州仓 " })));
+      expect.objectContaining({ warehouse: " 广州仓 " }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(query().get("warehouse")).toBe(" 广州仓 ");
   });
 
@@ -663,7 +664,7 @@ describe("维保数据分析页", () => {
     await waitFor(() => expect(searchMaintenanceProjects).toHaveBeenCalledTimes(1));
     await clickOption("项目乙");
     await waitFor(() => expect(fetchPnRanking).toHaveBeenLastCalledWith(
-      expect.objectContaining({ project: "p1,p2", page: 1 })));
+      expect.objectContaining({ project: "p1,p2", page: 1 }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     fireEvent.change(input, { target: { value: "别的关键词" } });
     await waitFor(() => expect(searchMaintenanceProjects).toHaveBeenCalledTimes(2));
     expect(screen.getAllByText("项目-p1").length).toBeGreaterThan(0);
@@ -697,7 +698,7 @@ describe("维保数据分析页", () => {
     await waitFor(() => expect(fetchSpendTrend).toHaveBeenCalledTimes(1));
     expect(fetchSpendTrend).toHaveBeenLastCalledWith(expect.objectContaining({
       range: "all", granularity: "month", business_type: "spare", customer: "客户A",
-    }));
+    }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     expect(query().get("view")).toBe("spend");
     expect(query().get("granularity")).toBeNull();
     expect(query().get("customer")).toBe("客户A");
@@ -712,7 +713,7 @@ describe("维保数据分析页", () => {
     expect(fetchPnRanking).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("按天"));
     await waitFor(() => expect(fetchSpendTrend).toHaveBeenLastCalledWith(
-      expect.objectContaining({ granularity: "day", customer: "客户A" })));
+      expect.objectContaining({ granularity: "day", customer: "客户A" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     expect(query().get("granularity")).toBe("day");
     expect(query().get("view")).toBe("spend");
     expect(fetchPnRanking).not.toHaveBeenCalled();
@@ -783,7 +784,7 @@ describe("维保数据分析页", () => {
   it("开支页签下重置筛选：清空 view/granularity/筛选并回到多维排名", async () => {
     renderPage("/maintenance/analytics?view=spend&granularity=day&customer=客户A&range=all");
     await waitFor(() => expect(fetchSpendTrend).toHaveBeenLastCalledWith(
-      expect.objectContaining({ granularity: "day", customer: "客户A" })));
+      expect.objectContaining({ granularity: "day", customer: "客户A" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
     fireEvent.click(screen.getByRole("button", { name: "重置筛选" }));
     await waitFor(() => expect(query().toString()).toBe(""));
     expect(screen.getByRole("tab", { name: "多维排名" })).toHaveAttribute("aria-selected", "true");
@@ -791,3 +792,9 @@ describe("维保数据分析页", () => {
     expect(fetchSpendTrend).toHaveBeenCalledTimes(1);
   });
 });
+
+// Existing page behavior runs under the explicit legacy authorization mode.
+vi.mock("../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

@@ -1,3 +1,4 @@
+import { prepareLegacyPageFixture, legacyAuthorizationState } from "../../../../test/legacyAuthorization";
 import { cleanupAntd, renderWithoutMotion as render } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
@@ -170,8 +171,8 @@ describe("ReturnReceiptBatchMaintenance 批量修改", () => {
     setText(reasonArea(dialog), "批量清点修正");
     fireEvent.click(screen.getByRole("button", { name: "修改 2 条" }));
     await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(2));
-    expect(mocks.update.mock.calls[0]).toEqual(["r1", { version: 3, reason: "批量清点修正", note: "新备注A", evidence_ref: "新凭据A" }]);
-    expect(mocks.update.mock.calls[1]).toEqual(["r2", { version: 7, reason: "批量清点修正", qty: 6 }]);
+    expect(mocks.update.mock.calls[0]).toEqual(["r1", { version: 3, reason: "批量清点修正", note: "新备注A", evidence_ref: "新凭据A" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })]);
+    expect(mocks.update.mock.calls[1]).toEqual(["r2", { version: 7, reason: "批量清点修正", qty: 6 }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })]);
     // 结果表：两行都「已提交」（结果列 Tag 精确计数，明细文本同名不计入）
     await waitFor(() => {
       const tags = within(dialog).getAllByText("已提交").filter((node) => node.closest(".ant-tag"));
@@ -242,7 +243,7 @@ describe("ReturnReceiptBatchMaintenance 批量修改", () => {
     mocks.update.mockImplementationOnce(() => Promise.reject(httpError(409, "版本冲突")));
     fireEvent.click(screen.getByRole("button", { name: "原样重试（原版本号）" }));
     await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(3));
-    expect(mocks.update.mock.calls[2]).toEqual(["r1", { version: 3, reason: "批量修正", note: "新备注A" }]);
+    expect(mocks.update.mock.calls[2]).toEqual(["r1", { version: 3, reason: "批量修正", note: "新备注A" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })]);
     await waitFor(() => expect(within(dialog).getAllByText("版本冲突").length).toBeGreaterThan(0));
   });
 
@@ -260,7 +261,7 @@ describe("ReturnReceiptBatchMaintenance 批量修改", () => {
     mocks.update.mockImplementationOnce(() => Promise.reject(httpError(401, "未授权")));
     fireEvent.click(screen.getByRole("button", { name: "原样重试（原版本号）" }));
     await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(2));
-    expect(mocks.update.mock.calls[1]).toEqual(["r1", { version: 3, reason: "批量修正", note: "新备注A" }]);
+    expect(mocks.update.mock.calls[1]).toEqual(["r1", { version: 3, reason: "批量修正", note: "新备注A" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })]);
     expect(await within(dialog).findByText(/不改变原提交「结果未知」判定/)).toBeInTheDocument();
     // 状态仍是「结果未知」，绝不能降级成「未提交」
     expect(within(dialog).queryAllByText("未提交").length).toBe(0);
@@ -335,8 +336,8 @@ describe("ReturnReceiptBatchMaintenance 批量作废", () => {
     setText(within(dialog).getByPlaceholderText("如：批量重复登记 / 录入错误"), "批量重复登记");
     fireEvent.click(screen.getByRole("button", { name: "作废 2 条" }));
     await waitFor(() => expect(mocks.voidReceipt).toHaveBeenCalledTimes(2));
-    expect(mocks.voidReceipt.mock.calls[0]).toEqual(["r1", { version: 3, reason: "批量重复登记" }]);
-    expect(mocks.voidReceipt.mock.calls[1]).toEqual(["r2", { version: 7, reason: "批量重复登记" }]);
+    expect(mocks.voidReceipt.mock.calls[0]).toEqual(["r1", { version: 3, reason: "批量重复登记" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })]);
+    expect(mocks.voidReceipt.mock.calls[1]).toEqual(["r2", { version: 7, reason: "批量重复登记" }, expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })]);
     // 结果表两行「已提交」Tag（结果列内精确定位）
     await waitFor(() => {
       const tags = within(dialog).getAllByText("已提交").filter((node) => node.closest(".ant-tag"));
@@ -372,7 +373,7 @@ describe("D-31 批量维护容量", () => {
     mocks.demands.mockResolvedValue({ data: { rows: [{ source_order_id: "d1", order_no: "WBDD-1", demand_qty: "10.000", received_qty: "12.000", remaining_qty: "0.000", max_qty: "2.000", basis_state: "complete", is_current: true }], total: 1 } });
     const dialog = await openUpdate([r1]);
     expect(await within(dialog).findByText(/剩余可录 0/)).toBeInTheDocument();
-    expect(mocks.demands).toHaveBeenCalledWith("p1", expect.objectContaining({ receipt_id: "r1" }));
+    expect(mocks.demands).toHaveBeenCalledWith("p1", expect.objectContaining({ receipt_id: "r1" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) }));
     setText(qtyInput(dialog, "2"), "3");
     setText(reasonArea(dialog), "清点核实");
     expect(await within(dialog).findByText(/本次最多可录入 2，当前提交 3/)).toBeInTheDocument();
@@ -380,7 +381,7 @@ describe("D-31 批量维护容量", () => {
     setText(qtyInput(dialog, "3"), "2");
     setText(noteArea(dialog), "仅修改备注");
     fireEvent.click(within(dialog).getByRole("button", { name: "修改 1 条" }));
-    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith("r1", expect.objectContaining({ note: "仅修改备注" })));
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith("r1", expect.objectContaining({ note: "仅修改备注" }), expect.objectContaining({ request: expect.any(Function), isCurrent: expect.any(Function) })));
   });
 
   it("容量 409 原文显示且不冒充版本冲突", async () => {
@@ -395,3 +396,8 @@ describe("D-31 批量维护容量", () => {
     expect(within(dialog).queryByText("版本冲突")).not.toBeInTheDocument();
   });
 });
+
+vi.mock("../../../../authz/AuthzProvider", async original => ({
+  ...await original<typeof import("../../../../authz/AuthzProvider")>(), useAuthz: () => legacyAuthorizationState(),
+}));
+beforeEach(() => prepareLegacyPageFixture());

@@ -1,3 +1,6 @@
+import { useContextTransport } from "../../authz/domainTransport";
+import { withContextSurface } from "../../authz/ContextSurface";
+import { surfaceRule } from "../../authz/rules";
 import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Input, InputNumber, Modal, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -79,7 +82,7 @@ function updatesFor(draft: EditDraft): Record<string, unknown> {
  * 选中明细行的逐行批量 PATCH。成功行永不重发；普通失败保留原 digest/payload；
  * 409 必须显式 GET 最新行，把服务器值与新 digest 一起重建草稿后再由用户修改。
  */
-export default function DemandLineBatchEdit({
+function DemandLineBatchEdit({
   sourceOrderId,
   rows,
   onClose,
@@ -90,6 +93,7 @@ export default function DemandLineBatchEdit({
   onClose: () => void;
   onCommitted: () => void | Promise<unknown>;
 }) {
+  const transport = useContextTransport(sourceOrderId, true);
   const [drafts, setDrafts] = useState<EditDraft[]>(() => rows.map(draftFrom));
   const [reason, setReason] = useState("");
   const [attempts, setAttempts] = useState<Record<string, FrozenEdit>>({});
@@ -126,15 +130,15 @@ export default function DemandLineBatchEdit({
   const run = async (epoch: number, targets: FrozenEdit[]) => {
     let wroteAny = false;
     for (const target of targets) {
-      if (epochRef.current !== epoch) return;
+      if ((epochRef.current !== epoch || !transport.isCurrent())) return;
       syncAttempt(target.id, { ...target, status: "running", error: undefined });
       try {
-        await patchDemandLine(target.id, target.updates, reason.trim(), target.digest);
-        if (epochRef.current !== epoch) return;
+        await patchDemandLine(target.id, target.updates, reason.trim(), target.digest, transport);
+        if ((epochRef.current !== epoch || !transport.isCurrent())) return;
         wroteAny = true;
         syncAttempt(target.id, { ...target, status: "succeeded", error: undefined });
       } catch (cause) {
-        if (epochRef.current !== epoch) return;
+        if ((epochRef.current !== epoch || !transport.isCurrent())) return;
         if (isConflict(cause)) {
           syncAttempt(target.id, {
             ...target,
@@ -150,15 +154,15 @@ export default function DemandLineBatchEdit({
         }
       }
     }
-    if (epochRef.current !== epoch || !wroteAny) return;
+    if ((epochRef.current !== epoch || !transport.isCurrent()) || !wroteAny) return;
     try {
       const refreshed = await onCommitted();
-      if (epochRef.current !== epoch) return;
+      if ((epochRef.current !== epoch || !transport.isCurrent())) return;
       if (refreshed === false || refreshed === null) {
         setError("修改已保存，但列表刷新失败；请稍后手动刷新查看最新数据");
       }
     } catch {
-      if (epochRef.current === epoch) {
+      if ((epochRef.current === epoch && transport.isCurrent())) {
         setError("修改已保存，但列表刷新失败；请稍后手动刷新查看最新数据");
       }
     }
@@ -212,7 +216,7 @@ export default function DemandLineBatchEdit({
       if (!targets.length) return;
       await run(epoch, targets);
     } finally {
-      if (epochRef.current === epoch) {
+      if ((epochRef.current === epoch && transport.isCurrent())) {
         setRunning(false);
         writeLock.current = false;
       }
@@ -225,8 +229,8 @@ export default function DemandLineBatchEdit({
     const epoch = epochRef.current;
     setRunning(true);
     try {
-      const response = await listDemandLines(sourceOrderId);
-      if (epochRef.current !== epoch) return;
+      const response = await listDemandLines(sourceOrderId, transport);
+      if ((epochRef.current !== epoch || !transport.isCurrent())) return;
       const fresh = response.data.items.find((row) => row.raw_line_id === id && row.is_active);
       const previous = attemptsRef.current[id];
       if (!fresh) {
@@ -246,7 +250,7 @@ export default function DemandLineBatchEdit({
         error: "已加载服务器最新数据；请重新修改后再提交",
       });
     } catch (cause) {
-      if (epochRef.current === epoch) {
+      if ((epochRef.current === epoch && transport.isCurrent())) {
         const previous = attemptsRef.current[id];
         syncAttempt(id, {
           ...previous,
@@ -255,7 +259,7 @@ export default function DemandLineBatchEdit({
         });
       }
     } finally {
-      if (epochRef.current === epoch) {
+      if ((epochRef.current === epoch && transport.isCurrent())) {
         setRunning(false);
         writeLock.current = false;
       }
@@ -382,3 +386,5 @@ export default function DemandLineBatchEdit({
     </Modal>
   );
 }
+
+export default withContextSurface(DemandLineBatchEdit, surfaceRule("maintenance_demand.batch_edit"), props => [props.sourceOrderId, props.rows.map(row => [row.raw_line_id, row.digest])]);

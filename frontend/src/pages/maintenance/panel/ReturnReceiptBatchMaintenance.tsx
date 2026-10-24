@@ -1,3 +1,7 @@
+import { withContextSurface } from "../../../authz/ContextSurface";
+import { useContextAdmission } from "../../../authz/access";
+import { useContextTransport, withTransportSignal } from "../../../authz/domainTransport";
+import { surfaceRule, actionRule } from "../../../authz/rules";
 import { useEffect, useRef, useState } from "react";
 import { App, Alert, Button, Input, InputNumber, Modal, Select, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -188,7 +192,7 @@ const STATUS_TAG: Record<RowStatus, { color: string; label: string }> = {
  * 部分成功语义：行间不构成事务；成功行锁定不重发；409 不自动升级 version；
  * 网络失败/5xx 视为结果未知，只允许沿用原 version 原样重试（首次已成功时会得到 409）。
  */
-export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }: {
+function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }: {
   mode: "update" | "void";
   /** 当前勾选且有效的返还记录（父级已过滤已作废行；打开弹窗时冻结快照）。 */
   receipts: ReturnReceipt[];
@@ -203,6 +207,13 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
   const [submitting, setSubmitting] = useState(false);
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [results, setResults] = useState<ResultRow[]>([]);
+  const admission = useContextAdmission();
+  const canCommand = admission.state(actionRule("maintenance_return_receipt", mode), true) !== "deny";
+  const canCapacity = admission.state(actionRule("maintenance_return_receipt", "read_demands"), true) !== "deny";
+  const capture = useContextTransport(JSON.stringify([open, mode, rows, reason]), true);
+  const readCapture = useContextTransport("receipt-capacity", true);
+  const capacityAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => capacityAbort.current?.abort(), []);
   const lockRef = useRef(false);
   const frozenRef = useRef<FrozenRow[]>([]);
   // 只认最新一发：卸载/项目切换（组件随选择清空被卸载）后，在途循环不得续发后续行
@@ -241,9 +252,9 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
 
   const sendRow = async (item: FrozenRow) => {
     if (isVoid) {
-      await voidReturnReceipt(item.receiptId, { version: item.version, reason: item.reason });
+      await voidReturnReceipt(item.receiptId, { version: item.version, reason: item.reason }, capture);
     } else {
-      await updateReturnReceipt(item.receiptId, { version: item.version, reason: item.reason, ...item.diff });
+      await updateReturnReceipt(item.receiptId, { version: item.version, reason: item.reason, ...item.diff }, capture);
     }
   };
 
@@ -275,7 +286,7 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
 
   const submitAll = async () => {
     // 同步锁：双击的第二次点击在 state 刷新前就应被挡下
-    if (lockRef.current) return;
+    if (!canCommand || !capture.isCurrent() || lockRef.current) return;
     const reasonTrim = reason.trim();
     if (!reasonTrim) {
       message.error(isVoid ? "批量作废必须填写共同原因" : "批量修改必须填写共同原因");
@@ -308,22 +319,22 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
     setResults(finalRows);
     setPhase("results");
     for (const item of frozenRef.current) {
-      if (seqRef.current !== mySeq) return;
+      if (!capture.isCurrent() || seqRef.current !== mySeq) return;
       try {
         await sendRow(item);
-        if (seqRef.current !== mySeq) return;
+        if (!capture.isCurrent() || seqRef.current !== mySeq) return;
         const target = finalRows.find((row) => row.receiptId === item.receiptId);
         if (target) { target.status = "ok"; target.detail = "已提交"; }
         setResults([...finalRows]);
       } catch (error) {
-        if (seqRef.current !== mySeq) return;
+        if (!capture.isCurrent() || seqRef.current !== mySeq) return;
         const status = errorStatus(error);
         const target = finalRows.find((row) => row.receiptId === item.receiptId);
         if (target) { target.status = status; target.detail = describeError(error, status); }
         setResults([...finalRows]);
       }
     }
-    if (seqRef.current !== mySeq) return;
+    if (!capture.isCurrent() || seqRef.current !== mySeq) return;
     setSubmitting(false);
     lockRef.current = false;
     summarize(finalRows);
@@ -331,7 +342,7 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
 
   const retryRow = async (receiptId: string) => {
     // 同步锁（与 submitAll 同一 lockRef）：双击重试在 state 刷新前就被挡下
-    if (lockRef.current) return;
+    if (!canCommand || !capture.isCurrent() || lockRef.current) return;
     const item = frozenRef.current.find((row) => row.receiptId === receiptId);
     if (!item) return;
     lockRef.current = true;
@@ -340,10 +351,10 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
     markResult(receiptId, { detail: "正在原样重试（沿用原版本号，若首次已成功将返回版本冲突）…" });
     try {
       await sendRow(item);
-      if (seqRef.current !== mySeq) return;
+      if (!capture.isCurrent() || seqRef.current !== mySeq) return;
       markResult(receiptId, { status: "ok", detail: "已提交" });
     } catch (error) {
-      if (seqRef.current !== mySeq) return;
+      if (!capture.isCurrent() || seqRef.current !== mySeq) return;
       const status = errorStatus(error);
       if (status === "conflict" || status === "unknown") {
         markResult(receiptId, { status, detail: describeError(error, status) });
@@ -356,25 +367,30 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
       }
     } finally {
       lockRef.current = false;
-      if (seqRef.current === mySeq) setRetryingId(null);
+      if (capture.isCurrent() && seqRef.current === mySeq) setRetryingId(null);
     }
   };
 
   const loadCapacity = async (receipt: ReturnReceipt, seq: number) => {
+    if (!canCapacity) { patchRow(receipt.receipt_id, { capacityLoading: false, capacityLoadError: "缺少需求单容量读取权限；只能保留或减少原数量" }); return; }
+    if (!readCapture.isCurrent()) return;
+    const requestCapture = capacityAbort.current ? withTransportSignal(readCapture, capacityAbort.current.signal) : readCapture;
     try {
       const response = await getReturnReceiptDemands(receipt.project_id, {
         receipt_id: receipt.receipt_id, page: 1, page_size: 100,
-      });
-      if (seq !== seqRef.current) return;
+      }, requestCapture);
+      if (!requestCapture.isCurrent() || seq !== seqRef.current) return;
       const capacity = response.data.rows.find((candidate) => candidate.source_order_id === receipt.source_order_id);
       patchRow(receipt.receipt_id, { capacity, capacityLoading: false, capacityLoadError: undefined });
     } catch (error) {
-      if (seq !== seqRef.current) return;
+      if (!requestCapture.isCurrent() || seq !== seqRef.current) return;
       patchRow(receipt.receipt_id, { capacityLoading: false, capacityLoadError: readError(error, "需求单容量加载失败，请重试后再增加数量") });
     }
   };
 
   const openModal = () => {
+    if (!canCommand) return;
+    capacityAbort.current?.abort(); capacityAbort.current = new AbortController();
     const seq = ++seqRef.current;
     setRows(receipts.map(toEditRow));
     setReason("");
@@ -387,6 +403,7 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
 
   const close = () => {
     if (busy) return;
+    capacityAbort.current?.abort();
     setOpen(false);
     // ok/conflict/unknown 都意味着服务端状态可能已变（conflict 可能是首次重试已成功）→ 刷新父列表
     if (results.some((row) => row.status !== "failed")) void onDone();
@@ -635,4 +652,10 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
       </Modal>
     </>
   );
+}
+
+const BoundReceiptBatchMaintenance = withContextSurface(ReturnReceiptBatchMaintenance, surfaceRule("maintenance_return_receipt.batch_maintain"));
+export default function ReceiptBatchMaintenance(props: Parameters<typeof ReturnReceiptBatchMaintenance>[0]) {
+  const admission = useContextAdmission();
+  return admission.state(actionRule("maintenance_return_receipt", props.mode), true) === "deny" ? null : <BoundReceiptBatchMaintenance {...props} />;
 }

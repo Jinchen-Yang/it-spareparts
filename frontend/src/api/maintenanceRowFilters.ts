@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
 import type { RangePreset } from "./maintenanceWorkbooks";
 
@@ -56,32 +57,32 @@ export interface ProjectRowFilterQuery {
 export const serializeRowFilters = (filters: MaintenanceRowFilter[]) =>
   filters.length ? JSON.stringify(filters) : undefined;
 
-export async function getMaintenanceRowFields(projectId?: string, projectOnly = false) {
+export async function getMaintenanceRowFields(projectId?: string, projectOnly = false, capture?: ContextRequestTransport) {
   const path = projectOnly && projectId
     ? `/maintenance/projects/stable/${encodeURIComponent(projectId)}/master-workbook/row-fields`
     : "/maintenance/spare-part-lines/fields";
-  const response = await api.get<MaintenanceRowFields>(path, {
+  const response = await domainApi(capture).get<MaintenanceRowFields>(path, {
     params: !projectOnly && projectId ? { project_id: projectId } : undefined,
   });
   return response.data;
 }
 
-export async function listMaintenanceWorkbenchRows(query: MaintenanceRowQuery, page: number) {
-  const response = await api.get<MaintenanceWorkbenchRows>("/maintenance/spare-part-lines/rows", {
+export async function listMaintenanceWorkbenchRows(query: MaintenanceRowQuery, page: number, capture?: ContextRequestTransport) {
+  const response = await domainApi(capture).get<MaintenanceWorkbenchRows>("/maintenance/spare-part-lines/rows", {
     params: { ...query, page, page_size: 20 },
   });
   return response.data;
 }
 
-export async function exportMaintenanceRows(query: MaintenanceRowQuery, format: RowExportFormat) {
-  const response = await api.get<Blob>("/maintenance/spare-part-lines/export", {
+export async function exportMaintenanceRows(query: MaintenanceRowQuery, format: RowExportFormat, capture?: ContextRequestTransport) {
+  const response = await domainApi(capture).get<Blob>("/maintenance/spare-part-lines/export", {
     params: { ...query, format }, responseType: "blob",
   });
   return response.data;
 }
 
-export async function exportProjectRows(projectId: string, query: ProjectRowFilterQuery, format: RowExportFormat) {
-  const response = await api.get<Blob>(
+export async function exportProjectRows(projectId: string, query: ProjectRowFilterQuery, format: RowExportFormat, capture?: ContextRequestTransport) {
+  const response = await domainApi(capture).get<Blob>(
     `/maintenance/projects/stable/${encodeURIComponent(projectId)}/master-workbook/rows/export`,
     { params: { ...query, format }, responseType: "blob" },
   );

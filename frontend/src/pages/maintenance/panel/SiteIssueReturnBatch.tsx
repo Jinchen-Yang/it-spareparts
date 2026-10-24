@@ -1,3 +1,6 @@
+import { withContextSurface } from "../../../authz/ContextSurface";
+import { useContextTransport } from "../../../authz/domainTransport";
+import { actionRule, allRule, surfaceRule } from "../../../authz/rules";
 import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Input, Modal, Space, Table, Tag, Typography } from "antd";
 import { correctSiteIssueLine, type SiteIssueLineCorrectionInput } from "../../../api/maintenanceOperations";
@@ -46,7 +49,7 @@ function describeFailure(error: unknown): Pick<Result, "status" | "detail"> {
 }
 
 /** 逐行独立事务；只从上一成功回执接续同单版本，不自动接受冲突的新版本。 */
-export default function SiteIssueReturnBatch({ selection, disabled, onChanged }: {
+function SiteIssueReturnBatch({ selection, disabled, onChanged }: {
   selection: SiteIssueReturnSelection[];
   disabled: boolean;
   onChanged: () => Promise<boolean>;
@@ -59,6 +62,7 @@ export default function SiteIssueReturnBatch({ selection, disabled, onChanged }:
   const [busy, setBusy] = useState(false);
   const [refreshFailed, setRefreshFailed] = useState(false);
   const [operator, setOperator] = useState("");
+  const capture = useContextTransport(JSON.stringify([open, rows, reason, action]), true);
   const busyRef = useRef(false);
   const generation = useRef(0);
   const sessionToken = useRef<string | null>(null);
@@ -69,11 +73,11 @@ export default function SiteIssueReturnBatch({ selection, disabled, onChanged }:
   const refresh = async (run: number) => {
     let success = false;
     try { success = await onChanged(); } catch { /* 事实回执保留，刷新失败不重发。 */ }
-    if (generation.current === run) setRefreshFailed(!success);
+    if (capture.isCurrent() && generation.current === run) setRefreshFailed(!success);
   };
 
   const submit = async () => {
-    if (busyRef.current || !action || !reason.trim() || reasonTooLong) return;
+    if (!capture.isCurrent() || busyRef.current || !action || !reason.trim() || reasonTooLong) return;
     busyRef.current = true;
     setBusy(true);
     const run = ++generation.current;
@@ -85,7 +89,7 @@ export default function SiteIssueReturnBatch({ selection, disabled, onChanged }:
     }));
     setResults([...final]);
     for (const row of final) {
-      if (generation.current !== run) return;
+      if (!capture.isCurrent() || generation.current !== run) return;
       if (row.status === "unchanged") continue;
       if (localStorage.getItem("token") !== sessionToken.current) {
         row.status = "unsubmitted";
@@ -101,13 +105,13 @@ export default function SiteIssueReturnBatch({ selection, disabled, onChanged }:
           reason: reason.trim(), idempotency_key: newKey(),
         };
         try {
-          const { data } = await correctSiteIssueLine(row.issueId, row.lineId, row.payload);
-          if (generation.current !== run) return;
+          const { data } = await correctSiteIssueLine(row.issueId, row.lineId, row.payload, capture);
+          if (!capture.isCurrent() || generation.current !== run) return;
           versions.set(row.issueId, data.issue_version);
           row.status = data.changed ? "success" : "unchanged";
           row.detail = data.changed ? "返还要求已保存" : "服务器确认未变化";
         } catch (error) {
-          if (generation.current !== run) return;
+          if (!capture.isCurrent() || generation.current !== run) return;
           Object.assign(row, describeFailure(error));
           if (row.status === "conflict" || row.status === "unknown") blockedIssues.add(row.issueId);
         }
@@ -115,28 +119,28 @@ export default function SiteIssueReturnBatch({ selection, disabled, onChanged }:
       setResults([...final]);
     }
     await refresh(run);
-    if (generation.current !== run) return;
+    if (!capture.isCurrent() || generation.current !== run) return;
     busyRef.current = false;
     setBusy(false);
   };
 
   const retryUnknown = async (row: Result) => {
-    if (busyRef.current || !row.payload || localStorage.getItem("token") !== sessionToken.current) return;
+    if (!capture.isCurrent() || busyRef.current || !row.payload || localStorage.getItem("token") !== sessionToken.current) return;
     busyRef.current = true;
     setBusy(true);
     const run = generation.current;
     let patch: Pick<Result, "status" | "detail">;
     try {
-      const { data } = await correctSiteIssueLine(row.issueId, row.lineId, row.payload);
+      const { data } = await correctSiteIssueLine(row.issueId, row.lineId, row.payload, capture);
       patch = { status: data.changed ? "success" : "unchanged", detail: data.idempotent_replay ? "已核对原始成功回执" : "返还要求已保存" };
     } catch (error) {
       // 后续 403/422 等只证明本次被拒，不能据此断言首次没有落库。
       patch = { status: "unknown", detail: `尚未核对首次结果，请刷新核实：${readError(error, "请求未完成")}` };
     }
-    if (generation.current !== run) return;
+    if (!capture.isCurrent() || generation.current !== run) return;
     setResults((current) => current?.map((item) => item.lineId === row.lineId ? { ...item, ...patch } : item) ?? null);
     await refresh(run);
-    if (generation.current !== run) return;
+    if (!capture.isCurrent() || generation.current !== run) return;
     busyRef.current = false;
     setBusy(false);
   };
@@ -188,3 +192,5 @@ export default function SiteIssueReturnBatch({ selection, disabled, onChanged }:
     </Modal>
   </>;
 }
+
+export default withContextSurface(SiteIssueReturnBatch, allRule(surfaceRule("maintenance_issue.correction"), actionRule("maintenance_issue", "correct_line")));

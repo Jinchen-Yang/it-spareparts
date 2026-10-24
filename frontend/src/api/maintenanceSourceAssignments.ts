@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 import { api } from "../api";
 
 export const maintenanceSourceOrderParamsSerializer = { indexes: null } as const;
@@ -66,7 +67,7 @@ export const listMaintenanceSourceOrders = (params: {
   xsdd_project_id?: string;
   page?: number;
   page_size?: number;
-} = {}) => api.get<MaintenanceSourceOrderDirectory>(
+} = {}, capture?: ContextRequestTransport) => domainApi(capture).get<MaintenanceSourceOrderDirectory>(
   "/maintenance/project-assignments/orders",
   { params, paramsSerializer: maintenanceSourceOrderParamsSerializer },
 );
@@ -75,7 +76,7 @@ export const assignMaintenanceSourceOrders = (body: {
   project_id: string;
   items: MaintenanceAssignmentExpectation[];
   reason: string;
-}) => api.post<{ assignments: MaintenanceAssignmentResult[] }>(
+}, capture?: ContextRequestTransport) => domainApi(capture).post<{ assignments: MaintenanceAssignmentResult[] }>(
   "/maintenance/project-assignments/orders/assign",
   body,
 );
@@ -83,14 +84,14 @@ export const assignMaintenanceSourceOrders = (body: {
 export const unassignMaintenanceSourceOrders = (body: {
   items: Array<{ assignment_id: string; expected_version: number }>;
   reason: string;
-}) => api.post<{ assignments: MaintenanceAssignmentResult[] }>(
+}, capture?: ContextRequestTransport) => domainApi(capture).post<{ assignments: MaintenanceAssignmentResult[] }>(
   "/maintenance/project-assignments/orders/unassign",
   body,
 );
 
 /** 自动补挂靠：未归属维保订单按 project_std 精确匹配已有项目主档并挂靠。 */
-export const autoAssignMaintenanceSourceOrders = () =>
-  api.post<{
+export const autoAssignMaintenanceSourceOrders = ( capture?: ContextRequestTransport) =>
+  domainApi(capture).post<{
     result: {
       assigned_orders: number;
       matched_projects: number;

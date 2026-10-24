@@ -1,3 +1,4 @@
+import { domainApi, type ContextRequestTransport } from "../authz/domainTransport";
 /** 维保数据看板 API 客户端（R33 四视图 + R34 / D-0024）。
  *
  * 数量与金额分离（R33 第 2 条，R34 延续）：无金额权的账号 summary/projects/parts
@@ -590,23 +591,23 @@ export interface PagedRows<T> {
   pagination: DashboardPagination;
 }
 
-export const fetchDashboardOptions = () =>
-  api.get<DashboardOptions>(`${BASE}/options`).then((r) => r.data);
+export const fetchDashboardOptions = ( capture?: ContextRequestTransport) =>
+  domainApi(capture).get<DashboardOptions>(`${BASE}/options`).then((r) => r.data);
 
-export const fetchDashboardSummary = (params: DashboardFilters) =>
-  api.get<SummaryResponse>(`${BASE}/summary`, { params }).then((r) => r.data);
+export const fetchDashboardSummary = (params: DashboardFilters, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<SummaryResponse>(`${BASE}/summary`, { params }).then((r) => r.data);
 
 export const fetchDashboardProjects = (
-  params: DashboardFilters & { sort?: string; page?: number; page_size?: number },
-) => api.get<PagedRows<ProjectRow>>(`${BASE}/projects`, { params }).then((r) => r.data);
+  params: DashboardFilters & { sort?: string; page?: number; page_size?: number }, capture?: ContextRequestTransport
+) => domainApi(capture).get<PagedRows<ProjectRow>>(`${BASE}/projects`, { params }).then((r) => r.data);
 
 export const fetchDashboardParts = (
-  params: DashboardFilters & { sort?: string; page?: number; page_size?: number },
-) => api.get<PagedRows<PartRow>>(`${BASE}/parts`, { params }).then((r) => r.data);
+  params: DashboardFilters & { sort?: string; page?: number; page_size?: number }, capture?: ContextRequestTransport
+) => domainApi(capture).get<PagedRows<PartRow>>(`${BASE}/parts`, { params }).then((r) => r.data);
 
 export const fetchDashboardValuation = (
-  params: DashboardFilters & { sort?: string; page?: number; page_size?: number },
-) => api.get<ValuationResponse>(`${BASE}/valuation`, { params }).then((r) => r.data);
+  params: DashboardFilters & { sort?: string; page?: number; page_size?: number }, capture?: ContextRequestTransport
+) => domainApi(capture).get<ValuationResponse>(`${BASE}/valuation`, { params }).then((r) => r.data);
 
 export const fetchDashboardReceipts = (
   params: DashboardFilters & {
@@ -615,27 +616,27 @@ export const fetchDashboardReceipts = (
     sort?: string;
     page?: number;
     page_size?: number;
-  },
+  }, capture?: ContextRequestTransport
 ) =>
-  api
+  domainApi(capture)
     .get<PagedRows<ReceiptLineRow>>(`${BASE}/receipts`, { params })
     .then((r) => r.data);
 
 export const fetchDashboardQuantityChecks = (
-  params: DashboardFilters & { sort?: string; page?: number; page_size?: number },
+  params: DashboardFilters & { sort?: string; page?: number; page_size?: number }, capture?: ContextRequestTransport
 ) =>
-  api
+  domainApi(capture)
     .get<QuantityChecksResponse>(`${BASE}/quantity-checks`, { params })
     .then((r) => r.data);
 
 /** M01 期间下单（数量域，无金额键；不支持关键词 q）。 */
-export const fetchDashboardOrders = (params: DashboardFilters) =>
-  api.get<OrdersResponse>(`${BASE}/orders`, { params }).then((r) => r.data);
+export const fetchDashboardOrders = (params: DashboardFilters, capture?: ContextRequestTransport) =>
+  domainApi(capture).get<OrdersResponse>(`${BASE}/orders`, { params }).then((r) => r.data);
 
 /** M03 每日每项目已计消耗（数量全计；金额键随利润门）。 */
 export const fetchDashboardConsumption = (
-  params: DashboardFilters & { page?: number; page_size?: number },
-) => api.get<ConsumptionResponse>(`${BASE}/consumption`, { params }).then((r) => r.data);
+  params: DashboardFilters & { page?: number; page_size?: number }, capture?: ContextRequestTransport
+) => domainApi(capture).get<ConsumptionResponse>(`${BASE}/consumption`, { params }).then((r) => r.data);
 
 /** M03 领用明细下钻：issue_date × project_id 定位到具体日×项目核对。 */
 export const fetchDashboardConsumptionIssues = (
@@ -644,9 +645,9 @@ export const fetchDashboardConsumptionIssues = (
     project_id?: string;
     page?: number;
     page_size?: number;
-  },
+  }, capture?: ContextRequestTransport
 ) =>
-  api
+  domainApi(capture)
     .get<PagedRows<ConsumptionIssueRow>>(`${BASE}/consumption/issues`, { params })
     .then((r) => r.data);
 
@@ -666,9 +667,9 @@ export const downloadDashboardExport = async (
     format: "csv" | "xlsx";
     test_result?: string;
     source?: string;
-  },
+  }, capture?: ContextRequestTransport
 ): Promise<DashboardExportDownload> => {
-  const response = await api.get<Blob>(`${BASE}/export`, {
+  const response = await domainApi(capture).get<Blob>(`${BASE}/export`, {
     params,
     responseType: "blob",
   });

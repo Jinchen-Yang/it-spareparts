@@ -1,3 +1,4 @@
+import { useModuleAccess } from "../../authz/access";
 import { Alert, Button, Select, Skeleton, Space } from "antd";
 import { Link, useSearchParams } from "react-router-dom";
 import type { ExplorerRow } from "../../api/maintenanceAnalytics";
@@ -24,18 +25,19 @@ export default function MaintenancePnCompactView({ refreshKey = 0, projectLabels
 }) {
   const [search, setSearch] = useSearchParams();
   const params = pnCompactParamsFromSearch(search);
-  const { data, loading, error, reload } = useMaintenanceExplorer(params, refreshKey);
+  const { data, context, loading, error, reload } = useMaintenanceExplorer(params, refreshKey, "maintenance_analysis.pn_compact");
   useVisibleMaintenanceRefresh(async () => { if (loading) return false; reload(); return true; });
   const permissions = readPermissionMap();
+  const module = useModuleAccess("maintenance_analysis", context);
   const overview = data?.pn_overview;
-  const canCost = !!permissions.data_purchase_cost && overview?.cost_visibility === "visible"
+  const canCost = module.field("data_purchase_cost", !!permissions.data_purchase_cost) && overview?.cost_visibility === "visible"
     && data?.meta.cost_visibility === "visible" && data.summary.cost_state !== "restricted" && overview.cost_rows !== null;
   const multiSearch = new URLSearchParams(search);
   multiSearch.delete("view");
   const scope: string[] = [];
   if (params.business_type && params.business_type !== "all") scope.push(`业务类型：${csvLabels(params.business_type, BOARD_BUSINESS_TYPE_LABELS)}`);
   if (params.project) scope.push(`项目：${csvLabels(params.project, projectLabels)}`);
-  if (params.customer && permissions.data_customer && data?.meta.customer_visibility !== "restricted") scope.push(`客户：${params.customer}`);
+  if (params.customer && module.field("data_customer", !!permissions.data_customer) && data?.meta.customer_visibility !== "restricted") scope.push(`客户：${params.customer}`);
   if (params.sp) scope.push(`销售：${params.sp}`);
   if (params.q) scope.push(`搜索：${params.q}`);
   if (params.order_no) scope.push(`需求单号：${params.order_no}`);
