@@ -1,3 +1,4 @@
+import { readMaintenanceWorkbookContext } from "../../../../components/maintenance/maintenancePermissions";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ search: vi.fn(), categories: vi.fn(), correct: vi.fn() }));
@@ -53,7 +54,7 @@ async function confirmBatch(action = "批量设为免返") {
 describe("领用行返还要求批量", () => {
   it("免返发送 true，按规则的硬盘仍显式更正；同单接续新版本、跳过未变化并展示逐行结果", async () => {
     const onChanged = vi.fn().mockResolvedValue(true);
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={onChanged} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={onChanged} registerRefresh={vi.fn()} />);
     await selectAll();
     expect(screen.getByRole("button", { name: "批量修改收货属性" })).toBeInTheDocument();
     const dialog = await confirmBatch();
@@ -78,7 +79,7 @@ describe("领用行返还要求批量", () => {
     { action: "恢复按规则判断", value: null, wording: "是否应返还：按规则判断" },
   ])("$action 原样发送 $value，保留三态而非直接映射是/否", async ({ action, value, wording }) => {
     mocks.search.mockResolvedValue({ data: { total: 1, rows: [issue("i1", [true])] } });
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(true)} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(true)} registerRefresh={vi.fn()} />);
     await selectAll();
     const dialog = await confirmBatch(action);
     expect(within(dialog).getByText(wording)).toBeInTheDocument();
@@ -90,7 +91,7 @@ describe("领用行返还要求批量", () => {
     mocks.search.mockResolvedValue({ data: { total: 3, rows: [issue("i1", [false, false]), issue("i2", [false]), issue("i3", [false])] } });
     mocks.correct.mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: "site_issue_edit_version_conflict", message: "版本已变化", current_issue_version: 99 } } } })
       .mockRejectedValueOnce({ response: { status: 422, data: { detail: { message: "更正被拒绝" } } } });
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(true)} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(true)} registerRefresh={vi.fn()} />);
     await selectAll();
     const dialog = await confirmBatch();
     expect(await within(dialog).findByText("成功 1，未变化 0，冲突 1，失败 1，结果未知 0，未提交 1")).toBeInTheDocument();
@@ -101,7 +102,7 @@ describe("领用行返还要求批量", () => {
 
   it("全部原始值相同时仅显示未变化，无 HTTP 写入", async () => {
     mocks.search.mockResolvedValue({ data: { total: 1, rows: [issue("i1", [null, null])] } });
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(true)} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(true)} registerRefresh={vi.fn()} />);
     await selectAll();
     const dialog = await confirmBatch("恢复按规则判断");
     expect(await within(dialog).findByText("成功 0，未变化 2，冲突 0，失败 0，结果未知 0，未提交 0")).toBeInTheDocument();
@@ -110,7 +111,7 @@ describe("领用行返还要求批量", () => {
 
   it("成功后刷新失败保留回执，关闭结果不会重发", async () => {
     mocks.search.mockResolvedValue({ data: { total: 1, rows: [issue("i1", [false])] } });
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockRejectedValue(new Error("刷新断网"))} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockRejectedValue(new Error("刷新断网"))} registerRefresh={vi.fn()} />);
     await selectAll();
     const dialog = await confirmBatch();
     expect(await within(dialog).findByText("修改回执已保留，但页面刷新失败；请重新加载，成功行无需再次提交。")).toBeInTheDocument();
@@ -122,7 +123,7 @@ describe("领用行返还要求批量", () => {
   it("结果未知保留首次 key 和载荷核对回执，重放成功不重发其他行", async () => {
     mocks.search.mockResolvedValue({ data: { total: 1, rows: [issue("i1", [false, false])] } });
     mocks.correct.mockRejectedValueOnce(new Error("响应丢失"));
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(true)} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(true)} registerRefresh={vi.fn()} />);
     await selectAll();
     const dialog = await confirmBatch();
     expect(await within(dialog).findByText("成功 0，未变化 0，冲突 0，失败 0，结果未知 1，未提交 1")).toBeInTheDocument();
@@ -137,7 +138,7 @@ describe("领用行返还要求批量", () => {
   it("关闭未知结果后仍可恢复同键核对入口，不能用新批次抹掉未知回执", async () => {
     mocks.search.mockResolvedValue({ data: { total: 1, rows: [issue("i1", [false])] } });
     mocks.correct.mockRejectedValueOnce(new Error("响应丢失"));
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(false)} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(false)} registerRefresh={vi.fn()} />);
     await selectAll();
     const dialog = await confirmBatch();
     const close = within(dialog).getByRole("button", { name: /^关\s*闭$/ });
@@ -158,7 +159,7 @@ describe("领用行返还要求批量", () => {
     mocks.search.mockResolvedValue({ data: { total: 1, rows: [issue("i1", [false])] } });
     mocks.correct.mockRejectedValueOnce(new Error("响应丢失"))
       .mockRejectedValueOnce({ response: { status, data: { detail: { message: "本次请求被拒绝" } } } });
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(true)} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(true)} registerRefresh={vi.fn()} />);
     await selectAll();
     const dialog = await confirmBatch();
     const replay = await within(dialog).findByRole("button", { name: "原样核对回执" });
@@ -173,7 +174,7 @@ describe("领用行返还要求批量", () => {
     mocks.search.mockResolvedValue({ data: { total: 1, rows: [issue("i1", [false, false])] } });
     let resolveFirst!: (value: unknown) => void;
     mocks.correct.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }));
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(true)} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn().mockResolvedValue(true)} registerRefresh={vi.fn()} />);
     await selectAll();
     const dialog = await confirmBatch();
     localStorage.setItem("token", "another-session");
@@ -184,7 +185,7 @@ describe("领用行返还要求批量", () => {
   });
 
   it("超过原因上限明确报错并禁用提交，不静默截断", async () => {
-    render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
+    render(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
     await selectAll();
     fireEvent.click(screen.getByRole("button", { name: "批量设为应返" }));
     const dialog = await screen.findByRole("dialog");
@@ -202,14 +203,14 @@ describe("领用行返还要求批量", () => {
     const delivery = issue("delivery", [false]);
     delivery.lines[0].delivery_line_id = "delivery-id";
     mocks.search.mockResolvedValue({ data: { total: 4, rows: [issue("i1", [false]), native, draft, delivery] } });
-    const { rerender } = render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
+    const { rerender } = render(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
     await screen.findByText("PN-i1-0");
     for (const pn of ["PN-native-0", "PN-draft-0", "PN-delivery-0"]) {
       expect(within(screen.getByText(pn).closest("tr")!).getByRole("checkbox")).toBeDisabled();
     }
     expect(screen.getByRole("button", { name: "批量设为应返" })).toBeDisabled();
     localStorage.setItem("permissions", "{}");
-    rerender(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
+    rerender(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={vi.fn()} registerRefresh={vi.fn()} />);
     expect(screen.queryByRole("button", { name: "批量设为应返" })).not.toBeInTheDocument();
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   });
@@ -218,12 +219,12 @@ describe("领用行返还要求批量", () => {
     let resolveFirst!: (value: unknown) => void;
     mocks.correct.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }));
     const refresh = vi.fn().mockResolvedValue(true);
-    const { rerender } = render(<SiteReturnTab projectId="p1" exportBase="项目" canUpload={false} onChanged={refresh} registerRefresh={vi.fn()} />);
+    const { rerender } = render(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p1" exportBase="项目" canUpload={false} onChanged={refresh} registerRefresh={vi.fn()} />);
     await selectAll();
     await confirmBatch();
     expect(mocks.correct).toHaveBeenCalledTimes(1);
     mocks.search.mockResolvedValue({ data: { total: 0, rows: [] } });
-    rerender(<SiteReturnTab projectId="p2" exportBase="项目" canUpload={false} onChanged={refresh} registerRefresh={vi.fn()} />);
+    rerender(<SiteReturnTab permissionContext={readMaintenanceWorkbookContext()} canDownload projectId="p2" exportBase="项目" canUpload={false} onChanged={refresh} registerRefresh={vi.fn()} />);
     await act(async () => resolveFirst({ data: { issue_version: 8, changed: true } }));
     expect(mocks.correct).toHaveBeenCalledTimes(1);
     expect(refresh).not.toHaveBeenCalled();

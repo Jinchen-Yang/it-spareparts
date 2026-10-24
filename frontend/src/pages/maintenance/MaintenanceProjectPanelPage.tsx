@@ -28,7 +28,7 @@ import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
 import { maintenanceAnalyticsReturnPath, readProjectPanelTab } from "./analysisNavigation";
 import { publishMaintenanceChange } from "../../utils/maintenanceRefresh";
-import { readMaintenanceCapabilities } from "../../components/maintenance/maintenancePermissions";
+import { readMaintenanceCapabilities, readMaintenanceWorkbookContext, readMaintenanceWorkbookCapabilities } from "../../components/maintenance/maintenancePermissions";
 import {
   LIFECYCLE_LABEL,
   type PanelRefresh,
@@ -172,14 +172,26 @@ function HealthBand({ row, metrics }: { row: BoardProjectRow | null; metrics: He
  * 先查询展示板中是否仍有该稳定 ID，空集时不请求必然 404 的单卡。回款指标走
  * getMaintenanceProjectWorkspace。聚合行缺失时健康带「聚合数据暂缺」，不全页报错。
  */
-export function MaintenanceProjectPanelPage() {
-  const { projectId = "" } = useParams();
-  // React Router 会复用同一个 route element。以项目 ID 强制重建内部状态，确保
-  // A 项目的在途请求、tab 筛选和旧金额都不能进入 B 项目的操作上下文。
-  return <MaintenanceProjectPanelContent key={projectId} projectId={projectId} />;
+function readProjectWorkbookScope(projectId: string): string {
+  return JSON.stringify([
+    projectId, readMaintenanceWorkbookContext(),
+  ]);
 }
 
-function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
+export function MaintenanceProjectPanelPage() {
+  const { projectId = "" } = useParams();
+  // 项目、账号和权限快照共同拥有服务端资格；变化后重新读取，不能复用旧 true。
+  // App 的 Router 已按 token 重建，这里也守住面板单独嵌入/复用的边界。
+  const scope = readProjectWorkbookScope(projectId);
+  return <MaintenanceProjectPanelContent key={scope} projectId={projectId} workbookScope={scope}
+    permissionContext={readMaintenanceWorkbookContext()} />;
+}
+
+function MaintenanceProjectPanelContent({ projectId, workbookScope, permissionContext }: {
+  projectId: string;
+  workbookScope: string;
+  permissionContext: string;
+}) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = readProjectPanelTab(searchParams.get("tab"));
@@ -207,9 +219,13 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
   // 早已按此放行，入口显示跟服务端下发的 can_edit_master_workbook 走，不在前端复算
   // 挂靠关系。展示板单卡可能 404（无挂靠的停用项目 / 展示板关闭），稳定详情的
   // project 上带同一 flag 兜底。
-  const canUpload = !!perms.action_maintenance_expense_collection_upload
-    || !!row?.can_edit_master_workbook
-    || !!project?.can_edit_master_workbook;
+  // A delayed board/workspace response may rerender only this stateful child.
+  // It cannot renew a different account's qualification from the old project.
+  const ownsWorkbookScope = workbookScope === readProjectWorkbookScope(projectId);
+  const { project: workbook } = readMaintenanceWorkbookCapabilities(project && ownsWorkbookScope ? {
+    detailCanEdit: project.can_edit_master_workbook,
+    boardCanEdit: row?.can_edit_master_workbook,
+  } : undefined);
   const canManageProject = !!perms.action_maintenance_project_manage;
   const canEditBasics = canManageProject && project?.is_active !== false && (
     localStorage.getItem("role") === "admin"
@@ -456,7 +472,9 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
           size="small"
           title="本项目总表"
           filename={`${exportBase}-总表.xlsx`}
-          canUpload={canUpload}
+          permissionContext={permissionContext}
+          canDownload={workbook.canDownload}
+          canUpload={workbook.canUpload}
           hint="六 sheet 一次下载，回填后整份上传覆盖"
           onDownload={() => downloadProjectMaster(projectId)}
           onValidate={(file) => validateProjectMaster(projectId, file)}
@@ -524,7 +542,9 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
               <PartsOrdersTab
                 projectId={projectId}
                 exportBase={exportBase}
-                canUpload={canUpload}
+                permissionContext={permissionContext}
+                canDownload={workbook.canDownload}
+                canUpload={workbook.canUpload}
                 contractNos={row?.contract_nos ?? []}
                 onChanged={refreshProject}
                 registerRefresh={registerTabRefresh}
@@ -538,7 +558,9 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
               <ExpenseTab
                 projectId={projectId}
                 exportBase={exportBase}
-                canUpload={canUpload}
+                permissionContext={permissionContext}
+                canDownload={workbook.canDownload}
+                canUpload={workbook.canUpload}
                 onChanged={refreshProject}
                 registerRefresh={registerTabRefresh}
               />
@@ -551,7 +573,9 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
               <CollectionTab
                 projectId={projectId}
                 exportBase={exportBase}
-                canUpload={canUpload}
+                permissionContext={permissionContext}
+                canDownload={workbook.canDownload}
+                canUpload={workbook.canUpload}
                 rows={collectionRows}
                 loading={collectionLoading}
                 onRefresh={refreshProject}
@@ -566,7 +590,9 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
               <SiteReturnTab
                 projectId={projectId}
                 exportBase={exportBase}
-                canUpload={canUpload}
+                permissionContext={permissionContext}
+                canDownload={workbook.canDownload}
+                canUpload={workbook.canUpload}
                 onChanged={refreshProject}
                 registerRefresh={registerTabRefresh}
               />

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { App, Alert, Button, Card, Modal, Space, Table, Tag, Typography, Upload } from "antd";
 import { DownloadOutlined, UploadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -14,6 +14,7 @@ import {
 import { readError } from "./panelUtils";
 import MaintenanceAcceptancePanel from "../../../components/maintenance/MaintenanceAcceptancePanel";
 import { saveBlob } from "../../../api/maintenanceWorkbooks";
+import { useAsyncContext } from "../../../hooks/useAsyncContext";
 
 const { Text } = Typography;
 
@@ -68,47 +69,81 @@ export function AcceptanceTab({
   const [feedback, setFeedback] = useState<{ type: "error" | "warning"; text: string } | null>(null);
   const [issues, setIssues] = useState<string[]>([]);
   const [uploadInputVersion, setUploadInputVersion] = useState(0);
-  const generation = useRef(0);
+  const session = localStorage.getItem("token");
+  const importAllowed = useRef(canImport);
+  useLayoutEffect(() => { importAllowed.current = canImport; }, [canImport]);
+  const readContext = useAsyncContext(JSON.stringify([projectId, session]));
+  const uploadContext = useAsyncContext(JSON.stringify([projectId, session, canImport]));
+  const scopeGuard = () => {
+    const inScope = readContext.capture();
+    const requestSession = localStorage.getItem("token");
+    return () => inScope() && requestSession === session
+      && localStorage.getItem("token") === requestSession;
+  };
 
-  const load = async () => {
-    const seq = ++generation.current;
+  const load = async (operationCurrent = scopeGuard()) => {
+    if (!operationCurrent()) return false;
+    const readCurrent = readContext.begin();
+    const inScope = scopeGuard();
+    const isCurrentRead = () => inScope() && readCurrent();
+    const isCurrent = () => operationCurrent() && isCurrentRead();
+    // 成功写后的读回可能被新操作取代；旧清单先失效，不能继续冒充当前事实。
+    setData(null);
     setLoading(true);
     setFeedback(null);
     setIssues([]);
     try {
       const resp = await getMaintenanceAcceptanceChecklist(projectId);
-      if (seq === generation.current) setData(resp.data);
-      return seq === generation.current;
+      if (isCurrent()) setData(resp.data);
+      return isCurrent();
     } catch (err) {
-      if (seq === generation.current) {
+      if (isCurrent()) {
         setData(null);
         setFeedback({ type: "error", text: readError(err, "验收清单加载失败") });
       }
       return false;
     } finally {
-      if (seq === generation.current) setLoading(false);
+      if (isCurrentRead()) setLoading(false);
     }
   };
 
   useEffect(() => {
+    setData(null);
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  // 上传权限变更会结束旧写流程；用当前读取补齐可能被取消的写后读回。
+  }, [projectId, session, canImport]);
+
+  useEffect(() => {
+    setImporting(false);
+    setFeedback(null);
+    setIssues([]);
+  }, [projectId, session, canImport]);
 
   const downloadTemplate = async () => {
+    const isCurrent = scopeGuard();
+    if (!isCurrent()) return;
     setFeedback(null);
     setIssues([]);
     try {
       const resp = await downloadAcceptanceChecklistTemplate(projectId);
-      saveBlob(resp.data, "验收需求清单模板.xlsx");
+      if (isCurrent()) saveBlob(resp.data, "验收需求清单模板.xlsx");
     } catch (err) {
+      if (!isCurrent()) return;
       setFeedback({ type: "error", text: readError(err, "模板下载失败") });
     }
   };
 
-  const confirmApply = (preview: MaintenanceAcceptanceChecklistPreview) =>
+  const confirmApply = (preview: MaintenanceAcceptanceChecklistPreview, isCurrent: () => boolean) =>
     new Promise<void>((resolve) => {
-      Modal.confirm({
+      if (!isCurrent()) { resolve(); return; }
+      let handle: ReturnType<typeof Modal.confirm>;
+      let releaseConfirmation = () => {};
+      const finish = () => {
+        releaseConfirmation();
+        resolve();
+      };
+      handle = Modal.confirm({
       title: "应用验收清单",
       width: 560,
       content: (
@@ -131,42 +166,51 @@ export function AcceptanceTab({
       ),
       okText: "替换生效",
       cancelText: "取消",
-      onCancel: () => resolve(),
+      onCancel: finish,
       onOk: async () => {
+        if (!isCurrent()) { finish(); return; }
         setImporting(true);
         let committed = false;
         try {
           await applyMaintenanceAcceptanceChecklist(preview.batch_id);
           committed = true;
-          const localReady = await load();
+          if (!isCurrent()) return;
+          const localReady = await load(isCurrent);
+          if (!isCurrent()) return;
           let parentReady = true;
           try {
             parentReady = onChanged ? (await onChanged()) !== false : true;
           } catch {
             parentReady = false;
           }
+          if (!isCurrent()) return;
           if (localReady && parentReady) {
             message.success(`验收清单已生效并刷新（${preview.item_rows} 条）`);
           } else {
             setFeedback({ type: "warning", text: "验收清单已生效，但页面刷新失败；旧数据已失效，请重试。" });
           }
-          resolve();
         } catch (err) {
+          if (!isCurrent()) return;
           if (committed) {
             setFeedback({ type: "warning", text: "验收清单已生效，但页面刷新失败；旧数据已失效，请重试。" });
-            resolve();
             return;
           }
           setFeedback({ type: "error", text: readError(err, "应用失败，系统未写入") });
-          resolve();
         } finally {
-          setImporting(false);
+          if (isCurrent()) setImporting(false);
+          finish();
         }
       },
       });
+      releaseConfirmation = uploadContext.ownConfirmation(() => { handle.destroy(); finish(); });
     });
 
   const beforeUpload = async (file: File) => {
+    if (!importAllowed.current) return false;
+    const inScope = scopeGuard();
+    const uploadCurrent = uploadContext.begin();
+    const isCurrent = () => inScope() && uploadCurrent() && importAllowed.current;
+    if (!isCurrent()) return false;
     setImporting(true);
     setFeedback(null);
     setIssues([]);
@@ -175,20 +219,23 @@ export function AcceptanceTab({
         file,
         idempotencyKey: idempotencyKey(),
       });
+      if (!isCurrent()) return false;
       const preview = resp.data;
       if (preview.issue_rows > 0) {
         setFeedback({ type: "error", text: `清单有 ${preview.issue_rows} 个问题行，未导入` });
         setIssues(preview.issues);
       } else {
-        await confirmApply(preview);
+        await confirmApply(preview, isCurrent);
       }
     } catch (err) {
-      setFeedback({ type: "error", text: readError(err, "清单解析失败") });
+      if (isCurrent()) setFeedback({ type: "error", text: readError(err, "清单解析失败") });
     } finally {
-      setImporting(false);
-      // 浏览器不会为同一个 file input 连续触发同文件的 change；预检失败或
-      // 用户取消确认后重建 Upload，避免“再点同一文件没有反应”。
-      setUploadInputVersion((current) => current + 1);
+      if (isCurrent()) {
+        setImporting(false);
+        // 浏览器不会为同一个 file input 连续触发同文件的 change；预检失败或
+        // 用户取消确认后重建 Upload，避免“再点同一文件没有反应”。
+        setUploadInputVersion((current) => current + 1);
+      }
     }
     return false; // 阻止 antd 自动上传
   };

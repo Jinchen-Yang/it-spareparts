@@ -90,12 +90,16 @@ function returnRequirement(row: SiteReturnRow): { label: string; color: string }
 export function SiteReturnTab({
   projectId,
   exportBase,
+  canDownload,
+  permissionContext,
   canUpload,
   onChanged,
   registerRefresh,
 }: {
   projectId: string;
   exportBase: string;
+  canDownload: boolean;
+  permissionContext: string;
   canUpload: boolean;
   onChanged: () => Promise<boolean>;
   registerRefresh: RegisterPanelRefresh;
@@ -273,6 +277,8 @@ export function SiteReturnTab({
                 size="small"
                 title="维保领用与返还"
                 filename={`${exportBase}-${SHEETS.site}.xlsx`}
+                permissionContext={permissionContext}
+                canDownload={canDownload}
                 canUpload={canUpload}
                 onDownload={() => downloadProjectMaster(projectId, [SHEETS.site])}
                 onValidate={(file) => validateProjectMaster(projectId, file)}

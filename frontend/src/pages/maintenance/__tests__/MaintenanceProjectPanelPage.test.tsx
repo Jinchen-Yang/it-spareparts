@@ -160,6 +160,9 @@ const orderRow = {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  localStorage.setItem("permissions", JSON.stringify({
+    page_maintenance: true, data_purchase_cost: true, data_profit: true,
+  }));
   getBoardProject.mockResolvedValue({ data: projectRow });
   searchBoardProjects.mockResolvedValue({ data: { rows: [], total: 0 } });
   // 与后端真实契约同形（MaintenanceProjectOverview = {project: {...}}）——旧 mock 的
@@ -778,7 +781,8 @@ describe("项目面板", () => {
 
   it("概览 tab 只读：没有 01 表下载/上传，全页上传入口只有页头总表", async () => {
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_expense_collection_upload: true }));
+      JSON.stringify({ page_maintenance: true, data_purchase_cost: true, data_profit: true,
+        action_maintenance_expense_collection_upload: true }));
     renderPanel();
     await screen.findByTestId("panel-health-band");
     expect(screen.queryByRole("button", { name: /下载基础信息表/ })).toBeNull();
@@ -1456,7 +1460,8 @@ describe("报销 tab 展示备注（#47）", () => {
 
   it("页头总表必须等当前报销 tab 读回完成后才报刷新成功", async () => {
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_expense_collection_upload: true }));
+      JSON.stringify({ page_maintenance: true, data_purchase_cost: true, data_profit: true,
+        action_maintenance_expense_collection_upload: true }));
     let resolveReadback!: (value: { rows: never[]; total: number }) => void;
     const { container } = renderPanel();
     fireEvent.click(await screen.findByRole("tab", { name: "报销" }));
@@ -1484,7 +1489,8 @@ describe("报销 tab 展示备注（#47）", () => {
 
   it("页头总表落库后报销读回失败会清空旧行并明确提示刷新失败", async () => {
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_expense_collection_upload: true }));
+      JSON.stringify({ page_maintenance: true, data_purchase_cost: true, data_profit: true,
+        action_maintenance_expense_collection_upload: true }));
     listProjectExpenseRows
       .mockResolvedValueOnce({
         rows: [{
@@ -1524,6 +1530,7 @@ describe("报销 tab 展示备注（#47）", () => {
   });
 
   it("项目负责人无上传动作键时按服务端 can_edit_master_workbook 给上传入口（D-03）", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ page_maintenance: true }));
     // 后端上传门早已放行本人项目的负责人/销售；入口显示只信服务端下发的判定，
     // 不看本地权限图（负责人账号通常没有 action_maintenance_expense_collection_upload）
     getBoardProject.mockResolvedValue({
@@ -1546,10 +1553,39 @@ describe("报销 tab 展示备注（#47）", () => {
     await screen.findByRole("button", { name: /下载报销/ });
     expect(screen.queryByRole("button", { name: /上传覆盖/ })).toBeNull();
   });
+
+  it("服务端明确拒绝编辑优先于本地旧上传 action，阅读者仍能下载", async () => {
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true, data_purchase_cost: true, data_profit: true,
+      action_maintenance_expense_collection_upload: true,
+    }));
+    getBoardProject.mockResolvedValue({ data: { ...projectRow, can_edit_master_workbook: false } });
+    renderPanel();
+    await screen.findByRole("button", { name: /下载本项目总表/ });
+    await waitFor(() => expect(getBoardProject).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: /上传覆盖/ })).toBeNull();
+  });
+
+  it.each([
+    { tab: "备件与需求单", title: "备件成本", loaded: listProjectPartsRows },
+    { tab: "报销", title: "报销", loaded: listProjectExpenseRows },
+    { tab: "回款", title: "回款", loaded: getCollectionPlan },
+    { tab: "领用与返还", title: "维保领用与返还", loaded: searchSiteIssues },
+  ])("项目无金额与编辑资格：$tab 的单 sheet 也不显示工作簿入口", async ({ tab, title, loaded }) => {
+    localStorage.setItem("permissions", JSON.stringify({ page_maintenance: true, data_purchase_cost: true }));
+    getBoardProject.mockResolvedValue({ data: { ...projectRow, can_edit_master_workbook: false } });
+    renderPanel();
+    await screen.findByTestId("panel-health-band");
+    fireEvent.click(await screen.findByRole("tab", { name: tab }));
+    await waitFor(() => expect(loaded).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: new RegExp(`下载${title}|下载本项目总表|上传覆盖`) })).toBeNull();
+    expect(downloadProjectMaster).not.toHaveBeenCalled();
+  });
 });
 
 describe("D-03 上传入口兜底与领用作废可核对（void-d03）", () => {
   it("展示板单卡 404 时按稳定详情 project 上的 can_edit_master_workbook 给上传入口", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ page_maintenance: true }));
     // 无挂靠的停用项目 / 展示板开关关闭 → 单卡 404，row 为 null；面板总是先取
     // 稳定详情，flag 挂在 project 上兜底，负责人不丢上传入口（同一服务端判定）。
     getBoardProject.mockRejectedValue(new Error("404 项目不存在或无权查看"));
@@ -1640,7 +1676,8 @@ describe("D-03 上传入口兜底与领用作废可核对（void-d03）", () => 
 
   it("预检回执列出落在已作废行上的改动未生效（D-02 作废优先），其余照常回传", async () => {
     localStorage.setItem("permissions",
-      JSON.stringify({ action_maintenance_expense_collection_upload: true }));
+      JSON.stringify({ page_maintenance: true, data_purchase_cost: true, data_profit: true,
+        action_maintenance_expense_collection_upload: true }));
     validateProjectMaster.mockResolvedValue({
       site_creates: 1,
       will_void_rows: [],
