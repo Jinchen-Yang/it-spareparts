@@ -220,6 +220,10 @@ def get_gallery(
     ):
         raise CatalogError("request.validation_failed", "图库筛选无效", status_code=422)
     access(db, context, authorize, "gallery.read", part_id)
+    # The first upload must not change whether a state-specific read is allowed.
+    # Check before the empty-group shortcut, as well as for every origin below.
+    if status != "gallery":
+        access(db, context, authorize, f"gallery.{status}.read", part_id)
     states = read_identity(db, [part_id])
     identity_revision = states[part_id].identity_revision if states[part_id] else 0
     member = db.get(GalleryMember, part_id)
@@ -264,8 +268,6 @@ def get_gallery(
             ) from error
     # Authorize origin IDs before selecting duplicates so an unreadable duplicate
     # cannot hide a readable source with the same hash and purpose.
-    if status != "gallery":
-        access(db, context, authorize, f"gallery.{status}.read", part_id)
     permitted_origins = []
     for origin in db.scalars(
         select(GalleryMember.part_id).where(GalleryMember.group_id == group.id)

@@ -111,6 +111,18 @@
     "part_gallery",
     "gallery.read"
   ],
+  "gallery.candidate.read": [
+    "part_gallery",
+    "gallery.candidate.read"
+  ],
+  "gallery.deleted.read": [
+    "part_gallery",
+    "gallery.deleted.read"
+  ],
+  "gallery.processing.read": [
+    "part_gallery",
+    "gallery.processing.read"
+  ],
   "gallery.archive": [
     "part_gallery",
     "gallery.archive"

@@ -536,3 +536,42 @@ resourcePolicy:
           ruleActivated: >-
             {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
              "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-candidate-read
+      actions: ["gallery.candidate.read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.candidate.read" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-deleted-read
+      actions: ["gallery.deleted.read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.deleted.read" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
+    - name: explicit-gallery-processing-read
+      actions: ["gallery.processing.read"]
+      effect: EFFECT_ALLOW
+      roles: [registered_account]
+      condition:
+        match:
+          expr: >-
+            "gallery.processing.read" in P.attr.grants.part_gallery.actions && "gallery.read" in P.attr.grants.part_gallery.actions && P.attr.grants.part_gallery.scope == "all"
+      output:
+        when:
+          ruleActivated: >-
+            {"resource": "part_gallery", "scope": P.attr.grants.part_gallery.scope, "version": P.attr.grants.part_gallery.version,
+             "field_permissions": P.attr.grants.part_gallery.field_permissions}
