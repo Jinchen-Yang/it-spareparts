@@ -48,7 +48,7 @@ import "./dashboard/maintenanceDashboard.css";
 import { useContextAdmission, useModuleAccess } from "../../authz/access";
 import { useContextQuery } from "../../authz/contextQuery";
 import { withContextSurface } from "../../authz/ContextSurface";
-import { routeRule, surfaceRule } from "../../authz/rules";
+import { actionRule, routeRule, surfaceRule } from "../../authz/rules";
 
 const { Text } = Typography;
 
@@ -232,8 +232,9 @@ function MaintenanceDashboardPageBody() {
   const amountsVisible = module.legacy ? options?.amounts_visible ?? false : module.field("data_profit");
 
   // 筛选集 → 请求参数（自定义区间补日期；空筛选项省略）。
-  // 试算比例：金额可见账号一律携带（URL 无显式值时用默认 0.5，Sunny 01:20 裁定；
-  // 显式 "0" 为非空真值串，不被默认覆盖）；数量账号不携带任何金额参数。
+  // 只有具名调整动作可以覆盖服务端试算参数；纯估值读取保留服务端缺省语义。
+  // 获准调整时继续用默认 0.5，显式 "0" 不被覆盖；legacy 保持原金额账号行为。
+  const canAdjustRatio = amountsVisible && admission.state(actionRule("maintenance_dashboard", "adjust_valuation_parameters"), true) !== "deny";
   const ratio = state.ratio || DEFAULT_RATIO;
   const usingDefaultRatio = state.ratio === "";
   const params = useMemo<DashboardFilters>(() => ({
@@ -243,9 +244,9 @@ function MaintenanceDashboardPageBody() {
     ...(state.project ? { project: state.project } : {}),
     ...(state.business_type ? { business_type: state.business_type } : {}),
     ...(state.q.trim() ? { q: state.q.trim() } : {}),
-    ...(amountsVisible ? { value_retention_ratio: ratio } : {}),
+    ...(canAdjustRatio ? { value_retention_ratio: ratio } : {}),
   }), [state.range, state.from, state.to, state.project, state.business_type,
-      state.q, amountsVisible, ratio]);
+      state.q, canAdjustRatio, ratio]);
 
   // 排序：候选来自 options（随权限收敛）；URL 里的非法/越权键回退页签默认。
   const tabSorts = options?.sorts[tab] ?? [];

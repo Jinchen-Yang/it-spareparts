@@ -2,8 +2,8 @@
   "snapshot": {
     "schema_version": 1,
     "authorization_mode": "unified_modules",
-    "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
-    "version": "aff618b5bcee56656d82de27b5c2a3e3ae624c6c7388861ca0661d7207e488b3",
+    "catalog_version": "authz-s4-0f975412fb75bbff709bd7fe",
+    "version": "0cb7c1900f36f691f2a7fc08482d55e8dcb48523201c9d576ee0a2fccb83966d",
     "username": "s4-agent-owner",
     "principal": {
       "id": 1,
@@ -5061,7 +5061,7 @@
   "catalog": {
     "schema_version": 1,
     "authorization_mode": "unified_modules",
-    "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+    "catalog_version": "authz-s4-0f975412fb75bbff709bd7fe",
     "modules": [
       {
         "id": "company_summary",
@@ -10150,7 +10150,8 @@
             "page_routes": [
               "/maintenance",
               "/maintenance/demands",
-              "/maintenance/projects/:projectId"
+              "/maintenance/projects/:projectId",
+              "/maintenance/analytics"
             ],
             "route_entry": false
           }
@@ -22334,7 +22335,7 @@
         },
         "authorization_context": {
           "schema_version": 1,
-          "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+          "catalog_version": "authz-s4-0f975412fb75bbff709bd7fe",
           "authorization_epoch": 0,
           "context": {
             "kind": "collection",
@@ -22360,13 +22361,13 @@
           {
             "id": 1,
             "title": "synthetic session",
-            "updated_at": "2026-10-24T02:44:50.760277Z",
+            "updated_at": "2026-10-24T08:31:13.464247Z",
             "generating": false
           }
         ],
         "authorization_context": {
           "schema_version": 1,
-          "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+          "catalog_version": "authz-s4-0f975412fb75bbff709bd7fe",
           "authorization_epoch": 0,
           "context": {
             "kind": "collection",
@@ -22393,17 +22394,17 @@
       "resolution": {
         "locator": {
           "object_type": "agent_file",
-          "object_id": "6762289883d3"
+          "object_id": "340d4c05ef70"
         },
         "authorization_context": {
           "schema_version": 1,
-          "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+          "catalog_version": "authz-s4-0f975412fb75bbff709bd7fe",
           "authorization_epoch": 0,
           "context": {
             "kind": "object",
             "object_type": "agent_file",
-            "id": "6762289883d3",
-            "authorization_revision": "d2e78fc48a2bc52e89f09b1c187247fdfff7ed70f8c559bef89b36768f366926"
+            "id": "340d4c05ef70",
+            "authorization_revision": "895d69ae426368e3ee3ae9594e70ed18266e8746debc277512cb86cd75c3d24e"
           },
           "resources": {
             "agent_file": {
@@ -22420,19 +22421,19 @@
         }
       },
       "payload": {
-        "file_id": "6762289883d3",
+        "file_id": "340d4c05ef70",
         "filename": "synthetic.txt",
         "kind": "other",
         "ext": "txt",
         "authorization_context": {
           "schema_version": 1,
-          "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+          "catalog_version": "authz-s4-0f975412fb75bbff709bd7fe",
           "authorization_epoch": 0,
           "context": {
             "kind": "object",
             "object_type": "agent_file",
-            "id": "6762289883d3",
-            "authorization_revision": "d2e78fc48a2bc52e89f09b1c187247fdfff7ed70f8c559bef89b36768f366926"
+            "id": "340d4c05ef70",
+            "authorization_revision": "895d69ae426368e3ee3ae9594e70ed18266e8746debc277512cb86cd75c3d24e"
           },
           "resources": {
             "agent_file": {
@@ -22458,13 +22459,13 @@
         },
         "authorization_context": {
           "schema_version": 1,
-          "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+          "catalog_version": "authz-s4-0f975412fb75bbff709bd7fe",
           "authorization_epoch": 0,
           "context": {
             "kind": "object",
             "object_type": "chat_session",
             "id": "1",
-            "authorization_revision": "4e53f788c0fef1b74315ccd7b8142b3c75d4eac66f26161a479504635a4909c7"
+            "authorization_revision": "2c009e84f2de22999913af0a434225e7cfd822e9181ed894faa2d7f6be8ced84"
           },
           "resources": {
             "private_chat_session": {
@@ -22486,13 +22487,13 @@
         "items": [],
         "authorization_context": {
           "schema_version": 1,
-          "catalog_version": "authz-s4-b54b6526cddd46d86c396d11",
+          "catalog_version": "authz-s4-0f975412fb75bbff709bd7fe",
           "authorization_epoch": 0,
           "context": {
             "kind": "object",
             "object_type": "chat_session",
             "id": "1",
-            "authorization_revision": "4e53f788c0fef1b74315ccd7b8142b3c75d4eac66f26161a479504635a4909c7"
+            "authorization_revision": "2c009e84f2de22999913af0a434225e7cfd822e9181ed894faa2d7f6be8ced84"
           },
           "resources": {
             "private_chat_session": {
@@ -22511,5 +22512,5 @@
     }
   ],
   "sse_entry": "POST /api/agent/sessions/{session_id}/chat/stream",
-  "sse": "data: {\"type\":\"ready\",\"schema_version\":1,\"session_id\":1,\"run_id\":\"40c9e75fec874f6baaf355039161ef63\",\"authorization_context\":{\"schema_version\":1,\"catalog_version\":\"authz-s4-b54b6526cddd46d86c396d11\",\"authorization_epoch\":0,\"context\":{\"kind\":\"object\",\"object_type\":\"chat_session\",\"id\":\"1\",\"authorization_revision\":\"a937e3b802757ad07d18c7bf3061848f4e6715d5370e769d327d311f7bfe8ced\"},\"resources\":{\"agent_chat\":{\"grant_version\":1,\"decisions\":{\"use\":{\"effect\":\"allow\",\"reason\":null}},\"field_permissions\":[]},\"private_chat_session\":{\"grant_version\":1,\"decisions\":{\"run\":{\"effect\":\"allow\",\"reason\":null}},\"field_permissions\":[]}}},\"replay_complete\":true}\n\ndata: {\"type\":\"delta\",\"text\":\"AI 助手尚未配置：请在服务器 .env 设置 LLM_API_KEY（如 DeepSeek 密钥）后重启服务。在此之前可以继续使用「型号查询」页的近似搜索。\",\"run_id\":\"40c9e75fec874f6baaf355039161ef63\",\"seq\":1}\n\ndata: {\"type\":\"done\",\"tool_calls\":[],\"configured\":false,\"stopped\":false,\"run_id\":\"40c9e75fec874f6baaf355039161ef63\",\"seq\":2}\n\n"
+  "sse": "data: {\"type\":\"ready\",\"schema_version\":1,\"session_id\":1,\"run_id\":\"db562f06de31421f8878b94bd4cf3bf5\",\"authorization_context\":{\"schema_version\":1,\"catalog_version\":\"authz-s4-0f975412fb75bbff709bd7fe\",\"authorization_epoch\":0,\"context\":{\"kind\":\"object\",\"object_type\":\"chat_session\",\"id\":\"1\",\"authorization_revision\":\"fe5359feff1964055eb228b2302dff6c2b01303d47eb94d3fd0e7d4dc104649b\"},\"resources\":{\"agent_chat\":{\"grant_version\":1,\"decisions\":{\"use\":{\"effect\":\"allow\",\"reason\":null}},\"field_permissions\":[]},\"private_chat_session\":{\"grant_version\":1,\"decisions\":{\"run\":{\"effect\":\"allow\",\"reason\":null}},\"field_permissions\":[]}}},\"replay_complete\":true}\n\ndata: {\"type\":\"delta\",\"text\":\"AI 助手尚未配置：请在服务器 .env 设置 LLM_API_KEY（如 DeepSeek 密钥）后重启服务。在此之前可以继续使用「型号查询」页的近似搜索。\",\"run_id\":\"db562f06de31421f8878b94bd4cf3bf5\",\"seq\":1}\n\ndata: {\"type\":\"done\",\"tool_calls\":[],\"configured\":false,\"stopped\":false,\"run_id\":\"db562f06de31421f8878b94bd4cf3bf5\",\"seq\":2}\n\n"
 }

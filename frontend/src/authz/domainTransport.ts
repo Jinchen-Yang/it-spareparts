@@ -60,12 +60,13 @@ export function useContextTransport(lifetimeKey: string, legacyAllowed = false, 
           urlQuery[key] = previous === undefined ? value : Array.isArray(previous) ? [...previous, value] : [previous, value];
         }
         const query = { ...urlQuery, ...config.params };
-        const input: ContextInput = { pathParams: registered.pathParams, query, body: config.data };
+        const currentInput = (): ContextInput => ({ pathParams: registered.pathParams, query, body: config.data, headers: config.headers });
+        const input = currentInput();
         const inputKey = contextInputKey(input);
         return run({
           admit: snapshot => ruleState(snapshot, rule, legacy) !== "deny",
           queryKey: `${registered.entryId}:${inputKey}`,
-          isInputCurrent: () => lifetime.current === lifetimeKey && authz.isCurrent(owner) && !config.signal?.aborted && contextInputKey(input) === inputKey,
+          isInputCurrent: () => lifetime.current === lifetimeKey && authz.isCurrent(owner) && !config.signal?.aborted && contextInputKey(currentInput()) === inputKey,
           request: async (capture, current) => {
             const child = new AbortController();
             const abort = () => child.abort();
@@ -74,12 +75,12 @@ export function useContextTransport(lifetimeKey: string, legacyAllowed = false, 
             if (capture.signal.aborted || config.signal?.aborted) child.abort();
             const captured = { ...capture, signal: child.signal };
             try {
-              if (allLegacy) return await api.request<T>({ ...config, ...transportConfig(captured) });
+              if (allLegacy) return await api.request<T>({ ...config, auth: undefined, ...transportConfig(captured, input.headers) });
               return await executeContextRequest({ entryId: registered.entryId, input, snapshot: authz.snapshot!,
                 capture: captured, current, execute: async (authorized, precondition) => {
                   if (resolvedRule && !ruleAllowed(authz.snapshot, resolvedRule(registered.entryId, authorized.authorizationContext!), legacy, authorized.authorizationContext))
                     throw new ContextDenied();
-                  const response = await api.request<T>({ ...config, ...transportConfig(authorized),
+                  const response = await api.request<T>({ ...config, auth: undefined, ...transportConfig(authorized, input.headers),
                     url: authorizationPath(registered.entryId, registered.pathParams),
                     params: method === "GET" ? { ...query, authorization_precondition: JSON.stringify(precondition) } : query,
                     data: method === "GET" ? undefined : commandBody(config.data, precondition),

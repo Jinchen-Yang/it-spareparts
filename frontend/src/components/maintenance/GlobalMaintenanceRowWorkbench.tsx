@@ -31,7 +31,7 @@ function GlobalMaintenanceRowWorkbench({ rangeParams }: { rangeParams: RowRangeP
   }), [rangeParams.range, rangeParams.from, rangeParams.to, filters, projectId]);
   const directory = useContextQuery({
     entryId: "GET /api/maintenance/projects/stable",
-    rule: actionRule("maintenance_project_directory", "read"), queryKey: ["row-projects"], legacyAllowed: true,
+    rule: surfaceRule("maintenance_project_directory.project_selectors"), queryKey: ["row-projects"], legacyAllowed: true,
     query: async capture => {
       const first = (await listMaintenanceProjects({ page: 1, page_size: 200, include_inactive: true }, capture)).data;
       const rows = [...first.rows];

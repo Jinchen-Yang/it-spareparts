@@ -659,5 +659,6 @@ function CollectionTabContent({
 export const CollectionTab = withContextSurface(CollectionTabContent, contextSurfaces(
   "maintenance_collection.actuals", "maintenance_collection.plans", "maintenance_collection.manage_actuals",
   "maintenance_general_workbook.collection_roundtrip", "maintenance_managed_workbook.collection_roundtrip",
+  "maintenance_general_workbook_write.collection_roundtrip",
 ), props => props.projectId);
 export default CollectionTab;

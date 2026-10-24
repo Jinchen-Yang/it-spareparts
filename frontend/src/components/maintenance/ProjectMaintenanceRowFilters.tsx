@@ -69,7 +69,7 @@ export default function ProjectMaintenanceRowFilters({
         <Typography.Text>{total === null ? "行数待查询" : `共 ${total} 行`}</Typography.Text>
         {canExport && (["csv", "xlsx"] as const).map((format) => (
           <Button key={format} loading={exporting === format}
-            disabled={loading || total === null || exporting !== null}
+            disabled={loading || exporting !== null}
             onClick={() => void download(format)}>导出完整筛选集 {format.toUpperCase()}</Button>
         ))}
       </Space>

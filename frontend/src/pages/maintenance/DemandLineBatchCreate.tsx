@@ -1,3 +1,4 @@
+import { useContextAdmission } from "../../authz/access";
 import { useContextTransport } from "../../authz/domainTransport";
 import { withContextSurface } from "../../authz/ContextSurface";
 import { surfaceRule } from "../../authz/rules";
@@ -83,6 +84,8 @@ function DemandLineBatchCreate({
   onClose: () => void;
   onCommitted: () => void | Promise<unknown>;
 }) {
+  const admission = useContextAdmission();
+  const canSelectProject = admission.surface("maintenance_project_directory.project_selectors", true) !== "deny";
   const transport = useContextTransport(fixedProjectId ?? "global-create", true);
   const [projectId, setProjectId] = useState<string | undefined>(fixedProjectId);
   const [orderDate, setOrderDate] = useState<Dayjs | null>(dayjs());
@@ -103,6 +106,7 @@ function DemandLineBatchCreate({
   const projectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadProjects = useCallback(async (query?: string) => {
+    if (!canSelectProject) return;
     const generation = ++projectGen.current;
     setProjectsLoading(true);
     setProjectError(null);
@@ -136,7 +140,7 @@ function DemandLineBatchCreate({
     } finally {
       if ((generation === projectGen.current && transport.isCurrent())) setProjectsLoading(false);
     }
-  }, [transport]);
+  }, [transport, canSelectProject]);
 
   useEffect(() => {
     if (!fixedProjectId) void loadProjects();
@@ -211,7 +215,7 @@ function DemandLineBatchCreate({
   };
 
   const submit = async () => {
-    if (writeLock.current) return;
+    if ((!fixedProjectId && !canSelectProject) || writeLock.current) return;
     writeLock.current = true;
     const epoch = epochRef.current;
     setRunning(true);
@@ -364,7 +368,7 @@ function DemandLineBatchCreate({
         <Button key="close" disabled={running || unknownCount > 0} onClick={close}>关闭</Button>,
         <Button
           key="submit" type="primary" loading={running}
-          disabled={frozen && retryCount === 0}
+          disabled={(!fixedProjectId && !canSelectProject) || frozen && retryCount === 0}
           onClick={() => { void submit(); }}
         >{frozen ? `重试未完成行${retryCount ? `（${retryCount}）` : ""}` : "提交整批"}</Button>,
       ]}
@@ -388,11 +392,11 @@ function DemandLineBatchCreate({
         <Space wrap align="start">
           {fixedProjectId ? (
             <div><Text type="secondary">项目（固定）</Text><br /><Text>{fixedProjectLabel ?? "当前项目"}</Text></div>
-          ) : (
+          ) : canSelectProject ? (
             <div>
               <Text type="secondary">项目</Text><br />
               <Select
-                showSearch filterOption={false} style={{ width: 280 }}
+                aria-label="需求单项目" showSearch filterOption={false} style={{ width: 280 }}
                 value={projectId} loading={projectsLoading} disabled={frozen || running}
                 placeholder="选择项目（可按名称/编码搜索）"
                 onSearch={(value) => {
@@ -416,13 +420,13 @@ function DemandLineBatchCreate({
                 }))}
               />
             </div>
-          )}
+          ) : <Alert type="info" message="没有项目选择权限，可从已授权的项目面板新增需求。" />}
           <div>
             <Text type="secondary">制单日期</Text><br />
             <DatePicker value={orderDate} disabled={frozen || running} onChange={setOrderDate} />
           </div>
         </Space>
-        {projectError && !fixedProjectId ? (
+        {projectError && !fixedProjectId && canSelectProject ? (
           <Alert type="error" showIcon message={projectError}
             action={<Button size="small" onClick={() => { void loadProjects(); }}>重试</Button>} />
         ) : null}

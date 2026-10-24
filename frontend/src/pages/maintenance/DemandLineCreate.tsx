@@ -1,3 +1,4 @@
+import { useContextAdmission } from "../../authz/access";
 import { useContextTransport } from "../../authz/domainTransport";
 import { withContextSurface } from "../../authz/ContextSurface";
 import { surfaceRule } from "../../authz/rules";
@@ -89,6 +90,8 @@ function DemandLineCreate({
   /** 创建成功后的回读钩子（父级刷新列表/指标）。只在同代（未过期）时调用。 */
   onCreated: () => void;
 }) {
+  const admission = useContextAdmission();
+  const canSelectProject = admission.surface("maintenance_project_directory.project_selectors", true) !== "deny";
   const transport = useContextTransport(fixedProjectId ?? "global-create", true);
   const { message } = App.useApp();
   const [form] = Form.useForm<CreateFormValues>();
@@ -112,6 +115,7 @@ function DemandLineCreate({
   const projectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadProjects = useCallback(async (q?: string) => {
+    if (!canSelectProject) return;
     const g = ++projectGen.current;
     setProjectLoading(true);
     setProjectError(null);
@@ -150,7 +154,7 @@ function DemandLineCreate({
     } finally {
       if ((g === projectGen.current && transport.isCurrent())) setProjectLoading(false);
     }
-  }, [transport]);
+  }, [transport, canSelectProject]);
 
   useEffect(() => {
     if (fixedProjectId) return; // 面板模式不需要项目列表
@@ -196,7 +200,7 @@ function DemandLineCreate({
   }, []);
 
   const doSubmit = async () => {
-    if (submitLockRef.current) return; // 同步锁：在任何 await 之前挡住快速双击
+    if ((!fixedProjectId && !canSelectProject) || submitLockRef.current) return; // 同步锁：在任何 await 之前挡住快速双击
     submitLockRef.current = true;
     const epoch = epochRef.current;
     setSubmitting(true);
@@ -261,6 +265,7 @@ function DemandLineCreate({
       okText="创建需求行"
       cancelText="取消"
       confirmLoading={submitting}
+      okButtonProps={{ disabled: !fixedProjectId && !canSelectProject }}
       onCancel={() => { if (!submitting) onClose(); }}
       onOk={() => { void doSubmit(); }}
       maskClosable={false}
@@ -284,13 +289,14 @@ function DemandLineCreate({
             <Form.Item label="项目（当前项目，固定）">
               <Text>{fixedProjectLabel ?? "当前项目"}</Text>
             </Form.Item>
-          ) : (
+          ) : canSelectProject ? (
             <Form.Item
               name="project_id"
               label="项目"
               rules={[{ required: true, message: "请选择项目" }]}
             >
               <Select
+                aria-label="需求单项目"
                 showSearch
                 filterOption={false}
                 loading={projectLoading}
@@ -306,8 +312,8 @@ function DemandLineCreate({
                 }))}
               />
             </Form.Item>
-          )}
-          {projectError && !fixedProjectId ? (
+          ) : <Alert type="info" message="没有项目选择权限，可从已授权的项目面板新增需求。" />}
+          {projectError && !fixedProjectId && canSelectProject ? (
             <Alert
               type="error"
               showIcon
