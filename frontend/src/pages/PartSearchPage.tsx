@@ -10,6 +10,7 @@ import PoolReferencePanel from "../components/pools/PoolReferencePanel";
 import InlinePartEditModal from "../components/parts/InlinePartEditModal";
 import PartGalleryPanel from "../components/parts/PartGalleryPanel";
 import LivePartSearch from "../components/parts/LivePartSearch";
+import PartThumb from "../components/gallery/PartThumb";
 import api from "../api";
 import type { Overview, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { unifiedSearch, fetchOverview } from "../api/search";
@@ -385,6 +386,9 @@ export default function PartSearchPage() {
           <div className="part-search-keyword">
             <LivePartSearch
               inputValue={qInput}
+              renderThumb={(item) => <span className="live-part-search-thumb" aria-hidden>
+                <PartThumb partId={item.part_id} pn={item.pn_std} size={40} />
+              </span>}
               onInputChange={(text) => { setQInput(text); setQueryError(false); }}
               inputProps={{
                 "aria-label": "型号或关键词",

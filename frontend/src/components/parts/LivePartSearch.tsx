@@ -229,18 +229,20 @@ export default function LivePartSearch({
             >
               {renderThumb?.(item)}
               <div className="live-part-search-details">
-                <div><strong className="live-part-search-pn">{highlightedPn(item.pn_std, item.matched_terms ?? [])}</strong>
+                <div className="live-part-search-line">
+                  <strong className="live-part-search-pn">{highlightedPn(item.pn_std, item.matched_terms ?? [])}</strong>
                   {item.match_reason && <Tag color="blue">{item.match_reason}</Tag>}
                   {renderBadges?.(item)}
+                  {(item.brand || item.manufacturer) && <span className="live-part-search-secondary">
+                    {[item.brand, item.manufacturer].filter(Boolean).join(" / ")}
+                  </span>}
                 </div>
-                {(item.brand || item.manufacturer) && <div className="live-part-search-secondary">
-                  {[item.brand, item.manufacturer].filter(Boolean).join(" / ")}
-                </div>}
                 {(item.summary || item.description) && <div className="live-part-search-summary"
                   title={item.summary || item.description || undefined}>{item.summary || item.description}</div>}
-                <Space wrap size={[0, 4]}>{item.key_specs?.map((spec, i) => <Tag key={i}>{spec.label} {spec.value}</Tag>)}
+                {(Boolean(item.key_specs?.length) || item.stock_qty != null) && <div className="live-part-search-specs">
+                  {item.key_specs?.map((spec, i) => <Tag key={i}>{spec.label} {spec.value}</Tag>)}
                   {item.stock_qty != null && <Tag>库存 {item.stock_qty}</Tag>}
-                </Space>
+                </div>}
               </div>
             </div>)}
         </div>

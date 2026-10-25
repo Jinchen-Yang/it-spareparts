@@ -5,14 +5,19 @@
   border-radius: 6px; background: var(--mb-surface); color: var(--mb-text);
   border: 1px solid var(--mb-border); box-shadow: var(--mb-shadow);
 }
-.live-part-search-options { max-height: 360px; overflow-y: auto; padding: 4px; }
-.live-part-search-option { display: flex; gap: 10px; padding: 9px 10px; border-radius: 4px; cursor: pointer; }
+.live-part-search-options { max-height: 420px; overflow-y: auto; padding: 4px; }
+.live-part-search-option { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 4px; cursor: pointer; }
 .live-part-search-option:hover, .live-part-search-option.is-active { background: var(--mb-accent-soft); }
 .live-part-search-details { min-width: 0; flex: 1; }
 .live-part-search-pn { font-family: monospace; margin-right: 8px; }
 .live-part-search-pn mark { background: var(--mb-tag-warning-background); color: var(--mb-tag-warning-text); }
-.live-part-search-secondary, .live-part-search-summary { color: var(--mb-text-3); font-size: 12px; margin-top: 3px; }
-.live-part-search-summary { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-bottom: 4px; }
+.live-part-search-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.live-part-search-line .ant-tag { margin-inline-end: 0; }
+.live-part-search-secondary { color: var(--mb-text-3); font-size: 12px; margin-left: auto; padding-left: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.live-part-search-summary { color: var(--mb-text-3); font-size: 12px; margin-top: 2px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.live-part-search-specs { margin-top: 3px; display: flex; flex-wrap: wrap; gap: 4px; }
+.live-part-search-specs .ant-tag { margin-inline-end: 0; font-size: 11px; line-height: 18px; }
+.live-part-search-thumb { pointer-events: none; flex: none; }
 .live-part-search-state { padding: 18px; text-align: center; }
 .live-part-search-add { border-top: 1px solid var(--mb-border); padding: 4px; }
 .live-part-search-add .ant-btn { height: auto; white-space: normal; }
