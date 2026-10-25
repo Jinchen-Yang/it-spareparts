@@ -36,6 +36,20 @@ UploadId = Annotated[UUID, Path()]
 MAX_GALLERY_REVISION = 2_147_483_647
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 _IMAGE_MIME = Literal["image/jpeg", "image/png", "image/webp"]
+# 图库代理的访问审计动作全集。sys_access_log.action 列宽 64，新增动作先在这里
+# 登记；tests/test_access_log_action_width.py 会从活代码取本 Literal 校验列宽。
+GalleryAuditAction = Literal[
+    "gallery_list",
+    "gallery_upload_sign",
+    "gallery_upload_resumable",
+    "gallery_upload_status",
+    "gallery_upload_part_sign",
+    "gallery_upload_complete",
+    "gallery_upload_cancel",
+    "gallery_register",
+    "gallery_update",
+    "gallery_delete",
+]
 
 
 class UploadSignInput(BaseModel):
@@ -172,7 +186,7 @@ def _response_with_etag(result: ShopGalleryResponse) -> Response:
     return Response(status_code=result.status_code, headers=headers)
 
 
-def _audit(ctx: UserContext, action: str, part_id: int, **extra: object) -> None:
+def _audit(ctx: UserContext, action: GalleryAuditAction, part_id: int, **extra: object) -> None:
     record_access_log(ctx, action, "part", {"part_id": part_id, **extra})
 
 
