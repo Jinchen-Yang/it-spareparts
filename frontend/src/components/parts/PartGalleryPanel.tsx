@@ -14,6 +14,7 @@ interface Props {
   pn: string;
   /** 与后端 page_master_data 同一权限；false = 只读。 */
   canWrite: boolean;
+  onChanged?: () => void;
 }
 
 type UploadStatus = "signing" | "uploading" | "registering" | "done" | "failed";
@@ -39,7 +40,7 @@ function errorMessage(error: any, fallback: string): string {
   return fallback;
 }
 
-export default function PartGalleryPanel({ partId, pn, canWrite }: Props) {
+export default function PartGalleryPanel({ partId, pn, canWrite, onChanged }: Props) {
   const { message, modal } = App.useApp();
   const [gallery, setGallery] = useState<GalleryList | null>(null);
   const [loading, setLoading] = useState(false);
@@ -125,6 +126,7 @@ export default function PartGalleryPanel({ partId, pn, canWrite }: Props) {
       const result = await registerGalleryImage(
         partId, ticket.upload_id, authToken, item.registerRequestId,
       );
+      onChanged?.();
       if (!mounted.current) return;
       patchUpload(item.key, { status: "done", progress: 100 });
       if (result.duplicate || result.restored) message.info("图片已存在，已复用商城图库记录");
@@ -182,6 +184,7 @@ export default function PartGalleryPanel({ partId, pn, canWrite }: Props) {
       await updateGalleryImage(partId, image.id, {
         ...update, baseline_gallery_revision: gallery.gallery_revision,
       }, authToken, newGalleryRequestId());
+      onChanged?.();
       if (!mounted.current) return;
       message.success(successText);
       await load();
@@ -214,6 +217,7 @@ export default function PartGalleryPanel({ partId, pn, canWrite }: Props) {
         setBusyImage(image.id);
         try {
           await deleteGalleryImage(partId, image.id, revision, authToken, newGalleryRequestId());
+          onChanged?.();
           if (!mounted.current) return;
           message.success("图片已删除");
           await load();
