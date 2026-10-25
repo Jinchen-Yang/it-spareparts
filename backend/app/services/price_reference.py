@@ -13,11 +13,13 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Literal
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.business_time import business_today
@@ -27,12 +29,15 @@ from app.schemas.resale_price_reference import ReferenceWindow
 from app.security import UserContext, is_field_hidden
 from app.services import part_overview
 from app.services.resale_price_reference import (
+    PriceReferenceUnavailable,
     _Group,
     _grouped_samples_by_part,
     _price_entries,
     _purchase_grouped_samples_by_part,
     _weighted_amounts,
 )
+
+_log = logging.getLogger(__name__)
 
 # data_purchase_cost 字段组的代表键：与 apply_field_visibility 的隐藏字段同一判定。
 _PURCHASE_COST_FIELD = "purchase_price"
@@ -100,6 +105,28 @@ def batch(
     if not requested:
         return {}
 
+    try:
+        return _batch_resolved(
+            db, requested, ctx, window_days=window_days, today=today
+        )
+    except PriceReferenceUnavailable:
+        raise
+    except SQLAlchemyError:
+        _log.warning("Price reference batch aggregation unavailable")
+        raise PriceReferenceUnavailable from None
+    except (ArithmeticError, ValueError):
+        _log.warning("Price reference batch arithmetic unavailable")
+        raise PriceReferenceUnavailable from None
+
+
+def _batch_resolved(
+    db: Session,
+    requested: list[int],
+    ctx: UserContext,
+    *,
+    window_days: int,
+    today: date | None,
+) -> dict[int, dict]:
     rows = db.execute(
         select(DimPart.id, DimPart.pn_std).where(
             DimPart.id.in_(requested), DimPart.status == "active"
