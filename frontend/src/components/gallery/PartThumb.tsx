@@ -36,8 +36,13 @@ export default function PartThumb({ partId, pn, size = 48, onEmptyClick }: Props
     return () => observer.disconnect();
   }, [visible]);
 
+  // 每次重新加载（换型号 / 失效刷新 / 卸载）都换代，预览的迟到响应按代次丢弃。
+  const viewGeneration = useRef(0);
+  useEffect(() => () => { viewGeneration.current += 1; }, []);
+
   useEffect(() => {
     if (!visible) return;
+    viewGeneration.current += 1;
     let disposed = false;
     setStatus("loading");
     setGallery(null);
@@ -64,16 +69,22 @@ export default function PartThumb({ partId, pn, size = 48, onEmptyClick }: Props
   const actionable = status === "ready" || (status === "empty" && Boolean(onEmptyClick));
   const open = () => {
     if (status === "ready") {
-      if (!token) return;
-      // 签名链接可能已过期：打开预览前经缓存取一次（过期会重新拉取），用最新链接预览。
+      const generation = viewGeneration.current;
+      const showCurrent = () => { setCurrent(mainIndex); setPreview(true); };
+      if (!token) { showCurrent(); return; }
+      // 签名链接可能已过期：打开预览前经缓存取一次（过期会重新拉取）。
+      // 刷新失败时退回用已有链接预览，不把正常缩略图打成错误态。
       void getCover(partId, token).then((data) => {
+        if (generation !== viewGeneration.current) return;
         const fresh = Array.isArray(data.images) ? data.images : [];
-        if (!fresh.length) { setGallery(data); setStatus("empty"); return; }
+        if (!fresh.length) { showCurrent(); return; }
         const freshMain = data.main_image_id ?? data.main_image?.id;
         setGallery(data);
         setCurrent(Math.max(0, fresh.findIndex((image) => image.id === freshMain)));
         setPreview(true);
-      }).catch(() => setStatus("error"));
+      }).catch(() => {
+        if (generation === viewGeneration.current) showCurrent();
+      });
     } else if (status === "empty") onEmptyClick?.();
   };
   const style: CSSProperties = {

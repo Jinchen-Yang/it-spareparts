@@ -185,3 +185,40 @@ it("签名链接过期后点击预览会重新取图库并用新链接", async (
   expect(fetchPartGallery).toHaveBeenCalledTimes(2);
   vi.restoreAllMocks();
 });
+
+it("预览前刷新失败时仍用已有链接预览，缩略图不变成错误态", async () => {
+  const soon = new Date(Date.now() + 61_000).toISOString();
+  const stale = { ...gallery, images: [{ ...image, url_expires_at: soon }, back] } as CoverGallery;
+  vi.mocked(fetchPartGallery).mockResolvedValueOnce(stale).mockRejectedValueOnce(new Error("shop down"));
+  render(<PartThumb partId={42} pn="PN-42" />);
+  await screen.findByAltText("PN-42 图片");
+  const realNow = Date.now;
+  vi.spyOn(Date, "now").mockImplementation(() => realNow() + 5_000);
+  fireEvent.click(screen.getByRole("button", { name: "PN-42 图片" }));
+  await waitFor(() => expect(document.querySelector(".ant-image-preview-img")).toHaveAttribute("src", image.url));
+  expect(screen.getByAltText("PN-42 图片")).toBeInTheDocument();
+  vi.restoreAllMocks();
+});
+
+it("换型号后迟到的预览刷新结果被丢弃", async () => {
+  const soon = new Date(Date.now() + 61_000).toISOString();
+  const stale = { ...gallery, images: [{ ...image, url_expires_at: soon }, back] } as CoverGallery;
+  let resolveLate!: (data: GalleryList) => void;
+  const other = { ...gallery, part_id: 43, images: [{ ...image, id: "other", url: "https://oss.example/other.jpg" }] };
+  vi.mocked(fetchPartGallery).mockImplementation((partId: number) => {
+    if (partId === 43) return Promise.resolve(other);
+    return vi.mocked(fetchPartGallery).mock.calls.filter(([id]) => id === 42).length === 1
+      ? Promise.resolve(stale) : new Promise((done) => { resolveLate = done; });
+  });
+  const { rerender } = render(<PartThumb partId={42} pn="PN-42" />);
+  await screen.findByAltText("PN-42 图片");
+  const realNow = Date.now;
+  vi.spyOn(Date, "now").mockImplementation(() => realNow() + 5_000);
+  fireEvent.click(screen.getByRole("button", { name: "PN-42 图片" }));
+  rerender(<PartThumb partId={43} pn="PN-43" />);
+  await screen.findByAltText("PN-43 图片");
+  await act(async () => resolveLate({ ...gallery, images: [{ ...image, url: "https://oss.example/late.jpg" }] }));
+  expect(document.querySelector('.ant-image-preview-img[src="https://oss.example/late.jpg"]')).toBeNull();
+  vi.restoreAllMocks();
+  invalidateCover(43);
+});
