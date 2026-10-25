@@ -28,6 +28,16 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe("LivePartSearch", () => {
+  it("防抖等待期间显示「搜索中」，不闪「暂无匹配型号」", async () => {
+    render(<LivePartSearch />);
+    type("0231");
+    await tick(50);
+    expect(screen.getByRole("status")).toHaveTextContent("搜索中");
+    expect(screen.queryByText("暂无匹配型号")).not.toBeInTheDocument();
+    await tick(100);
+    expect(screen.getByRole("option")).toBeInTheDocument();
+  });
+
   it("150ms 防抖且只发最后一次输入；展示资料、命中原因和 PN 高亮", async () => {
     render(<LivePartSearch />);
     type("02");

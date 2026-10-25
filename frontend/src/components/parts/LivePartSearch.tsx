@@ -118,6 +118,8 @@ export default function LivePartSearch({
     setLoading(false);
     if (!next.trim() || composing.current) { setOpen(false); return; }
     setOpen(true);
+    // 防抖期间就显示「搜索中」，避免清空后先闪一下「暂无匹配型号」。
+    setLoading(true);
     const seq = generation.current;
     const run = async () => {
       timer.current = null;

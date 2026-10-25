@@ -64,8 +64,16 @@ export default function PartThumb({ partId, pn, size = 48, onEmptyClick }: Props
   const actionable = status === "ready" || (status === "empty" && Boolean(onEmptyClick));
   const open = () => {
     if (status === "ready") {
-      setCurrent(mainIndex);
-      setPreview(true);
+      if (!token) return;
+      // 签名链接可能已过期：打开预览前经缓存取一次（过期会重新拉取），用最新链接预览。
+      void getCover(partId, token).then((data) => {
+        const fresh = Array.isArray(data.images) ? data.images : [];
+        if (!fresh.length) { setGallery(data); setStatus("empty"); return; }
+        const freshMain = data.main_image_id ?? data.main_image?.id;
+        setGallery(data);
+        setCurrent(Math.max(0, fresh.findIndex((image) => image.id === freshMain)));
+        setPreview(true);
+      }).catch(() => setStatus("error"));
     } else if (status === "empty") onEmptyClick?.();
   };
   const style: CSSProperties = {

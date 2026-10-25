@@ -170,3 +170,18 @@ it("token 改变并重渲染时重新请求，不使用旧账号的图片", asyn
   await waitFor(() => expect(screen.getByAltText("PN-42 图片")).toHaveAttribute("src", back.url));
   expect(fetchPartGallery).toHaveBeenLastCalledWith(42, "new-thumb-token");
 });
+
+it("签名链接过期后点击预览会重新取图库并用新链接", async () => {
+  const soon = new Date(Date.now() + 61_000).toISOString();
+  const stale = { ...gallery, images: [{ ...image, url_expires_at: soon }, back] } as CoverGallery;
+  const freshImage = { ...image, url: "https://oss.example/front-fresh.jpg" };
+  vi.mocked(fetchPartGallery).mockResolvedValueOnce(stale).mockResolvedValueOnce({ ...gallery, images: [freshImage, back] });
+  render(<PartThumb partId={42} pn="PN-42" />);
+  await screen.findByAltText("PN-42 图片");
+  const realNow = Date.now;
+  vi.spyOn(Date, "now").mockImplementation(() => realNow() + 5_000);
+  fireEvent.click(screen.getByRole("button", { name: "PN-42 图片" }));
+  await waitFor(() => expect(document.querySelector(".ant-image-preview-img")).toHaveAttribute("src", freshImage.url));
+  expect(fetchPartGallery).toHaveBeenCalledTimes(2);
+  vi.restoreAllMocks();
+});
