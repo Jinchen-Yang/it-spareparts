@@ -9,6 +9,7 @@ import PageHeader from "../components/PageHeader";
 import PoolReferencePanel from "../components/pools/PoolReferencePanel";
 import InlinePartEditModal from "../components/parts/InlinePartEditModal";
 import PartGalleryPanel from "../components/parts/PartGalleryPanel";
+import LivePartSearch from "../components/parts/LivePartSearch";
 import api from "../api";
 import type { Overview, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { unifiedSearch, fetchOverview } from "../api/search";
@@ -382,14 +383,26 @@ export default function PartSearchPage() {
             if (event.key === "Enter" && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
           }}>
           <div className="part-search-keyword">
-            <Input
-              aria-label="型号或关键词"
-              aria-invalid={queryError || undefined}
-              aria-describedby={queryError ? "part-query-error" : undefined}
-              status={queryError ? "error" : undefined}
-              placeholder="输入型号 (PN) 或描述关键词；规格条件可单独使用"
-              size="large" value={qInput}
-              onChange={(e) => { setQInput(e.target.value); setQueryError(false); }} allowClear
+            <LivePartSearch
+              inputValue={qInput}
+              onInputChange={(text) => { setQInput(text); setQueryError(false); }}
+              inputProps={{
+                "aria-label": "型号或关键词",
+                "aria-invalid": queryError || undefined,
+                "aria-describedby": queryError ? "part-query-error" : undefined,
+                status: queryError ? "error" : undefined,
+                placeholder: "输入型号 (PN) 或描述关键词；规格条件可单独使用",
+                size: "large",
+              }}
+              onChange={(items) => {
+                const item = items[0];
+                if (!item) return;
+                const unchanged = item.pn_std === urlQ && filterQuery === "{}";
+                // 选定具体型号后按该 PN 查询；身份仍用 part_id 打开现有全景深链。
+                patchUrl({ q: item.pn_std, part_id: String(item.part_id), pn: undefined,
+                  ...Object.fromEntries(filterKeys.map((key) => [key, undefined])) });
+                if (unchanged) runSearch(item.pn_std, {}, false);
+              }}
             />
             <Button type="primary" htmlType="submit" size="large" loading={searching}>搜索</Button>
           </div>

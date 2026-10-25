@@ -11,7 +11,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import SecretStr, ValidationInfo, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # DeepSeek v4 为混合思考模型；默认开思考（reasoning_content 流式回前端，灰色可折叠展示）。
@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     # 两个字段任一为空时图库代理接口整组 503。
     shop_gallery_base_url: str = ""
     shop_gallery_token: SecretStr = SecretStr("")
+    # M1 资料召回在分档、字段打分前截断；PN/别名和报价加权候选另走车道。
+    part_search_candidate_limit: int = Field(default=300, ge=1)
 
     # ---- 商城销售参考价（2026-10-19 金臣口径：30 天窗口 + 时间衰减）----
     # 只作用于新 GET /integrations/resale/parts/price-reference，不改变任何既有分析口径。
