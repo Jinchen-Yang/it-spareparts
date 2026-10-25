@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
-  cleanupAntd, fireEvent, render, screen, waitFor, within,
+  act, cleanupAntd, fireEvent, render, screen, waitFor, within,
 } from "../../../test/antdRender";
 import { api } from "../../../api";
 import PartGalleryPanel from "../PartGalleryPanel";
@@ -132,6 +132,7 @@ it("无写权限时只读：隐藏上传与图库操作，仍展示缩略图", a
 });
 
 it("有写权限时可上传：签名、浏览器直传 OSS、登记各用独立请求号", async () => {
+  const onChanged = vi.fn();
   let loads = 0;
   const calls: any[] = [];
   api.defaults.adapter = async (config) => {
@@ -146,7 +147,7 @@ it("有写权限时可上传：签名、浏览器直传 OSS、登记各用独立
     }, 201);
     throw new Error(`unexpected ${config.method} ${config.url}`);
   };
-  render(<PartGalleryPanel partId={42} pn="PN-42" canWrite />);
+  render(<PartGalleryPanel partId={42} pn="PN-42" canWrite onChanged={onChanged} />);
 
   await screen.findByText("暂无图片，可上传");
   fireEvent.change(screen.getByLabelText("选择图库图片"), { target: { files: [file()] } });
@@ -169,6 +170,7 @@ it("有写权限时可上传：签名、浏览器直传 OSS、登记各用独立
 
   expect(await screen.findByText("已登记")).toBeInTheDocument();
   expect(await screen.findByAltText("front.jpg")).toBeInTheDocument();
+  expect(onChanged).toHaveBeenCalledTimes(1);
 });
 
 it("登记失败后重试复用同一个幂等号，且不重复直传 OSS", async () => {
@@ -227,6 +229,7 @@ it("写操作 409 时提示图库已被他人修改并自动刷新", async () =>
 });
 
 it("删除走 AntD 确认框并携带 baseline_gallery_revision", async () => {
+  const onChanged = vi.fn();
   let deletes = 0;
   let loads = 0;
   let deleteConfig: any = null;
@@ -242,7 +245,7 @@ it("删除走 AntD 确认框并携带 baseline_gallery_revision", async () => {
     }
     throw new Error(`unexpected ${config.url}`);
   };
-  render(<PartGalleryPanel partId={42} pn="PN-42" canWrite />);
+  render(<PartGalleryPanel partId={42} pn="PN-42" canWrite onChanged={onChanged} />);
 
   await screen.findByAltText("front.jpg");
   fireEvent.click(screen.getByRole("button", { name: "删除 front.jpg" }));
@@ -254,4 +257,80 @@ it("删除走 AntD 确认框并携带 baseline_gallery_revision", async () => {
   expect(deleteConfig.params).toEqual({ baseline_gallery_revision: 3 });
   expect(header(deleteConfig, "X-Request-Id")).toMatch(uuid);
   await waitFor(() => expect(loads).toBeGreaterThanOrEqual(2));
+  expect(onChanged).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  ["排序", "下移 front.jpg", { sort_order: 1 }],
+  ["设主图", "设为 back.jpg 的主图", { sort_order: 0 }],
+  ["标瑕疵", "标记 front.jpg 瑕疵", { is_defect: true }],
+])("%s 成功后通知调用方图库已变更", async (_operation, buttonName, update) => {
+  const onChanged = vi.fn();
+  const updates: any[] = [];
+  const secondImage = { ...image, id: "44444444-4444-4444-8444-444444444444", filename: "back.jpg", sort_order: 1 };
+  api.defaults.adapter = async (config) => {
+    if (config.url === "/parts/42/gallery") {
+      return response(config, { ...gallery, images: [image, secondImage] });
+    }
+    if (config.method === "patch") {
+      updates.push(JSON.parse(config.data));
+      return response(config, { image, gallery_revision: 4 });
+    }
+    throw new Error(`unexpected ${config.method} ${config.url}`);
+  };
+  render(<PartGalleryPanel partId={42} pn="PN-42" canWrite onChanged={onChanged} />);
+
+  await screen.findByAltText("front.jpg");
+  fireEvent.click(screen.getByRole("button", { name: buttonName }));
+
+  await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+  expect(updates).toEqual([{ ...update, baseline_gallery_revision: 3 }]);
+});
+
+it("图库写入已发出时先卸载，成功响应迟到仍通知调用方且不重新加载", async () => {
+  const onChanged = vi.fn();
+  let resolveWrite!: (value: ReturnType<typeof response>) => void;
+  const pending = new Promise<ReturnType<typeof response>>((resolve) => { resolveWrite = resolve; });
+  let writeConfig: any;
+  let loads = 0;
+  api.defaults.adapter = async (config) => {
+    if (config.url === "/parts/42/gallery") {
+      loads += 1;
+      return response(config, gallery);
+    }
+    if (config.method === "patch") {
+      writeConfig = config;
+      return pending;
+    }
+    throw new Error(`unexpected ${config.method} ${config.url}`);
+  };
+  const { unmount } = render(<PartGalleryPanel partId={42} pn="PN-42" canWrite onChanged={onChanged} />);
+  await screen.findByAltText("front.jpg");
+  fireEvent.click(screen.getByRole("button", { name: "标记 front.jpg 瑕疵" }));
+  await waitFor(() => expect(writeConfig).toBeDefined());
+  unmount();
+  expect(onChanged).not.toHaveBeenCalled();
+
+  await act(async () => {
+    resolveWrite(response(writeConfig, { image: { ...image, is_defect: true }, gallery_revision: 4 }));
+    await pending;
+  });
+
+  await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+  expect(loads).toBe(1);
+});
+
+it("图库写入失败时不通知调用方资料已变更", async () => {
+  const onChanged = vi.fn();
+  api.defaults.adapter = async (config) => {
+    if (config.url === "/parts/42/gallery") return response(config, gallery);
+    throw Object.assign(new Error("unavailable"), {
+      config, response: { status: 503, data: { detail: "图库服务暂不可用" } },
+    });
+  };
+  render(<PartGalleryPanel partId={42} pn="PN-42" canWrite onChanged={onChanged} />);
+  await screen.findByAltText("front.jpg");
+  fireEvent.click(screen.getByRole("button", { name: "标记 front.jpg 瑕疵" }));
+  expect(await screen.findByText("图库服务暂不可用")).toBeInTheDocument();
+  expect(onChanged).not.toHaveBeenCalled();
 });

@@ -1,0 +1,92 @@
+.master-data-table .ant-table-tbody > tr > td {
+  height: 65px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.master-data-thumb-placeholder {
+  box-sizing: border-box;
+  display: block;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--mb-border-soft);
+  border-radius: 6px;
+  background: var(--mb-inset);
+}
+
+.master-data-drawer .ant-drawer-footer > .ant-btn + .ant-btn {
+  margin-inline-start: 8px;
+}
+
+.master-editor-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 55fr) minmax(0, 45fr);
+  height: 100%;
+  min-height: 0;
+}
+
+.master-editor-panel {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  padding: 20px 24px;
+}
+
+.master-editor-columns > .master-editor-panel + .master-editor-panel {
+  border-inline-start: 1px solid var(--mb-border-soft);
+}
+
+.master-editor-panel h2,
+.master-data-fields h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+
+.master-data-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.master-data-fields .ant-divider {
+  margin: 8px 0 0;
+  color: var(--mb-text-3);
+  font-size: 13px;
+}
+
+.master-editor-tabs {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.master-editor-tabs > .ant-tabs-nav {
+  flex: none;
+  margin: 0;
+  padding-inline: 24px;
+}
+
+.master-editor-tabs > .ant-tabs-content-holder {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.master-editor-tabs .ant-tabs-content,
+.master-editor-tabs .ant-tabs-tabpane {
+  height: 100%;
+}
+
+.master-editor-tabs .master-editor-panel {
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.master-data-pair {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
