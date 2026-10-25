@@ -10,7 +10,7 @@ import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import Integer, String, and_, column, func, or_, select, values
 from sqlalchemy.orm import Session
 
 from app import config, security, tax_policy
@@ -579,6 +579,58 @@ def _inquiry_ref(db: Session, part_id: int, pn_std: str) -> dict:
     )
     return {"min_money": _d(row[0]), "max_money": _d(row[1]),
             "last_money": _d(last), "count": row[2]}
+
+
+def inquiry_refs(db: Session, parts: list[tuple[int, str]]) -> dict[int, dict]:
+    """批量版 ``_inquiry_ref``：一次查询返回每个 part 的询价参考。
+
+    返回结构与单 part 版完全一致（min_money/max_money/last_money/count）。
+    用 VALUES 构造请求 part 集合再 left join，避免每个 part 各查两次。
+    """
+    if not parts:
+        return {}
+    requested = values(
+        column("part_id", Integer),
+        column("pn_std", String(128)),
+        name="requested_part",
+    ).data([(int(part_id), str(pn_std)) for part_id, pn_std in parts])
+    cond = or_(
+        FPartInquiry.part_id == requested.c.part_id,
+        and_(
+            FPartInquiry.part_id.is_(None),
+            FPartInquiry.pn_std == requested.c.pn_std,
+        ),
+    )
+    # 相关子查询保持单 part 版“按申请时间倒序取最后一条”的语义；整批仍是一次往返。
+    last_money = (
+        select(FPartInquiry.money)
+        .where(cond)
+        .order_by(FPartInquiry.apply_time.desc().nullslast())
+        .limit(1)
+        .correlate(requested)
+        .scalar_subquery()
+    )
+    statement = (
+        select(
+            requested.c.part_id.label("part_id"),
+            func.min(FPartInquiry.money).label("min_money"),
+            func.max(FPartInquiry.money).label("max_money"),
+            func.count(FPartInquiry.id).label("count"),
+            last_money.label("last_money"),
+        )
+        .select_from(requested.outerjoin(FPartInquiry, cond))
+        # pn_std 与 part_id 一一对应，但 PG 要求相关子查询引用列出现在分组中。
+        .group_by(requested.c.part_id, requested.c.pn_std)
+    )
+    return {
+        row.part_id: {
+            "min_money": _d(row.min_money),
+            "max_money": _d(row.max_money),
+            "last_money": _d(row.last_money),
+            "count": row.count,
+        }
+        for row in db.execute(statement).all()
+    }
 
 
 def get_overview(db: Session, pn_std: str | None,
