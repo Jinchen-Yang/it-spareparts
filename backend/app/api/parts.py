@@ -19,13 +19,29 @@ from app.security import (
     UserContext, apply_field_visibility, get_current_user_context,
     record_access_log, require_page,
 )
-from app.services import batch_normalize, master_edit, part_overview, part_resolver, pool_price_analysis, standardize, taxonomy
+from app.services import batch_normalize, master_edit, part_overview, part_resolver, part_search, pool_price_analysis, standardize, taxonomy
 
 router = APIRouter(prefix="/parts", tags=["parts"])
 
 # 批量应用 kill-switch：确定性 standardize 引擎已接入并上线(v1.2.3)，已解冻(v1.2.4)。
 # 写回门槛在 apply_batch（仅 review_status=AUTO_OK 才写回，§17）。如线上发现问题，改回 True 即刻冻结。
 BATCH_APPLY_FROZEN = False
+
+
+@router.get("/suggest")
+def suggest(
+    q: str = Query(""),
+    limit: int = Query(10, ge=1, le=30),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> list[dict]:
+    """实时联想只返回候选身份与匹配证据，沿用型号搜索的鉴权和字段净化。"""
+    q_norm = q.strip()
+    record_access_log(ctx, "suggest", "parts", {"q": q_norm or None, "limit": limit})
+    if not q_norm:
+        return []
+    return apply_field_visibility(part_search.search(db, q_norm, limit=limit), ctx)
 
 
 @router.get("/search")

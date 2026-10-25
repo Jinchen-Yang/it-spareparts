@@ -61,6 +61,30 @@ export interface SearchFilters {
   category_minor?: string;
 }
 
+/** 实时检索候选；受字段可见性约束的资料允许缺省。 */
+export interface PartSuggestion {
+  part_id: number;
+  pn_std: string;
+  brand?: string | null;
+  manufacturer?: string | null;
+  summary?: string | null;
+  description?: string | null;
+  category_major?: string | null;
+  category_minor?: string | null;
+  key_specs?: { label: string; value: string }[];
+  stock_qty?: number | null;
+  match_type: string;
+  match_reason: string;
+  matched_terms: string[];
+}
+
+export async function suggestParts(q: string, limit = 10, signal?: AbortSignal): Promise<PartSuggestion[]> {
+  const { data } = await api.get<PartSuggestion[]>("/parts/suggest", {
+    params: { q, limit }, signal,
+  });
+  return data;
+}
+
 /** 统一搜索：纯文本走 resolver（精确即唯一 + 相似降级）；带规格过滤走结构化浏览 */
 export async function unifiedSearch(
   q: string | undefined,
