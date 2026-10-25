@@ -9,6 +9,7 @@ from datetime import date
 from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,6 +48,12 @@ class Settings(BaseSettings):
     # Dedicated, default-off server-to-server export for the independent resale app.
     resale_export_token_sha256: SecretStr = SecretStr("")
     resale_catalog_token_sha256: SecretStr = SecretStr("")
+    # shop → itsp PN 主数据写接口的服务密钥（只存 SHA-256）；为空时整组接口 503。
+    pn_master_integration_token_sha256: SecretStr = SecretStr("")
+    # itsp → shop 图库服务（图库归 shop 所有）。服务密钥只留在后端，绝不下发浏览器；
+    # 两个字段任一为空时图库代理接口整组 503。
+    shop_gallery_base_url: str = ""
+    shop_gallery_token: SecretStr = SecretStr("")
 
     # ---- 商城销售参考价（2026-10-19 金臣口径：30 天窗口 + 时间衰减）----
     # 只作用于新 GET /integrations/resale/parts/price-reference，不改变任何既有分析口径。
@@ -60,7 +67,11 @@ class Settings(BaseSettings):
     )
     resale_price_reference_exclude_confirmed_source_error: bool = True
 
-    @field_validator("resale_export_token_sha256", "resale_catalog_token_sha256")
+    @field_validator(
+        "resale_export_token_sha256",
+        "resale_catalog_token_sha256",
+        "pn_master_integration_token_sha256",
+    )
     @classmethod
     def validate_resale_export_hash(
         cls, value: SecretStr, info: ValidationInfo
@@ -73,6 +84,32 @@ class Settings(BaseSettings):
                 f"{info.field_name.upper()} 必须是 64 位小写十六进制 SHA256 摘要"
             )
         return SecretStr(digest)
+
+    @field_validator("shop_gallery_base_url")
+    @classmethod
+    def validate_shop_gallery_base_url(cls, value: str) -> str:
+        """只接受 http(s) 基地址；空 = 未配置（整组代理 503）。"""
+        base_url = value.strip().rstrip("/")
+        if not base_url:
+            return ""
+        parsed = urlsplit(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("SHOP_GALLERY_BASE_URL 必须是 http(s) 基地址")
+        if parsed.username or parsed.password:
+            raise ValueError("SHOP_GALLERY_BASE_URL 不能包含账号密码")
+        if parsed.query or parsed.fragment:
+            raise ValueError("SHOP_GALLERY_BASE_URL 不能包含查询串或锚点")
+        return base_url
+
+    @field_validator("shop_gallery_token")
+    @classmethod
+    def validate_shop_gallery_token(cls, value: SecretStr) -> SecretStr:
+        # Bearer 明文令牌只允许可打印 ASCII、不含空白：既防复制配置带入的首尾空白，
+        # 也避免非法头部字符拖到运行期才变成「图库服务不可用」。
+        token = value.get_secret_value().strip()
+        if token and any(not 0x21 <= ord(char) <= 0x7E for char in token):
+            raise ValueError("SHOP_GALLERY_TOKEN 必须是可打印 ASCII 且不含空白")
+        return SecretStr(token)
 
     @field_validator("resale_price_reference_window_days")
     @classmethod

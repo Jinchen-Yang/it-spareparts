@@ -6,7 +6,8 @@ import {
   type MasterEditPayload, type MasterEditSnapshot,
 } from "../../api/search";
 
-type EditablePart = Required<Pick<MasterFields, "description" | "category_major" | "category_minor">> & {
+type EditablePart = Required<Pick<MasterFields,
+  "description" | "manufacturer" | "summary" | "category_major" | "category_minor">> & {
   pn_std: string;
 };
 
@@ -27,7 +28,7 @@ const normalized = (value: string | null | undefined) => {
 
 /**
  * 型号全景里的轻量主数据编辑器。
- * 只开放甲方本次明确提出的描述与两级品类，不复制完整主数据页的其它能力。
+ * 开放描述、制造商、简介与两级品类；不复制完整主数据页的其它能力。
  */
 export default function InlinePartEditModal({
   open, canEdit, contextKey, partId, pn, onClose, onSaved,
@@ -115,6 +116,8 @@ export default function InlinePartEditModal({
       const next: EditablePart = {
         pn_std: snapshot.pn_std,
         description: snapshot.fields.description,
+        manufacturer: snapshot.fields.manufacturer ?? null,
+        summary: snapshot.fields.summary ?? null,
         category_major: snapshot.fields.category_major,
         category_minor: snapshot.fields.category_minor,
       };
@@ -157,7 +160,7 @@ export default function InlinePartEditModal({
     const payload: MasterEditPayload = {
       part_id: baseline.part_id, pn_std: baseline.pn_std, base_snapshot: baseline,
     };
-    (["description", "category_major", "category_minor"] as const).forEach((key) => {
+    (["description", "manufacturer", "summary", "category_major", "category_minor"] as const).forEach((key) => {
       const before = normalized(initial[key]);
       const after = normalized(form[key]);
       if (before !== after) payload[key] = after;
@@ -273,6 +276,31 @@ export default function InlinePartEditModal({
                 placeholder="输入便于采购、销售和库房识别的备件描述"
                 onChange={(event) => setForm((current) => current
                   ? { ...current, description: event.target.value }
+                  : current)}
+              />
+            </div>
+            <div>
+              <label htmlFor="inline-part-manufacturer" style={{ display: "block", marginBottom: 4 }}>制造商</label>
+              <Input
+                id="inline-part-manufacturer"
+                value={form?.manufacturer ?? ""}
+                disabled={loading || saving || rebasing || !form}
+                placeholder="如 希捷 / 惠普"
+                onChange={(event) => setForm((current) => current
+                  ? { ...current, manufacturer: event.target.value }
+                  : current)}
+              />
+            </div>
+            <div>
+              <label htmlFor="inline-part-summary" style={{ display: "block", marginBottom: 4 }}>简介</label>
+              <Input.TextArea
+                id="inline-part-summary"
+                value={form?.summary ?? ""}
+                rows={2}
+                disabled={loading || saving || rebasing || !form}
+                placeholder="面向商城展示的中文简介"
+                onChange={(event) => setForm((current) => current
+                  ? { ...current, summary: event.target.value }
                   : current)}
               />
             </div>

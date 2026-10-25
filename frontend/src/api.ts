@@ -397,6 +397,7 @@ export const SPEC_SOURCE_LABEL: Record<string, string> = {
 };
 export interface MasterFields {
   description?: string | null; brand?: string | null;
+  manufacturer?: string | null; summary?: string | null;
   category_major?: string | null; category_minor?: string | null;
   machine_or_part?: string | null; unit?: string | null;
 }

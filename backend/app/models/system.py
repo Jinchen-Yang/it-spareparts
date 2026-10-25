@@ -245,7 +245,8 @@ class SysAuditLog(Base):
     before_json: Mapped[dict | None] = mapped_column(JSONB)
     after_json: Mapped[dict | None] = mapped_column(JSONB)
     reason: Mapped[str | None] = mapped_column(Text)
-    operated_by: Mapped[str | None] = mapped_column(String(64))
+    # 96：服务间调用沿用 ``shop:<用户名>``（用户名上限 64），见 PN 主数据集成迁移。
+    operated_by: Mapped[str | None] = mapped_column(String(96))
     operated_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
 

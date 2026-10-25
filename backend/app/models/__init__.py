@@ -112,6 +112,7 @@ from app.models.maintenance_collection_evidence import (
 from app.models.maintenance_ai_fallback import MaintenanceAiMappingProposal
 from app.models.master_data import (
     Brand,
+    IntegrationRequestLog,
     ProductCategory,
     ProductDataQualityIssue,
     ProductMatchCandidate,
@@ -151,6 +152,7 @@ __all__ = [
     "DimCustomer",
     "Brand",
     "ProductCategory",
+    "IntegrationRequestLog",
     "ProductSpec",
     "ProductMatchCandidate",
     "ProductMergeLog",

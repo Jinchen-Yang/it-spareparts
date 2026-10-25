@@ -55,7 +55,9 @@ from app.api import (
     maintenance_project_batch_transfer,
     maintenance_wbdd_import,
     maintenance_source_cancel_cascade,
+    part_gallery,
     parts,
+    pn_master_integration,
     pool_analysis,
     pools,
     profit,
@@ -107,6 +109,7 @@ app.include_router(accounts.router, prefix=settings.api_prefix)
 app.include_router(role_templates.router, prefix=settings.api_prefix)
 app.include_router(imports.router, prefix=settings.api_prefix)
 app.include_router(parts.router, prefix=settings.api_prefix)
+app.include_router(part_gallery.router, prefix=settings.api_prefix)
 app.include_router(profit.router, prefix=settings.api_prefix)
 app.include_router(sales_analytics.router, prefix=settings.api_prefix)
 app.include_router(inventory.router, prefix=settings.api_prefix)
@@ -136,6 +139,7 @@ app.include_router(maintenance_row_workbench.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipts.router, prefix=settings.api_prefix)
 app.include_router(resale_export.router, prefix=settings.api_prefix)
 app.include_router(resale_catalog_export.router, prefix=settings.api_prefix)
+app.include_router(pn_master_integration.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipt_import.router, prefix=settings.api_prefix)
 app.include_router(
     maintenance_project_batch_transfer.router, prefix=settings.api_prefix

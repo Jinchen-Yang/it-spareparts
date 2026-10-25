@@ -72,6 +72,11 @@ _KNOWN_DYNAMIC_SITES: dict[tuple[str, str], tuple[int, str]] = {
         3,
         "三处 _ev 闭包体内转发给 record_security_event 的变量；取值=本文件 _ev(...)/ev(...) 调用处的字面量（_WRAPPER_SINK_LITERALS 看守）",
     ),
+    ("app/api/part_gallery.py", "action"): (
+        1,
+        "图库代理 _audit 包装；值域=GalleryAuditAction 的 10 个字面量（最长 "
+        "gallery_upload_part_sign=24 < 64），由 test_dynamic_actions_fit_column_width 校验",
+    ),
 }
 
 
@@ -148,6 +153,9 @@ def _dynamic_values() -> list[str]:
         f"collection_milestone_{choice}"
         for choice in typing.get_args(FollowUpAction)
     )
+    # 图库代理审计动作：Literal 枚举现值（_audit 包装的动态写入点）。
+    from app.api.part_gallery import GalleryAuditAction
+    values.extend(typing.get_args(GalleryAuditAction))
     return values
 
 

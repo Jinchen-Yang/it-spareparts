@@ -6,8 +6,8 @@ const originalAdapter = api.defaults.adapter;
 const baseline: MasterEditSnapshot = {
   part_id: 1, pn_std: "PN-1",
   identity: { part_id: 1, pn_std: "PN-1", status: "active", merged_into_id: null },
-  fields: { description: null, brand: null, category_major: null, category_minor: null,
-    machine_or_part: null, unit: null },
+  fields: { description: null, brand: null, manufacturer: null, summary: null,
+    category_major: null, category_minor: null, machine_or_part: null, unit: null },
   specs: {}, version_mode: "field_snapshot",
 };
 const payload: MasterEditPayload = {

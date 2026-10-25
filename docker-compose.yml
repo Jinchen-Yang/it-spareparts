@@ -77,6 +77,9 @@ services:
       LLM_MODEL: ${LLM_MODEL:-deepseek-v4-flash}
       # 留空 = 用应用内默认(关思考)；设 {} = 明确不传额外参数
       LLM_EXTRA_BODY: ${LLM_EXTRA_BODY:-}
+      # itsp → shop 图库代理（图库归 shop）：两个都非空才启用，密钥只在后端。
+      SHOP_GALLERY_BASE_URL: ${SHOP_GALLERY_BASE_URL:-}
+      SHOP_GALLERY_TOKEN: ${SHOP_GALLERY_TOKEN:-}
       # 三期 视觉识别(图片/扫描件)：不配则图片走降级，文字类文件照常
       VISION_API_KEY: ${VISION_API_KEY:-}
       VISION_BASE_URL: ${VISION_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
