@@ -336,3 +336,37 @@ def test_filter_constraints_apply_to_direct_and_fuzzy_candidates(db):
     _part(db, "FILTER-AA101", brand="Other", category_major="硬盘", category_minor="SAS")
     assert _pns(db, "FILTER-AA100", filters={"brand": "Other"}) == ["FILTER-AA101"]
     assert _pns(db, "FILTER", filters={"category_major": "内存"}) == []
+
+
+def test_document_candidates_are_bounded_before_ranking(db, monkeypatch):
+    monkeypatch.setattr(part_search.get_settings(), "part_search_candidate_limit", 5)
+    for i in range(8):
+        _part(db, f"COMMON-{i:02}", category_major="硬盘")
+    items = part_search.search(db, "硬盘", limit=30)
+    assert [item["pn_std"] for item in items] == [f"COMMON-{i:02}" for i in range(5)]
+    assert all(item["match_type"] == "field" for item in items)
+
+
+@pytest.mark.parametrize("query", ["硬盘", "HPE"])
+@pytest.mark.parametrize("match_type", ["exact_pn", "exact_alias"])
+def test_high_frequency_fields_cannot_evict_exact_pn_or_alias(db, monkeypatch, query, match_type):
+    monkeypatch.setattr(part_search.get_settings(), "part_search_candidate_limit", 5)
+    for i in range(20):
+        _part(db, f"A-FREQUENT-{i:02}", brand=query, category_major=query)
+    target = _part(db, query if match_type == "exact_pn" else "Z-ALIAS-TARGET")
+    if match_type == "exact_alias":
+        db.add(PartAlias(pn_raw=query, pn_std=target.pn_std, part_id=target.id, status="active"))
+        db.flush()
+    items = part_search.search(db, query)
+    assert items[0]["part_id"] == target.id
+    assert items[0]["match_type"] == match_type
+
+
+def test_pn_and_boost_lanes_survive_document_candidate_cap(db, monkeypatch):
+    monkeypatch.setattr(part_search.get_settings(), "part_search_candidate_limit", 1)
+    field = _part(db, "A-FIELD", brand="HPE")
+    boosted = _part(db, "B-BOOST", description="HPE")
+    substring = _part(db, "X-HPE-SUBSTRING")
+    prefix = _part(db, "HPE-PREFIX")
+    items = part_search.search(db, "HPE", limit=4, filters={"boost_part_ids": {boosted.id}})
+    assert [item["part_id"] for item in items] == [prefix.id, substring.id, boosted.id, field.id]

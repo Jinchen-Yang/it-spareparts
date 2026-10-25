@@ -6,6 +6,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy import Integer
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.services.part_resolver import preprocess
 from app.services.part_search_normalize import compact, normalize
 from app.services.spec_extract import SPEC_KEYS
@@ -188,11 +189,12 @@ def search(db: Session, q: str, *, limit: int = 10, filters: dict | None = None)
                   compact_prefix=compact(q) + "%", compact_contains="%" + compact(q) + "%")
     params["literal_exact"] = not any(c in q for c in "*?")
     pn_exact = f"((:exact <> '' AND p.pn_compact = :exact) OR (:literal_exact AND (:exact='' OR p.pn_std ~ '[^ -~]') AND ({_normalized('p.pn_std')})=:q))"
-    alias_exact = """p.pn_std IN (SELECT a.pn_std FROM part_alias a
+    alias_matches = """SELECT a.pn_std FROM part_alias a
         WHERE a.status='active' AND :exact<>'' AND a.pn_compact=:exact
         UNION SELECT a.pn_std FROM part_alias a WHERE a.status='active'
         AND :literal_exact AND (:exact='' OR a.pn_raw ~ '[^ -~]')
-        AND (""" + _normalized("a.pn_raw") + ")=:q)"
+        AND (""" + _normalized("a.pn_raw") + ")=:q"
+    alias_exact = "p.pn_std IN (" + alias_matches + ")"
     def pn_match(parameter: str) -> str:
         return _contains("(" + _match_text("p.pn_std") + ")", parameter)
 
@@ -210,10 +212,9 @@ def search(db: Session, q: str, *, limit: int = 10, filters: dict | None = None)
         contains = (_contains("p.pn_compact", "compact_contains")
                     + " OR (p.pn_std ~ '[^ -~]' AND "
                     + _contains("part_search_normalize(p.pn_std)", "pn_contains") + ")")
-    columns = "p.id AS part_id, p.pn_std, p.brand, p.manufacturer, p.summary, p.description, p.category_major, p.category_minor"
+    fields = "p.pn_std, p.brand, p.manufacturer, p.summary, p.description, p.category_major, p.category_minor"
+    columns = "p.id AS part_id, " + fields
     base = " FROM part_search_text s JOIN dim_part p ON p.id=s.part_id WHERE p.status <> 'merged' AND "
-    tier = (f"CASE WHEN {pn_exact} OR {alias_exact} THEN 0 WHEN ({prefix}) THEN 1 "
-            f"WHEN ({contains}) THEN 2 WHEN p.id=ANY(CAST(:boost_ids AS integer[])) THEN 3 ELSE 4 END")
     # 单字符常命中大多数 PN，分档查询可在顺序索引上提前停止。
     rows: list[dict] = []
     if len(q) == 1:
@@ -227,8 +228,29 @@ def search(db: Session, q: str, *, limit: int = 10, filters: dict | None = None)
             if len(rows) >= limit:
                 break
     if len(rows) < limit:
-        stmt = text(f"WITH ranked AS MATERIALIZED (SELECT {columns}, {tier} AS tier, {pn_exact} AS pn_exact "
-                    + base + " AND ".join(conditions) + extra + ") "
+        params["candidate_limit"] = get_settings().part_search_candidate_limit
+        # 资料先只召回 ID，再截断；不在几千个高频词命中上做分档或字段打分。
+        # PN 各档和报价加权独立保留前 limit 条，避免被资料候选上限挤掉。
+        # 同一份匹配型号、精确别名供所有车道复用，避免每条车道重复扫业务表。
+        alias_exact = "p.pn_std IN (SELECT pn_std FROM exact_aliases)"
+        tier = (f"CASE WHEN {pn_exact} OR {alias_exact} THEN 0 WHEN ({prefix}) THEN 1 "
+                f"WHEN ({contains}) THEN 2 WHEN p.id=ANY(CAST(:boost_ids AS integer[])) THEN 3 ELSE 4 END")
+        lane_base = " FROM matched_parts p WHERE true "
+        lanes = [f"(SELECT p.id AS part_id {lane_base} AND ({condition}) "
+                 "ORDER BY p.pn_std LIMIT :limit)"
+                 for condition in (f"{pn_exact} OR {alias_exact}", prefix, contains,
+                                   "p.id=ANY(CAST(:boost_ids AS integer[]))")]
+        stmt = text("WITH exact_aliases AS MATERIALIZED (" + alias_matches + "), "
+                    "direct_matches AS MATERIALIZED (SELECT s.part_id "
+                    "FROM part_search_text s WHERE " + " AND ".join(conditions) + "), "
+                    f"matched_parts AS MATERIALIZED (SELECT p.id, p.pn_compact, {fields} "
+                    "FROM direct_matches s JOIN dim_part p ON p.id=s.part_id "
+                    "WHERE p.status <> 'merged' " + extra + "), "
+                    "doc_candidates AS MATERIALIZED (SELECT p.id AS part_id " + lane_base
+                    + " ORDER BY p.pn_std LIMIT :candidate_limit), "
+                    "candidates AS (" + " UNION ".join(lanes + ["SELECT part_id FROM doc_candidates"])
+                    + f"), ranked AS MATERIALIZED (SELECT {columns}, {tier} AS tier, {pn_exact} AS pn_exact "
+                    "FROM candidates c JOIN matched_parts p ON p.id=c.part_id) "
                     "SELECT * FROM ranked p ORDER BY tier, "
                     + f"(CASE WHEN tier=4 THEN ({_field_weight(terms)}) ELSE 0 END) DESC, "
                     "p.pn_std LIMIT :limit")

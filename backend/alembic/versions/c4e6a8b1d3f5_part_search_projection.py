@@ -158,7 +158,33 @@ def upgrade() -> None:
             new_id integer;
             target_id integer;
         BEGIN
+            -- UPDATE OF 只判断语句是否提及列；再比较值，避开同值回写。
+            IF TG_OP = 'UPDATE' THEN
+                IF TG_TABLE_NAME = 'dim_part' THEN
+                    IF ROW(OLD.pn_std, OLD.pn_raw_sample, OLD.brand, OLD.manufacturer,
+                           OLD.summary, OLD.description, OLD.category_major,
+                           OLD.category_minor, OLD.status)
+                       IS NOT DISTINCT FROM
+                       ROW(NEW.pn_std, NEW.pn_raw_sample, NEW.brand, NEW.manufacturer,
+                           NEW.summary, NEW.description, NEW.category_major,
+                           NEW.category_minor, NEW.status) THEN
+                        RETURN NULL;
+                    END IF;
+                ELSIF TG_TABLE_NAME = 'product_specs' THEN
+                    IF ROW(OLD.part_id, OLD.spec_key, OLD.spec_value)
+                       IS NOT DISTINCT FROM ROW(NEW.part_id, NEW.spec_key, NEW.spec_value) THEN
+                        RETURN NULL;
+                    END IF;
+                ELSE
+                    IF ROW(OLD.part_id, OLD.pn_std, OLD.pn_raw, OLD.status)
+                       IS NOT DISTINCT FROM ROW(NEW.part_id, NEW.pn_std, NEW.pn_raw, NEW.status) THEN
+                        RETURN NULL;
+                    END IF;
+                END IF;
+            END IF;
             IF TG_TABLE_NAME = 'dim_part' THEN
+                -- 改名按当前 pn_std 重新关联无 part_id 的别名：旧名退出、新名进入。
+                -- 这里只维护投影，不替业务改写别名；别名之后改名也会刷新新旧归属。
                 IF TG_OP <> 'INSERT' THEN old_id := OLD.id; END IF;
                 IF TG_OP <> 'DELETE' THEN new_id := NEW.id; END IF;
             ELSE
@@ -185,10 +211,16 @@ def upgrade() -> None:
         END
         $trigger$
     """)
-    for table in ("dim_part", "product_specs", "part_alias"):
+    trigger_columns = {
+        "dim_part": ("pn_std, pn_raw_sample, brand, manufacturer, summary, description, "
+                     "category_major, category_minor, status"),
+        "product_specs": "part_id, spec_key, spec_value",
+        "part_alias": "part_id, pn_std, pn_raw, status",
+    }
+    for table, columns in trigger_columns.items():
         op.execute(f"""
             CREATE TRIGGER trg_{table}_search_text
-            AFTER INSERT OR UPDATE OR DELETE ON {table}
+            AFTER INSERT OR DELETE OR UPDATE OF {columns} ON {table}
             FOR EACH ROW EXECUTE FUNCTION trigger_part_search_text()
         """)
     op.execute("SELECT refresh_part_search_text(id) FROM dim_part ORDER BY id")

@@ -40,6 +40,7 @@ def main() -> None:
         cfg = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
         cfg.set_main_option("script_location", str(Path(__file__).resolve().parents[1] / "alembic"))
         command.upgrade(cfg, "head")
+        from app.config import get_settings
         from app.services.part_search import search
 
         engine = create_engine(run.database_url)
@@ -47,11 +48,14 @@ def main() -> None:
             conn.execute(text("""
                 INSERT INTO dim_part(pn_std,pn_raw_sample,brand,manufacturer,summary,
                                      description,category_major,category_minor)
-                SELECT 'M1-'||lpad(i::text,5,'0')||'-AC4L-'||upper(substr(md5(i::text),1,6)),
-                       'RAW-'||i, 'VENDOR'||lpad((i%30)::text,2,'0'),
+                SELECT CASE i WHEN 0 THEN '硬盘' WHEN 1 THEN 'HPE'
+                       ELSE 'M1-'||lpad(i::text,5,'0')||'-AC4L-'||upper(substr(md5(i::text),1,6)) END,
+                       'RAW-'||i, CASE WHEN i%10<3 THEN 'HPE'
+                       ELSE 'VENDOR'||lpad((i%30)::text,2,'0') END,
                        'MANUFACTURER'||(i%23), '企业级存储备件 '||i,
                        '耐用服务器部件 第'||i||'号',
-                       (ARRAY['机械硬盘','固态硬盘','服务器内存'])[i%3+1],
+                       CASE WHEN i%10<3 THEN (ARRAY['机械硬盘','固态硬盘'])[i%2+1]
+                       ELSE '服务器内存' END,
                        (ARRAY['企业盘','高速盘','存储模块'])[i%3+1]
                 FROM generate_series(0,:last) i
             """), {"last": args.rows - 1})
@@ -76,7 +80,8 @@ def main() -> None:
         cases = [
             ("精确PN", pn), ("前缀", "M1-1234"), ("中段子串", pn[9:]),
             ("紧凑写法", pn.replace("-", "")), ("通配", "M1-1234?-AC4L*"),
-            ("中文品类", "机械硬盘"), ("品牌", "VENDOR07"), ("规格值", "1200GB"),
+            ("中文品类", "机械硬盘"), ("高频中文品类", "硬盘"),
+            ("品牌", "VENDOR07"), ("高频品牌", "HPE"), ("规格值", "1200GB"),
             ("多词", "VENDOR07 NVME 容量"), ("错拼", pn[:12] + "X" + pn[13:]),
             ("单字符", "M"), ("纯数字", "12345"), ("无结果", "ZXQJNONEFOUND998877"),
         ]
@@ -88,13 +93,16 @@ def main() -> None:
                 captured.append((statement, parameters))
 
         timings = []
-        report = {"rows": args.rows, "runs_per_case": args.runs, "cases": {}}
+        report = {"rows": args.rows, "runs_per_case": args.runs,
+                  "candidate_limit": get_settings().part_search_candidate_limit, "cases": {}}
         with Session(engine) as db:
             for name, query in cases:
                 warm = search(db, query)
                 assert bool(warm) == (name != "无结果"), f"{name} 的召回语义错误"
                 if name in ("精确PN", "紧凑写法"):
                     assert warm[0]["pn_std"] == pn and warm[0]["match_type"] == "exact_pn"
+                if name in ("高频中文品类", "高频品牌"):
+                    assert warm[0]["pn_std"] == query and warm[0]["match_type"] == "exact_pn"
                 samples = []
                 count = 0
                 for _ in range(args.runs):
@@ -102,10 +110,11 @@ def main() -> None:
                     count = len(search(db, query))
                     samples.append((perf_counter() - start) * 1000)
                 report["cases"][name] = {"query": query, "count": count, **_percentiles(samples)}
+                report["cases"][name]["within_target"] = report["cases"][name]["p95_ms"] <= 150
                 timings.extend(samples)
                 print(json.dumps({name: report["cases"][name]}, ensure_ascii=False), flush=True)
             event.listen(engine, "before_cursor_execute", capture)
-            for name in ("精确PN", "紧凑写法", "纯数字"):
+            for name in ("精确PN", "紧凑写法", "纯数字", "高频中文品类", "高频品牌"):
                 query = dict(cases)[name]
                 captured.clear()
                 search(db, query)
@@ -116,11 +125,13 @@ def main() -> None:
             event.remove(engine, "before_cursor_execute", capture)
         report["overall"] = _percentiles(timings)
         report["target_p95_ms"] = 150
-        report["within_target"] = report["overall"]["p95_ms"] <= 150
+        report["within_target"] = all(case["within_target"] for case in report["cases"].values())
         report["plans"] = plans
         report["gin_used"] = any("Bitmap Index Scan" in line and "part_search" in line
                                  for plan in plans.values() for line in plan)
         print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+        if not report["within_target"]:
+            raise SystemExit("存在查询类别 p95 超过 150ms，需定位后重新实测")
     finally:
         if engine is not None:
             engine.dispose()

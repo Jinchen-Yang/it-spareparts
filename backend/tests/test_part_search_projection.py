@@ -16,7 +16,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart, PartAlias
-from app.models.master_data import ProductSpec
+from app.models.master_data import Brand, ProductCategory, ProductSpec
 from app.services.part_search_normalize import compact, normalize
 from app.services.spec_extract import SPEC_KEYS
 from scripts.rebuild_part_search_text import rebuild
@@ -36,6 +36,10 @@ def _doc(db, part_id):
     return db.execute(text(
         "SELECT doc, doc_compact FROM part_search_text WHERE part_id=:id"
     ), {"id": part_id}).mappings().one_or_none()
+
+
+def _projection_times(db):
+    return dict(db.execute(text("SELECT part_id, updated_at FROM part_search_text")).all())
 
 
 @pytest.mark.parametrize("value", [
@@ -104,6 +108,190 @@ def test_dim_part_insert_update_delete_refreshes_same_transaction(db):
     db.delete(part)
     db.flush()
     assert _doc(db, part_id) is None
+
+
+@pytest.mark.parametrize("column", [
+    "pn_std", "pn_raw_sample", "brand", "manufacturer", "summary", "description",
+    "category_major", "category_minor",
+])
+def test_each_dim_part_search_column_refreshes_only_when_value_changes(db, column):
+    part = _part(db)
+    before = _projection_times(db)
+    db.execute(text(f"UPDATE dim_part SET {column}={column} WHERE id=:id"), {"id": part.id})
+    assert _projection_times(db) == before
+
+    db.execute(text(f"UPDATE dim_part SET {column}=:value WHERE id=:id"),
+               {"id": part.id, "value": "CHANGED-SEARCH-VALUE"})
+    changed = _projection_times(db)
+    assert changed[part.id] > before[part.id]
+    assert "CHANGED-SEARCH-VALUE" in _doc(db, part.id)["doc"]
+    db.execute(text(
+        f"UPDATE dim_part SET {column}=:value, data_quality_score=12.34 WHERE id=:id"
+    ), {"id": part.id, "value": "CHANGED-SEARCH-VALUE"})
+    assert _projection_times(db) == changed
+
+    if column != "pn_std":
+        db.execute(text(f"UPDATE dim_part SET {column}=NULL WHERE id=:id"), {"id": part.id})
+        cleared = _projection_times(db)
+        assert cleared[part.id] > changed[part.id]
+        assert "CHANGED-SEARCH-VALUE" not in _doc(db, part.id)["doc"]
+        db.execute(text(f"UPDATE dim_part SET {column}=NULL WHERE id=:id"), {"id": part.id})
+        assert _projection_times(db) == cleared
+
+
+def test_dim_part_status_refreshes_and_same_active_status_does_not(db):
+    target = _part(db, pn="STATUS-TARGET")
+    source = _part(db, pn="STATUS-SOURCE")
+    before = _projection_times(db)
+    db.execute(text("UPDATE dim_part SET status='active' WHERE id=:id"), {"id": source.id})
+    assert _projection_times(db) == before
+    db.execute(text(
+        "UPDATE dim_part SET status='merged', merged_into_id=:target WHERE id=:id"
+    ), {"id": source.id, "target": target.id})
+    assert _doc(db, source.id) is None
+    db.execute(text(
+        "UPDATE dim_part SET status='active', merged_into_id=NULL WHERE id=:id"
+    ), {"id": source.id})
+    restored = _projection_times(db)
+    assert restored[source.id] > before[source.id]
+    assert restored[target.id] == before[target.id]
+    db.execute(text("UPDATE dim_part SET status='active' WHERE id=:id"), {"id": source.id})
+    assert _projection_times(db) == restored
+
+
+def test_unrelated_batch_updates_do_not_refresh_projection(db):
+    brand = Brand(brand_name="无关字典品牌", normalized_name="无关字典品牌")
+    category = ProductCategory(category_major="无关字典分类")
+    db.add_all([brand, category])
+    parts = [_part(db, pn=f"UNRELATED-{index:03d}") for index in range(20)]
+    db.add_all([
+        ProductSpec(part_id=part.id, spec_key="capacity", spec_value="1200GB")
+        for part in parts
+    ] + [
+        PartAlias(part_id=part.id, pn_std=part.pn_std, pn_raw=f"ALIAS-{part.pn_std}",
+                  status="active")
+        for part in parts
+    ])
+    db.flush()
+    before = _projection_times(db)
+    updates = [
+        ("UPDATE dim_part SET data_quality_score=98.76", {}),
+        ("UPDATE dim_part SET brand_id=:id", {"id": brand.id}),
+        ("UPDATE dim_part SET category_id=:id", {"id": category.id}),
+        ("UPDATE dim_part SET updated_at=updated_at + interval '1 day'", {}),
+        ("UPDATE dim_part SET reviewed_at=clock_timestamp(), needs_review=true, "
+         "unit='件', machine_or_part='part', locked_fields=ARRAY['brand'], "
+         "master_source='manual', category_source='MANUAL', is_excluded=true, "
+         "exclude_reason='测试无关字段'", {}),
+        ("UPDATE product_specs SET spec_unit='TB', numeric_value=1.2, source='manual', "
+         "updated_at=updated_at + interval '1 day', "
+         "created_at=created_at + interval '1 day'", {}),
+        ("UPDATE part_alias SET source='manual', needs_review=true, "
+         "created_at=created_at + interval '1 day'", {}),
+    ]
+    for statement, params in updates:
+        assert db.execute(text(statement), params).rowcount == len(parts)
+        assert _projection_times(db) == before
+
+
+@pytest.mark.parametrize("column", ["part_id", "spec_key", "spec_value"])
+def test_each_spec_search_column_refreshes_only_when_value_changes(db, column):
+    first = _part(db, pn="SPEC-COLUMN-FIRST")
+    second = _part(db, pn="SPEC-COLUMN-SECOND")
+    spec = ProductSpec(part_id=first.id, spec_key="capacity", spec_value="1200GB")
+    db.add(spec)
+    db.flush()
+    before = _projection_times(db)
+    db.execute(text(f"UPDATE product_specs SET {column}={column} WHERE id=:id"),
+               {"id": spec.id})
+    assert _projection_times(db) == before
+    value = {"part_id": second.id, "spec_key": "interface", "spec_value": "CHANGED-SPEC"}[column]
+    db.execute(text(f"UPDATE product_specs SET {column}=:value WHERE id=:id"),
+               {"id": spec.id, "value": value})
+    changed = _projection_times(db)
+    assert changed[first.id] > before[first.id]
+    if column == "part_id":
+        assert changed[second.id] > before[second.id]
+        assert "1200GB" not in _doc(db, first.id)["doc"]
+        assert "1200GB" in _doc(db, second.id)["doc"]
+    else:
+        assert changed[second.id] == before[second.id]
+        assert ("接口 1200GB" if column == "spec_key" else "CHANGED-SPEC") in _doc(db, first.id)["doc"]
+    db.execute(text(f"UPDATE product_specs SET {column}=:value WHERE id=:id"),
+               {"id": spec.id, "value": value})
+    assert _projection_times(db) == changed
+
+
+@pytest.mark.parametrize("column", ["part_id", "pn_std", "pn_raw", "status"])
+def test_each_alias_search_column_refreshes_only_when_value_changes(db, column):
+    first = _part(db, pn="ALIAS-COLUMN-FIRST")
+    second = _part(db, pn="ALIAS-COLUMN-SECOND")
+    alias = PartAlias(pn_raw="COLUMN-ALIAS", pn_std=first.pn_std, status="active")
+    db.add(alias)
+    db.flush()
+    before = _projection_times(db)
+    db.execute(text(f"UPDATE part_alias SET {column}={column} WHERE id=:id"), {"id": alias.id})
+    assert _projection_times(db) == before
+    value = {"part_id": first.id, "pn_std": second.pn_std,
+             "pn_raw": "CHANGED-ALIAS", "status": "pending"}[column]
+    db.execute(text(f"UPDATE part_alias SET {column}=:value WHERE id=:id"),
+               {"id": alias.id, "value": value})
+    changed = _projection_times(db)
+    assert changed[first.id] > before[first.id]
+    if column == "pn_std":
+        assert changed[second.id] > before[second.id]
+        assert "COLUMN-ALIAS" not in _doc(db, first.id)["doc"]
+        assert "COLUMN-ALIAS" in _doc(db, second.id)["doc"]
+    else:
+        assert changed[second.id] == before[second.id]
+        if column == "pn_raw":
+            assert "COLUMN-ALIAS" not in _doc(db, first.id)["doc"]
+            assert "CHANGED-ALIAS" in _doc(db, first.id)["doc"]
+        elif column == "status":
+            assert "COLUMN-ALIAS" not in _doc(db, first.id)["doc"]
+    db.execute(text(f"UPDATE part_alias SET {column}=:value WHERE id=:id"),
+               {"id": alias.id, "value": value})
+    assert _projection_times(db) == changed
+
+
+def test_rename_refreshes_old_and_new_pn_fallback_aliases_without_rewriting_them(db):
+    part = _part(db, pn="RENAME-OLD")
+    old_alias = PartAlias(pn_raw="OLD-FALLBACK-ALIAS", pn_std="RENAME-OLD", status="active")
+    new_alias = PartAlias(pn_raw="NEW-FALLBACK-ALIAS", pn_std="RENAME-NEW", status="active")
+    db.add_all([old_alias, new_alias])
+    db.flush()
+    assert "OLD-FALLBACK-ALIAS" in _doc(db, part.id)["doc"]
+    assert "NEW-FALLBACK-ALIAS" not in _doc(db, part.id)["doc"]
+    part.pn_std = "RENAME-NEW"
+    db.flush()
+    assert "OLD-FALLBACK-ALIAS" not in _doc(db, part.id)["doc"]
+    assert "NEW-FALLBACK-ALIAS" in _doc(db, part.id)["doc"]
+    db.refresh(old_alias)
+    assert old_alias.pn_std == "RENAME-OLD"
+    assert old_alias.part_id is None
+
+    old_alias.pn_std = "RENAME-NEW"
+    db.flush()
+    assert "OLD-FALLBACK-ALIAS" in _doc(db, part.id)["doc"]
+    assert "NEW-FALLBACK-ALIAS" in _doc(db, part.id)["doc"]
+
+
+def test_pn_fallback_aliases_follow_reused_names_when_parts_swap_names(db):
+    first = _part(db, pn="SWAP-FIRST")
+    second = _part(db, pn="SWAP-SECOND")
+    db.add_all([
+        PartAlias(pn_raw="FIRST-FALLBACK-ALIAS", pn_std=first.pn_std, status="active"),
+        PartAlias(pn_raw="SECOND-FALLBACK-ALIAS", pn_std=second.pn_std, status="active"),
+    ])
+    db.flush()
+    # pn_std 唯一约束不延迟，使用临时名在同一事务内交换。
+    db.execute(text("UPDATE dim_part SET pn_std='SWAP-TEMP' WHERE id=:id"), {"id": first.id})
+    db.execute(text("UPDATE dim_part SET pn_std='SWAP-FIRST' WHERE id=:id"), {"id": second.id})
+    db.execute(text("UPDATE dim_part SET pn_std='SWAP-SECOND' WHERE id=:id"), {"id": first.id})
+    assert "SECOND-FALLBACK-ALIAS" in _doc(db, first.id)["doc"]
+    assert "FIRST-FALLBACK-ALIAS" not in _doc(db, first.id)["doc"]
+    assert "FIRST-FALLBACK-ALIAS" in _doc(db, second.id)["doc"]
+    assert "SECOND-FALLBACK-ALIAS" not in _doc(db, second.id)["doc"]
 
 
 def test_specs_insert_update_move_delete_refreshes_both_parts(db):
