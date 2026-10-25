@@ -1,9 +1,13 @@
 import { urlPageField, useUrlState } from "../hooks/useUrlState";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { App, Alert, Button, Form, Input, Modal, Select, Space, Table, Tag, Tooltip } from "antd";
+import { App, Alert, Button, Divider, Drawer, Empty, Form, Grid, Input, Select, Space, Table, Tabs, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import PageHeader from "../components/PageHeader";
 import BatchNormalizeModal from "../components/BatchNormalizeModal";
+import PartGalleryPanel from "../components/parts/PartGalleryPanel";
+import PartThumb from "../components/gallery/PartThumb";
+import { invalidateCover } from "../api/galleryCovers";
+import "./MasterDataPage.css";
 import api, {
   SPEC_SOURCE_LABEL,
   type CategoryNode, type ClassifySuggestion, type MasterFields, type NearDup, type PartHit,
@@ -23,6 +27,12 @@ const EDITABLE = ["description", "brand", "manufacturer", "summary",
   "category_major", "category_minor", "machine_or_part", "unit"] as const;
 const PAGE_SIZE = 20;
 const normalized = (value: string | null | undefined) => value?.trim() || null;
+const partIdentity = (part: PartHit) => part.part_id ?? part.id;
+const canSee = (key: string) => {
+  if ((localStorage.getItem("role") || "") === "admin") return true;
+  try { return JSON.parse(localStorage.getItem("permissions") || "{}")[key] === true; }
+  catch { return false; }
+};
 
 /** 备件主数据：采购可搜全部型号 → 编辑描述/品类/品牌，或新建 PN。
  * 人工改过的字段后端 locked_fields 标记，重导（氚云）不覆盖。 */
@@ -32,6 +42,16 @@ export default function MasterDataPage() {
   const page = Number(pageParam);
   const [searchInput, setSearchInput] = useState(q);
   useEffect(() => { setSearchInput(q); }, [q]);
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const composing = useRef(false);
+  const clearSearchTimer = () => {
+    if (searchTimer.current !== null) clearTimeout(searchTimer.current);
+    searchTimer.current = null;
+  };
+  useEffect(() => {
+    clearSearchTimer();
+    return clearSearchTimer;
+  }, [q, page]);
   const [rows, setRows] = useState<PartHit[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -58,6 +78,11 @@ export default function MasterDataPage() {
   const searchSeq = useRef(0);
   const draftSeq = useRef(0);
   const editTarget = useRef<PartHit | null>(null);
+  const galleryChanged = useRef(false);
+  const galleryEditorOpen = useRef(false);
+  const [editorTab, setEditorTab] = useState("details");
+  const gallerySection = useRef<HTMLElement>(null);
+  const wideEditor = Grid.useBreakpoint().xl;
   const sessionIsCurrent = () => mounted.current && Boolean(token.current)
     && localStorage.getItem("token") === token.current;
   const sessionConfig = () => ({ headers: { Authorization: `Bearer ${token.current}` } });
@@ -106,11 +131,18 @@ export default function MasterDataPage() {
   }, [q, page]);
 
   const search = (raw: string) => {
+    clearSearchTimer();
+    if (composing.current) return;
     // URL 只保存规范化后的关键词，避免首尾空白产生不同链接。
     const query = raw.trim();
     setSearchInput(query);
     if (query === q && page === 1) void doSearch(q, page);
     else patchUrl({ q: query, page: "1" });
+  };
+  const queueSearch = (value: string) => {
+    setSearchInput(value);
+    clearSearchTimer();
+    if (!composing.current) searchTimer.current = setTimeout(() => search(value), 300);
   };
 
   const l2opts = (l1?: string | null) =>
@@ -120,6 +152,9 @@ export default function MasterDataPage() {
     if (!sessionIsCurrent()) return;
     ++editSeq.current; ++draftSeq.current;
     editTarget.current = null;
+    galleryChanged.current = false;
+    galleryEditorOpen.current = true;
+    setEditorTab("details");
     setBaseline(null); setEditLoading(false); setLoadError(null); setSaveError(null); setSaving(false);
     setConflictLines([]);
     setCanRebase(false); setRebasing(false);
@@ -127,26 +162,36 @@ export default function MasterDataPage() {
     setForm(EMPTY); setInit(EMPTY); setNear([]); setSuggest(null); setMode("create");
   };
   const closeEditor = () => {
+    const partId = editTarget.current && partIdentity(editTarget.current);
+    if (galleryChanged.current && partId != null) invalidateCover(partId);
+    galleryChanged.current = false;
+    galleryEditorOpen.current = false;
     ++editSeq.current; ++draftSeq.current;
     setMode(null); setSaving(false); setEditLoading(false);
     setCanRebase(false); setRebasing(false);
   };
-  const openEdit = async (part: PartHit) => {
+  const openEdit = async (part: PartHit, tab = "details") => {
     if (!sessionIsCurrent()) return;
     const seq = ++editSeq.current;
     ++draftSeq.current;
     const isCurrent = () => seq === editSeq.current && sessionIsCurrent();
+    if (!editTarget.current || partIdentity(editTarget.current) !== partIdentity(part)) {
+      galleryChanged.current = false;
+    }
     editTarget.current = part;
+    galleryEditorOpen.current = true;
+    setEditorTab(tab);
     setMode("edit"); setForm({ ...EMPTY, pn_std: part.pn_std });
     setBaseline(null); setNear([]); setSuggest(null); setLoadError(null); setSaveError(null);
     setConflictLines([]);
     setCanRebase(false); setRebasing(false);
     setEditLoading(true); setSaving(false);
     try {
-      if (!part.id) throw new Error("缺少稳定型号 ID，请刷新列表后重试");
-      const snapshot = await fetchMasterEditState(part.id, token.current!);
+      const partId = partIdentity(part);
+      if (!partId) throw new Error("缺少稳定型号 ID，请刷新列表后重试");
+      const snapshot = await fetchMasterEditState(partId, token.current!);
       if (!isCurrent()) return;
-      if (snapshot.part_id !== part.id || snapshot.identity.status !== "active") {
+      if (snapshot.part_id !== partId || snapshot.identity.status !== "active") {
         throw new Error("型号身份已变化，请刷新列表后重新打开编辑");
       }
       const p = snapshot.fields;
@@ -282,7 +327,16 @@ export default function MasterDataPage() {
 
   const columns: ColumnsType<PartHit> = [
     {
-      title: "PN", dataIndex: "pn_std", width: 230,
+      title: "图片", width: 72,
+      render: (_, r) => {
+        const partId = partIdentity(r);
+        return partId != null
+          ? <PartThumb partId={partId} pn={r.pn_std} onEmptyClick={() => void openEdit(r, "gallery")} />
+          : <span className="master-data-thumb-placeholder" aria-label="缺少型号 ID" />;
+      },
+    },
+    {
+      title: "PN", dataIndex: "pn_std", width: 230, ellipsis: true,
       render: (v, r) => (
         <Space size={4}>
           <span style={{ fontWeight: 500 }}>{v}</span>
@@ -290,11 +344,28 @@ export default function MasterDataPage() {
         </Space>
       ),
     },
-    { title: "描述", dataIndex: "description", ellipsis: true },
-    { title: "品牌", dataIndex: "brand", width: 130 },
     {
-      title: "品类", dataIndex: "category_major", width: 150,
-      render: (v) => v || <span style={{ color: "#bbb" }}>未分类</span>,
+      title: "描述", dataIndex: "description", width: 260, ellipsis: { showTitle: false },
+      render: (v) => <Tooltip title={v}><span>{v}</span></Tooltip>,
+    },
+    {
+      title: "品牌", dataIndex: "brand", width: 130, ellipsis: { showTitle: false },
+      render: (v) => <Tooltip title={v}><span>{v}</span></Tooltip>,
+    },
+    {
+      title: "制造商", dataIndex: "manufacturer", width: 130, ellipsis: { showTitle: false },
+      render: (v) => v ? <Tooltip title={v}><span>{v}</span></Tooltip>
+        : <span style={{ color: "var(--mb-text-3)" }}>-</span>,
+    },
+    {
+      title: "品类", dataIndex: "category_major", width: 170, ellipsis: true,
+      render: (v, r) => v ? [v, r.category_minor].filter(Boolean).join(" / ")
+        : <span style={{ color: "var(--mb-text-3)" }}>未分类</span>,
+    },
+    {
+      title: "简介", dataIndex: "summary", width: 220, ellipsis: { showTitle: false },
+      render: (v) => v ? <Tooltip title={v}><span>{v}</span></Tooltip>
+        : <span style={{ color: "var(--mb-text-3)" }}>-</span>,
     },
     {
       title: "操作", width: 90, fixed: "right",
@@ -303,7 +374,7 @@ export default function MasterDataPage() {
   ];
 
   const fields = (
-    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+    <div className="master-data-fields">
       {mode === "create" ? (
         <Form component={false} layout="vertical" fields={[{
           name: "master-edit-pn", value: form.pn_std,
@@ -328,6 +399,7 @@ export default function MasterDataPage() {
           </ul>} />
       )}
 
+      <Divider orientation="left" plain>描述与规范化建议</Divider>
       <div>
         <label htmlFor="master-edit-description" style={{ display: "block", marginBottom: 4 }}>描述</label>
         <Input.TextArea id="master-edit-description" value={form.description ?? ""} rows={2} onBlur={onSuggest} disabled={saving || rebasing}
@@ -379,8 +451,12 @@ export default function MasterDataPage() {
         )}
       </div>
 
-      <Space size={12} style={{ width: "100%" }} wrap>
-        <div style={{ flex: 1, minWidth: 220 }}>
+      <Divider orientation="left" plain>品牌 / 制造商</Divider>
+      <div className="master-data-pair">
+        <div><label htmlFor="master-edit-brand" style={{ display: "block", marginBottom: 4 }}>品牌</label>
+        <Input id="master-edit-brand" value={form.brand ?? ""} placeholder="如 Seagate / HPE" disabled={saving || rebasing}
+          onChange={(e) => set({ brand: e.target.value })} /></div>
+        <div>
           <label htmlFor="master-edit-manufacturer" style={{ display: "block", marginBottom: 4 }}>制造商</label>
           <Input
             id="master-edit-manufacturer"
@@ -390,8 +466,33 @@ export default function MasterDataPage() {
             onChange={(e) => set({ manufacturer: e.target.value })}
           />
         </div>
-      </Space>
-
+      </div>
+      <Divider orientation="left" plain>品类</Divider>
+      <div className="master-data-pair">
+        <div>
+          <label htmlFor="master-edit-major" style={{ display: "block", marginBottom: 4 }}>品类（大类）</label>
+          <Select id="master-edit-major" style={{ width: "100%" }} allowClear showSearch value={form.category_major ?? undefined} disabled={saving || rebasing}
+            placeholder="选择大类" options={cats.map((c) => ({ label: c.name, value: c.name }))}
+            onChange={(v) => set({ category_major: v ?? null, category_minor: null })} />
+        </div>
+        <div>
+          <label htmlFor="master-edit-minor" style={{ display: "block", marginBottom: 4 }}>品类（二级）</label>
+          <Select id="master-edit-minor" style={{ width: "100%" }} allowClear showSearch value={form.category_minor ?? undefined}
+            placeholder="选择二级" options={l2opts(form.category_major)}
+            onChange={(v) => set({ category_minor: v ?? null })} disabled={saving || rebasing || !form.category_major} />
+        </div>
+      </div>
+      <Divider orientation="left" plain>类型 / 单位</Divider>
+      <div className="master-data-pair">
+        <div><label htmlFor="master-edit-type" style={{ display: "block", marginBottom: 4 }}>类型</label>
+          <Select id="master-edit-type" style={{ width: "100%" }} value={form.machine_or_part ?? undefined} placeholder="未填" disabled={saving || rebasing}
+            options={[{ value: "备件" }, { value: "整机" }]}
+            onChange={(v) => set({ machine_or_part: v })} /></div>
+        <div><label htmlFor="master-edit-unit" style={{ display: "block", marginBottom: 4 }}>单位</label>
+          <Input id="master-edit-unit" value={form.unit ?? ""} placeholder="个" disabled={saving || rebasing}
+            onChange={(e) => set({ unit: e.target.value })} /></div>
+      </div>
+      <Divider orientation="left" plain>简介</Divider>
       <div>
         <label htmlFor="master-edit-summary" style={{ display: "block", marginBottom: 4 }}>简介</label>
         <Input.TextArea
@@ -403,36 +504,37 @@ export default function MasterDataPage() {
           onChange={(e) => set({ summary: e.target.value })}
         />
       </div>
-
-      <Space size={12} style={{ width: "100%" }} wrap>
-        <div style={{ minWidth: 180 }}>
-          <label htmlFor="master-edit-major" style={{ display: "block", marginBottom: 4 }}>品类（大类）</label>
-          <Select id="master-edit-major" style={{ width: 180 }} allowClear showSearch value={form.category_major ?? undefined} disabled={saving || rebasing}
-            placeholder="选择大类" options={cats.map((c) => ({ label: c.name, value: c.name }))}
-            onChange={(v) => set({ category_major: v ?? null, category_minor: null })} />
-        </div>
-        <div style={{ minWidth: 180 }}>
-          <label htmlFor="master-edit-minor" style={{ display: "block", marginBottom: 4 }}>品类（二级）</label>
-          <Select id="master-edit-minor" style={{ width: 180 }} allowClear showSearch value={form.category_minor ?? undefined}
-            placeholder="选择二级" options={l2opts(form.category_major)}
-            onChange={(v) => set({ category_minor: v ?? null })} disabled={saving || rebasing || !form.category_major} />
-        </div>
-      </Space>
-
-      <Space size={12} wrap>
-        <div><label htmlFor="master-edit-brand" style={{ display: "block", marginBottom: 4 }}>品牌</label>
-          <Input id="master-edit-brand" style={{ width: 180 }} value={form.brand ?? ""} placeholder="如 Seagate / HPE" disabled={saving || rebasing}
-            onChange={(e) => set({ brand: e.target.value })} /></div>
-        <div><label htmlFor="master-edit-type" style={{ display: "block", marginBottom: 4 }}>类型</label>
-          <Select id="master-edit-type" style={{ width: 120 }} value={form.machine_or_part ?? undefined} placeholder="未填" disabled={saving || rebasing}
-            options={[{ value: "备件" }, { value: "整机" }]}
-            onChange={(v) => set({ machine_or_part: v })} /></div>
-        <div><label htmlFor="master-edit-unit" style={{ display: "block", marginBottom: 4 }}>单位</label>
-          <Input id="master-edit-unit" style={{ width: 100 }} value={form.unit ?? ""} placeholder="个" disabled={saving || rebasing}
-            onChange={(e) => set({ unit: e.target.value })} /></div>
-      </Space>
-    </Space>
+    </div>
   );
+
+  const details = <section aria-label="资料" className="master-editor-panel">
+    <h2>资料</h2>
+    {editLoading ? <div role="status">正在加载型号资料…</div> : loadError ? (
+      <Alert type="error" showIcon message={loadError}
+        action={<Button onClick={() => editTarget.current && openEdit(editTarget.current)}>重试</Button>} />
+    ) : fields}
+    {saveError && <Alert type="error" showIcon style={{ marginTop: 12 }} message={saveError}
+      description={<div style={{ overflowWrap: "anywhere" }}>
+        {conflictLines.map((line, index) => <div key={index} style={{ whiteSpace: "pre-wrap" }}>{line}</div>)}
+        <div>草稿已保留；请核对当前值与本次修改。</div>
+        {canRebase && <Button loading={rebasing} disabled={saving} onClick={rebaseDraft}
+          style={{ height: "auto", whiteSpace: "normal", marginTop: 8, maxWidth: "100%" }}>
+          以当前值为新基线并保留我的草稿
+        </Button>}
+      </div>} />}
+  </section>;
+  const galleryPartId = editTarget.current && partIdentity(editTarget.current);
+  const gallery = <section ref={gallerySection} tabIndex={-1} aria-label="图库" className="master-editor-panel">
+    {mode === "edit" && galleryPartId != null ? <PartGalleryPanel
+      key={galleryPartId} partId={galleryPartId} pn={form.pn_std}
+      canWrite={canSee("page_master_data")} onChanged={() => {
+        if (mounted.current && galleryEditorOpen.current && editTarget.current
+          && partIdentity(editTarget.current) === galleryPartId) galleryChanged.current = true;
+        else invalidateCover(galleryPartId);
+      }}
+    /> : <><h2>图库</h2><Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
+      description={mode === "create" ? "保存后即可上传图片" : "缺少型号 ID，请刷新列表后重试"} /></>}
+  </section>;
 
   return (
     <div>
@@ -449,11 +551,13 @@ export default function MasterDataPage() {
       <Input.Search
         placeholder="搜 PN / 描述 / 品牌（留空浏览全部）" allowClear enterButton
         style={{ maxWidth: 460, marginBottom: 16 }}
-        value={searchInput} onChange={(e) => setSearchInput(e.target.value)} onSearch={search}
+        value={searchInput} onChange={(e) => queueSearch(e.target.value)} onSearch={search}
+        onCompositionStart={() => { composing.current = true; clearSearchTimer(); }}
+        onCompositionEnd={(e) => { composing.current = false; queueSearch(e.currentTarget.value); }}
       />
       <Table
-        rowKey="pn_std" size="small" columns={columns} dataSource={rows} loading={loading}
-        scroll={{ x: 760 }}
+        rowKey={(r) => partIdentity(r) ?? r.pn_std} size="small" columns={columns} dataSource={rows} loading={loading}
+        className="master-data-table" scroll={{ x: 1302 }}
         pagination={{
           current: page, pageSize: PAGE_SIZE, total, showSizeChanger: false,
           showTotal: (t) => `共 ${t} 个匹配`,
@@ -461,12 +565,19 @@ export default function MasterDataPage() {
         }}
       />
 
-      <Modal
+      <Drawer
         open={mode !== null}
-        title={mode === "create" ? "新建 PN" : `编辑 ${form.pn_std}`}
-        onCancel={closeEditor}
-        confirmLoading={saving}
-        width={560}
+        title={mode === "create" ? "新建 PN" : <Space size={8}>
+          <span>编辑 PN</span><Tag>{form.pn_std}</Tag>
+          {editTarget.current?.needs_review && <Tag color="orange">待复核</Tag>}
+        </Space>}
+        onClose={closeEditor}
+        placement="right" width="min(1080px, 100vw)" destroyOnClose
+        className="master-data-drawer"
+        styles={{ body: { padding: 0, overflow: "hidden", minHeight: 0 }, footer: { textAlign: "right" } }}
+        afterOpenChange={(open) => {
+          if (open && editorTab === "gallery") gallerySection.current?.focus();
+        }}
         footer={
           mode === "create" && near.length > 0
             ? [
@@ -482,20 +593,12 @@ export default function MasterDataPage() {
             ]
         }
       >
-        {editLoading ? <div role="status">正在加载型号资料…</div> : loadError ? (
-          <Alert type="error" showIcon message={loadError}
-            action={<Button onClick={() => editTarget.current && openEdit(editTarget.current)}>重试</Button>} />
-        ) : fields}
-        {saveError && <Alert type="error" showIcon style={{ marginTop: 12 }} message={saveError}
-          description={<div style={{ overflowWrap: "anywhere" }}>
-            {conflictLines.map((line, index) => <div key={index} style={{ whiteSpace: "pre-wrap" }}>{line}</div>)}
-            <div>草稿已保留；请核对当前值与本次修改。</div>
-            {canRebase && <Button loading={rebasing} disabled={saving} onClick={rebaseDraft}
-              style={{ height: "auto", whiteSpace: "normal", marginTop: 8, maxWidth: "100%" }}>
-              以当前值为新基线并保留我的草稿
-            </Button>}
-          </div>} />}
-      </Modal>
+        {wideEditor ? <div className="master-editor-columns">{details}{gallery}</div> : (
+          <Tabs className="master-editor-tabs" activeKey={editorTab} onChange={setEditorTab}
+            items={[{ key: "details", label: "资料", children: details, forceRender: true },
+              { key: "gallery", label: "图库", children: gallery, forceRender: true }]} />
+        )}
+      </Drawer>
 
       <BatchNormalizeModal
         open={batchOpen}

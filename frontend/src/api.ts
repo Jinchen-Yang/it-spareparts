@@ -45,10 +45,14 @@ export default api;
 export interface PartHit {
   // part_id：browse/结构化分支返回（池成员选择等需要 id 的场景请传 browse=true）；resolver 分支无
   id?: number;
+  part_id?: number;
   pn_std: string;
   description: string | null;
   brand: string | null;
+  manufacturer?: string | null;
+  summary?: string | null;
   category_major: string | null;
+  category_minor?: string | null;
   needs_review: boolean;
   // 近似搜索附加字段（空查询浏览列表时无）
   score?: number;

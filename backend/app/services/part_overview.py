@@ -150,7 +150,9 @@ def search_parts(db: Session, q: str | None, page: int, page_size: int,
             "id": p.id,   # 兼容旧消费方（池成员选择等）；统一键名是 part_id
             "part_id": p.id,
             "pn_std": p.pn_std, "description": p.description, "brand": p.brand,
+            "manufacturer": p.manufacturer, "summary": p.summary,
             "category": p.category_major, "category_major": p.category_major,
+            "category_minor": p.category_minor,
             "needs_review": p.needs_review,
             "is_excluded": p.is_excluded,   # 与 resolver 分支返回形状对齐
             "specs": specs_by_part.get(p.id, {}),

@@ -83,7 +83,7 @@ it("主数据库编辑冲突后保留品牌清空草稿，以当前基线重提�
   };
   render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   fireEvent.click(await screen.findByRole("button", { name: /编\s*辑/ }));
-  const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
+  const dialog = await screen.findByRole("dialog", { name: /编辑 PN.*PN-42/ });
   fireEvent.change(within(dialog).getByDisplayValue("Old Brand"), { target: { value: "" } });
   fireEvent.click(within(dialog).getByRole("button", { name: /保\s*存/ }));
 
@@ -118,7 +118,7 @@ it("原始类型未填时可主动选择备件，提交类型差异并保留 nul
   };
   render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
-  const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
+  const dialog = await screen.findByRole("dialog", { name: /编辑 PN.*PN-42/ });
   await within(dialog).findByDisplayValue("Old Brand");
   fireEvent.mouseDown(within(dialog).getByLabelText("类型"));
   await screen.findByRole("option", { name: "备件" });
@@ -146,18 +146,18 @@ it("取消慢加载后打开另一型号，旧加载不会覆盖新表单", asyn
   };
   render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
-  const loadingDialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
+  const loadingDialog = await screen.findByRole("dialog", { name: /编辑 PN.*PN-42/ });
   expect(within(loadingDialog).getByRole("button", { name: /保\s*存/ })).toBeDisabled();
   fireEvent.click(within(loadingDialog).getByRole("button", { name: /取\s*消/ }));
   await openPart("PN-43");
-  const nextDialog = await screen.findByRole("dialog", { name: "编辑 PN-43" });
+  const nextDialog = await screen.findByRole("dialog", { name: /编辑 PN.*PN-43/ });
   await within(nextDialog).findByDisplayValue("第二型号描述");
 
   await act(async () => {
     slow.resolve(response({}, { ...baseline, part: { id: 42, pn_std: "PN-42", ...baseline.fields } }));
     await slow.promise;
   });
-  expect(screen.getByRole("dialog", { name: "编辑 PN-43" })).toBeInTheDocument();
+  expect(screen.getByRole("dialog", { name: /编辑 PN.*PN-43/ })).toBeInTheDocument();
   expect(within(nextDialog).getByLabelText("描述")).toHaveValue("第二型号描述");
 });
 
@@ -174,7 +174,7 @@ it("旧型号保存迟到时不会关闭后来打开的编辑会话或触发旧�
   };
   render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
-  const firstDialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
+  const firstDialog = await screen.findByRole("dialog", { name: /编辑 PN.*PN-42/ });
   await within(firstDialog).findByDisplayValue("Old Brand");
   fireEvent.change(within(firstDialog).getByLabelText("描述"), { target: { value: "第一型号草稿" } });
   fireEvent.click(within(firstDialog).getByRole("button", { name: /保\s*存/ }));
@@ -182,7 +182,7 @@ it("旧型号保存迟到时不会关闭后来打开的编辑会话或触发旧�
   expect(patchConfig.headers.Authorization).toBe("Bearer editor-token");
   fireEvent.click(within(firstDialog).getByRole("button", { name: /取\s*消/ }));
   await openPart("PN-43");
-  const nextDialog = await screen.findByRole("dialog", { name: "编辑 PN-43" });
+  const nextDialog = await screen.findByRole("dialog", { name: /编辑 PN.*PN-43/ });
   await within(nextDialog).findByDisplayValue("第二型号描述");
   fireEvent.change(within(nextDialog).getByLabelText("描述"), { target: { value: "第二型号草稿" } });
   await act(async () => {
@@ -190,7 +190,7 @@ it("旧型号保存迟到时不会关闭后来打开的编辑会话或触发旧�
     await save.promise;
   });
   expect(within(nextDialog).getByLabelText("描述")).toHaveValue("第二型号草稿");
-  expect(screen.getByRole("dialog", { name: "编辑 PN-43" })).toBeInTheDocument();
+  expect(screen.getByRole("dialog", { name: /编辑 PN.*PN-43/ })).toBeInTheDocument();
   expect(searches).toBe(1);
 });
 
@@ -204,10 +204,10 @@ it("没有实际修改时，空值展示和默认类型不会写入", async () =
   };
   render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
-  const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
+  const dialog = await screen.findByRole("dialog", { name: /编辑 PN.*PN-42/ });
   await within(dialog).findByDisplayValue("Old Brand");
   fireEvent.click(within(dialog).getByRole("button", { name: /保\s*存/ }));
-  await waitFor(() => expect(screen.queryByRole("dialog", { name: "编辑 PN-42" })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: /编辑 PN.*PN-42/ })).toBeNull());
   expect(patches).toBe(0);
 });
 
@@ -223,7 +223,7 @@ it("旧账号保存的迟到 401 不会退出新账号或覆盖当前草稿", as
   };
   render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
-  const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
+  const dialog = await screen.findByRole("dialog", { name: /编辑 PN.*PN-42/ });
   await within(dialog).findByDisplayValue("Old Brand");
   fireEvent.change(within(dialog).getByLabelText("描述"), { target: { value: "原账号草稿" } });
   fireEvent.click(within(dialog).getByRole("button", { name: /保\s*存/ }));
@@ -299,7 +299,7 @@ it("保存期间不能用一键规范化修改待保存的草稿", async () => {
   };
   render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
-  const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
+  const dialog = await screen.findByRole("dialog", { name: /编辑 PN.*PN-42/ });
   await within(dialog).findByDisplayValue("Old Brand");
   const input = within(dialog).getByLabelText("描述");
   fireEvent.change(input, { target: { value: "保存中的草稿" } });
@@ -334,7 +334,7 @@ it.each(["改名", "合并"])("主数据库冲突后重取基线遇到%s时不�
   };
   render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
-  const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
+  const dialog = await screen.findByRole("dialog", { name: /编辑 PN.*PN-42/ });
   await within(dialog).findByDisplayValue("Old Brand");
   fireEvent.change(within(dialog).getByLabelText("品牌"), { target: { value: "我的品牌草稿" } });
   fireEvent.click(within(dialog).getByRole("button", { name: /保\s*存/ }));
@@ -362,7 +362,7 @@ it.each(["账号", "型号"])("主数据库冲突基线慢加载期间切换%s�
   };
   render(<MemoryRouter><MasterDataPage /></MemoryRouter>);
   await openPart("PN-42");
-  const dialog = await screen.findByRole("dialog", { name: "编辑 PN-42" });
+  const dialog = await screen.findByRole("dialog", { name: /编辑 PN.*PN-42/ });
   await within(dialog).findByDisplayValue("Old Brand");
   fireEvent.change(within(dialog).getByLabelText("描述"), { target: { value: "原账号草稿" } });
   fireEvent.click(within(dialog).getByRole("button", { name: /保\s*存/ }));

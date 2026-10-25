@@ -119,6 +119,7 @@ from app.models.master_data import (
     ProductMergeLog,
     ProductSpec,
 )
+from app.models.part_search import PartSearchText, SpecKeyLabel
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder, FSalesReconciliationSnapshot
 from app.models.system import (
@@ -154,6 +155,8 @@ __all__ = [
     "ProductCategory",
     "IntegrationRequestLog",
     "ProductSpec",
+    "PartSearchText",
+    "SpecKeyLabel",
     "ProductMatchCandidate",
     "ProductMergeLog",
     "ProductDataQualityIssue",
