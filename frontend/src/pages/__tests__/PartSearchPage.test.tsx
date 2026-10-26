@@ -40,6 +40,14 @@ vi.mock("../../api/search", async (importOriginal) => {
 vi.mock("../../api/poolAnalysis", () => ({
   fetchPoolReference: (...a: unknown[]) => fetchPoolReference(...a),
 }));
+vi.mock("../../components/gallery/GalleryPicker", () => ({
+  default: ({ items, mode, onClose }: { items: { partId: number; pn: string }[]; mode: string; onClose: () => void }) => (
+    <div role="dialog" aria-label="图库选择器桩">
+      <span>{`${mode}:${items[0].partId}:${items[0].pn}`}</span>
+      <button onClick={onClose}>关闭图库选择器桩</button>
+    </div>
+  ),
+}));
 vi.mock("../../api", () => {
   const api = {
     get: vi.fn(async () => ({ data: { categories: [] } })),
@@ -150,6 +158,27 @@ afterEach(async () => {
 });
 
 describe("稳定深链", () => {
+  it("图库多选下载入口以 modal 打开当前型号，关闭后清理", async () => {
+    renderAt("/parts?part_id=42");
+    await screen.findByText("型号全景：");
+    fireEvent.click(screen.getByRole("button", { name: "多选下载" }));
+    expect(screen.getByRole("dialog", { name: "图库选择器桩" })).toHaveTextContent("modal:42:02311DYQ");
+    fireEvent.click(screen.getByRole("button", { name: "关闭图库选择器桩" }));
+    expect(screen.queryByRole("dialog", { name: "图库选择器桩" })).toBeNull();
+  });
+
+  it("切换全景型号会关闭图库选择器，新入口使用新型号", async () => {
+    fetchOverview.mockImplementation(async (key: { part_id: number }) => ovFix(key.part_id, key.part_id === 43 ? "PN-43" : "02311DYQ"));
+    renderAt("/parts?part_id=42");
+    await screen.findByText("型号全景：");
+    fireEvent.click(screen.getByRole("button", { name: "多选下载" }));
+    act(() => nav("/parts?part_id=43"));
+    await screen.findByRole("button", { name: "修改型号 PN-43 的描述和品类" });
+    expect(screen.queryByRole("dialog", { name: "图库选择器桩" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "多选下载" }));
+    expect(screen.getByRole("dialog", { name: "图库选择器桩" })).toHaveTextContent("modal:43:PN-43");
+  });
+
   it("替代料折叠可用 Tab 到达并用空格和 Enter 切换，保留记忆与编辑权限遮蔽", async () => {
     localStorage.setItem("role", "readonly");
     localStorage.setItem("ps_subs_open", "0");

@@ -29,6 +29,7 @@ from app.services.shop_gallery_client import (
 )
 
 router = APIRouter(prefix="/parts/{part_id}/gallery", tags=["part-gallery"])
+gallery_router = APIRouter(prefix="/parts/gallery", tags=["part-gallery"])
 
 PartId = Annotated[int, Path(ge=1, le=2**63 - 1)]
 ImageId = Annotated[UUID, Path()]
@@ -40,6 +41,7 @@ _IMAGE_MIME = Literal["image/jpeg", "image/png", "image/webp"]
 # 登记；tests/test_access_log_action_width.py 会从活代码取本 Literal 校验列宽。
 GalleryAuditAction = Literal[
     "gallery_list",
+    "gallery_download",
     "gallery_upload_sign",
     "gallery_upload_resumable",
     "gallery_upload_status",
@@ -88,6 +90,22 @@ class ImageUpdateInput(BaseModel):
         if not changes or any(getattr(self, field) is None for field in changes):
             raise ValueError("请提供排序、瑕疵标记或移入图库操作")
         return self
+
+
+class GalleryDownloadItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    part_id: int = Field(strict=True, ge=1, le=2**63 - 1)
+    image_ids: list[
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    ] = Field(min_length=1)
+
+
+class GalleryDownloadInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[GalleryDownloadItem] = Field(min_length=1)
+    kind: Literal["single", "zip"]
 
 
 def require_gallery_request_id(
@@ -188,6 +206,26 @@ def _response_with_etag(result: ShopGalleryResponse) -> Response:
 
 def _audit(ctx: UserContext, action: GalleryAuditAction, part_id: int, **extra: object) -> None:
     record_access_log(ctx, action, "part", {"part_id": part_id, **extra})
+
+
+@gallery_router.post("/download-audit", status_code=204)
+def audit_gallery_download(
+    payload: GalleryDownloadInput,
+    _role: Role,
+    ctx: Ctx,
+) -> Response:
+    """只记录浏览器发起的下载计数，不接收或代理图片字节。"""
+    _actor(ctx)
+    record_access_log(
+        ctx,
+        "gallery_download",
+        "part",
+        {
+            "part_count": len({item.part_id for item in payload.items}),
+            "image_count": sum(len(item.image_ids) for item in payload.items),
+        },
+    )
+    return Response(status_code=204)
 
 
 @router.get("")
