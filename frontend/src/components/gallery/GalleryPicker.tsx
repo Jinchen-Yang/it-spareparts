@@ -16,6 +16,8 @@ interface Props {
   items?: GalleryPart[];
   mode?: "inline" | "modal";
   onClose?: () => void;
+  /** 单次打包张数上限，默认 MAX_GALLERY_IMAGES；只允许调小（测试与特殊入口用）。 */
+  maxImages?: number;
 }
 
 interface Group extends GalleryPart {
@@ -39,7 +41,7 @@ function groupImages(group: Group): GalleryDownloadItem[] {
 }
 
 /** 通用图库选择器：图片下载和 ZIP 组装均在浏览器完成。 */
-export default function GalleryPicker({ partIds, items, mode = "inline", onClose }: Props) {
+export default function GalleryPicker({ partIds, items, mode = "inline", onClose, maxImages = MAX_GALLERY_IMAGES }: Props) {
   const { message } = App.useApp();
   const token = localStorage.getItem("token");
   // 调用方可直接传数组字面量；仅内容变化才重置选择与进行中的下载。
@@ -105,7 +107,8 @@ export default function GalleryPicker({ partIds, items, mode = "inline", onClose
   const allImages = groups.flatMap(groupImages);
   const chosen = allImages.filter((item) => selected.has(imageKey(item)));
   const totalBytes = chosen.reduce((total, item) => total + Math.max(0, item.image.bytes || 0), 0);
-  const overLimit = chosen.length > MAX_GALLERY_IMAGES || totalBytes > MAX_GALLERY_BYTES;
+  const imageLimit = Math.min(maxImages, MAX_GALLERY_IMAGES);
+  const overLimit = chosen.length > imageLimit || totalBytes > MAX_GALLERY_BYTES;
 
   const selectImage = (item: GalleryDownloadItem, checked: boolean, shiftKey: boolean) => {
     const key = imageKey(item);
@@ -221,7 +224,7 @@ export default function GalleryPicker({ partIds, items, mode = "inline", onClose
         <Button type="primary" disabled={downloading || !chosen.length || overLimit || !token}
           onClick={() => void startDownload(chosen, "zip")}>打包下载</Button>
       </Space>
-      {overLimit && <Alert type="warning" showIcon message="单次最多 500 张或 2 GB，请分批下载" style={{ marginBottom: 12 }} />}
+      {overLimit && <Alert type="warning" showIcon message={`单次最多 ${imageLimit} 张或 2 GB，请分批下载`} style={{ marginBottom: 12 }} />}
       {downloading && <div style={{ marginBottom: 12 }}>
         <div role="status">下载进度：{progress.completed} / {progress.total}</div>
         <Progress percent={progress.total ? Math.round(progress.completed / progress.total * 100) : 0} />

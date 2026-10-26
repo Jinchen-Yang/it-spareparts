@@ -176,15 +176,18 @@ it("选中总大小恰为 2 GB 可打包，超出后禁用且提示分批下载"
   expect(screen.getByRole("button", { name: "打包下载" })).toBeEnabled();
 });
 
-it("超出 500 张禁用打包，回到 500 张恢复可用", async () => {
-  vi.mocked(getCover).mockResolvedValue(gallery(42, "PN-42", Array.from({ length: 501 }, (_, index) => image(`img-${index}`, index, 1))));
-  render(<GalleryPicker partIds={[42]} />);
-  await screen.findByAltText("PN-42 第 501 张");
+// 500 张的真实边界由 galleryDownloads 单测覆盖；界面只验证超限禁用/回落恢复，
+// 用 maxImages 缩小规模，避免在慢 CI 上渲染 501 张缩略图超时。
+it("超出张数上限禁用打包，回到上限恢复可用", async () => {
+  vi.mocked(getCover).mockResolvedValue(gallery(42, "PN-42", Array.from({ length: 6 }, (_, index) => image(`img-${index}`, index, 1))));
+  render(<GalleryPicker partIds={[42]} maxImages={5} />);
+  await screen.findByAltText("PN-42 第 6 张");
   fireEvent.click(screen.getByRole("button", { name: /^全\s*选$/ }));
   expect(screen.getByRole("button", { name: "打包下载" })).toBeDisabled();
-  select("PN-42", 501);
+  expect(screen.getByText("单次最多 5 张或 2 GB，请分批下载")).toBeInTheDocument();
+  select("PN-42", 6);
   expect(screen.getByRole("button", { name: "打包下载" })).toBeEnabled();
-}, 20_000);
+});
 
 it("缩略图打开原图的页内预览，刷新签名后可切换和右键另存", async () => {
   const data = gallery();
