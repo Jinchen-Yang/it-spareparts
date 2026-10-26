@@ -7,6 +7,7 @@ export interface GalleryImage {
   id: string;
   pn_id: string;
   url: string;
+  url_expires_at?: string | null;
   thumb_url: string | null;
   width: number;
   height: number;
@@ -79,6 +80,20 @@ export async function fetchPartGallery(partId: number, token: string): Promise<G
     headers: auth(token),
   });
   return data;
+}
+
+export async function auditGalleryDownload(
+  items: { part_id: number; image_ids: string[] }[],
+  kind: "single" | "zip",
+  token: string,
+): Promise<void> {
+  // 审计失败不能触发 axios 的全局 401 reload，避免中断已开始的 OSS 下载。
+  const response = await fetch("/api/parts/gallery/download-audit", {
+    method: "POST",
+    headers: { ...auth(token), "Content-Type": "application/json" },
+    body: JSON.stringify({ items, kind }),
+  });
+  if (!response.ok) throw new Error(`下载审计失败（${response.status}）`);
 }
 
 export async function signGalleryUpload(

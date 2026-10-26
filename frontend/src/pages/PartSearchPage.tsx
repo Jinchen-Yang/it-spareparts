@@ -11,6 +11,7 @@ import InlinePartEditModal from "../components/parts/InlinePartEditModal";
 import PartGalleryPanel from "../components/parts/PartGalleryPanel";
 import LivePartSearch from "../components/parts/LivePartSearch";
 import PartThumb from "../components/gallery/PartThumb";
+import GalleryPicker from "../components/gallery/GalleryPicker";
 import api from "../api";
 import type { Overview, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { unifiedSearch, fetchOverview } from "../api/search";
@@ -97,7 +98,9 @@ export default function PartSearchPage() {
   const [loadingOv, setLoadingOv] = useState(false);
   const [subPn, setSubPn] = useState("");
   const [inlineEditPn, setInlineEditPn] = useState<string | null>(null);
+  const [galleryPickerOpen, setGalleryPickerOpen] = useState(false);
   useEffect(() => { setInlineEditPn(null); }, [urlPartId, urlPn]);
+  useEffect(() => { setGalleryPickerOpen(false); }, [urlPartId, urlPn]);
   // 替代料卡片折叠（记忆本机）
   const [subsOpen, setSubsOpen] = useState(() => localStorage.getItem("ps_subs_open") !== "0");
   const toggleSubs = () => setSubsOpen((o) => { localStorage.setItem("ps_subs_open", o ? "0" : "1"); return !o; });
@@ -530,6 +533,12 @@ export default function PartSearchPage() {
             </Descriptions>
           </section>
 
+          <Button onClick={() => setGalleryPickerOpen(true)} style={{ marginBottom: 8 }}>多选下载</Button>
+          {galleryPickerOpen && <GalleryPicker
+            items={[{ partId: ov.part.id, pn: ov.part.pn_std }]}
+            mode="modal"
+            onClose={() => setGalleryPickerOpen(false)}
+          />}
           <PartGalleryPanel
             key={ov.part.id}
             partId={ov.part.id}
