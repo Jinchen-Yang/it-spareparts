@@ -9,6 +9,7 @@ import { refreshWorkBadges, useWorkBadge } from "./useWorkBadge";
 
 interface Props {
   subjectType?: string;
+  conflictMessage?: string;
   renderRow: (item: WorkItem) => ReactNode;
   onOpen: (item: WorkItem) => void | Promise<void>;
 }
@@ -27,7 +28,7 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-export default function WorkInbox({ subjectType, renderRow, onOpen }: Props) {
+export default function WorkInbox({ subjectType, conflictMessage, renderRow, onOpen }: Props) {
   const { message } = App.useApp();
   const badge = useWorkBadge();
   const [tab, setTab] = useState<WorkTab>("assigned");
@@ -125,7 +126,7 @@ export default function WorkInbox({ subjectType, renderRow, onOpen }: Props) {
       const response = (error as { response?: { status?: number; data?: { detail?: { claimed_by_name?: string } } } })?.response;
       if (response?.status === 409) {
         const name = response.data?.detail?.claimed_by_name;
-        message.warning(action === "claim" && name ? `已被 ${name} 领取` : errorMessage(error, "待办已变化，请刷新后重试"));
+        message.warning(conflictMessage ?? (action === "claim" && name ? `已被 ${name} 领取` : errorMessage(error, "待办已变化，请刷新后重试")));
         setDialog(undefined);
         refresh();
       } else message.error(errorMessage(error, `${actionLabels[action]}失败，请重试`));

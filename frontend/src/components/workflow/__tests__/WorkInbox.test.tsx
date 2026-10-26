@@ -108,6 +108,19 @@ it("领取冲突显示当前领取人，并重新获取待办", async () => {
   await waitFor(() => expect(vi.mocked(listWorkItems).mock.calls.length).toBeGreaterThan(listCalls));
 });
 
+it("售前可指定统一冲突文案并保留自动刷新", async () => {
+  vi.mocked(claimWorkItem).mockRejectedValue({ response: { status: 409, data: {
+    detail: { message: "记录已变化", claimed_by_name: "王工" },
+  } } });
+  render(<WorkInbox subjectType="presales_inquiry" conflictMessage="已被他人修改/领取"
+    renderRow={() => <span>售前待办</span>} onOpen={vi.fn()} />);
+  await screen.findByText("售前待办");
+  const listCalls = vi.mocked(listWorkItems).mock.calls.length;
+  fireEvent.click(screen.getByRole("button", { name: /领\s*取/ }));
+  expect(await screen.findByText("已被他人修改/领取")).toBeInTheDocument();
+  await waitFor(() => expect(vi.mocked(listWorkItems).mock.calls.length).toBeGreaterThan(listCalls));
+});
+
 it("退回公共池必须填写原因，提交当前版本与原因", async () => {
   vi.mocked(listWorkItems).mockResolvedValue({ ...page(), items: [claimedItem] });
   inbox();
