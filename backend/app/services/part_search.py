@@ -3,7 +3,7 @@ import re
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy import Integer
+from sqlalchemy import Integer, String
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -12,6 +12,10 @@ from app.services.part_search_normalize import compact, normalize
 from app.services.spec_extract import SPEC_KEYS
 
 __all__ = ["search"]
+
+# 与 part_search_short_keys 迁移冻结的汉字范围一致。
+_CJK = "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002fa1f\U00030000-\U000323af"
+_SHORT_TERM = re.compile(r"(?:[A-Z0-9]{1,2}|[" + _CJK + r"]{1,2})")
 
 
 def _boost_part_ids(db: Session, q: str) -> set[int]:
@@ -33,7 +37,7 @@ def _pattern(term: str, *, compacted: bool = False) -> str | None:
 
 def _contains(column: str, parameter: str) -> str:
     # 投影和查询已按同一规则转大写，LIKE 保留大小写不敏感语义并避免重复折叠全文。
-    operator = "LIKE" if column in ("s.doc", "s.doc_compact", "p.pn_compact") else "ILIKE"
+    operator = "LIKE" if column in ("s.doc", "s.doc_compact", "p.pn_compact", "x.pn_compact") else "ILIKE"
     return f"{column} {operator} :{parameter} ESCAPE E'\\\\'"
 
 
@@ -63,7 +67,32 @@ def _term_condition(term: str, i: int, params: dict) -> str:
     if cp:
         params[f"c{i}"] = "%" + cp + "%"
         cond += " OR " + _contains("s.doc_compact", f"c{i}")
+    if _SHORT_TERM.fullmatch(term):
+        # 每个键都是同一归一化 doc 的字面子串，无需再读取 doc 做 LIKE。
+        # 保留文档行关联，纯短词可只读文档主键索引。
+        # 混合字符、标点及通配仍走原路径，避免没有键时漏召回。
+        params[f"sk{i}"] = term
+        return f"(k.keys @> ARRAY[:sk{i}]::text[])"
     return "(" + cond + ")"
+
+
+def _short_statement(stmt, terms: list[str], q: str):
+    # 只把短词自身的值交给规划器，避免通用计划丢失高频短键的选择率。
+    # SQLAlchemy 负责安全引用；长词绑定、规划设置及同事务后续语句不变。
+    names = {f"{prefix}{i}" for i, term in enumerate(terms) if _SHORT_TERM.fullmatch(term)
+             for prefix in ("sk", "t", "c")}
+    if not names:
+        return stmt
+    if _SHORT_TERM.fullmatch(q):
+        names.update(("q", "exact", "prefix", "pn_contains", "compact_prefix", "compact_contains"))
+    present = set(re.findall(r":([a-z][a-z0-9_]*)", str(stmt)))
+    bindings = [bindparam(name, type_=String(), literal_execute=True)
+                for name in sorted(names & present)]
+    if _SHORT_TERM.fullmatch(q):
+        # 单短词的提前停止还依赖实际上限，不能采用通用 LIMIT 的默认估计。
+        bindings.extend(bindparam(name, type_=Integer(), literal_execute=True)
+                        for name in ("limit", "remaining", "candidate_limit") if name in present)
+    return stmt.bindparams(*bindings)
 
 
 def _field_weight(terms: list[str]) -> str:
@@ -173,7 +202,7 @@ def search(db: Session, q: str, *, limit: int = 10, filters: dict | None = None)
     limit = min(30, max(0, int(limit)))
     if not q or not limit:
         return []
-    # 联想是短查询；候选车道较多时 JIT 编译本身会超过交互预算。
+    # 与基线一致，只关闭 JIT；短词不能改写长词或后续调用的规划设置。
     db.execute(text("SET LOCAL jit = off"))
     filters = dict(filters or {})
     boost = filters.get("boost_part_ids", _boost_part_ids)
@@ -181,6 +210,10 @@ def search(db: Session, q: str, *, limit: int = 10, filters: dict | None = None)
     params = {"q": q, "limit": limit, "boost_ids": list(boost or ())}
     terms = list(dict.fromkeys(q.split()))
     conditions = [_term_condition(t, i, params) for i, t in enumerate(terms)]
+    # 短词才关联窄表；纯长词保持原文档 SQL 和物理访问路径。
+    projection = "part_search_text s"
+    if any(_SHORT_TERM.fullmatch(term) for term in terms):
+        projection += " JOIN part_search_short_key k USING (part_id)"
     extra = _filter_sql(filters, params)
     # 沿用 resolver 的整查询 compact 精确判定；M1 另加 active 别名门。
     joined = preprocess(q)[0]["joined"] if not any(c in q for c in "*?%_\\") else ""
@@ -195,6 +228,13 @@ def search(db: Session, q: str, *, limit: int = 10, filters: dict | None = None)
         AND :literal_exact AND (:exact='' OR a.pn_raw ~ '[^ -~]')
         AND (""" + _normalized("a.pn_raw") + ")=:q"
     alias_exact = "p.pn_std IN (" + alias_matches + ")"
+    cjk_query = bool(_SHORT_TERM.fullmatch(q) and not q.isascii())
+    if cjk_query:
+        # 纯 ASCII 原文不可能归一化成汉字，避免对所有 PN/别名执行全文归一。
+        pn_exact = f"(p.pn_std ~ '[^ -~]' AND ({_normalized('p.pn_std')})=:q)"
+        alias_matches = ("SELECT a.pn_std FROM part_alias a WHERE a.status='active' "
+                         "AND a.pn_raw ~ '[^ -~]' AND (" + _normalized("a.pn_raw") + ")=:q")
+        alias_exact = "p.pn_std IN (" + alias_matches + ")"
     def pn_match(parameter: str) -> str:
         return _contains("(" + _match_text("p.pn_std") + ")", parameter)
 
@@ -212,19 +252,50 @@ def search(db: Session, q: str, *, limit: int = 10, filters: dict | None = None)
         contains = (_contains("p.pn_compact", "compact_contains")
                     + " OR (p.pn_std ~ '[^ -~]' AND "
                     + _contains("part_search_normalize(p.pn_std)", "pn_contains") + ")")
+        if len(q) < 3:
+            # 短 PN 子串同样提不出 trigram；strpos 保留包含语义，避开全 GIN 扫描。
+            contains = ("strpos(p.pn_compact,:q)>0 OR (p.pn_std ~ '[^ -~]' "
+                        "AND " + _contains("part_search_normalize(p.pn_std)", "pn_contains") + ")")
+    elif cjk_query:
+        prefix = "p.pn_std ~ '[^ -~]' AND (" + prefix + ")"
+        contains = "p.pn_std ~ '[^ -~]' AND (" + contains + ")"
+
+    def exact_ids(alias_source: str) -> str:
+        return ("SELECT x.id FROM dim_part x WHERE :exact<>'' AND x.pn_compact=:exact "
+                "UNION SELECT x.id FROM dim_part x WHERE :literal_exact "
+                "AND x.pn_std ~ '[^ -~]' AND (" + _normalized("x.pn_std") + ")=:q "
+                "UNION SELECT x.id FROM dim_part x WHERE x.pn_std IN (" + alias_source + ")")
+
     fields = "p.pn_std, p.brand, p.manufacturer, p.summary, p.description, p.category_major, p.category_minor"
     columns = "p.id AS part_id, " + fields
-    base = " FROM part_search_text s JOIN dim_part p ON p.id=s.part_id WHERE p.status <> 'merged' AND "
-    # 单字符常命中大多数 PN，分档查询可在顺序索引上提前停止。
+    base = " FROM " + projection + " JOIN dim_part p ON p.id=s.part_id WHERE p.status <> 'merged' AND "
+    direct_base = base + " AND ".join(conditions)
+    key_check = (" WHERE p.status <> 'merged' AND EXISTS ("
+                 "SELECT 1 FROM " + projection + " WHERE s.part_id=p.id AND "
+                 + " AND ".join(conditions) + " OFFSET 0)")
+    bounded_base = " FROM dim_part p" + key_check
+    # 字母短词常命中大量 PN，分档查询可在顺序索引上提前停止。
     rows: list[dict] = []
-    if len(q) == 1:
+    if len(q) == 1 or re.fullmatch(r"[A-Z]{2}", q):
         params.update(exclude=[], remaining=limit)
+        # 先按 PN 条件找行，再逐个核对短词投影。
+        fast_base = bounded_base if _SHORT_TERM.fullmatch(q) else direct_base
         for condition, rank in ((f"{pn_exact} OR {alias_exact}", 0), (prefix, 1)):
             params.update(exclude=[r["part_id"] for r in rows], remaining=limit - len(rows))
+            lane_from = fast_base
+            if _SHORT_TERM.fullmatch(q):
+                # 三种精确证据分别利用 compact、非 ASCII 子集和别名索引。
+                unicode_prefix = ("SELECT x.id FROM dim_part x WHERE x.pn_std ~ '[^ -~]' AND "
+                                  + _contains("part_search_normalize(x.pn_std)", "prefix"))
+                prefix_ids = (("SELECT x.id FROM dim_part x WHERE "
+                               + _contains("x.pn_compact", "compact_prefix") + " UNION ")
+                              if compact(q) else "") + unicode_prefix
+                ids = exact_ids(alias_matches) if rank == 0 else prefix_ids
+                lane_from = " FROM (" + ids + ") hits JOIN dim_part p ON p.id=hits.id" + key_check
             stmt = text(f"SELECT {columns}, {rank} AS tier, {pn_exact} AS pn_exact "
-                        + base + " AND ".join(conditions) + extra + f" AND ({condition}) "
+                        + lane_from + extra + f" AND ({condition}) "
                         "AND NOT(p.id=ANY(CAST(:exclude AS integer[]))) ORDER BY p.pn_std LIMIT :remaining")
-            rows.extend(dict(r) for r in db.execute(stmt, params).mappings())
+            rows.extend(dict(r) for r in db.execute(_short_statement(stmt, terms, q), params).mappings())
             if len(rows) >= limit:
                 break
     if len(rows) < limit:
@@ -240,9 +311,10 @@ def search(db: Session, q: str, *, limit: int = 10, filters: dict | None = None)
                  "ORDER BY p.pn_std LIMIT :limit)"
                  for condition in (f"{pn_exact} OR {alias_exact}", prefix, contains,
                                    "p.id=ANY(CAST(:boost_ids AS integer[]))")]
+        ranked_from = "FROM candidates c JOIN dim_part p ON p.id=c.part_id"
         stmt = text("WITH exact_aliases AS MATERIALIZED (" + alias_matches + "), "
                     "direct_matches AS MATERIALIZED (SELECT s.part_id "
-                    "FROM part_search_text s WHERE " + " AND ".join(conditions) + "), "
+                    "FROM " + projection + " WHERE " + " AND ".join(conditions) + "), "
                     f"matched_parts AS MATERIALIZED (SELECT p.id, p.pn_compact, {fields} "
                     "FROM direct_matches s JOIN dim_part p ON p.id=s.part_id "
                     "WHERE p.status <> 'merged' " + extra + "), "
@@ -254,7 +326,27 @@ def search(db: Session, q: str, *, limit: int = 10, filters: dict | None = None)
                     "SELECT * FROM ranked p ORDER BY tier, "
                     + f"(CASE WHEN tier=4 THEN ({_field_weight(terms)}) ELSE 0 END) DESC, "
                     "p.pn_std LIMIT :limit")
-        rows = [dict(r) for r in db.execute(stmt, params).mappings()]
+        # 含数字短词复用上面的匹配集合，避免稀疏 PN 子串另扫全库。
+        if all(_SHORT_TERM.fullmatch(term) for term in terms) and not re.search(r"[0-9]", q):
+            # 高频短词不展开全部文档命中：PN 各档独立找前 limit 条，
+            # 资料按 PN 只留前 N 条。稀疏词仍可由数组 GIN 自然召回。
+            identity_base = (" FROM (" + exact_ids("SELECT pn_std FROM exact_aliases")
+                             + ") hits JOIN dim_part p ON p.id=hits.id" + key_check)
+            short_lanes = [f"(SELECT p.id AS part_id {identity_base if rank == 0 else bounded_base} "
+                           f"{extra} AND ({condition}) "
+                           "ORDER BY p.pn_std LIMIT :limit)"
+                           for rank, condition in enumerate((f"{pn_exact} OR {alias_exact}", prefix, contains,
+                                                              "p.id=ANY(CAST(:boost_ids AS integer[]))"))]
+            stmt = text("WITH exact_aliases AS MATERIALIZED (" + alias_matches + "), "
+                        "doc_candidates AS MATERIALIZED (SELECT p.id AS part_id "
+                        + direct_base + extra + " ORDER BY p.pn_std LIMIT :candidate_limit), "
+                        "candidates AS MATERIALIZED (" + " UNION ".join(
+                            short_lanes + ["SELECT part_id FROM doc_candidates"])
+                        + f"), ranked AS MATERIALIZED (SELECT {columns}, {tier} AS tier, {pn_exact} AS pn_exact "
+                        + ranked_from + ") SELECT * FROM ranked p ORDER BY tier, "
+                        + f"(CASE WHEN tier=4 THEN ({_field_weight(terms)}) ELSE 0 END) DESC, "
+                        "p.pn_std LIMIT :limit")
+        rows = [dict(r) for r in db.execute(_short_statement(stmt, terms, q), params).mappings()]
     # 短词、显式通配或字面符号保持直接匹配，其余词可纠错，仍逐词满足条件。
     fuzzy_eligible = [len(t) >= 3 and not any(c in t for c in "*?%_\\") for t in terms]
     if len(rows) < limit and any(fuzzy_eligible):
@@ -297,11 +389,11 @@ def search(db: Session, q: str, *, limit: int = 10, filters: dict | None = None)
                               f"SELECT {columns},true AS fuzzy, "
                               "greatest(c.sim,word_similarity(:q,s.doc)) AS fuzzy_score "
                               "FROM cands c JOIN dim_part p ON p.id=c.part_id "
-                              "JOIN part_search_text s ON s.part_id=p.id WHERE "
+                              "JOIN " + projection + " ON s.part_id=p.id WHERE "
                               + " AND ".join(fuzzy_conditions) + extra
                               + " AND NOT(p.id=ANY(CAST(:exclude AS integer[]))) "
                               "ORDER BY greatest(c.sim,word_similarity(:q,s.doc)) DESC,p.pn_std LIMIT :remaining")
-            rows.extend(dict(r) for r in db.execute(fuzzy_stmt, params).mappings())
+            rows.extend(dict(r) for r in db.execute(_short_statement(fuzzy_stmt, terms, q), params).mappings())
         if len(rows) < limit:
             # 已有 PN/别名纠错证据时，额外资料候选要求更强证据，避免共用片段
             # 补入一屏无关型号；纯资料纠错仍沿用 resolver 的 0.35 阈值。
@@ -311,17 +403,17 @@ def search(db: Session, q: str, *, limit: int = 10, filters: dict | None = None)
             # 先独立召回文档，再限制候选数；把 LIMIT 放在索引召回内会诱导
             # 优化器沿主键逐行算 word_similarity，稀疏命中时耗时失控。
             fuzzy_stmt = text("WITH doc_matches AS MATERIALIZED (SELECT s.part_id "
-                              "FROM part_search_text s WHERE " + " AND ".join(doc_fuzzy_conditions)
+                              "FROM " + projection + " WHERE " + " AND ".join(doc_fuzzy_conditions)
                               + "), doc_candidates AS MATERIALIZED (SELECT d.part_id FROM doc_matches d "
                               "JOIN dim_part p ON p.id=d.part_id WHERE p.status<>'merged' " + extra
                               + " AND NOT(p.id=ANY(CAST(:exclude AS integer[]))) LIMIT 120) "
                               f"SELECT {columns},true AS fuzzy, "
                               "greatest(word_similarity(:q,s.doc),similarity(:cq,s.doc_compact)) AS fuzzy_score "
                               "FROM doc_candidates c JOIN dim_part p ON p.id=c.part_id "
-                              "JOIN part_search_text s ON s.part_id=p.id "
+                              "JOIN " + projection + " ON s.part_id=p.id "
                               "ORDER BY greatest(word_similarity(:q,s.doc),similarity(:cq,s.doc_compact)) DESC, "
                               "p.pn_std LIMIT :remaining")
-            rows.extend(dict(r) for r in db.execute(fuzzy_stmt, params).mappings())
+            rows.extend(dict(r) for r in db.execute(_short_statement(fuzzy_stmt, terms, q), params).mappings())
         direct = [r for r in rows if not r.get("fuzzy")]
         fuzzy = sorted((r for r in rows if r.get("fuzzy")),
                        key=lambda r: (-r["fuzzy_score"], r["pn_std"]))
