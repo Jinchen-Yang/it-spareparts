@@ -14,6 +14,7 @@ export interface LivePartSearchProps {
   onInputChange?: (text: string) => void;
   inputProps?: Omit<InputProps, "value" | "onChange" | "onKeyDown" | "onCompositionStart" | "onCompositionEnd">;
   limit?: number;
+  minChars?: number;
   onAddRaw?: (text: string) => void;
   renderThumb?: (item: PartSuggestion) => ReactNode;
   renderBadges?: (item: PartSuggestion) => ReactNode;
@@ -66,7 +67,7 @@ function highlightedPn(pn: string, terms: string[]) {
 /** 独立联想组件，不接触现有 PartPicker 的身份与匹配契约。 */
 export default function LivePartSearch({
   mode = "single", value, onChange, inputValue, onInputChange, inputProps,
-  limit = 10, onAddRaw, renderThumb, renderBadges,
+  limit = 10, minChars = 1, onAddRaw, renderThumb, renderBadges,
 }: LivePartSearchProps) {
   const [text, setText] = useState(inputValue ?? "");
   const [picked, setPicked] = useState<PartSuggestion[]>([]);
@@ -116,7 +117,8 @@ export default function LivePartSearch({
     setActive(-1);
     setError(false);
     setLoading(false);
-    if (!next.trim() || composing.current) { setOpen(false); return; }
+    const length = Array.from(next.trim()).length;
+    if (!length || length < minChars || composing.current) { setOpen(false); return; }
     setOpen(true);
     const seq = generation.current;
     const run = async () => {
@@ -135,7 +137,7 @@ export default function LivePartSearch({
       }
     };
     if (immediate) void run();
-    else timer.current = setTimeout(run, 150);
+    else timer.current = setTimeout(run, length === 1 ? 300 : 150);
   };
 
   const changeSelection = (next: PartSuggestion[]) => {

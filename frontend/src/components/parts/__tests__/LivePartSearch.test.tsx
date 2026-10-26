@@ -28,6 +28,105 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe("LivePartSearch", () => {
+  it.each(["S", "硬", " S "])("默认支持单字符，去除首尾空白后按 300ms 防抖：%s", async (query) => {
+    render(<LivePartSearch />);
+    type(query);
+    await tick(299);
+    expect(suggestParts).not.toHaveBeenCalled();
+    await tick(1);
+    expect(suggestParts).toHaveBeenCalledExactlyOnceWith(query, 10, expect.any(AbortSignal));
+  });
+
+  it("扩展汉字按一个 Unicode 字符使用 300ms 防抖，仍受 minChars 阈值限制", async () => {
+    const { rerender } = render(<LivePartSearch />);
+    type("𠀀");
+    await tick(299);
+    expect(suggestParts).not.toHaveBeenCalled();
+    await tick(1);
+    expect(suggestParts).toHaveBeenCalledExactlyOnceWith("𠀀", 10, expect.any(AbortSignal));
+    rerender(<LivePartSearch minChars={2} />);
+    type(""); type("𠀀");
+    await tick(300);
+    expect(suggestParts).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it.each(["HP", "硬盘", "SAS"])("两个及以上字符按 150ms 防抖：%s", async (query) => {
+    render(<LivePartSearch />);
+    type(query);
+    await tick(149);
+    expect(suggestParts).not.toHaveBeenCalled();
+    await tick(1);
+    expect(suggestParts).toHaveBeenCalledExactlyOnceWith(query, 10, expect.any(AbortSignal));
+  });
+
+  it("从单字符改成双字符时取消 300ms 计时，重新按 150ms 查询", async () => {
+    render(<LivePartSearch />);
+    type("S"); await tick(200);
+    type("SA"); await tick(149);
+    expect(suggestParts).not.toHaveBeenCalled();
+    await tick(1);
+    expect(suggestParts).toHaveBeenCalledExactlyOnceWith("SA", 10, expect.any(AbortSignal));
+    await tick(300);
+    expect(suggestParts).toHaveBeenCalledTimes(1);
+  });
+
+  it("minChars 按去除首尾空白后的长度拦截输入，达到阈值才查询", async () => {
+    render(<LivePartSearch minChars={2} />);
+    type(" S "); await tick(300);
+    expect(suggestParts).not.toHaveBeenCalled();
+    expect(screen.queryByRole("listbox")).toBeNull();
+    type(" SA "); await tick(149);
+    expect(suggestParts).not.toHaveBeenCalled();
+    await tick(1);
+    expect(suggestParts).toHaveBeenCalledExactlyOnceWith(" SA ", 10, expect.any(AbortSignal));
+  });
+
+  it("低于 minChars 时取消待发请求和进行中请求，并清空旧结果", async () => {
+    const pending = deferred<PartSuggestion[]>();
+    suggestParts.mockReturnValue(pending.promise);
+    render(<LivePartSearch minChars={2} />);
+    type("SA"); await tick(100);
+    type("S"); await tick(300);
+    expect(suggestParts).not.toHaveBeenCalled();
+    type("SA"); await tick();
+    const signal: AbortSignal = suggestParts.mock.calls[0][2];
+    type("S");
+    expect(signal.aborted).toBe(true);
+    await act(async () => pending.resolve([item()]));
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(screen.queryByRole("option")).toBeNull();
+    await tick(300);
+    expect(suggestParts).toHaveBeenCalledTimes(1);
+  });
+
+  it("中文组合输入结束仍须达到 minChars 才立即请求", async () => {
+    render(<LivePartSearch minChars={2} />);
+    fireEvent.compositionStart(input());
+    type("硬");
+    fireEvent.compositionEnd(input());
+    await tick(300);
+    expect(suggestParts).not.toHaveBeenCalled();
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.compositionStart(input());
+    type("硬盘");
+    fireEvent.compositionEnd(input());
+    expect(suggestParts).toHaveBeenCalledExactlyOnceWith("硬盘", 10, expect.any(AbortSignal));
+  });
+
+  it("保留缩略图插槽，以及 PN、命中原因、品牌同一行和简介第二行的布局", async () => {
+    render(<LivePartSearch renderThumb={() => <img alt="型号缩略图" src="/thumb.jpg" />} />);
+    type("0231"); await tick();
+    const option = screen.getByRole("option");
+    const line = option.querySelector(".live-part-search-line")!;
+    expect(within(option).getByRole("img", { name: "型号缩略图" }).parentElement).toBe(option);
+    expect(line).toHaveTextContent("0231-AC4L");
+    expect(line).toHaveTextContent("PN前缀");
+    expect(line).toHaveTextContent("华为 / Huawei");
+    expect(line.nextElementSibling).toHaveClass("live-part-search-summary");
+    expect(line.nextElementSibling).toHaveTextContent("服务器硬盘");
+  });
+
   it("150ms 防抖且只发最后一次输入；展示资料、命中原因和 PN 高亮", async () => {
     render(<LivePartSearch />);
     type("02");
