@@ -132,6 +132,7 @@ from app.models.system import (
     SysRoleTemplate,
     SysUser,
 )
+from app.models.workflow import SubjectEvent, WorkItem
 from app.models.replenishment import (
     ReplenishmentApplication,
     ReplenishmentApplicationLine,
@@ -248,6 +249,8 @@ __all__ = [
     "SysBusinessSetting",
     "SysUser",
     "SysRoleTemplate",
+    "WorkItem",
+    "SubjectEvent",
     "ReplenishmentApplication",
     "ReplenishmentApplicationVersion",
     "ReplenishmentApplicationLine",

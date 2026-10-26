@@ -125,6 +125,7 @@ except BaseException:
 _app_engine = engine
 
 _TABLES = [
+    "subject_event", "work_item",
     "chat_message", "chat_session",
     "replenishment_review_line",
     "replenishment_review",
