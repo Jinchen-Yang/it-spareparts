@@ -1474,6 +1474,29 @@
       "version": "3.0.2"
     },
     {
+      "bom-ref": "pkg:npm/fflate@0.8.2?path=node_modules%2Ffflate",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "70f254e3b39a02809b834a41bf3b20a533e19a1a88e5e26387f248bbcb4f8f9abe4fb88bbd6fc901852a984eca381e11d59c8487305a210a50a5aadd045e73f0"
+        }
+      ],
+      "name": "fflate",
+      "properties": [
+        {
+          "name": "it-spareparts:package-lock-path",
+          "value": "node_modules/fflate"
+        },
+        {
+          "name": "it-spareparts:development-only",
+          "value": "false"
+        }
+      ],
+      "purl": "pkg:npm/fflate@0.8.2",
+      "type": "library",
+      "version": "0.8.2"
+    },
+    {
       "bom-ref": "pkg:npm/follow-redirects@1.16.1?path=node_modules%2Ffollow-redirects",
       "hashes": [
         {

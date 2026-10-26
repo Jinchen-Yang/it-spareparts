@@ -404,7 +404,12 @@ def test_permission_registry_wiring(db):
                                    "action_maintenance_collection_follow_up",
                                    "action_maintenance_collection_plan_import",
                                    "action_replenishment_create",
-                                   "action_replenishment_review"]
+                                   "action_replenishment_review",
+                                   "action_presales_inquire",
+                                   "action_presales_quote",
+                                   "action_presales_offer",
+                                   "action_presales_bind_part",
+                                   "action_presales_supervise"]
 
 
 # ---------------------------------------------------------------- 端到端闭环
