@@ -1,11 +1,12 @@
-"""实时检索投影（M1，迁移 c4e6a8b1d3f5）。
+"""实时检索投影（M1，迁移 c4e6a8b1d3f5 / d6f8a0b2c4e6）。
 
-两张表都由数据库触发器维护（dim_part / product_specs / part_alias 写入时同事务刷新），
-应用代码只读；这里登记 ORM 模型是为了让 alembic check 与迁移结构一致。
+文本和短词投影都由数据库触发器维护（dim_part / product_specs / part_alias 写入时
+同事务刷新），应用代码只读；登记 ORM 模型以保持 alembic check 与迁移结构一致。
 """
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -38,4 +39,19 @@ class PartSearchText(Base):
               postgresql_using="gin", postgresql_ops={"doc": "gin_trgm_ops"}),
         Index("ix_part_search_text_doc_compact_trgm", "doc_compact",
               postgresql_using="gin", postgresql_ops={"doc_compact": "gin_trgm_ops"}),
+    )
+
+
+class PartSearchShortKey(Base):
+    """独立窄表保存一至二字符检索键，不扩大文本投影的 heap。"""
+
+    __tablename__ = "part_search_short_key"
+
+    part_id: Mapped[int] = mapped_column(
+        ForeignKey("dim_part.id", ondelete="CASCADE"), primary_key=True)
+    keys: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+
+    __table_args__ = (
+        Index("ix_part_search_short_key_keys", "keys",
+              postgresql_using="gin", postgresql_ops={"keys": "array_ops"}),
     )

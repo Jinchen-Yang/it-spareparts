@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.40.0";
+export const APP_VERSION = "1.40.1";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.40.1",
+    date: "2026-10-26",
+    items: [
+      "「硬盘」「内存」「HP」这类一两个字的短词联想明显变快",
+      "英文 1–2 个字母按词首匹配（比如输入 S 不再匹配到 ABS），中文短词照旧包含即命中",
+      "联想等待期间显示「搜索中」，不再先闪一下「暂无匹配型号」",
+      "看大图前自动刷新图片链接，页面放久了也不会打不开",
+    ],
+  },
   {
     version: "1.40.0",
     date: "2026-10-26",

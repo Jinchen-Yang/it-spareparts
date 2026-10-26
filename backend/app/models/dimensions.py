@@ -82,6 +82,8 @@ class DimPart(Base):
 
     __table_args__ = (
         Index("ix_part_pn_compact", "pn_compact"),
+        Index("ix_part_search_non_ascii", "pn_std",
+              postgresql_where=text("pn_std ~ '[^ -~]'")),
         Index("ix_part_pn_compact_trgm", "pn_compact",
               postgresql_using="gin", postgresql_ops={"pn_compact": "gin_trgm_ops"}),
         Index("ix_part_search_doc_trgm", "search_doc",
@@ -122,6 +124,8 @@ class PartAlias(Base):
 
     __table_args__ = (
         Index("ix_alias_std", "pn_std"),
+        Index("ix_alias_search_non_ascii", "pn_std",
+              postgresql_where=text("pn_raw ~ '[^ -~]'")),
         Index("ix_alias_pn_compact_trgm", "pn_compact",
               postgresql_using="gin", postgresql_ops={"pn_compact": "gin_trgm_ops"}),
         # DEFERRABLE：改名(part_rename)需在同事务里改 dim_part.pn_std 与名下别名 pn_std，
