@@ -8,6 +8,13 @@ export interface AudienceRule {
   group_ids: number[];
 }
 
+/** 仅作者和主管可读取的规则；名称来自服务端，不靠候选列表反推。 */
+export interface AudienceRuleRead {
+  mode: AudienceMode;
+  users: { id: string; name: string }[];
+  groups: { id: number; name: string }[];
+}
+
 export interface AudiencePerson {
   id: string;
   display_name: string;

@@ -5,7 +5,8 @@ import {
   defineField, listFieldDefinitions, suggestFieldNames, type CustomFieldValue, type FieldDefinition,
   type FieldLevel, type FieldNameSuggestion, type FieldValueType,
 } from "../../api/fields";
-import type { AudienceRule } from "../../api/audience";
+import type { AudienceRule, AudienceRuleRead } from "../../api/audience";
+import { changedAudience } from "../audience/rules";
 import AudienceLock from "../audience/AudienceLock";
 import { PUBLIC_AUDIENCE, type AudiencePickerProps } from "../audience/AudiencePicker";
 
@@ -28,13 +29,14 @@ export interface CustomFieldsEditorProps {
   template: FieldDefinition[];
   definitions?: FieldDefinition[];
   value?: CustomFieldValue[];
+  savedValues?: { field_def_id?: number; rule?: AudienceRuleRead }[];
   onChange?: (values: CustomFieldValue[]) => void;
   disabled?: boolean;
   audienceProps?: Omit<AudiencePickerProps, "value" | "onChange" | "disabled">;
 }
 
 /** 一张单据/一行使用一个实例；切换单据或 anchor 时由调用方用 key 重建实例。 */
-export function CustomFieldsEditor({ subjectType, level, template, definitions, value, onChange,
+export function CustomFieldsEditor({ subjectType, level, template, definitions, value, savedValues, onChange,
   disabled = false, audienceProps }: CustomFieldsEditorProps) {
   const [innerValue, setInnerValue] = useState<CustomFieldValue[]>([]);
   const current = value ?? innerValue;
@@ -113,16 +115,22 @@ export function CustomFieldsEditor({ subjectType, level, template, definitions, 
   const changeValue = (field: EditorField, next: string) => {
     const previous = current.find((item) => valueKey(item) === field.key);
     // 有值项以受控回填为准；本地规则仅是尚未填写的空框草稿。
-    const rule = previous?.value ? previous.rule : rules[field.key] ?? previous?.rule;
+    const draftRule = previous?.value ? previous.rule : rules[field.key] ?? previous?.rule;
+    const rule = changedAudience(draftRule, savedValues?.find((item) => item.field_def_id === field.id)?.rule);
     const identity = field.id !== undefined ? { field_def_id: field.id } : { new_name: field.name };
     const entry: CustomFieldValue = { ...identity, value: next, ...(rule ? { rule } : {}) };
     emit([...current.filter((item) => valueKey(item) !== field.key), entry]);
   };
   const changeRule = (field: EditorField, rule: AudienceRule) => {
+    const nextRule = changedAudience(rule, savedValues?.find((item) => item.field_def_id === field.id)?.rule);
     if (!current.some((item) => valueKey(item) === field.key && item.value)) {
       setRules((previous) => ({ ...previous, [field.key]: rule }));
     }
-    emit(current.map((item) => valueKey(item) === field.key ? { ...item, rule } : item));
+    emit(current.map((item) => {
+      if (valueKey(item) !== field.key) return item;
+      const { rule: _rule, ...entry } = item;
+      return { ...entry, ...(nextRule ? { rule: nextRule } : {}) };
+    }));
   };
   const hide = (field: EditorField) => {
     setHidden((previous) => [...previous, field.key]);
@@ -159,6 +167,8 @@ export function CustomFieldsEditor({ subjectType, level, template, definitions, 
     {fields.map((field) => {
       const item = current.find((entry) => valueKey(entry) === field.key);
       const fieldValue = item?.value ?? "";
+      const savedEntry = savedValues?.find((entry) => entry.field_def_id === field.id);
+      const savedRule = savedEntry?.rule;
       const label = `${field.name}字段值`;
       let input;
       if (field.value_type === "bool" || field.value_type === "choice") {
@@ -175,9 +185,9 @@ export function CustomFieldsEditor({ subjectType, level, template, definitions, 
       return <div key={field.key}>
         <Space style={{ marginBottom: 4 }}>
           <Typography.Text>{field.name}</Typography.Text>
-          <AudienceLock {...audienceProps} label={field.name} disabled={disabled}
-            value={(item?.value ? item.rule : rules[field.key] ?? item?.rule) ?? field.default_rule ?? PUBLIC_AUDIENCE}
-            onChange={(rule) => changeRule(field, rule)} />
+          {(!savedEntry || savedRule) && <AudienceLock {...audienceProps} label={field.name} disabled={disabled} savedRule={savedRule}
+            value={(item?.value ? item.rule : rules[field.key] ?? item?.rule) ?? (savedRule ? undefined : field.default_rule ?? PUBLIC_AUDIENCE)}
+            onChange={(rule) => changeRule(field, rule)} />}
           <Button type="text" size="small" icon={<EyeInvisibleOutlined />} disabled={disabled}
             aria-label={`临时隐藏${field.name}`} onClick={() => hide(field)} />
         </Space>

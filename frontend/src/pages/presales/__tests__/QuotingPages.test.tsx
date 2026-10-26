@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   getInquiry: vi.fn(), createInquiry: vi.fn(), saveOffer: vi.fn(), updateOffer: vi.fn(),
   withdrawOffer: vi.fn(), replyInquiry: vi.fn(), publishInquiry: vi.fn(), partCheck: vi.fn(),
   bindPart: vi.fn(), createPart: vi.fn(), library: vi.fn(), revisions: vi.fn(), listWorkItems: vi.fn(),
-  listWorkCandidates: vi.fn(), getFieldTemplate: vi.fn(), refreshWorkBadges: vi.fn(), inbox: vi.fn(),
+  listWorkCandidates: vi.fn(), getFieldTemplate: vi.fn(), refreshWorkBadges: vi.fn(), inbox: vi.fn(), suppliers: vi.fn(),
 }));
 vi.mock("../../../api/presales", () => ({ presales: mocks }));
 vi.mock("../../../api/workItems", () => ({ listWorkItems: mocks.listWorkItems, listWorkCandidates: mocks.listWorkCandidates }));
@@ -55,6 +55,10 @@ let currentInquiry: Inquiry;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
+  localStorage.setItem("role", "purchaser");
+  localStorage.setItem("permissions", JSON.stringify({ action_presales_quote: true, action_presales_offer: true, data_supplier: true }));
+  mocks.suppliers.mockResolvedValue([]);
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-25T04:00:00Z"));
   currentInquiry = baseInquiry();
   mocks.getInquiry.mockImplementation(async () => currentInquiry);
@@ -70,8 +74,10 @@ beforeEach(() => {
     return currentInquiry.offers;
   });
   mocks.saveOffer.mockImplementation(async (_inquiryId: number, lineId: number, body: Record<string, unknown>) => {
+    const rules = Object.fromEntries(["supplier_audience", "reporter_audience", "notes_audience"].flatMap((field) =>
+      body[field] ? [[field, { mode: (body[field] as { mode: string }).mode, users: [], groups: [] }]] : []));
     const offer = quote({ ...body, id: lineId + 70, line_id: lineId, part_id: lineId - 10,
-      version: Number(body.offer_id ? body.expected_version : 0) + 1 });
+      ...rules, version: Number(body.offer_id ? body.expected_version : 0) + 1 });
     currentInquiry = { ...currentInquiry, offers: [...(currentInquiry.offers ?? []).filter((item) => item.line_id !== lineId), offer] };
     return offer;
   });

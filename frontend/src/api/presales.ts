@@ -1,5 +1,5 @@
 import { api } from "../api";
-import type { AudienceRule } from "./audience";
+import type { AudienceRule, AudienceRuleRead } from "./audience";
 import type { FieldDefinition } from "./fields";
 import type { PartSuggestion } from "./search";
 import type { PriceRef } from "./priceRefs";
@@ -12,6 +12,9 @@ export interface FieldValue {
   value: string | number | boolean | null;
   rule?: AudienceRule;
 }
+
+export interface ReadFieldValue extends Omit<FieldValue, "rule"> { rule?: AudienceRuleRead }
+export interface PresalesCandidate { id: number; name: string }
 
 export interface LineInput {
   line_key?: string;
@@ -26,7 +29,7 @@ export interface LineInput {
   field_values?: FieldValue[];
 }
 
-export interface InquiryLine extends LineInput {
+export interface InquiryLine extends Omit<LineInput, "notes_audience" | "field_values"> {
   id: number;
   inquiry_id: number;
   line_key: string;
@@ -35,7 +38,8 @@ export interface InquiryLine extends LineInput {
   qty: string | number;
   status: "active" | "deleted";
   version: number;
-  field_values?: FieldValue[];
+  notes_audience?: AudienceRuleRead;
+  field_values?: ReadFieldValue[];
   field_template?: Pick<FieldDefinition, "id" | "name" | "value_type" | "choices">[];
 }
 
@@ -66,7 +70,10 @@ export interface OfferInput {
   notes_audience?: AudienceRule;
 }
 
-export interface Offer extends OfferInput {
+export interface Offer extends Omit<OfferInput, "supplier_audience" | "reporter_audience" | "notes_audience"> {
+  supplier_audience?: AudienceRuleRead;
+  reporter_audience?: AudienceRuleRead;
+  notes_audience?: AudienceRuleRead;
   id: number;
   inquiry_id: number;
   line_id: number;
@@ -99,6 +106,8 @@ export interface Inquiry {
   revision: number;
   customer_id?: number | null;
   notes?: string | null;
+  offer_audience?: AudienceRuleRead;
+  notes_audience?: AudienceRuleRead;
   assignee_ids?: number[];
   created_by?: number;
   created_at: string;
@@ -112,7 +121,7 @@ export interface Inquiry {
   lines?: InquiryLine[];
   offers?: Offer[];
   work_items?: InquiryWorkItem[];
-  field_values?: FieldValue[];
+  field_values?: ReadFieldValue[];
 }
 
 export interface InquiryPage { items: Inquiry[]; total: number; page: number; page_size: number }
@@ -145,6 +154,12 @@ async function inquiryAction(id: number, action: string, body: VersionInput) {
 
 /** 返回值保持服务端过滤后的形状，不补出被受众规则删去的字段。 */
 export const presales = {
+  async customers(q = "", signal?: AbortSignal) {
+    return (await api.get<PresalesCandidate[]>(`${root}/customers`, { params: { q, limit: 20 }, signal })).data;
+  },
+  async suppliers(q = "", signal?: AbortSignal) {
+    return (await api.get<PresalesCandidate[]>(`${root}/suppliers`, { params: { q, limit: 20 }, signal })).data;
+  },
   async listInquiries(params: { kind?: Inquiry["kind"]; scope?: "mine" | "all"; status?: Inquiry["status"]; page?: number; page_size?: number } = {}) {
     return (await api.get<InquiryPage>(`${root}/inquiries`, { params })).data;
   },

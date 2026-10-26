@@ -14,7 +14,7 @@ from app.db import get_db
 from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer
 from app.security import UserContext
 from app.services import price_reference
-from app.services.presales import binding, common, inquiries, library, offers, visibility
+from app.services.presales import binding, candidates, common, inquiries, library, offers, visibility
 from app.services.presales.registration import register_subjects
 from app.services.resale_price_reference import PriceReferenceUnavailable
 from app.services.workflow.registry import WorkflowError
@@ -181,6 +181,18 @@ def _call(db, fn, *, write=False):
 
 def _inquiry_action(db, ctx, fn):
     return _call(db, lambda: visibility.inquiry_view(db, fn(), ctx), write=True)
+
+
+@router.get("/customers")
+def search_customers(db: Db, ctx: Ctx, q: str = Query(default="", max_length=256),
+                     limit: int = Query(20, ge=1, le=100)):
+    return _call(db, lambda: candidates.customers(db, ctx, q, limit=limit))
+
+
+@router.get("/suppliers")
+def search_suppliers(db: Db, ctx: Ctx, q: str = Query(default="", max_length=256),
+                     limit: int = Query(20, ge=1, le=100)):
+    return _call(db, lambda: candidates.suppliers(db, ctx, q, limit=limit))
 
 
 @router.get("/inquiries")

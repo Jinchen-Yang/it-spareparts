@@ -6,6 +6,14 @@ beforeEach(() => {
   Object.values(http).forEach((fn) => fn.mockReset().mockResolvedValue({ data: { id: 1, version: 2 } }));
 });
 
+it("客户和供应商候选分别使用售前专用搜索端点与取消信号", async () => {
+  const controller = new AbortController();
+  await presales.customers("客户甲", controller.signal);
+  expect(http.get).toHaveBeenLastCalledWith("/presales/customers", { params: { q: "客户甲", limit: 20 }, signal: controller.signal });
+  await presales.suppliers("供应商甲", controller.signal);
+  expect(http.get).toHaveBeenLastCalledWith("/presales/suppliers", { params: { q: "供应商甲", limit: 20 }, signal: controller.signal });
+});
+
 it("使用主键、各主体版本与受众账号字符串传递原始契约，不补隐藏字段", async () => {
   const body = { kind: "sales_inquiry" as const, assignee_ids: [4, 5],
     offer_audience: { mode: "include" as const, user_ids: ["sale-a"], group_ids: [2] },

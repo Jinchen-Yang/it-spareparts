@@ -116,6 +116,20 @@ describe("AudiencePicker", () => {
 });
 
 describe("AudienceLock", () => {
+  it("回读规则展示真实模式、人员与分组名称，打开设置不触发改写", async () => {
+    const onChange = vi.fn();
+    render(<AudienceLock label="备注" savedRule={{ mode: "exclude", users: [{ id: "not-in-results", name: "原销售" }],
+      groups: [{ id: 99, name: "原分组" }] }} onChange={onChange} people={[]} groups={[]} />);
+    fireEvent.click(screen.getByRole("button", { name: "备注可见性：不给谁看" }));
+    const select = await screen.findByRole("combobox", { name: "不给谁看" });
+    expect(select.closest(".ant-select")).toHaveTextContent("原销售");
+    expect(select.closest(".ant-select")).toHaveTextContent("原分组");
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "公开" }));
+    expect(onChange).toHaveBeenLastCalledWith(PUBLIC_AUDIENCE);
+    expect(screen.getByRole("button", { name: "备注可见性：公开" })).toBeInTheDocument();
+  });
+
   it.each<[AudienceMode, string, string]>([
     ["public", "公开", "global"], ["private", "私密", "lock"],
     ["include", "部分可见", "team"], ["exclude", "不给谁看", "user-delete"],

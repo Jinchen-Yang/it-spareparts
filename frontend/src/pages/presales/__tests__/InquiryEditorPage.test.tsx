@@ -6,14 +6,13 @@ import type { Inquiry, Offer } from "../../../api/presales";
 
 const mocks = vi.hoisted(() => ({
   presales: { getInquiry: vi.fn(), createInquiry: vi.fn(), updateInquiry: vi.fn(), submitInquiry: vi.fn(),
-    resubmitInquiry: vi.fn(), appendLines: vi.fn(), library: vi.fn() },
+    resubmitInquiry: vi.fn(), appendLines: vi.fn(), library: vi.fn(), customers: vi.fn() },
   suggestParts: vi.fn(), getFieldTemplate: vi.fn(), listFieldDefinitions: vi.fn(),
-  listWorkCandidates: vi.fn(), fetchPurchaseAnalyticsOptions: vi.fn(),
+  listWorkCandidates: vi.fn(),
 }));
 vi.mock("../../../api/presales", () => ({ presales: mocks.presales }));
 vi.mock("../../../api/search", () => ({ suggestParts: mocks.suggestParts }));
 vi.mock("../../../api/workItems", () => ({ listWorkCandidates: mocks.listWorkCandidates }));
-vi.mock("../../../api/purchaseAnalytics", () => ({ fetchPurchaseAnalyticsOptions: mocks.fetchPurchaseAnalyticsOptions }));
 vi.mock("../../../api/fields", () => ({ getFieldTemplate: mocks.getFieldTemplate, listFieldDefinitions: mocks.listFieldDefinitions,
   suggestFieldNames: vi.fn(async () => []), defineField: vi.fn() }));
 vi.mock("../../../api/audience", () => ({ listAudiencePeople: vi.fn(async () => []), listAudienceGroups: vi.fn(async () => []) }));
@@ -58,13 +57,18 @@ beforeEach(() => {
   mocks.suggestParts.mockImplementation(async (q: string) => q === "PN-A" ? [partA] : q === "PN-B" ? [partB] : []);
   mocks.presales.library.mockResolvedValue({ 10: [validOffer], 11: [] });
   mocks.listWorkCandidates.mockResolvedValue({ items: [{ id: 2, display_name: "采购甲" }, { id: 3, display_name: "采购乙" }] });
-  mocks.fetchPurchaseAnalyticsOptions.mockResolvedValue({ data: { customers: [{ customer_id: 5, customer: "客户甲" }], selected_customers: [] } });
+  mocks.presales.customers.mockResolvedValue([{ id: 5, name: "客户甲" }]);
   mocks.getFieldTemplate.mockImplementation(async (_subject, level) => level === "line" ? [field] : []);
   mocks.listFieldDefinitions.mockImplementation(async (_subject, level) => level === "line" ? [field] : []);
   mocks.presales.getInquiry.mockResolvedValue(inquiry());
   const savedLines = (body: { lines: Inquiry["lines"] }) => body.lines?.map((line, index) => ({ ...line, line_key: line.line_key || `saved-${index}` }));
-  mocks.presales.createInquiry.mockImplementation(async (body) => inquiry({ ...body, lines: savedLines(body), id: 9, version: 1 }));
-  mocks.presales.updateInquiry.mockImplementation(async (id, body) => inquiry({ ...body, lines: savedLines(body), id, version: body.expected_version + 1 }));
+  // 保存响应遵循回读契约；不能把写入的 user_ids/group_ids 原样当成读取规则。
+  const savedRules = (body: { offer_audience?: { mode: string }; notes_audience?: { mode: string } }) => ({
+    ...(body.offer_audience ? { offer_audience: { mode: body.offer_audience.mode, users: [], groups: [] } } : {}),
+    ...(body.notes_audience ? { notes_audience: { mode: body.notes_audience.mode, users: [], groups: [] } } : {}),
+  });
+  mocks.presales.createInquiry.mockImplementation(async (body) => inquiry({ ...body, ...savedRules(body), lines: savedLines(body), id: 9, version: 1 }));
+  mocks.presales.updateInquiry.mockImplementation(async (id, body) => inquiry({ ...body, ...savedRules(body), lines: savedLines(body), id, version: body.expected_version + 1 }));
   mocks.presales.submitInquiry.mockResolvedValue(inquiry({ id: 9, status: "submitted", version: 2 }));
   mocks.presales.resubmitInquiry.mockResolvedValue(inquiry({ status: "submitted", version: 7 }));
   mocks.presales.appendLines.mockResolvedValue(inquiry({ status: "submitted", version: 5 }));
@@ -108,6 +112,56 @@ describe("销售询价编辑", () => {
     fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
     await waitFor(() => expect(mocks.presales.createInquiry).toHaveBeenCalledWith(expect.objectContaining({ assignee_ids: [] })));
     expect(mocks.presales.submitInquiry).not.toHaveBeenCalled();
+  });
+
+  it("客户候选实时调用售前专用接口", async () => {
+    mount();
+    await waitFor(() => expect(mocks.presales.customers).toHaveBeenCalledWith("", expect.any(AbortSignal)));
+    fireEvent.change(screen.getByRole("combobox", { name: "客户" }), { target: { value: "客户甲" } });
+    await waitFor(() => expect(mocks.presales.customers).toHaveBeenLastCalledWith("客户甲", expect.any(AbortSignal)));
+  });
+
+  it("客户字段权限关闭时不展示选择器、不查询或覆盖客户", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ data_customer: false }));
+    mount("/presales/inquiries/1/edit");
+    await screen.findByRole("spinbutton", { name: "PN-A 数量" });
+    expect(screen.queryByRole("combobox", { name: "客户" })).not.toBeInTheDocument();
+    expect(mocks.presales.customers).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
+    await waitFor(() => expect(mocks.presales.updateInquiry).toHaveBeenCalled());
+    expect(mocks.presales.updateInquiry.mock.calls[0][1]).not.toHaveProperty("customer_id");
+  });
+
+  it("整单、备注及 M7 回读真实可见性，修改内容时全部沿用原规则", async () => {
+    const privateRule = { mode: "private" as const, users: [], groups: [] };
+    const includeRule = { mode: "include" as const, users: [{ id: "sale-a", name: "销售甲" }], groups: [] };
+    const excludeRule = { mode: "exclude" as const, users: [], groups: [{ id: 88, name: "旧分组" }] };
+    const data = inquiry({ notes_audience: privateRule, offer_audience: includeRule,
+      field_values: [{ field_def_id: 32, name: "单头说明", value: "原说明", rule: excludeRule }] });
+    data.lines![0].notes_audience = excludeRule;
+    data.lines![0].field_values = [{ field_def_id: 31, name: "质保要求", value: "一年", rule: privateRule },
+      { field_def_id: 33, name: "期望交期", value: "2026-11-01", rule: includeRule }];
+    mocks.getFieldTemplate.mockImplementation(async (_subject, level) => level === "line" ? [field] : [{ ...field, id: 32, name: "单头说明", level: "header" }]);
+    mocks.listFieldDefinitions.mockImplementation(mocks.getFieldTemplate.getMockImplementation()!);
+    mocks.presales.getInquiry.mockResolvedValue(data);
+    mount("/presales/inquiries/1/edit");
+    const warranty = await screen.findByRole("textbox", { name: "质保要求字段值" });
+    expect(screen.getByRole("button", { name: "客户要求可见性：私密" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "PN-A 行备注可见性：不给谁看" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "PN-A 期望交期可见性：部分可见" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "质保要求可见性：私密" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "单头说明可见性：不给谁看" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "谁可以看" }).closest(".ant-select")).toHaveTextContent("销售甲");
+    fireEvent.change(warranty, { target: { value: "三年" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "单头说明字段值" }), { target: { value: "新说明" } });
+    fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
+    await waitFor(() => expect(mocks.presales.updateInquiry).toHaveBeenCalled());
+    const body = mocks.presales.updateInquiry.mock.calls[0][1];
+    expect(body).not.toHaveProperty("offer_audience");
+    expect(body).not.toHaveProperty("notes_audience");
+    expect(body.lines[0]).not.toHaveProperty("notes_audience");
+    expect(body.field_values).toEqual([{ field_def_id: 32, value: "新说明" }]);
+    expect(body.lines[0].field_values).toEqual([{ field_def_id: 31, value: "三年" }, { field_def_id: 33, value: "2026-11-01" }]);
   });
 
   it("撤回后的单据保留 line_key，先保存最新版本再重新提交且不重置可见性", async () => {

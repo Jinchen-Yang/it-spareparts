@@ -4,6 +4,10 @@ import type { AudienceRule } from "../../api/audience";
 import AudienceLock from "../../components/audience/AudienceLock";
 import { PUBLIC_AUDIENCE } from "../../components/audience/AudiencePicker";
 import { expiryLabel, useNow } from "./shared";
+import { presales } from "../../api/presales";
+import { readPermissionMap } from "../../nav";
+import { changedAudience } from "../../components/audience/rules";
+import CandidateSelect from "./CandidateSelect";
 
 const PRIVATE_AUDIENCE: AudienceRule = { mode: "private", user_ids: [], group_ids: [] };
 const editableFields = ["unit_price", "is_tax_inclusive", "no_stock", "qty_available", "stock_location",
@@ -17,7 +21,7 @@ export function offerInput(offer?: Offer): OfferInput {
     .map((field) => [field, offer[field]]));
 }
 
-export function quoteComplete(value: OfferInput): boolean {
+export function quoteComplete(value: Pick<OfferInput, "no_stock" | "unit_price">): boolean {
   return value.no_stock === true || (value.unit_price != null && value.unit_price !== ""
     && Number.isFinite(Number(value.unit_price)) && Number(value.unit_price) >= 0);
 }
@@ -32,12 +36,16 @@ interface Props {
 
 export default function QuoteEditor({ value, onChange, existing, disabled = false, label = "报价" }: Props) {
   const now = useNow();
+  const permissions = readPermissionMap();
+  const supplierVisible = localStorage.getItem("role") === "admin"
+    || (permissions.data_supplier !== false && !!(permissions.action_presales_quote || permissions.action_presales_offer));
   const change = (patch: Partial<OfferInput>) => onChange({ ...value, ...patch });
   const fieldVisible = (field: keyof Offer) => !existing || field in existing;
-  const lock = (field: "supplier_audience" | "reporter_audience" | "notes_audience", title: string) => (
-    <AudienceLock label={title} disabled={disabled} value={value[field] ?? (field === "supplier_audience" ? PRIVATE_AUDIENCE : PUBLIC_AUDIENCE)}
-      onChange={(rule) => change({ [field]: rule })} />
-  );
+  const lock = (field: "supplier_audience" | "reporter_audience" | "notes_audience", title: string) => !existing || existing[field] ? (
+    <AudienceLock key={`${existing?.id ?? "new"}:${existing?.version ?? 0}:${field}`} label={title} disabled={disabled}
+      savedRule={existing?.[field]} value={value[field] ?? (!existing ? field === "supplier_audience" ? PRIVATE_AUDIENCE : PUBLIC_AUDIENCE : undefined)}
+      onChange={(rule) => change({ [field]: changedAudience(rule, existing?.[field]) })} />
+  ) : null;
 
   return <Form layout="vertical" component="div" disabled={disabled}>
     <Form.Item><Checkbox checked={value.no_stock} disabled={disabled}
@@ -80,9 +88,9 @@ export default function QuoteEditor({ value, onChange, existing, disabled = fals
         <Typography.Text type="secondary" role="status">{expiryLabel(value.validity_days ?? 1, now)}</Typography.Text>
       </Space>
     </Form.Item>
-    {fieldVisible("supplier_id") && <Form.Item label={<Space>供应商档案 ID{lock("supplier_audience", "供应商")}</Space>}>
-      <InputNumber aria-label={`${label}供应商档案 ID`} min={1} precision={0} disabled={disabled} value={value.supplier_id}
-        onChange={(next) => change({ supplier_id: next })} />
+    {supplierVisible && fieldVisible("supplier_id") && <Form.Item label={<Space>供应商{lock("supplier_audience", "供应商")}</Space>}>
+      <CandidateSelect label={`${label}供应商`} load={presales.suppliers} disabled={disabled} value={value.supplier_id}
+        onChange={(next) => change({ supplier_id: next ?? null })} />
     </Form.Item>}
     {fieldVisible("source_key") && <Form.Item label="货源标识（可选）">
       <Input aria-label={`${label}货源标识`} value={value.source_key ?? ""} disabled={disabled} maxLength={128}

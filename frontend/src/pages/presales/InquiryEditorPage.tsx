@@ -2,9 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Alert, App, Button, Card, Checkbox, Col, Empty, Form, Input, InputNumber, Row, Select, Space, Spin, Tag, Typography } from "antd";
 import { presales, type Inquiry, type InquiryLine, type Offer } from "../../api/presales";
-import type { AudienceRule } from "../../api/audience";
+import type { AudienceRule, AudienceRuleRead } from "../../api/audience";
 import { getFieldTemplate, listFieldDefinitions, type CustomFieldValue, type FieldDefinition, type FieldLevel } from "../../api/fields";
-import { fetchPurchaseAnalyticsOptions } from "../../api/purchaseAnalytics";
 import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
 import type { PartSuggestion } from "../../api/search";
 import LivePartSearch from "../../components/parts/LivePartSearch";
@@ -15,12 +14,16 @@ import AudienceLock from "../../components/audience/AudienceLock";
 import CustomFieldsEditor from "../../components/fields/CustomFieldsEditor";
 import PartQuoteBadges from "./PartQuoteBadges";
 import { isOfferActive as activeOffer, OfferBadge, useNow } from "./shared";
+import CandidateSelect from "./CandidateSelect";
+import { changedAudience } from "../../components/audience/rules";
+import { readPermissionMap } from "../../nav";
 
-type ReadField = { field_def_id?: number; new_name?: string; name?: string; value: unknown };
+type ReadField = { field_def_id?: number; new_name?: string; name?: string; value: unknown; rule?: AudienceRuleRead };
 type DraftLine = {
   key: string; line_key?: string; part_id: number | null; pn_raw: string; description?: string | null;
   brand?: string | null; qty: number; require_exact_pn: boolean; ref_offer_id?: number | null;
   notes?: string | null; notes_audience?: AudienceRule; notesVisible: boolean; field_values: CustomFieldValue[];
+  savedNotesAudience?: AudienceRuleRead; savedDeliveryAudience?: AudienceRuleRead;
   originalFields: ReadField[]; expectedDelivery: string; deliveryFieldId?: number; deliveryAudience?: AudienceRule;
 };
 const DELIVERY_FIELD = "期望交期";
@@ -36,8 +39,9 @@ function errorText(error: unknown, fallback: string) {
 }
 
 /** 字段池只负责编辑；模板按 PN anchor 拉取，不携带上一张单据的值。 */
-function Fields({ level, partId, value, onChange, disabled = false }: {
+function Fields({ level, partId, value, savedValues, onChange, disabled = false }: {
   level: FieldLevel; partId?: number | null; value: CustomFieldValue[];
+  savedValues?: ReadField[];
   onChange: (values: CustomFieldValue[]) => void; disabled?: boolean;
 }) {
   const [template, setTemplate] = useState<FieldDefinition[]>([]);
@@ -58,7 +62,7 @@ function Fields({ level, partId, value, onChange, disabled = false }: {
   return <>
     {error && <Alert type="warning" message="字段池加载失败，请刷新后重试；已有填写内容仍会保留。" />}
     <CustomFieldsEditor subjectType="presales_inquiry" level={level} template={template} definitions={definitions}
-      value={value} onChange={onChange} disabled={disabled || error} />
+      value={value} savedValues={savedValues} onChange={onChange} disabled={disabled || error} />
   </>;
 }
 
@@ -75,6 +79,7 @@ function fromLine(line: InquiryLine): DraftLine {
   return { key: line.line_key, line_key: line.line_key, part_id: line.part_id ?? null, pn_raw: line.pn_raw,
     description: line.description, qty: Number(line.qty), require_exact_pn: !!line.require_exact_pn,
     ref_offer_id: line.ref_offer_id, notes: line.notes, notesVisible: "notes" in line, field_values: editableFields(fields, true), originalFields: fields,
+    savedNotesAudience: line.notes_audience, savedDeliveryAudience: delivery?.rule,
     expectedDelivery: delivery?.value == null ? "" : String(delivery.value), deliveryFieldId: delivery?.field_def_id };
 }
 
@@ -91,12 +96,10 @@ function InquiryEditorContent() {
   const navigate = useNavigate();
   const location = useLocation();
   const { message } = App.useApp();
+  const customerVisible = localStorage.getItem("role") === "admin" || readPermissionMap().data_customer !== false;
   const [inquiry, setInquiry] = useState<Inquiry>();
   const [lines, setLines] = useState<DraftLine[]>([]);
   const [customerId, setCustomerId] = useState<number>();
-  const [customers, setCustomers] = useState<{ value: number; label: string }[]>([]);
-  const [customerError, setCustomerError] = useState(false);
-  const [customerQuery, setCustomerQuery] = useState("");
   const [notes, setNotes] = useState("");
   const [notesAudience, setNotesAudience] = useState<AudienceRule>();
   const [offerAudience, setOfferAudience] = useState<AudienceRule>();
@@ -122,7 +125,7 @@ function InquiryEditorContent() {
     setInquiry(data); setLines(append ? [] : (data.lines || []).map(fromLine));
     setCustomerId(data.customer_id ?? undefined); setNotes(data.notes || "");
     setFields(editableFields((data.field_values || []) as ReadField[])); setAssigneeIds(data.assignee_ids || []);
-    // 读取接口不返回规则；没有主动调整时省略该字段，保留服务端现有可见性。
+    // 回读规则只用于显示；编辑草稿另存，未调整时不重复提交。
     setOfferAudience(undefined); setNotesAudience(undefined);
   }, [append]);
   const refresh = useCallback(async () => {
@@ -144,18 +147,6 @@ function InquiryEditorContent() {
     }).catch(() => { if (!controller.signal.aborted) setCandidateError(true); });
     return () => controller.abort();
   }, []);
-  useEffect(() => {
-    let disposed = false;
-    const timer = window.setTimeout(() => {
-      void fetchPurchaseAnalyticsOptions(customerQuery, customerId ? [customerId] : []).then(({ data }) => {
-        if (disposed) return;
-        setCustomers([...new Map([...(data.customers || []), ...(data.selected_customers || [])]
-          .map((customer) => [customer.customer_id, { value: customer.customer_id, label: customer.customer || String(customer.customer_id) }])).values()]);
-        setCustomerError(false);
-      }).catch(() => { if (!disposed) setCustomerError(true); });
-    }, customerQuery ? 200 : 0);
-    return () => { disposed = true; clearTimeout(timer); };
-  }, [customerQuery, customerId]);
   const partIds = [...new Set(lines.flatMap((line) => line.part_id ? [line.part_id] : []))].sort((a, b) => a - b).join(",");
   useEffect(() => {
     let disposed = false;
@@ -190,10 +181,10 @@ function InquiryEditorContent() {
     ...(line.line_key ? { line_key: line.line_key } : {}), part_id: line.part_id, pn_raw: line.pn_raw,
     description: line.description ?? null, qty: line.qty, require_exact_pn: line.require_exact_pn,
     ref_offer_id: line.ref_offer_id ?? null, ...(line.notesVisible ? { notes: line.notes ?? null } : {}),
-    ...(line.notes_audience ? { notes_audience: line.notes_audience } : {}),
+    ...(changedAudience(line.notes_audience, line.savedNotesAudience) ? { notes_audience: line.notes_audience } : {}),
     field_values: [...serializeFields(line.field_values, line.originalFields, true),
       ...(line.expectedDelivery || line.deliveryFieldId ? [{ ...(line.deliveryFieldId ? { field_def_id: line.deliveryFieldId } : { new_name: DELIVERY_FIELD }),
-        value: line.expectedDelivery || null, ...(line.deliveryAudience ? { rule: line.deliveryAudience } : {}) }] : [])],
+        value: line.expectedDelivery || null, ...(changedAudience(line.deliveryAudience, line.savedDeliveryAudience) ? { rule: line.deliveryAudience } : {}) }] : [])],
   }));
   const save = async (submit: boolean) => {
     if (busy || blocked) return;
@@ -208,12 +199,12 @@ function InquiryEditorContent() {
       if (append && inquiry) {
         saved = await presales.appendLines(inquiry.id, { expected_version: inquiry.version, lines: serializeLines() });
       } else {
-        const payload = { ...(!inquiry || "customer_id" in inquiry ? { customer_id: customerId ?? null } : {}),
+        const payload = { ...(customerVisible && (!inquiry || "customer_id" in inquiry) ? { customer_id: customerId ?? null } : {}),
           ...(!inquiry || "notes" in inquiry ? { notes } : {}),
           ...(!inquiry || "assignee_ids" in inquiry ? { assignee_ids: assigneeIds } : {}),
           lines: serializeLines(), field_values: serializeFields(fields, (inquiry?.field_values || []) as ReadField[]),
-          ...(offerAudience ? { offer_audience: offerAudience } : !inquiry ? { offer_audience: PUBLIC_AUDIENCE } : {}),
-          ...(notesAudience ? { notes_audience: notesAudience } : {}) };
+          ...(changedAudience(offerAudience, inquiry?.offer_audience) ? { offer_audience: offerAudience } : !inquiry ? { offer_audience: PUBLIC_AUDIENCE } : {}),
+          ...(changedAudience(notesAudience, inquiry?.notes_audience) ? { notes_audience: notesAudience } : {}) };
         saved = inquiry ? await presales.updateInquiry(inquiry.id, { ...payload, expected_version: inquiry.version })
           : await presales.createInquiry({ ...payload, kind: "sales_inquiry" });
         if (!mounted.current) return;
@@ -247,23 +238,21 @@ function InquiryEditorContent() {
     </Space>
     {blocked && <Alert type="warning" message="当前单据不可在此编辑；已提交的销售询价请先撤回修改，关单后请复制为新单。" />}
     {!append && <Card title="询价信息"><Form layout="vertical" disabled={busy || blocked}>
-      {(!inquiry || "customer_id" in inquiry) && <Form.Item label="客户（可选）">
-        <Select aria-label="客户" showSearch allowClear filterOption={false} options={customers}
-          value={customerId} onSearch={setCustomerQuery} onChange={setCustomerId} placeholder="从已有客户中选择" />
-        {customerError && <Typography.Text type="secondary">当前账号暂不可加载客户候选，可留空；已有客户保留。</Typography.Text>}
+      {customerVisible && (!inquiry || "customer_id" in inquiry) && <Form.Item label="客户（可选）">
+        <CandidateSelect label="客户" load={presales.customers} value={customerId} onChange={setCustomerId} disabled={busy || blocked} />
       </Form.Item>}
-      {(!inquiry || "notes" in inquiry) && <Form.Item label={<Space>客户要求<AudienceLock label="客户要求" value={notesAudience} onChange={setNotesAudience} /></Space>}>
+      {(!inquiry || "notes" in inquiry) && <Form.Item label={<Space>客户要求{(!inquiry || inquiry.notes_audience) && <AudienceLock key={inquiry?.version ?? "new"} label="客户要求" savedRule={inquiry?.notes_audience} value={notesAudience} onChange={setNotesAudience} />}</Space>}>
         <Input.TextArea aria-label="客户要求" rows={3} value={notes} onChange={(event) => setNotes(event.target.value)} />
       </Form.Item>}
-      <Form.Item label="单头自定义字段"><Fields level="header" value={fields} onChange={setFields} disabled={busy || blocked} /></Form.Item>
+      <Form.Item label="单头自定义字段"><Fields key={inquiry?.version ?? "new"} level="header" savedValues={inquiry?.field_values} value={fields} onChange={setFields} disabled={busy || blocked} /></Form.Item>
       {(!inquiry || "assignee_ids" in inquiry) && <Form.Item label="处理人（多选）" extra="留空表示放入公共池，采购领取后处理。">
         <Select aria-label="处理人" mode="multiple" value={assigneeIds} onChange={setAssigneeIds}
           options={candidates.map((candidate) => ({ value: candidate.id, label: candidate.display_name }))} />
         {candidateError && <Alert type="warning" message="处理人候选加载失败，请刷新后再指定；留空仍表示公共池。" />}
       </Form.Item>}
-      <Form.Item label="本单报价其他销售可见" extra={inquiry ? "未调整时保留本单原有可见性。" : "默认公开。"}>
-        <AudiencePicker value={offerAudience} onChange={setOfferAudience} disabled={busy || blocked} />
-      </Form.Item>
+      {(!inquiry || inquiry.offer_audience) && <Form.Item label="本单报价其他销售可见" extra={inquiry ? "未调整时保留本单原有可见性。" : "默认公开。"}>
+        <AudiencePicker key={inquiry?.version ?? "new"} savedRule={inquiry?.offer_audience} value={offerAudience} onChange={setOfferAudience} disabled={busy || blocked} />
+      </Form.Item>}
     </Form></Card>}
     <Card title={append ? "新增行（原有行不变）" : "询价行"}>
       <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -286,8 +275,8 @@ function InquiryEditorContent() {
             <Row gutter={16}>
               <Col xs={24} sm={8}><Form.Item label="数量"><InputNumber aria-label={`${line.pn_raw} 数量`} min={0.001} max={99999999999.999} precision={3}
                 value={line.qty} onChange={(qty) => updateLine(line.key, { qty: qty ?? 0 })} style={{ width: "100%" }} /></Form.Item></Col>
-              <Col xs={24} sm={8}><Form.Item label={<Space>期望交期（自定义字段）<AudienceLock label={`${line.pn_raw} 期望交期`}
-                value={line.deliveryAudience} onChange={(rule) => updateLine(line.key, { deliveryAudience: rule })} /></Space>}><Input aria-label={`${line.pn_raw} 期望交期`} type="date"
+              <Col xs={24} sm={8}><Form.Item label={<Space>期望交期（自定义字段）{(!line.deliveryFieldId || line.savedDeliveryAudience) && <AudienceLock label={`${line.pn_raw} 期望交期`}
+                savedRule={line.savedDeliveryAudience} value={line.deliveryAudience} onChange={(rule) => updateLine(line.key, { deliveryAudience: rule })} />}</Space>}><Input aria-label={`${line.pn_raw} 期望交期`} type="date"
                 value={line.expectedDelivery} onChange={(event) => updateLine(line.key, { expectedDelivery: event.target.value })} /></Form.Item></Col>
               <Col xs={24} sm={8}><Form.Item label="PN 要求"><Checkbox checked={line.require_exact_pn}
                 onChange={(event) => updateLine(line.key, { require_exact_pn: event.target.checked })}>要求 PN 一致</Checkbox></Form.Item></Col>
@@ -298,11 +287,11 @@ function InquiryEditorContent() {
                 <Button onClick={() => updateLine(line.key, { ref_offer_id: null })}>取消引用</Button></Space>
                 : <EffectiveOffers offers={library[line.part_id] || []} now={now} onReference={(offer) => updateLine(line.key, { ref_offer_id: offer.id })} />}
             </Form.Item>}
-            {line.notesVisible && <Form.Item label={<Space>行备注<AudienceLock label={`${line.pn_raw} 行备注`} value={line.notes_audience}
-              onChange={(rule) => updateLine(line.key, { notes_audience: rule })} /></Space>}>
+            {line.notesVisible && <Form.Item label={<Space>行备注{(!line.line_key || line.savedNotesAudience) && <AudienceLock label={`${line.pn_raw} 行备注`} savedRule={line.savedNotesAudience} value={line.notes_audience}
+              onChange={(rule) => updateLine(line.key, { notes_audience: rule })} />}</Space>}>
               <Input.TextArea aria-label={`${line.pn_raw} 行备注`} value={line.notes || ""} onChange={(event) => updateLine(line.key, { notes: event.target.value })} />
             </Form.Item>}
-            <Form.Item label="行自定义字段"><Fields key={line.key} level="line" partId={line.part_id}
+            <Form.Item label="行自定义字段"><Fields key={`${line.key}:${inquiry?.version ?? "new"}`} level="line" partId={line.part_id} savedValues={line.originalFields}
               value={line.field_values} onChange={(values) => updateLine(line.key, { field_values: values })} disabled={busy || blocked} /></Form.Item>
           </Form>
         </Card>)}

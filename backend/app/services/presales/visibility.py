@@ -96,6 +96,11 @@ def _offer_batch(db, offers, ctx, *, fields):
         candidates.append((index, offer, values))
     # tuple 键隔离每条记录的规则，同名字段不会套用另一条报价的受众。
     filtered = audience.filter_fields(db, [flat], ctx, field_rules=rules, bypass=bypass)[0]
+    rule_views = audience.read_rules(db, {
+        (index, key): (getattr(offer, key + "_rule_id"), authors[offer.created_by].username)
+        for index, offer, _ in candidates if (index, "record") in filtered
+        for key in ("supplier_audience", "reporter_audience", "notes_audience")
+    }, ctx, bypass=bypass) if fields else {}
     result = []
     for index, offer, values in candidates:
         if (index, "record") not in filtered:
@@ -104,6 +109,9 @@ def _offer_batch(db, offers, ctx, *, fields):
         if not work_items.has_permission(ctx, "data_supplier"):
             view.pop("supplier_id", None)
             view.pop("source_key", None)
+        for key in ("supplier_audience", "reporter_audience", "notes_audience"):
+            if (index, key) in rule_views:
+                view[key] = rule_views[(index, key)]
         result.append((offer, view))
     return result
 
@@ -157,17 +165,26 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
     result["progress"] = {"quoted_lines": len({offer["line_id"] for offer in offers
         if offer["status"] == "published"}), "line_count": len(lines)}
     if detail:
+        result.update(audience.read_rules(db, {
+            "offer_audience": (inquiry.offer_audience_rule_id, author),
+            "notes_audience": (inquiry.notes_audience_rule_id, author),
+        }, ctx, bypass=bypass))
+        line_rules = audience.read_rules(db, {
+            line.id: (line.notes_audience_rule_id, author) for line in lines
+        }, ctx, bypass=bypass)
         header_subject = field_pool.Subject("presales_inquiry", f"inquiry:{inquiry.id}", "header")
-        result["field_values"] = field_pool.read_values(db, [header_subject], ctx, bypass).get(
+        result["field_values"] = field_pool.read_values(db, [header_subject], ctx, bypass, include_rules=True).get(
             header_subject.subject_id, [])
         line_subjects = [field_pool.Subject("presales_inquiry", f"line:{line.id}", "line") for line in lines]
-        values = field_pool.read_values(db, line_subjects, ctx, bypass) if lines else {}
+        values = field_pool.read_values(db, line_subjects, ctx, bypass, include_rules=True) if lines else {}
         result["lines"] = []
         for line in lines:
             row = {col.name: getattr(line, col.name) for col in line.__table__.columns
                    if col.name != "notes_audience_rule_id"}
             row = audience.filter_fields(db, [row], ctx,
                 field_rules={"notes": (line.notes_audience_rule_id, author)}, bypass=bypass)[0]
+            if line.id in line_rules:
+                row["notes_audience"] = line_rules[line.id]
             row["field_values"] = values.get(f"line:{line.id}", [])
             row["field_template"] = [{"id": f.id, "name": f.name, "value_type": f.value_type,
                                        "choices": f.choices} for f in field_pool.template_for(
@@ -210,7 +227,7 @@ def revision_views(db, offer_id, ctx):
             continue
         # 当前已改为私密的字段不会经旧的公开快照再次泄漏。
         view = {key: value for key, value in view.items() if key in current}
-        visible_fields = set(view) | {"reporter_audience", "notes_audience", "supplier_audience"}
+        visible_fields = set(view)
         changed = [key for key in revision.changed_fields if key in visible_fields]
         row = {"revision_no": revision.revision_no, "snapshot": view,
                "changed_fields": changed, "created_at": revision.created_at}

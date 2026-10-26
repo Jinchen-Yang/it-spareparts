@@ -155,6 +155,34 @@ def filter_fields(
     return [{key: value for key, value in record.items() if visible.get(key, True)} for record in records]
 
 
+def read_rules(
+    db: Session, field_rules: Mapping[Hashable, tuple[int | None, str | None]],
+    viewer: UserContext, *, bypass: Bypass,
+) -> dict[Hashable, dict]:
+    """只向各字段的作者或主管回读规则，批量补齐账号和分组名称。"""
+    bypassed = bool(bypass(viewer))
+    allowed = {key: rule_id for key, (rule_id, author) in field_rules.items()
+               if bypassed or (viewer.user_id is not None and viewer.user_id == author)}
+    rule_ids = {rule_id for rule_id in allowed.values() if rule_id is not None}
+    views = {None: {"mode": "public", "users": [], "groups": []}}
+    if rule_ids:
+        rows = db.execute(select(
+            AudienceRule.id, AudienceRule.mode, AudienceRuleMember.user_id,
+            SysUser.display_name, AudienceRuleMember.group_id, AudienceGroup.name,
+        ).outerjoin(AudienceRuleMember, AudienceRuleMember.rule_id == AudienceRule.id)
+          .outerjoin(SysUser, SysUser.username == AudienceRuleMember.user_id)
+          .outerjoin(AudienceGroup, AudienceGroup.id == AudienceRuleMember.group_id)
+          .where(AudienceRule.id.in_(rule_ids))
+          .order_by(AudienceRule.id, AudienceRuleMember.user_id, AudienceRuleMember.group_id))
+        for rule_id, mode, username, display_name, group_id, group_name in rows:
+            view = views.setdefault(rule_id, {"mode": mode, "users": [], "groups": []})
+            if username is not None:
+                view["users"].append({"id": username, "name": display_name or username})
+            elif group_id is not None:
+                view["groups"].append({"id": group_id, "name": group_name})
+    return {key: views[rule_id] for key, rule_id in allowed.items() if rule_id in views}
+
+
 def list_groups(db: Session, viewer: UserContext) -> list[AudienceGroup]:
     return list(db.scalars(select(AudienceGroup).where(
         AudienceGroup.archived.is_(False),

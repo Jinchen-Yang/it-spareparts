@@ -1,11 +1,13 @@
 method	path	operation_id
 DELETE	/api/presales/inquiries/{inquiry_id}	delete_inquiry_api_presales_inquiries__inquiry_id__delete
+GET	/api/presales/customers	search_customers_api_presales_customers_get
 GET	/api/presales/inquiries	list_inquiries_api_presales_inquiries_get
 GET	/api/presales/inquiries/{inquiry_id}	get_inquiry_api_presales_inquiries__inquiry_id__get
 GET	/api/presales/library	get_library_api_presales_library_get
 GET	/api/presales/library/search	search_library_api_presales_library_search_get
 GET	/api/presales/lines/{line_id}/part-check	check_part_api_presales_lines__line_id__part_check_get
 GET	/api/presales/offers/{offer_id}/revisions	offer_revisions_api_presales_offers__offer_id__revisions_get
+GET	/api/presales/suppliers	search_suppliers_api_presales_suppliers_get
 PATCH	/api/presales/inquiries/{inquiry_id}	update_inquiry_api_presales_inquiries__inquiry_id__patch
 PATCH	/api/presales/offers/{offer_id}	update_offer_api_presales_offers__offer_id__patch
 POST	/api/presales/inquiries	create_inquiry_api_presales_inquiries_post

@@ -2,14 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import { Alert, Button, Input, Select, Space, Switch, Typography } from "antd";
 import {
   createAudienceGroup, listAudienceGroups, listAudiencePeople,
-  type AudienceGroup, type AudiencePerson, type AudienceRule,
+  type AudienceGroup, type AudiencePerson, type AudienceRule, type AudienceRuleRead,
 } from "../../api/audience";
+import { editableAudience } from "./rules";
 import { COLORS } from "../../theme";
 
 export const PUBLIC_AUDIENCE: AudienceRule = { mode: "public", user_ids: [], group_ids: [] };
 
 export interface AudiencePickerProps {
   value?: AudienceRule;
+  savedRule?: AudienceRuleRead;
   onChange?: (value: AudienceRule) => void;
   people?: AudiencePerson[];
   groups?: AudienceGroup[];
@@ -27,10 +29,10 @@ function readFrequency(key: string): Record<string, number> {
   } catch { return {}; }
 }
 
-export function AudiencePicker({ value, onChange, people: providedPeople, groups: providedGroups,
+export function AudiencePicker({ value, savedRule, onChange, people: providedPeople, groups: providedGroups,
   disabled = false, preferenceKey = "audience.group-frequency" }: AudiencePickerProps) {
-  const [innerValue, setInnerValue] = useState<AudienceRule>(PUBLIC_AUDIENCE);
-  const current = value ?? innerValue;
+  const [innerValue, setInnerValue] = useState<AudienceRule>();
+  const current = value ?? innerValue ?? (savedRule ? editableAudience(savedRule) : PUBLIC_AUDIENCE);
   const [people, setPeople] = useState<AudiencePerson[]>(providedPeople ?? []);
   const [groups, setGroups] = useState<AudienceGroup[]>(providedGroups ?? []);
   const [frequency, setFrequency] = useState(() => readFrequency(preferenceKey));
@@ -39,6 +41,7 @@ export function AudiencePicker({ value, onChange, people: providedPeople, groups
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
+  useEffect(() => { setInnerValue(undefined); }, [savedRule]);
   useEffect(() => { setFrequency(readFrequency(preferenceKey)); }, [preferenceKey]);
   useEffect(() => {
     if (providedGroups) { setGroups(providedGroups); return; }
@@ -67,12 +70,22 @@ export function AudiencePicker({ value, onChange, people: providedPeople, groups
 
   const sortedGroups = useMemo(() => groups.filter((g) => !g.archived).sort((a, b) =>
     (frequency[b.id] || 0) - (frequency[a.id] || 0) || a.name.localeCompare(b.name, "zh-CN")), [groups, frequency]);
-  const options = [
-    { label: "分组", options: sortedGroups.map((g) => ({ value: `group:${g.id}`, searchText: g.name,
-      label: `${frequency[g.id] ? "常用 · " : ""}${g.name}（${g.scope === "public" ? "公共" : "个人"}分组）` })) },
-    { label: "人员", options: people.map((p) => ({ value: `user:${p.id}`, label: p.display_name || p.id,
-      searchText: `${p.display_name || ""} ${p.id}` })) },
-  ];
+  const groupOptions = sortedGroups.map((g) => ({ value: `group:${g.id}`, searchText: g.name,
+    label: `${frequency[g.id] ? "常用 · " : ""}${g.name}（${g.scope === "public" ? "公共" : "个人"}分组）` }));
+  const peopleOptions = people.map((p) => ({ value: `user:${p.id}`, label: p.display_name || p.id,
+    searchText: `${p.display_name || ""} ${p.id}` }));
+  // 当前规则可能引用不在本轮搜索结果或本人分组列表里的成员，仍须用回读名称显示。
+  savedRule?.groups.forEach((group) => {
+    if (!groupOptions.some((option) => option.value === `group:${group.id}`)) {
+      groupOptions.push({ value: `group:${group.id}`, label: group.name, searchText: group.name });
+    }
+  });
+  savedRule?.users.forEach((user) => {
+    if (!peopleOptions.some((option) => option.value === `user:${user.id}`)) {
+      peopleOptions.push({ value: `user:${user.id}`, label: user.name, searchText: `${user.name} ${user.id}` });
+    }
+  });
+  const options = [{ label: "分组", options: groupOptions }, { label: "人员", options: peopleOptions }];
   const emit = (next: AudienceRule) => { setInnerValue(next); onChange?.(next); };
   const remember = (ids: number[]) => {
     const next = { ...frequency };

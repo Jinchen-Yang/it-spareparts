@@ -297,7 +297,8 @@ def save_values(db: Session, subject, values: list[dict], viewer: UserContext,
         db.flush()
 
 
-def read_values(db: Session, subjects, viewer: UserContext, bypass) -> dict[str, list[dict]]:
+def read_values(db: Session, subjects, viewer: UserContext, bypass, *,
+                include_rules: bool = False) -> dict[str, list[dict]]:
     subjects = [_subject(subject) for subject in subjects]
     if len({s.subject_type for s in subjects}) > 1:
         raise ValueError("一次读取只能包含一种 subject_type，避免 subject_id 冲突")
@@ -315,8 +316,11 @@ def read_values(db: Session, subjects, viewer: UserContext, bypass) -> dict[str,
         key = str(value.id)
         records.append({key: (value.subject_id, {"field_def_id": field.id, "name": field.name, "value": value.value})})
         rules[key] = (value.rule_id if value.rule_id is not None else field.default_rule_id, value.updated_by)
+    rule_views = audience.read_rules(db, rules, viewer, bypass=bypass) if include_rules else {}
     for record in audience.filter_fields(db, records, viewer, field_rules=rules, bypass=bypass):
-        for subject_id, payload in record.values():
+        for key, (subject_id, payload) in record.items():
+            if key in rule_views:
+                payload["rule"] = rule_views[key]
             output[subject_id].append(payload)
     ordering = {field.id: (field.sort, field.name, field.id) for _, field in rows}
     for values in output.values():

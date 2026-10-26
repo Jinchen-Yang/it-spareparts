@@ -27,6 +27,19 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("CustomFieldsEditor", () => {
+  it("回读规则与定义默认值不同仍真实回显，重填且恢复原规则不重复提交", async () => {
+    const onChange = vi.fn();
+    render(<CustomFieldsEditor subjectType="demo" level="line" template={[definition()]} definitions={pool}
+      value={[]} savedValues={[{ field_def_id: 1, rule: { mode: "private", users: [], groups: [] } }]}
+      onChange={onChange} audienceProps={audienceProps} />);
+    fireEvent.click(screen.getByRole("button", { name: "备注1可见性：私密" }));
+    const toggle = await screen.findByRole("switch", { name: "私密" });
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    fireEvent.change(screen.getByRole("textbox", { name: "备注1字段值" }), { target: { value: "重新填写" } });
+    expect(onChange).toHaveBeenLastCalledWith([{ field_def_id: 1, value: "重新填写" }]);
+  });
+
   it("模板生成空白输入框，字段默认可见性体现在锁图标", () => {
     const onChange = vi.fn();
     render(<CustomFieldsEditor subjectType="demo" level="line" template={template}
