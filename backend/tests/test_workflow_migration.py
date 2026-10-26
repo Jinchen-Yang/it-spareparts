@@ -19,7 +19,7 @@ def test_workflow_revision_extends_the_single_main_head():
     # 后续通用模块迁移会接在本迁移之后，只要求迁移链仍是单 head 且包含本迁移。
     heads = scripts.get_heads()
     assert len(heads) == 1
-    assert _REVISION in {r.revision for r in scripts.walk_revisions(heads[0], 'base')}
+    assert _REVISION in {r.revision for r in scripts.walk_revisions('base', heads[0])}
 
 
 def test_workflow_upgrade_downgrade_and_zero_orm_drift(db):
