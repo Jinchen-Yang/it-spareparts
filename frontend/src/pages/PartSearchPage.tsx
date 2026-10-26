@@ -12,6 +12,7 @@ import PartGalleryPanel from "../components/parts/PartGalleryPanel";
 import LivePartSearch from "../components/parts/LivePartSearch";
 import PartThumb from "../components/gallery/PartThumb";
 import GalleryPicker from "../components/gallery/GalleryPicker";
+import PriceRefBadge from "../components/pricing/PriceRefBadge";
 import api from "../api";
 import type { Overview, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { unifiedSearch, fetchOverview } from "../api/search";
@@ -481,6 +482,7 @@ export default function PartSearchPage() {
                 <small>近 {ov.sale_price_ref.ref_sale_samples} 单 / {ov.sale_price_ref.ref_window_days} 天加权</small>
                 {ov.sale_price_ref.ref_sale_samples < 3 && <Tag color="orange">成交少，仅供参考</Tag>}
               </> : <small>暂无成交参考价</small>}
+              <PriceRefBadge partId={ov.part.id} />
             </div>
             <div aria-label="动态可用库存" className="part-summary-metric">
               <span>动态可用库存</span>

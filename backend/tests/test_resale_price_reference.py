@@ -240,6 +240,45 @@ def test_contract_fixture_matches_exactly(db, catalog_client):
     assert response.json() == expected
 
 
+def test_build_price_reference_service_output_matches_shop_contract(db):
+    """T10 回归钉：直接调用服务层，输出必须与商城契约夹具逐值一致。
+
+    批量参考价会泛化 ``_grouped_samples`` / ``_purchase_grouped_samples`` 的取数方
+    式；先钉住单 PN ``build_price_reference`` 的完整输出，改原模块后一旦漂移即
+    刻失败。固定 today=2026-10-19，数据与上面的 HTTP 契约测试完全相同。
+    """
+    part = _part(db, "DEMO-PN")
+    batch = _batch(db)
+    _sale(
+        db, batch, part, "service-contract-today",
+        order_date=date(2026, 10, 19),
+        lines=((Decimal(1), Decimal("113.00"), True),),
+    )
+    _sale(
+        db, batch, part, "service-contract-week-ago",
+        order_date=date(2026, 10, 12),
+        lines=((Decimal(1), Decimal("226.00"), True),),
+    )
+    _purchase(
+        db, batch, part, "service-contract-purchase-recent",
+        order_date=date(2026, 10, 18), tax_rate=Decimal(0),
+        is_tax_inclusive=False,
+        lines=((Decimal(2), Decimal("100.00")), (Decimal(1), Decimal("200.00"))),
+    )
+    _purchase(
+        db, batch, part, "service-contract-purchase-older",
+        order_date=date(2026, 10, 11), tax_rate=None,
+        lines=((Decimal(1), Decimal("113.00")),),
+    )
+    db.commit()
+
+    result = price_service.build_price_reference(
+        db, "DEMO-PN", get_settings(), today=TODAY
+    )
+    expected = json.loads(CONTRACT.read_text(encoding="utf-8"))
+    assert result.model_dump(mode="json") == expected
+
+
 # ---------------------------------------------------------------- 认证
 
 

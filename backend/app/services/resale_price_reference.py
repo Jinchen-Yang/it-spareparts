@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, localcontext
@@ -95,14 +96,19 @@ def _resolve_part_id(db: Session, pn_raw: str) -> int | None:
     return next(iter(resolved), None)
 
 
-def _grouped_samples(
-    db: Session,
+def _sales_sample_statement(
     *,
-    part_id: int,
+    part_ids: Sequence[int],
     start: date,
     end: date,
     settings: Settings,
-) -> list[_Group]:
+    group_by_part: bool,
+):
+    """销售样本聚合语句；单 PN 与批量共用同一口径，仅分组维度不同。
+
+    ``group_by_part=False``（单 PN 路径）保持原来的列集合与分组，不额外回传
+    part_id；``True`` 时多取一列、多分一组，供一次查询按 part 分桶。
+    """
     rate = _rate_expr(FSalesOrder)
     nominal = func.coalesce(FSalesOrder.tax_rate, 0) == 0
     bad_rate = and_(
@@ -115,7 +121,7 @@ def _grouped_samples(
         else FSalesLine.unit_price > 0
     )
     conditions = [
-        FSalesLine.part_id == part_id,
+        FSalesLine.part_id.in_(part_ids),
         FSalesOrder.order_date >= start,
         FSalesOrder.order_date <= end,
         FSalesOrder.data_status.in_(
@@ -130,40 +136,45 @@ def _grouped_samples(
         conditions.append(
             ~_dq_exists("sales", FSalesLine.id, ("confirmed_source_error",))
         )
-    statement = (
-        select(
-            FSalesOrder.order_date.label("order_date"),
-            rate.label("rate"),
-            func.sum(FSalesLine.qty * FSalesLine.unit_price).label("amount_raw"),
-            func.sum(FSalesLine.qty).label("qty"),
-            func.sum(FSalesLine.unit_price).label("price_sum"),
-            func.count().label("line_count"),
-            func.count(func.distinct(FSalesOrder.id)).label("order_count"),
-            func.count().filter(nominal).label("nominal_count"),
-            func.count().filter(bad_rate).label("bad_rate_count"),
-        )
+    columns = [
+        FSalesOrder.order_date.label("order_date"),
+        rate.label("rate"),
+        func.sum(FSalesLine.qty * FSalesLine.unit_price).label("amount_raw"),
+        func.sum(FSalesLine.qty).label("qty"),
+        func.sum(FSalesLine.unit_price).label("price_sum"),
+        func.count().label("line_count"),
+        func.count(func.distinct(FSalesOrder.id)).label("order_count"),
+        func.count().filter(nominal).label("nominal_count"),
+        func.count().filter(bad_rate).label("bad_rate_count"),
+    ]
+    grouping = [FSalesOrder.order_date, rate]
+    if group_by_part:
+        columns.insert(0, FSalesLine.part_id.label("part_id"))
+        grouping.insert(0, FSalesLine.part_id)
+    return (
+        select(*columns)
         .select_from(FSalesLine)
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
         .where(*conditions)
-        .group_by(FSalesOrder.order_date, rate)
+        .group_by(*grouping)
     )
-    return [
-        _Group(
-            order_date=row.order_date,
-            rate=row.rate,
-            amount_raw=row.amount_raw,
-            qty=row.qty,
-            price_sum=row.price_sum,
-            line_count=row.line_count,
-            order_count=row.order_count,
-            nominal_ex_count=row.nominal_count,
-            bad_rate_count=row.bad_rate_count,
-        )
-        for row in db.execute(statement).all()
-    ]
 
 
-def _purchase_grouped_samples(
+def _sales_group(row) -> _Group:
+    return _Group(
+        order_date=row.order_date,
+        rate=row.rate,
+        amount_raw=row.amount_raw,
+        qty=row.qty,
+        price_sum=row.price_sum,
+        line_count=row.line_count,
+        order_count=row.order_count,
+        nominal_ex_count=row.nominal_count,
+        bad_rate_count=row.bad_rate_count,
+    )
+
+
+def _grouped_samples(
     db: Session,
     *,
     part_id: int,
@@ -171,6 +182,49 @@ def _purchase_grouped_samples(
     end: date,
     settings: Settings,
 ) -> list[_Group]:
+    statement = _sales_sample_statement(
+        part_ids=(part_id,),
+        start=start,
+        end=end,
+        settings=settings,
+        group_by_part=False,
+    )
+    return [_sales_group(row) for row in db.execute(statement).all()]
+
+
+def _grouped_samples_by_part(
+    db: Session,
+    *,
+    part_ids: Sequence[int],
+    start: date,
+    end: date,
+    settings: Settings,
+) -> dict[int, list[_Group]]:
+    """批量版 ``_grouped_samples``：一次查询取回所有 part 的销售样本。"""
+    if not part_ids:
+        return {}
+    statement = _sales_sample_statement(
+        part_ids=part_ids,
+        start=start,
+        end=end,
+        settings=settings,
+        group_by_part=True,
+    )
+    grouped: dict[int, list[_Group]] = {}
+    for row in db.execute(statement).all():
+        grouped.setdefault(row.part_id, []).append(_sales_group(row))
+    return grouped
+
+
+def _purchase_sample_statement(
+    *,
+    part_ids: Sequence[int],
+    start: date,
+    end: date,
+    settings: Settings,
+    group_by_part: bool,
+):
+    """采购样本聚合语句；单 PN 与批量共用同一 D-39 过滤与税口径。"""
     po, pl = FPurchaseOrder, FPurchaseLine
     rate = _rate_expr(po)
     nominal_side = _nominal_side_expr(po)
@@ -179,7 +233,7 @@ def _purchase_grouped_samples(
         po.tax_rate.is_not(None), or_(po.tax_rate < 0, po.tax_rate >= 1)
     )
     conditions = [
-        pl.part_id == part_id,
+        pl.part_id.in_(part_ids),
         # D-39：旧批次残留行只在读侧排除，不能按行号选最新行替代。
         pl.import_batch_id == po.import_batch_id,
         po.order_date >= start,
@@ -194,26 +248,79 @@ def _purchase_grouped_samples(
         conditions.append(
             ~_dq_exists("purchase", pl.id, ("confirmed_source_error",))
         )
-    statement = (
-        select(
-            po.order_date.label("order_date"),
-            rate.label("rate"),
-            is_inc.label("is_tax_inclusive"),
-            func.sum(pl.qty * pl.unit_price).label("amount_raw"),
-            func.sum(pl.qty).label("qty"),
-            func.sum(pl.unit_price).label("price_sum"),
-            func.count().label("line_count"),
-            func.count(func.distinct(po.id)).label("order_count"),
-            func.count().filter(nominal_side == "inc").label("nominal_inc_count"),
-            func.count().filter(nominal_side == "ex").label("nominal_ex_count"),
-            func.count().filter(bad_rate).label("bad_rate_count"),
-        )
+    columns = [
+        po.order_date.label("order_date"),
+        rate.label("rate"),
+        is_inc.label("is_tax_inclusive"),
+        func.sum(pl.qty * pl.unit_price).label("amount_raw"),
+        func.sum(pl.qty).label("qty"),
+        func.sum(pl.unit_price).label("price_sum"),
+        func.count().label("line_count"),
+        func.count(func.distinct(po.id)).label("order_count"),
+        func.count().filter(nominal_side == "inc").label("nominal_inc_count"),
+        func.count().filter(nominal_side == "ex").label("nominal_ex_count"),
+        func.count().filter(bad_rate).label("bad_rate_count"),
+    ]
+    grouping = [po.order_date, rate, is_inc]
+    if group_by_part:
+        columns.insert(0, pl.part_id.label("part_id"))
+        grouping.insert(0, pl.part_id)
+    return (
+        select(*columns)
         .select_from(pl)
         .join(po, pl.order_id == po.id)
         .where(*conditions)
-        .group_by(po.order_date, rate, is_inc)
+        .group_by(*grouping)
     )
-    return [_Group(**row._mapping) for row in db.execute(statement).all()]
+
+
+def _purchase_group(row) -> _Group:
+    values = dict(row._mapping)
+    # 批量查询多回传一个分组列，构造 _Group 前剔除。
+    values.pop("part_id", None)
+    return _Group(**values)
+
+
+def _purchase_grouped_samples(
+    db: Session,
+    *,
+    part_id: int,
+    start: date,
+    end: date,
+    settings: Settings,
+) -> list[_Group]:
+    statement = _purchase_sample_statement(
+        part_ids=(part_id,),
+        start=start,
+        end=end,
+        settings=settings,
+        group_by_part=False,
+    )
+    return [_purchase_group(row) for row in db.execute(statement).all()]
+
+
+def _purchase_grouped_samples_by_part(
+    db: Session,
+    *,
+    part_ids: Sequence[int],
+    start: date,
+    end: date,
+    settings: Settings,
+) -> dict[int, list[_Group]]:
+    """批量版 ``_purchase_grouped_samples``：一次查询取回所有 part 的采购样本。"""
+    if not part_ids:
+        return {}
+    statement = _purchase_sample_statement(
+        part_ids=part_ids,
+        start=start,
+        end=end,
+        settings=settings,
+        group_by_part=True,
+    )
+    grouped: dict[int, list[_Group]] = {}
+    for row in db.execute(statement).all():
+        grouped.setdefault(row.part_id, []).append(_purchase_group(row))
+    return grouped
 
 
 def _decay_factor(order_date: date, end: date, half_life_days: Decimal) -> Decimal:
@@ -237,8 +344,13 @@ def _weighted_amounts(
     end: date,
     half_life_days: Decimal,
     weighting: Literal["qty_weighted", "line_mean"],
+    decay_cache: dict[date, Decimal] | None = None,
 ) -> tuple[Decimal, Decimal] | None:
-    """按时间衰减返回 (含税均价, 未税均价)；无样本返回 None，坏分母报错。"""
+    """按时间衰减返回 (含税均价, 未税均价)；无样本返回 None，坏分母报错。
+
+    ``decay_cache`` 供批量调用跨多个 PN 复用同一订单日的衰减因子；单 PN 路径
+    不传，行为与原先一致。
+    """
     if not groups:
         return None
     bad_rates = sum(group.bad_rate_count for group in groups)
@@ -250,12 +362,18 @@ def _weighted_amounts(
         inc_numerator = Decimal(0)
         ex_numerator = Decimal(0)
         denominator = Decimal(0)
+        # 同一订单日的衰减因子完全相同：批量 200 个 PN 时按日期缓存，
+        # 避免对每个分组重复做 50 位 Decimal 幂运算；结果逐位不变。
+        cache = decay_cache if decay_cache is not None else {}
         for group in groups:
             rate = _as_decimal(group.rate)
             factor = Decimal(1) + rate
             if not rate.is_finite() or not factor.is_finite() or factor <= 0:
                 raise PriceReferenceUnavailable
-            decay = _decay_factor(group.order_date, end, half_life_days)
+            decay = cache.get(group.order_date)
+            if decay is None:
+                decay = _decay_factor(group.order_date, end, half_life_days)
+                cache[group.order_date] = decay
             if weighting == "qty_weighted":
                 weighted_raw = decay * _as_decimal(group.amount_raw)
                 denominator += decay * _as_decimal(group.qty)
