@@ -3,6 +3,15 @@ from app.models.chat import ChatMessage, ChatSession
 from app.models.data_quality import FactDataQualityIssue
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inquiry import FPartInquiry
+from app.models.fields_audience import (
+    AudienceGroup,
+    AudienceGroupMember,
+    AudienceRule,
+    AudienceRuleMember,
+    FieldAnchorUsage,
+    FieldDef,
+    FieldValue,
+)
 from app.models.inventory import Inventory, PartSubstitute
 from app.models.maintenance import (
     FMaintenanceLine,
@@ -144,6 +153,8 @@ from app.models.replenishment import (
 )
 
 __all__ = [
+    "AudienceGroup", "AudienceGroupMember", "AudienceRule", "AudienceRuleMember",
+    "FieldDef", "FieldValue", "FieldAnchorUsage",
     "ChatSession",
     "ChatMessage",
     "FactDataQualityIssue",

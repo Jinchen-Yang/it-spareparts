@@ -125,6 +125,8 @@ except BaseException:
 _app_engine = engine
 
 _TABLES = [
+    "field_anchor_usage", "field_value", "field_def", "audience_rule_member",
+    "audience_rule", "audience_group_member", "audience_group",
     "chat_message", "chat_session",
     "replenishment_review_line",
     "replenishment_review",

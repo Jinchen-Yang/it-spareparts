@@ -10,11 +10,13 @@ from app import auth
 from app.api import (
     accounts,
     agent,
+    audience,
     chat_sessions,
     dashboard,
     data_quality,
     data_quality_calibration,
     governance,
+    field_pool,
     imports,
     inventory,
     maintenance,
@@ -106,6 +108,8 @@ app.add_middleware(
 
 app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(accounts.router, prefix=settings.api_prefix)
+app.include_router(audience.router, prefix=settings.api_prefix)
+app.include_router(field_pool.router, prefix=settings.api_prefix)
 app.include_router(role_templates.router, prefix=settings.api_prefix)
 app.include_router(imports.router, prefix=settings.api_prefix)
 app.include_router(parts.router, prefix=settings.api_prefix)
