@@ -16,7 +16,10 @@ _PREVIOUS = "d6f8a0b2c4e6"
 def test_workflow_revision_extends_the_single_main_head():
     scripts = ScriptDirectory.from_config(_alembic_cfg())
     assert scripts.get_revision(_REVISION).down_revision == _PREVIOUS
-    assert scripts.get_heads() == [_REVISION]
+    # 后续通用模块迁移会接在本迁移之后，只要求迁移链仍是单 head 且包含本迁移。
+    heads = scripts.get_heads()
+    assert len(heads) == 1
+    assert _REVISION in {r.revision for r in scripts.walk_revisions(heads[0], 'base')}
 
 
 def test_workflow_upgrade_downgrade_and_zero_orm_drift(db):
