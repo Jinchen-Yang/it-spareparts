@@ -45,8 +45,10 @@ def audience_user(
 
 
 def manages_public_groups(viewer: UserContext) -> bool:
-    # 本轮未注册业务主管权限，保守复用已存在的账号管理权限。
-    return bool((viewer.permissions or {}).get("action_account_manage"))
+    graph = viewer.permissions or {}
+    return viewer.role in {"admin", "boss"} or bool(
+        graph.get("action_account_manage") or graph.get("action_presales_supervise")
+    )
 
 
 class CreateGroup(BaseModel):

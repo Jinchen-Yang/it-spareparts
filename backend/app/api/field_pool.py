@@ -17,7 +17,7 @@ from app.services import audience, field_pool
 router = APIRouter(prefix="/fields", tags=["fields"])
 
 # 新业务接入前需显式注册；未知 subject_type 的团队池写入失败关闭。
-TEAM_FIELD_PERMISSION = {"demo": "action_account_manage"}
+TEAM_FIELD_PERMISSION = {"demo": "action_account_manage", "presales_inquiry": "action_presales_supervise"}
 
 
 class AudienceRuleInput(BaseModel):

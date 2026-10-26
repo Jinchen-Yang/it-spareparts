@@ -631,6 +631,7 @@ FIELD_GROUPS = {
         "supplier",
         # §8.8 采购来源渠道也属"从谁/从哪类进货"情报，随 data_supplier 一并遮
         "source_channel",
+        "source_key",
         "channel",
     ],
     "customer_info": [

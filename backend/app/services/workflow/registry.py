@@ -50,6 +50,11 @@ class SubjectSpec:
     summarize: Callable[[Session, Sequence[int], UserContext], dict[int, dict]]
     filter_events: Callable = _unfiltered
     pool_key: str | None = None
+    validate_complete: Callable | None = None
+    can_manage_subject: Callable | None = None
+    access_permission: str | None = None
+    badge_subject_ids: Callable | None = None
+    filter_items: Callable | None = None
 
 
 _specs: dict[str, SubjectSpec] = {}

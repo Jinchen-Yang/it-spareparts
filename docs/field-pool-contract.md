@@ -13,6 +13,6 @@
 - `read_values(db, subjects, viewer, bypass)` 返回 `{subject_id: [{field_def_id, name, value}]}`，一次只接受一种 subject_type，避免返回键冲突。历史值保留原定义 id，定义改名、归档不删除值；即使定义已归档或被团队同名定义覆盖，仍允许清空当前主体中本人个人池或团队池的已有值，禁止重新写入旧定义。有效规则由值覆盖优先、定义默认其次，交 M8 一次批量过滤；不可见项整个省略。
 - `name_suggestions(db, subject_type, q, viewer)` 返回 `[{field_def_id, name, uses}]`，包含当前个人池及团队池，按大小写无关子串筛选、累计使用次数降序排序。接口不带 level，前端根据同层定义过滤建议。
 
-定义重名抛 `FieldPoolError(ValueError, status_code=409)`，其他输入错误为 `ValueError`，个人越权为 `PermissionError`。HTTP 接口将它们转为 409、422、403，所有接口都要求有效实名账号。团队写入只注册 `demo -> action_account_manage`，未知 subject_type 拒绝团队写入。
+定义重名抛 `FieldPoolError(ValueError, status_code=409)`，其他输入错误为 `ValueError`，个人越权为 `PermissionError`。HTTP 接口将它们转为 409、422、403，所有接口都要求有效实名账号。团队写入注册 `demo -> action_account_manage` 和 `presales_inquiry -> action_presales_supervise`，未知 subject_type 拒绝团队写入。
 
 前端 `CustomFieldsEditor` 接收空模板，不拉历史值；新增名称通过定义接口立即保存到个人池，业务值由外层表单保存。临时隐藏只影响当前编辑实例，输出省略空值和隐藏值。因为保存服务为增量语义，编辑已有单据时，调用方需把原来有值、现在清空或隐藏的 id 显式补为 `value: null`，以删除已有值。切换主体或 anchor 时使用组件 key 重建实例。

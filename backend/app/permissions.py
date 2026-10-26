@@ -48,6 +48,7 @@ PAGE_KEYS: list[str] = [
     # 三口径（含税/不含税/实付）分析与下钻。模板仅 boss 开（admin 由
     # page_permission_allowed 恒放行）；sales/purchaser/readonly 显式 False。
     "page_purchase_analytics",
+    "page_presales",
 ]
 # 这两个页面不是角色能力，而是生产灰度名单。即使 role=admin，也必须从实名账号
 # template_perms ⊕ perm_overrides 得到 True；旧 token/共享口令/缺失账号快照一律失败关闭。
@@ -112,6 +113,11 @@ ACTION_KEYS: list[str] = [
     # Beta 补库申请的创建/复提与审核结果回写严格分权。审核 Agent 本身不在系统内实现。
     "action_replenishment_create",
     "action_replenishment_review",
+    "action_presales_inquire",
+    "action_presales_quote",
+    "action_presales_offer",
+    "action_presales_bind_part",
+    "action_presales_supervise",
 ]
 ROW_KEYS: list[str] = [
     "own_customers_only",
@@ -173,6 +179,12 @@ LABELS: dict[str, str] = {
     "action_replenishment_review": "补库审核结果回写",
     "page_sales_analysis": "销售分析（大单追踪）",
     "data_reconciliation": "销售单对账数据（已对账/待对账/退货已对账）",
+    "page_presales": "售前询价与报价库",
+    "action_presales_inquire": "销售询价管理",
+    "action_presales_quote": "询价回复报价",
+    "action_presales_offer": "主动报价管理",
+    "action_presales_bind_part": "询价行主数据绑定与建档",
+    "action_presales_supervise": "售前询价主管",
 }
 
 
@@ -252,6 +264,12 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     # 池写权限（action_pool_*）同理必须显式关——匿名 guest 决不能建池/改约束价；
     # page_pool_analysis / data_pool_price_governance 按规格 §12 全员开（普通员工可看池与约束价）。
     "readonly": {**_full(), "page_import": False, "page_governance": False,
+                 "page_presales": False,
+                 "action_presales_inquire": False,
+                 "action_presales_quote": False,
+                 "action_presales_offer": False,
+                 "action_presales_bind_part": False,
+                 "action_presales_supervise": False,
                  "page_master_data": False, "page_maintenance": False,
                  "page_maintenance_beta": False,
                  "page_boss_board": False,
@@ -287,6 +305,12 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
                  "page_accounts": False, "action_account_manage": False},
     "sales": {
+        "page_presales": True,
+        "action_presales_inquire": True,
+        "action_presales_quote": False,
+        "action_presales_offer": False,
+        "action_presales_bind_part": False,
+        "action_presales_supervise": False,
         # 甲方 2026-06-15 确认：销售能看采购成本/毛利（整机拆解加点直卖需要采购价算建议售价）。
         # 供应商仍隐藏（不暴露从谁进货）；逐单销售成交明细另由 own_customers_only 收紧（看不到）。
         "data_supplier": False, "data_customer": True,
@@ -338,6 +362,12 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "own_maintenance_projects_only": False,
     },
     "purchaser": {
+        "page_presales": True,
+        "action_presales_inquire": False,
+        "action_presales_quote": True,
+        "action_presales_offer": True,
+        "action_presales_bind_part": True,
+        "action_presales_supervise": False,
         "data_supplier": True, "data_customer": False,
         "data_purchase_cost": True, "data_profit": False,
         "page_parts": True, "page_purchases": True, "page_profit": False,
@@ -466,11 +496,17 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_collection_follow_up": "page_maintenance",
     "action_maintenance_collection_plan_import": "page_maintenance",
     "action_replenishment_create": "page_replenishment_beta",
+    "action_presales_inquire": "page_presales",
+    "action_presales_quote": "page_presales",
+    "action_presales_offer": "page_presales",
+    "action_presales_bind_part": "page_presales",
+    "action_presales_supervise": "page_presales",
 }
 
 # 尚未发布的维保动作同时依赖基础权限和 Beta 白名单。本表是叠加约束，保留
 # ACTION_PAGE_DEPENDENCIES 中既有的 page_maintenance 映射，避免历史权限契约漂移。
 ACTION_ADDITIONAL_PAGE_DEPENDENCIES: dict[str, str] = {
+    "action_presales_bind_part": "page_master_data",
     "action_maintenance_manager_workbook_apply": "page_maintenance_beta",
     "action_maintenance_project_manage": "page_maintenance_beta",
     "action_maintenance_demand_delete": "page_maintenance_beta",
@@ -575,6 +611,7 @@ def hidden_groups(perms: dict | None) -> set[str]:
 
 # 高风险键：授予/撤销仅限 admin 角色操作者（防非 admin 的账号管理代理自我提权/互相提权）
 HIGH_RISK_KEYS: set[str] = {
+    "action_presales_supervise",
     "page_maintenance_beta",
     "page_maintenance_boss",
     "page_replenishment_beta",
@@ -630,6 +667,10 @@ UI_GROUPS: list[dict] = [
          "action_maintenance_collection_plan_import",
          "action_replenishment_create",
          "action_replenishment_review",
+         "action_presales_inquire",
+         "action_presales_quote",
+         "action_presales_offer",
+         "action_presales_bind_part",
      ]},
     {"key": "row", "label": "行级范围",
      "hint": "在能看的数据里进一步收紧范围（限制型开关：勾上=看得更少）。",
@@ -637,6 +678,7 @@ UI_GROUPS: list[dict] = [
     {"key": "admin", "label": "高风险管理能力",
      "hint": "接近管理员的能力，只有管理员本人可以授予或撤销，请谨慎开放。",
      "keys": ["page_accounts", "action_account_manage",
+              "action_presales_supervise",
               "action_maintenance_migration_review",
                "action_maintenance_ledger_import",
                "action_maintenance_doc_import",
@@ -650,6 +692,60 @@ UI_GROUPS: list[dict] = [
 # summary=一句话；can/cannot=能看到能做什么/不能看到不能做什么；typical=典型使用岗位；
 # sensitivity=数据敏感级 low/medium/high/critical；risk=开放风险提醒。
 PERMISSION_META: dict[str, dict] = {
+    "page_presales": {
+        "label": "售前询价与报价库",
+        "summary": "查看本人参与的询价和可共享的有效报价。",
+        "can": "打开询价列表、报价库和参考信息。",
+        "cannot": "不能因此创建、回复或修改单据；他人的客户始终按行级规则隐藏。",
+        "typical": ["销售", "采购", "主管"],
+        "sensitivity": "medium",
+        "risk": "报价及字段仍受受众设置和数据可见权限约束。",
+    },
+    "action_presales_inquire": {
+        "label": "销售询价管理",
+        "summary": "创建销售询价，并管理本人单据的生命周期。",
+        "can": "建草稿、提交、撤回、追加行、关单和复制新单。",
+        "cannot": "不能替其他销售修改询价，也不能直接代采购回复。",
+        "typical": ["销售"],
+        "sensitivity": "high",
+        "risk": "提交和重提会派发待办；改型号、数量或精确匹配要求会使相关报价失效。",
+    },
+    "action_presales_quote": {
+        "label": "询价回复报价",
+        "summary": "作为询价处理人，领取公共询价或回复本人待办。",
+        "can": "逐行报价或标记无货，完成本人回复并更新自己的报价。",
+        "cannot": "不能处理其他采购的独立待办，也不能修改销售询价内容。",
+        "typical": ["采购"],
+        "sensitivity": "high",
+        "risk": "发布的有效报价可以被销售引用，每次变更保留历史快照。",
+    },
+    "action_presales_offer": {
+        "label": "主动报价管理",
+        "summary": "主动发布、更新和撤销本人报价。",
+        "can": "建立主动报价单、发布价格、续期和填写原因后撤销。",
+        "cannot": "不能覆盖他人的报价，也不能删除历史报价快照。",
+        "typical": ["采购"],
+        "sensitivity": "high",
+        "risk": "报价在有效期内可被他人引用；含税口径以原始输入为准。",
+    },
+    "action_presales_bind_part": {
+        "label": "询价行主数据绑定与建档",
+        "summary": "为本人处理的待建档询价行绑定已有型号或建立新主数据。",
+        "can": "先查重，命中时绑定，确无匹配时建立型号并同步到所有处理人。",
+        "cannot": "必须同时持有备件主数据页面权限；不能重复为同一行建档。",
+        "typical": ["采购", "主数据维护人员"],
+        "sensitivity": "high",
+        "risk": "会新增主数据身份，处理前应核对原始型号及描述。",
+    },
+    "action_presales_supervise": {
+        "label": "售前询价主管",
+        "summary": "查看全部售前单据并管理询价分派及团队规则。",
+        "can": "监督进度、改派待办，管理公共分组和团队字段池，查看受众限制的字段。",
+        "cannot": "不能绕过供应商等数据字段组权限，也不能删除历史快照。",
+        "typical": ["老板", "管理员指定的采购主管"],
+        "sensitivity": "critical",
+        "risk": "可查看跨人员询价与受众私密字段，仅管理员可授予或撤销。",
+    },
     # ---- 数据可见范围 ----
     "data_supplier": {
         "label": "查看供应商信息",

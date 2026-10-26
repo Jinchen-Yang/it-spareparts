@@ -1,7 +1,8 @@
 # M5 待办 / M6 时间线契约
 
 业务层注册 `SubjectSpec`，向引擎传入 `Subject(subject_type, subject_id)`；引擎不导入业务表。
-生产默认没有注册任何业务。测试仅注册 `demo`，业务使用方在启动时自行注册。
+业务使用方在启动时自行注册。当前售前注册 `presales_inquiry` 和 `presales_offer_notice`；
+通用模块测试使用独立的 `demo` 注册表。
 
 ## 注册与身份
 
@@ -10,10 +11,15 @@
 | `register(subject_type, spec)` | 同类型不可重复注册；未注册类型抛 `NotFound`（HTTP 404） |
 | `pool_permission` | 池成员与指派目标所需权限，按账号现有权限快照和覆盖计算 |
 | `supervisor_permission` | `all` 页签和主管改派的权限；只对相应 subject_type 生效 |
-| `can_view_subject(db, subject_id, ctx)` | 创建待办及读取时间线的业务对象准入回调 |
+| `can_view_subject(db, subject_id, ctx)` | 创建待办、列表和时间线的业务对象准入回调；列表在分页前按主体缓存判定结果 |
 | `summarize(db, subject_ids, ctx)` | 每种类型一次批量摘要；结果按主体 ID 索引 |
 | `filter_events(events, ctx)` | 时间线字段/受众过滤出口；默认原样返回，过滤后再分页 |
+| `filter_items(db, rows, ctx)` | 可选的待办输出字段过滤，按类型批量执行；须保留记录数量和顺序，缺省原样返回。主动报价通知的创建人身份也遵守报价人受众规则 |
 | `pool_key` | 可选，默认等于 subject_type；相同池必须配置相同成员权限 |
+| `access_permission` | 可选的类型准入权限；列表、角标、领单及已指派动作均要求此权限。缺省不增加限制；售前两类型均要求 `page_presales` |
+| `badge_subject_ids(db, ctx)` | 可选的批量准入回调，返回角标允许统计的主体 ID；业务自行通过 M8 过滤，不查询待办表 |
+| `validate_complete(db, item, ctx)` | 可选的业务完成校验，通用完成接口也会调用，防止绕过逐行回复约束 |
+| `can_manage_subject(db, subject_id, ctx)` | 可选的真实业务发起人回调；支持主管代建待办后原发起人继续撤回、恢复、关单 |
 
 实名账号来自 `sys_user`。HTTP 通过 `current_identity` 校验 token，拒绝共享口令身份；
 服务层每次重新解析有效账号与权限。服务动作的 `actor` 接受用户整数 ID 或已有的
@@ -39,6 +45,15 @@ HTTP 写接口负责提交，成功后调用 `record_access_log`。
 - `cancel_subject / pause_subject / resume_subject`：仅创建这些待办的发起人或主管可调用，
   以固定 ID 顺序锁定全部未结束待办。必须传 `expected_versions: {item_id: version}`，
   对全部未结束待办检查调用方版本；缺失版本拒绝执行。已暂停/已恢复的重复调用无新增事件。
+- `list_by_subject`（别名 `subject_items`）：业务读取的公开入口，检查主体准入；业务发起人、
+  待办创建人或主管读取全部，处理人只读取本人和有权访问的公共池。可选 `lock=True` 按 ID 锁定。
+- `subject_participation`：只返回本人是否被指派、是否创建待办、是否存在可领取公共池三项布尔值，
+  供主体准入回调使用，不调用准入回调，避免递归。
+- `participation_batch(db, subject_type, subject_ids, actor)`：同一类型的批量关系查询，返回
+  `{subject_id: {assigned, creator, unclaimed}}`，无待办的主体三项均为 false；一次身份查询和一次
+  待办查询完成，沿用单条语义，每次调用读取最新关系，不缓存跨请求结果。
+- `reopen`：业务发起人、待办创建人或主管可将 done/declined 重新打开为 pending；
+  要求 expected_version，清空结束时间和暂停标记，递增版本并追加事件。
 
 数据库对同一 subject + assignee 的 pending/in_progress 强制唯一（NULL 公共池待办不互斥）。
 唯一约束冲突返回 Conflict；调用方必须回滚失败事务。
@@ -58,6 +73,9 @@ HTTP 写接口负责提交，成功后调用 `record_access_log`。
 
 分页从 1 开始，page_size 默认 20、最大 100。每条 item 带 summary、assignee_name、
 claimed_by_name、allowed_actions。事件附 actor_name，系统动作 actor_name 为空。
+列表对候选主体执行当前 `can_view_subject`，过滤后再计算 total 和分页；受众分组变化立即生效。
+角标继续使用一次待办 SQL 聚合，先按类型的 `access_permission` 排除已撤权类型；
+主动报价通知额外通过 `badge_subject_ids` 批量检查当前 M8 受众，分组移除后列表和角标一起隐藏。
 
 - assigned：直接指派给我且未结束；不包含领取记录。
 - pool：我具有成员权限且未指派的 pending 记录。

@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, exists, func, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -53,6 +53,8 @@ def _target(db: Session, user_id: int, spec) -> SysUser:
     user, ctx = actor_context(db, user_id)
     if not has_permission(ctx, spec.pool_permission):
         raise Forbidden("目标账号不是池成员")
+    if spec.access_permission is not None and not has_permission(ctx, spec.access_permission):
+        raise Forbidden("目标账号无权访问该业务")
     return user
 
 
@@ -71,7 +73,13 @@ def _supervisor(ctx, item) -> bool:
     return has_permission(ctx, get_spec(item.subject_type).supervisor_permission)
 
 
-def _check_actor(item, user, ctx, *, supervisor_only=False):
+def _check_actor(db, item, user, ctx, *, supervisor_only=False):
+    spec = get_spec(item.subject_type)
+    access = spec.access_permission
+    if access is not None and not has_permission(ctx, access):
+        raise Forbidden("无权访问该类型的待办")
+    if not spec.can_view_subject(db, item.subject_id, ctx):
+        raise Forbidden("无权访问该业务对象")
     allowed = _supervisor(ctx, item)
     if not supervisor_only:
         allowed = allowed or item.assignee_id == user.id or item.claimed_by == user.id
@@ -131,6 +139,8 @@ def claim(db: Session, item_id: int, actor, expected_version: int) -> WorkItem:
     user, ctx = actor_context(db, actor)
     item = _load(db, item_id)
     spec = get_spec(item.subject_type)
+    if spec.access_permission is not None and not has_permission(ctx, spec.access_permission):
+        raise Forbidden("无权访问该类型的待办")
     if not has_permission(ctx, spec.pool_permission):
         raise Forbidden("不是该池的成员")
     if item.assignee_id is not None or item.status != "pending":
@@ -167,7 +177,7 @@ def _claim_conflict(db, item):
 def _prepare(db, item_id, actor, expected_version, *, supervisor_only=False):
     user, ctx = actor_context(db, actor)
     item = _load(db, item_id, lock=True)
-    _check_actor(item, user, ctx, supervisor_only=supervisor_only)
+    _check_actor(db, item, user, ctx, supervisor_only=supervisor_only)
     _version(item, expected_version)
     _active(item)
     return item, user
@@ -232,6 +242,9 @@ def complete(db, item_id, actor, expected_version=None):
         raise InvalidTransition("待办已暂停，不能完成")
     if item.assignee_id is None:
         raise InvalidTransition("请先领取待办")
+    validator = get_spec(item.subject_type).validate_complete
+    if validator is not None:
+        validator(db, item, actor_context(db, actor)[1])
     item.status, item.closed_at = "done", datetime.now(timezone.utc)
     return _changed(db, item, "complete", user.id)
 
@@ -257,8 +270,10 @@ def _subject_action(db, subject, actor, kind, reason=None, expected_versions=Non
     ).order_by(WorkItem.id).with_for_update().execution_options(populate_existing=True)).all()
     # 业务发起人可以撤回、恢复和关单；普通处理人不能影响其他人的待办。
     if not has_permission(ctx, spec.supervisor_permission):
-        if not spec.can_view_subject(db, subject.subject_id, ctx) or any(
-                item.created_by != user.id for item in items):
+        business_owner = spec.can_manage_subject is not None and spec.can_manage_subject(
+            db, subject.subject_id, ctx)
+        if not spec.can_view_subject(db, subject.subject_id, ctx) or (
+                not business_owner and any(item.created_by != user.id for item in items)):
             raise Forbidden("只有发起人或主管可以操作整个对象的待办")
     if not isinstance(expected_versions, dict):
         raise InvalidTransition("必须提供各待办的 expected_versions")
@@ -290,6 +305,8 @@ def resume_subject(db, subject, actor, *, expected_versions=None):
 
 def _scopes(ctx, subject_type=None):
     specs = {subject_type: get_spec(subject_type)} if subject_type else registered()
+    specs = {name: spec for name, spec in specs.items()
+             if spec.access_permission is None or has_permission(ctx, spec.access_permission)}
     pools = [name for name, spec in specs.items() if has_permission(ctx, spec.pool_permission)]
     supervised = [name for name, spec in specs.items() if has_permission(ctx, spec.supervisor_permission)]
     return specs, pools, supervised
@@ -349,10 +366,20 @@ def serialize_items(db, items, user_id, ctx):
     for name in dict.fromkeys(item.subject_type for item in items):
         ids = list(dict.fromkeys(item.subject_id for item in items if item.subject_type == name))
         summaries[name] = get_spec(name).summarize(db, ids, ctx)
-    return [{**{column.name: getattr(item, column.name) for column in WorkItem.__table__.columns},
+    result = [{**{column.name: getattr(item, column.name) for column in WorkItem.__table__.columns},
              "summary": summaries[item.subject_type].get(item.subject_id, {}),
              "assignee_name": names.get(item.assignee_id), "claimed_by_name": names.get(item.claimed_by),
              "allowed_actions": allowed_actions(item, user_id, ctx)} for item in items]
+    for name in summaries:
+        field_filter = get_spec(name).filter_items
+        if field_filter is None:
+            continue
+        indices = [index for index, item in enumerate(items) if item.subject_type == name]
+        filtered = field_filter(db, [result[index] for index in indices], ctx)
+        # 回调只过滤字段，不能改变记录数量或顺序；记录准入在分页前完成。
+        for index, row in zip(indices, filtered, strict=True):
+            result[index] = row
+    return result
 
 
 def visible_items(db, ctx, tab, subject_type=None, *, page=1, page_size=20):
@@ -361,20 +388,31 @@ def visible_items(db, ctx, tab, subject_type=None, *, page=1, page_size=20):
     user, ctx = actor_context(db, ctx)
     specs, pools, supervised = _scopes(ctx, subject_type)
     predicate = and_(WorkItem.subject_type.in_(specs), _tab_predicate(user.id, pools, supervised, tab))
-    total = db.scalar(select(func.count()).select_from(WorkItem).where(predicate))
-    items = db.scalars(select(WorkItem).where(predicate).order_by(WorkItem.id.desc())
-                       .offset((page - 1) * page_size).limit(page_size)).all()
-    return {"items": serialize_items(db, items, user.id, ctx), "total": total,
+    rows = db.scalars(select(WorkItem).where(predicate).order_by(WorkItem.id.desc())).all()
+    # 受众分组可即时变化；旧指派关系不能代替当前业务准入。先过滤，再分页和计数。
+    access_cache = {}
+    items = []
+    for item in rows:
+        subject = (item.subject_type, item.subject_id)
+        if subject not in access_cache:
+            access_cache[subject] = specs[item.subject_type].can_view_subject(db, item.subject_id, ctx)
+        if access_cache[subject]:
+            items.append(item)
+    page_items = items[(page - 1) * page_size:page * page_size]
+    return {"items": serialize_items(db, page_items, user.id, ctx), "total": len(items),
             "page": page, "page_size": page_size, "can_supervise": bool(supervised)}
 
 
 def badge(db, ctx):
     user, ctx = actor_context(db, ctx)
     specs, pools, supervised = _scopes(ctx)
+    visibility = [or_(WorkItem.subject_type != name,
+                      WorkItem.subject_id.in_(spec.badge_subject_ids(db, ctx)))
+                  for name, spec in specs.items() if spec.badge_subject_ids is not None]
     # 三个角标共用一次聚合，不逐页签查询。
     row = db.execute(select(*[func.count().filter(_tab_predicate(user.id, pools, supervised, tab)).label(tab)
                               for tab in ("assigned", "pool", "claimed")])
-                     .select_from(WorkItem).where(WorkItem.subject_type.in_(specs))).one()
+                     .select_from(WorkItem).where(WorkItem.subject_type.in_(specs), *visibility)).one()
     return dict(row._mapping)
 
 
@@ -387,6 +425,79 @@ def candidates(db, ctx, pool_key):
     for user in db.scalars(select(SysUser).where(SysUser.is_active.is_(True), SysUser.deleted_at.is_(None))
                             .order_by(SysUser.id)).all():
         graph = permissions.effective_for_user(user)
-        if graph.get(specs[0].pool_permission, False):
+        if graph.get(specs[0].pool_permission, False) and (
+                specs[0].access_permission is None or graph.get(specs[0].access_permission, False)):
             result.append({"id": user.id, "display_name": user.display_name or user.username})
     return {"items": result}
+
+
+def participation_batch(db: Session, subject_type, subject_ids, actor) -> dict[int, dict[str, bool]]:
+    """批量返回本人和主体的关系，不读取业务对象，供批量准入回调使用。"""
+    spec = get_spec(subject_type)
+    ids = list(dict.fromkeys(subject_ids))
+    for subject_id in ids:
+        as_subject(Subject(subject_type, subject_id))
+    if not ids:
+        return {}
+    user, ctx = actor_context(db, actor)
+    rows = db.execute(select(WorkItem.subject_id, WorkItem.assignee_id, WorkItem.created_by, WorkItem.status).where(
+        WorkItem.subject_type == subject_type, WorkItem.subject_id.in_(ids),
+    )).all()
+    result = {subject_id: {"assigned": False, "creator": False, "unclaimed": False}
+              for subject_id in ids}
+    member = has_permission(ctx, spec.pool_permission)
+    for row in rows:
+        flags = result[row.subject_id]
+        flags["assigned"] |= row.assignee_id == user.id
+        flags["creator"] |= row.created_by == user.id
+        flags["unclaimed"] |= member and row.assignee_id is None and row.status == "pending"
+    return result
+
+
+def subject_participation(db: Session, subject, actor) -> dict[str, bool]:
+    """只返回本人和主体的关系，供准入回调使用，避免回调递归。"""
+    subject = as_subject(subject)
+    return participation_batch(db, subject.subject_type, [subject.subject_id], actor)[subject.subject_id]
+
+
+def list_by_subject(db: Session, subject, actor, *, lock=False) -> list[WorkItem]:
+    """业务读取待办的公开入口；发起人/主管读全部，处理人只读本人或公共池。"""
+    subject = as_subject(subject)
+    user, ctx = actor_context(db, actor)
+    spec = get_spec(subject.subject_type)
+    if not spec.can_view_subject(db, subject.subject_id, ctx):
+        raise Forbidden("无权查看该对象的待办")
+    stmt = select(WorkItem).where(
+        WorkItem.subject_type == subject.subject_type, WorkItem.subject_id == subject.subject_id,
+    ).order_by(WorkItem.id)
+    if lock:
+        stmt = stmt.with_for_update()
+    rows = list(db.scalars(stmt.execution_options(populate_existing=True)))
+    business_owner = spec.can_manage_subject is not None and spec.can_manage_subject(
+        db, subject.subject_id, ctx)
+    if business_owner or has_permission(ctx, spec.supervisor_permission) or any(row.created_by == user.id for row in rows):
+        return rows
+    return [row for row in rows if row.assignee_id == user.id or (
+        row.assignee_id is None and row.status == "pending" and has_permission(ctx, spec.pool_permission)
+    )]
+
+
+subject_items = list_by_subject
+
+
+def reopen(db: Session, item_id: int, actor, expected_version=None) -> WorkItem:
+    """主体追加待处理内容后，发起人或主管可重新打开已回复的待办。"""
+    user, ctx = actor_context(db, actor)
+    item = _load(db, item_id, lock=True)
+    spec = get_spec(item.subject_type)
+    business_owner = spec.can_manage_subject is not None and spec.can_manage_subject(
+        db, item.subject_id, ctx)
+    if not spec.can_view_subject(db, item.subject_id, ctx) or not (
+        business_owner or item.created_by == user.id or has_permission(ctx, spec.supervisor_permission)
+    ):
+        raise Forbidden("只有发起人或主管可以重新打开待办")
+    _version(item, expected_version)
+    if item.status not in ("done", "declined"):
+        raise InvalidTransition("只能重新打开已回复的待办")
+    item.status, item.closed_at, item.paused = "pending", None, False
+    return _changed(db, item, "reopen", user.id)
