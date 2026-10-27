@@ -56,7 +56,7 @@ _KNOWN_DYNAMIC_SITES: dict[tuple[str, str], tuple[int, str]] = {
     ),
     ("app/agent/tools.py", 'f"agent_tool:{name}"'): (
         1,
-        "注册表 18 键（最长 agent_tool:get_maintenance_projects=35）；注册表外的模型自报名无上界，由 helper 的 action[:64] 兜底",
+        "注册表含 search_maintenance_movements；最大长度从实际注册表计算；注册表外的模型自报名无上界，由 helper 的 action[:64] 兜底",
     ),
     ("app/api/maintenance_collection_reminders.py",
      'f"collection_milestone_{body.action}"'): (
