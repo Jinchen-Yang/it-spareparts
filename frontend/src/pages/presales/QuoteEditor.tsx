@@ -21,8 +21,8 @@ export function offerInput(offer?: Offer): OfferInput {
     .map((field) => [field, offer[field]]));
 }
 
-export function quoteComplete(value: Pick<OfferInput, "no_stock" | "unit_price">): boolean {
-  return value.no_stock === true || (value.unit_price != null && value.unit_price !== ""
+export function quoteComplete(value: Pick<OfferInput, "no_stock" | "unit_price" | "notes">): boolean {
+  return value.no_stock === true ? !!value.notes?.trim() : (value.unit_price != null && value.unit_price !== ""
     && Number.isFinite(Number(value.unit_price)) && Number(value.unit_price) >= 0);
 }
 
@@ -32,9 +32,10 @@ interface Props {
   existing?: Offer;
   disabled?: boolean;
   label?: string;
+  allowNoStock?: boolean;
 }
 
-export default function QuoteEditor({ value, onChange, existing, disabled = false, label = "报价" }: Props) {
+export default function QuoteEditor({ value, onChange, existing, disabled = false, label = "报价", allowNoStock = true }: Props) {
   const now = useNow();
   const permissions = readPermissionMap();
   const supplierVisible = localStorage.getItem("role") === "admin"
@@ -48,8 +49,8 @@ export default function QuoteEditor({ value, onChange, existing, disabled = fals
   ) : null;
 
   return <Form layout="vertical" component="div" disabled={disabled}>
-    <Form.Item><Checkbox checked={value.no_stock} disabled={disabled}
-      onChange={(event) => change({ no_stock: event.target.checked })}>无货</Checkbox></Form.Item>
+    {allowNoStock && <Form.Item><Checkbox checked={value.no_stock} disabled={disabled}
+      onChange={(event) => change({ no_stock: event.target.checked })}>无货</Checkbox></Form.Item>}
     <Space wrap align="start" style={{ width: "100%" }}>
       <Form.Item label="单价" required={!value.no_stock}>
         <InputNumber aria-label={`${label}单价`} min={0} max={999999999999.99} precision={2}
@@ -99,8 +100,9 @@ export default function QuoteEditor({ value, onChange, existing, disabled = fals
     {(!existing || "reporter" in existing) && <Form.Item label={<Space>报价人{lock("reporter_audience", "报价人")}</Space>}>
       <Typography.Text>{existing?.reporter?.name ?? "当前填写人"}</Typography.Text>
     </Form.Item>}
-    {fieldVisible("notes") && <Form.Item label={<Space>采购备注{lock("notes_audience", "采购备注")}</Space>}>
+    {fieldVisible("notes") && <Form.Item required={value.no_stock} label={<Space>{value.no_stock ? "无货原因（必填）" : "采购备注"}{lock("notes_audience", "采购备注")}</Space>}>
       <Input.TextArea aria-label={`${label}备注`} value={value.notes ?? ""} disabled={disabled}
+        placeholder={value.no_stock ? "请填写无货原因" : undefined}
         onChange={(event) => change({ notes: event.target.value })} />
     </Form.Item>}
     {existing && <Typography.Text type="secondary">未调整的可见性沿用已有设置。</Typography.Text>}

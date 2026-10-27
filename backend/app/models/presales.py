@@ -120,6 +120,37 @@ class PresalesOffer(Base):
     )
 
 
+class PresalesOfferLineLink(Base):
+    """跨单更新保留原行关联；当前价格与受众仍只读原报价。"""
+    __tablename__ = "presales_offer_line_link"
+
+    line_id: Mapped[int] = mapped_column(ForeignKey("presales_inquiry_line.id"), primary_key=True)
+    offer_id: Mapped[int] = mapped_column(ForeignKey("presales_offer.id"), primary_key=True)
+
+
+class PresalesLineResponse(Base):
+    """每位采购的行处理结果；沿用只保存关联，不保存价格副本。"""
+    __tablename__ = "presales_line_response"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    line_id: Mapped[int] = mapped_column(ForeignKey("presales_inquiry_line.id"))
+    created_by: Mapped[int] = mapped_column(ForeignKey("sys_user.id"))
+    work_item_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("work_item.id"))
+    line_version: Mapped[int] = mapped_column(Integer)
+    mode: Mapped[str] = mapped_column(String(8))
+    ref_offer_id: Mapped[int | None] = mapped_column(ForeignKey("presales_offer.id"))
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("line_id", "created_by", name="uq_presales_line_response_author"),
+        CheckConstraint("line_version >= 1", name="ck_presales_line_response_version"),
+        CheckConstraint("(mode = 'reuse' AND ref_offer_id IS NOT NULL AND reason IS NULL) OR "
+                        "(mode = 'skip' AND ref_offer_id IS NULL AND reason IS NOT NULL AND length(trim(reason)) > 0)",
+                        name="ck_presales_line_response_mode"),
+    )
+
+
 class PresalesOfferRevision(Base):
     __tablename__ = "presales_offer_revision"
 

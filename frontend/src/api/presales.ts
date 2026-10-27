@@ -41,6 +41,7 @@ export interface InquiryLine extends Omit<LineInput, "notes_audience" | "field_v
   notes_audience?: AudienceRuleRead;
   field_values?: ReadFieldValue[];
   field_template?: Pick<FieldDefinition, "id" | "name" | "value_type" | "choices">[];
+  linked_offer_ids?: number[];
 }
 
 export interface InquiryInput {
@@ -97,6 +98,31 @@ export interface InquiryWorkItem {
   version: number;
 }
 
+export interface LineResponseInput {
+  line_id: number;
+  mode: "quote" | "reuse" | "skip";
+  ref_offer_id?: number;
+  reason?: string;
+}
+
+export interface LineResponse extends LineResponseInput {
+  created_by: number;
+  work_item_id: number | null;
+  offer?: Offer;
+  expired: boolean;
+}
+
+export interface ExistingChoice {
+  on_existing: "update" | "new";
+  existing_offer_id?: number;
+}
+
+export interface ExistingChoices {
+  on_existing?: "update" | "new";
+  existing_offer_id?: number;
+  existing_choices?: Record<number, ExistingChoice>;
+}
+
 export interface Inquiry {
   id: number;
   kind: "sales_inquiry" | "proactive_offer";
@@ -121,6 +147,7 @@ export interface Inquiry {
   lines?: InquiryLine[];
   offers?: Offer[];
   work_items?: InquiryWorkItem[];
+  line_responses?: LineResponse[];
   field_values?: ReadFieldValue[];
 }
 
@@ -189,10 +216,10 @@ export const presales = {
   async withdrawOffer(id: number, body: VersionInput & { reason: string }) {
     return (await api.post<Offer>(`${root}/offers/${id}/withdraw`, body)).data;
   },
-  async replyInquiry(id: number, body: VersionInput & { work_item_id?: number; expected_work_item_version?: number }) {
+  async replyInquiry(id: number, body: VersionInput & ExistingChoices & { work_item_id?: number; expected_work_item_version?: number; line_responses?: LineResponseInput[] }) {
     return (await api.post<Offer[]>(`${root}/inquiries/${id}/reply`, body)).data;
   },
-  async publishInquiry(id: number, body: VersionInput & { notice_user_ids?: number[] }) {
+  async publishInquiry(id: number, body: VersionInput & ExistingChoices & { notice_user_ids?: number[] }) {
     return (await api.post<Offer[]>(`${root}/inquiries/${id}/publish`, body)).data;
   },
   async partCheck(lineId: number, pn?: string) {

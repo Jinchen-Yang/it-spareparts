@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, App, Button, Card, Descriptions, Empty, Input, Modal, Space, Spin, Tag, Typography } from "antd";
+import { Alert, App, Button, Card, Descriptions, Empty, Input, Modal, Radio, Select, Space, Spin, Tag, Typography } from "antd";
 import { Link, useLocation, useParams } from "react-router-dom";
-import { presales, type Inquiry, type InquiryLine, type NearDuplicate, type Offer } from "../../api/presales";
+import { presales, type ExistingChoice, type Inquiry, type InquiryLine, type LineResponseInput, type NearDuplicate, type Offer } from "../../api/presales";
 import { listWorkItems, type WorkItem, type WorkTab } from "../../api/workItems";
 import type { PartSuggestion } from "../../api/search";
 import LivePartSearch from "../../components/parts/LivePartSearch";
@@ -12,7 +12,8 @@ import Timeline from "../../components/workflow/Timeline";
 import { refreshWorkBadges } from "../../components/workflow/useWorkBadge";
 import QuoteEditor, { offerInput, quoteComplete } from "./QuoteEditor";
 import PartQuoteBadges from "./PartQuoteBadges";
-import { usePresalesError, OfferBadge } from "./shared";
+import { usePresalesError, OfferBadge, isOfferActive, useNow } from "./shared";
+import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
 
 async function findOwnTask(inquiryId: number): Promise<WorkItem | undefined> {
   // 待办接口的这三个页签均按服务端当前账号过滤，不以显示名称推断身份。
@@ -144,6 +145,7 @@ function QuoteLine({ inquiry, line, offer, taskId, editable, refresh, onDirty }:
       {offer.status === "stale" && <Tag>基于旧版本</Tag>}
     </Space>}
     <QuoteEditor label={line.pn_raw} value={value} existing={newQuote ? undefined : offer} disabled={!canEdit || busy}
+      allowNoStock={inquiry.kind === "proactive_offer" || published}
       onChange={(next) => { setValue(next); onDirty(line.id, true); }} />
     {canEdit && <Space>
       <Button type="primary" loading={busy} disabled={!quoteComplete(value) || (!line.part_id && !value.no_stock)}
@@ -165,6 +167,7 @@ export default function ProcessPage() {
 
 function ProcessContent({ inquiryId }: { inquiryId: number }) {
   const handlePresalesError = usePresalesError();
+  const { choose, dialog } = useExistingOfferChoice();
   const location = useLocation();
   const navigationTask = (location.state as { workItem?: WorkItem } | null)?.workItem;
   const { message } = App.useApp();
@@ -176,10 +179,25 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
   const [gallery, setGallery] = useState(false);
   const [dirty, setDirty] = useState<Record<number, boolean>>({});
   const [timelineVersion, setTimelineVersion] = useState(0);
+  const [library, setLibrary] = useState<Record<number, Offer[]>>({});
+  const [libraryError, setLibraryError] = useState(false);
+  const [responses, setResponses] = useState<Record<number, LineResponseInput>>({});
+  const now = useNow([...Object.values(library).flat(), ...(inquiry?.line_responses ?? []).flatMap((row) => row.offer ? [row.offer] : [])]
+    .flatMap((offer) => [offer.valid_from, offer.valid_until]));
+  const partKey = (inquiry?.lines ?? []).filter((line) => line.part_id).map((line) => line.part_id).join(",");
   const refresh = useCallback(async () => {
     const latest = await loadInquiry(inquiryId);
     setInquiry(latest); setTimelineVersion((value) => value + 1);
   }, [inquiryId]);
+  useEffect(() => {
+    let cancelled = false;
+    setLibraryError(false);
+    if (!partKey) { setLibrary({}); return; }
+    presales.library([...new Set(partKey.split(",").map(Number))]).then((data) => {
+      if (!cancelled) setLibrary(data);
+    }).catch(() => { if (!cancelled) { setLibrary({}); setLibraryError(true); } });
+    return () => { cancelled = true; };
+  }, [partKey, inquiry?.version]);
   useEffect(() => {
     let cancelled = false;
     setLoading(true); setLoadError(false); setInquiry(undefined); setDirty({});
@@ -203,20 +221,52 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
   const active = taskStatus === "pending" || taskStatus === "in_progress";
   const paused = liveTask?.paused ?? task?.paused;
   const proactive = inquiry.kind === "proactive_offer";
-  const actorId = proactive ? inquiry.created_by : task?.assignee_id;
+  const actorId = proactive ? inquiry.created_by : task?.claimed_by ?? task?.assignee_id;
   const ownOffers = actorId == null ? [] : (inquiry.offers ?? []).filter((offer) => offer.reporter?.id === actorId);
   const lines = inquiry.lines ?? [];
   const required = lines.filter((line) => !line.ref_offer_id);
-  const complete = required.length > 0 && required.every((line) => !dirty[line.id]
-    && ownOffers.some((offer) => offer.line_id === line.id && ["draft", "published"].includes(offer.status)
-      && quoteComplete(offer) && (!!line.part_id || offer.no_stock)));
+  const savedResponse = (lineId: number) => inquiry.line_responses?.find((row) => row.line_id === lineId && row.created_by === actorId);
+  const responseFor = (lineId: number): LineResponseInput => responses[lineId] ?? savedResponse(lineId) ?? { line_id: lineId, mode: "quote" };
+  const reusedOffer = (line: InquiryLine) => {
+    const response = responseFor(line.id);
+    return (library[line.part_id!] ?? []).find((offer) => offer.id === response.ref_offer_id)
+      ?? (savedResponse(line.id)?.ref_offer_id === response.ref_offer_id ? savedResponse(line.id)?.offer : undefined);
+  };
+  const complete = required.length > 0 && required.every((line) => {
+    const response = responseFor(line.id);
+    if (response.mode === "skip") return !!response.reason?.trim();
+    if (response.mode === "reuse") {
+      const offer = reusedOffer(line);
+      return !!offer && isOfferActive(offer, now);
+    }
+    return !dirty[line.id] && ownOffers.some((offer) => offer.line_id === line.id && ["draft", "published"].includes(offer.status)
+      && quoteComplete(offer) && !offer.no_stock && !!line.part_id);
+  });
   const editable = inquiry.status === "submitted" && (proactive || !!task) && !paused;
   const reply = async () => {
     if (!complete || !task) return;
     setBusy(true);
     try {
-      await presales.replyInquiry(inquiry.id, { expected_version: inquiry.version, work_item_id: task.id,
-        expected_work_item_version: liveTask?.version ?? task.version });
+      const lineResponses = required.map((line) => {
+        const row = responseFor(line.id);
+        return { line_id: row.line_id, mode: row.mode, ...(row.mode === "reuse" ? { ref_offer_id: row.ref_offer_id } : {}),
+          ...(row.mode === "skip" ? { reason: row.reason?.trim() } : {}) };
+      });
+      const choices: Record<number, ExistingChoice> = {};
+      for (;;) {
+        try {
+          await presales.replyInquiry(inquiry.id, { expected_version: inquiry.version, work_item_id: task.id,
+            expected_work_item_version: liveTask?.version ?? task.version, line_responses: lineResponses,
+            ...(Object.keys(choices).length ? { existing_choices: choices } : {}) });
+          break;
+        } catch (error) {
+          const conflict = existingOfferConflict(error);
+          if (!conflict) throw error;
+          const choice = await choose(conflict);
+          if (!choice) return;
+          choices[conflict.draft_offer_id] = choice;
+        }
+      }
       message.success("已回复给销售"); refreshWorkBadges(); await refresh();
     } catch (error) { handlePresalesError(error, refresh); }
     finally { setBusy(false); }
@@ -236,9 +286,17 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
     </Typography.Paragraph>)}
     {!task && !proactive && <Alert type="info" message="请从自己的采购待办打开本单，领取或接受后即可处理" />}
     {paused && <Alert type="warning" message="询价已撤回，待办暂停" />}
+    {libraryError && <Alert type="warning" message="已有有效报价加载失败，请刷新后重试；仍可报新价或不报" />}
     {!lines.length && <Empty description="暂无询价行" />}
     {lines.map((line) => {
-      const current = (proactive && line.ref_offer_id ? ownOffers.find((offer) => offer.id === line.ref_offer_id) : undefined)
+      const response = responseFor(line.id);
+      const existing = (library[line.part_id!] ?? []).filter((offer) => isOfferActive(offer, now));
+      const reused = reusedOffer(line);
+      const changeResponse = (patch: Partial<LineResponseInput>) => setResponses((previous) => ({
+        ...previous, [line.id]: { ...responseFor(line.id), ...patch },
+      }));
+      const referenceId = proactive ? line.ref_offer_id ?? savedResponse(line.id)?.ref_offer_id : undefined;
+      const current = (referenceId ? ownOffers.find((offer) => offer.id === referenceId) : undefined)
         ?? ownOffers.find((offer) => offer.line_id === line.id && offer.status !== "withdrawn" && offer.status !== "stale")
         ?? ownOffers.find((offer) => offer.line_id === line.id);
       return <Card key={`line-${line.id}`} title={<Space wrap>
@@ -251,8 +309,27 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
         {"notes" in line && line.notes && <Typography.Paragraph>{line.notes}</Typography.Paragraph>}
         {line.field_values?.map((field, index) => <Typography.Paragraph key={index}>{field.name ?? field.new_name}: {String(field.value ?? "")}</Typography.Paragraph>)}
         {line.ref_offer_id && !proactive ? <Tag color="success">已引用有效报价，无需再次处理</Tag> : <>
+          {!proactive && <Space direction="vertical" style={{ width: "100%", marginBottom: 12 }}>
+            <Typography.Text strong>已有有效报价</Typography.Text>
+            {existing.length ? existing.map((offer) => <div key={offer.id}><OfferBadge offer={offer} /></div>)
+              : <Typography.Text type="secondary">暂无可见的有效报价</Typography.Text>}
+            <div role="radiogroup" aria-label={`${line.pn_raw}处理方式`}><Radio.Group value={response.mode} disabled={!editable || !active || busy}
+              onChange={(event) => changeResponse({ mode: event.target.value })}>
+              <Radio value="quote">报新价</Radio><Radio value="reuse" disabled={!existing.length}>沿用有效报价</Radio><Radio value="skip">无货 / 不报</Radio>
+            </Radio.Group></div>
+            {response.mode === "reuse" && <>
+              <Select aria-label={`${line.pn_raw}沿用报价`} placeholder="请选择沿用的有效报价" style={{ minWidth: 280 }}
+                value={response.ref_offer_id} disabled={!editable || !active || busy} onChange={(value) => changeResponse({ ref_offer_id: value })}
+                options={existing.map((offer) => ({ value: offer.id, label: <span>报价 #{offer.id} <OfferBadge offer={offer} /></span> }))} />
+              {reused && <div>所沿用报价：<OfferBadge offer={reused} /></div>}
+              {!reused && response.ref_offer_id && <Tag>沿用报价当前不可见或已失效</Tag>}
+            </>}
+            {response.mode === "skip" && <Input.TextArea aria-label={`${line.pn_raw}不报原因`} value={response.reason ?? ""}
+              placeholder="无货或不报的原因（必填）" disabled={!editable || !active || busy}
+              onChange={(event) => changeResponse({ reason: event.target.value })} />}
+          </Space>}
           {!line.part_id && editable && active && <PartBinding line={line} onBound={setInquiry} refresh={refresh} />}
-          {(!proactive || current) && <QuoteLine key={`${current?.id ?? "new"}:${current?.version ?? 0}`} inquiry={inquiry} line={line} offer={current}
+          {(proactive ? !!current : response.mode === "quote") && <QuoteLine key={`${current?.id ?? "new"}:${current?.version ?? 0}`} inquiry={inquiry} line={line} offer={current}
             taskId={task?.id} editable={editable && (proactive ? current?.status === "published" : active || current?.status === "published")} refresh={refresh}
             onDirty={(lineId, isDirty) => setDirty((previous) => ({ ...previous, [lineId]: isDirty }))} />}
         </>}
@@ -262,7 +339,8 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
       </Card>;
     })}
     {active && <Button type="primary" loading={busy} disabled={!complete || !editable} onClick={() => void reply()}>回复给销售</Button>}
-    {active && !complete && <Typography.Text type="secondary">每行保存报价或标记无货后，才能回复给销售。</Typography.Text>}
+    {active && !complete && <Typography.Text type="secondary">每行保存新报价、沿用有效报价或填写不报原因后，才能回复给销售。</Typography.Text>}
+    {dialog}
     <Timeline key={`timeline-${timelineVersion}`} subjectType="presales_inquiry" subjectId={inquiry.id} />
     {gallery && <GalleryPicker mode="modal" items={lines.filter((line) => line.part_id)
       .map((line) => ({ partId: line.part_id!, pn: line.pn_raw }))} onClose={() => setGallery(false)} />}

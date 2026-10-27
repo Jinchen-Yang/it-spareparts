@@ -9,7 +9,10 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
 
 from app.models.dimensions import DimPart, DimSupplier
-from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer, PresalesOfferRevision
+from app.models.presales import (
+    PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink,
+    PresalesOfferRevision,
+)
 from app.services.presales import common
 from app.services.workflow import work_items
 from app.services.workflow.registry import Conflict, Forbidden, InvalidTransition, NotFound, Subject
@@ -89,7 +92,7 @@ def _task(db, inquiry, actor, user_id, work_item_id=None):
 
 
 def _serialize_source(db, user_id, part_id, source_key):
-    # 同一报价人、PN 的货源修改也须与跨单发布串行，防止两个货源撞成同一条。
+    # 同采购同 PN 的检测与发布串行，避免并发绕过重复报价的明确选择。
     digest = hashlib.sha256(f"presales:{user_id}:{part_id}".encode()).digest()
     lock_key = int.from_bytes(digest[:8], "big", signed=True)
     db.execute(select(func.pg_advisory_xact_lock(lock_key)))
@@ -154,6 +157,8 @@ def _apply(db, offer, data, ctx):
 
 
 def _publishable(db, offer):
+    if offer.no_stock and (not offer.notes or not offer.notes.strip()):
+        raise InvalidTransition("无货或不报必须填写原因")
     if not offer.no_stock:
         if offer.part_id is None:
             raise InvalidTransition("请先绑定型号，再回复有货报价")
@@ -252,8 +257,31 @@ def _copy_quote(target, source):
         setattr(target, field, getattr(source, field))
 
 
+def _response(db, line, user_id, task_id, mode, *, ref_offer_id=None, reason=None):
+    row = db.scalar(select(PresalesLineResponse).where(
+        PresalesLineResponse.line_id == line.id, PresalesLineResponse.created_by == user_id))
+    if row is None:
+        row = PresalesLineResponse(line_id=line.id, created_by=user_id)
+        db.add(row)
+    row.line_version, row.work_item_id = line.version, task_id
+    row.mode, row.ref_offer_id, row.reason = mode, ref_offer_id, reason
+    return row
+
+
+def _valid_reference(db, line, offer_id, ctx):
+    from app.services.presales import library, visibility
+
+    if type(offer_id) is not int or line.part_id is None:
+        raise InvalidTransition("请选择同 PN 的有效报价")
+    offer = next((offer for offer in library._active(db, [line.part_id]) if offer.id == offer_id), None)
+    if offer is None or not visibility.can_view_offer(db, offer, ctx):
+        raise InvalidTransition("沿用报价已失效、不可见或与本行 PN 不同")
+    return offer
+
+
 def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
-          expected_work_item_version=None):
+          expected_work_item_version=None, on_existing=None, existing_offer_id=None,
+          existing_choices=None, line_responses=None):
     user, ctx = common.resolve_actor(db, actor)
     common.require(ctx, "page_presales")
     common.require(ctx, "action_presales_quote")
@@ -272,32 +300,64 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
         PresalesOffer.line_id.in_([line.id for line in lines]),
         PresalesOffer.status.in_(["draft", "published"]),
     ).order_by(PresalesOffer.id).with_for_update().execution_options(populate_existing=True)))
-    if {line.id for line in lines} - {offer.line_id for offer in own}:
-        raise InvalidTransition("每行必须填写报价或标记无货")
-    # 先验证所有行，避免调用方捕获异常后错误地提交了一半回复。
-    drafts = [offer for offer in own if offer.status == "draft"]
+    by_line = {line.id: line for line in lines}
+    decisions = {}
+    for data in line_responses or []:
+        if (not isinstance(data, dict) or data.get("line_id") not in by_line
+                or data["line_id"] in decisions or data.get("mode") not in {"quote", "reuse", "skip"}):
+            raise InvalidTransition("行处理选择无效或重复")
+        line = by_line[data["line_id"]]
+        mode = data["mode"]
+        if mode == "reuse":
+            if data.get("reason"):
+                raise InvalidTransition("沿用报价不能同时填写不报原因")
+            _valid_reference(db, line, data.get("ref_offer_id"), ctx)
+        elif mode == "skip":
+            if data.get("ref_offer_id") is not None or not isinstance(data.get("reason"), str) or not data["reason"].strip():
+                raise InvalidTransition("无货或不报必须填写原因")
+        elif data.get("ref_offer_id") is not None or data.get("reason"):
+            raise InvalidTransition("报新价不能同时选择沿用或不报")
+        decisions[line.id] = data
+    previous = list(db.scalars(select(PresalesLineResponse).where(
+        PresalesLineResponse.line_id.in_(by_line), PresalesLineResponse.created_by == user.id)))
+    for row in previous:
+        if row.line_id not in decisions and row.line_version == by_line[row.line_id].version:
+            if row.mode == "reuse":
+                _valid_reference(db, by_line[row.line_id], row.ref_offer_id, ctx)
+            decisions[row.line_id] = {"mode": row.mode, "ref_offer_id": row.ref_offer_id, "reason": row.reason}
+    quoted = {offer.line_id for offer in own}
+    if any(line.id not in quoted and decisions.get(line.id, {}).get("mode", "quote") == "quote"
+           for line in lines):
+        raise InvalidTransition("每行必须填写报价、沿用有效报价或说明不报原因")
+    drafts = [offer for offer in own if offer.status == "draft"
+              and decisions.get(offer.line_id, {}).get("mode", "quote") == "quote"]
     part_ids = {line.id: line.part_id for line in lines}
     for offer in drafts:
         offer.part_id = part_ids[offer.line_id]
         _publishable(db, offer)
-    published_at = common.now()
-    current = {(offer.line_id, offer.source_key): offer for offer in own if offer.status == "published"}
-    published = []
-    for offer in drafts:
-        key = (offer.line_id, offer.source_key)
-        existing = current.get(key)
-        target = existing or offer
-        if existing is not None:
-            _copy_quote(existing, offer)
+    plans = _publication_plans(db, drafts, inquiry, ctx, on_existing, existing_offer_id, existing_choices)
+    # 先验证整单，再落处理结果与报价，任何一行错误都不会完成待办。
+    for row in previous:
+        if decisions.get(row.line_id, {}).get("mode", "quote") == "quote":
+            db.delete(row)
+    for line_id, data in decisions.items():
+        if data["mode"] != "quote":
+            _response(db, by_line[line_id], user.id, task.id, data["mode"],
+                      ref_offer_id=data.get("ref_offer_id"),
+                      reason=data["reason"].strip() if data["mode"] == "skip" else None)
+    for offer in own:
+        if offer.status == "draft" and decisions.get(offer.line_id, {}).get("mode", "quote") != "quote":
             db.delete(offer)
-        target.work_item_id = task.id
-        _publish(db, target, actor, published_at)
-        current[key] = target
-        published.append(target)
+    published_at = common.now()
+    published = [_publish_choice(db, draft, target, inquiry, actor, published_at, task.id)
+                 for draft, target in plans]
+    db.flush()
     work_items.complete(db, task.id, actor, expected_version=task.version)
     db.flush()
     common.event(db, inquiry, actor, "offer.replied", {"offer_ids": [o.id for o in published]})
     common.audit(db, actor, "presales.offer.replied", inquiry.id)
+    current = {offer.id: offer for offer in own if offer.status == "published"}
+    current.update({offer.id: offer for offer in published})
     return list(current.values())
 
 
@@ -332,14 +392,6 @@ def update_offer(db, offer_id, actor, data, *, expected_version):
     if "supplier_id" in data and "source_key" not in data and old_source == implicit_source:
         data["source_key"] = f"supplier:{data['supplier_id']}" if data["supplier_id"] else ""
     changed = _apply(db, offer, data, ctx)
-    if offer.source_key != old_source or offer.supplier_id != old_supplier:
-        duplicate = db.scalar(select(PresalesOffer.id).where(
-            PresalesOffer.id != offer.id, PresalesOffer.created_by == offer.created_by,
-            PresalesOffer.part_id == offer.part_id, PresalesOffer.source_key == offer.source_key,
-            PresalesOffer.status == "published",
-        ).limit(1))
-        if duplicate is not None:
-            raise Conflict("该货源已有同 PN 报价，请更新已有报价", offer_id=duplicate)
     _publishable(db, offer)
     published_at = common.now()
     offer.valid_from = published_at
@@ -401,7 +453,77 @@ def _lock_merge_inquiry(db, inquiry_id):
         raise
 
 
-def publish_proactive(db, inquiry_id, actor, *, expected_version, notice_user_ids=None):
+def _publication_plans(db, drafts, inquiry, ctx, on_existing, existing_offer_id, existing_choices):
+    from app.services.presales import library, visibility
+
+    if on_existing not in {None, "update", "new"}:
+        raise InvalidTransition("重复报价必须选择更新或另报一条")
+    choices = existing_choices or {}
+    if not isinstance(choices, dict) or any(int(key) not in {row.id for row in drafts} for key in choices):
+        raise InvalidTransition("重复报价选择不属于本次发布的草稿")
+    for owner_id, part_id in sorted({(row.created_by, row.part_id or 0) for row in drafts}):
+        _serialize_source(db, owner_id, part_id or None, "")
+    plans, updating = [], set()
+    for draft in drafts:
+        choice = choices.get(draft.id, choices.get(str(draft.id), {}))
+        if not isinstance(choice, dict) or set(choice) - {"on_existing", "existing_offer_id"}:
+            raise InvalidTransition("重复报价选择无效")
+        action = choice.get("on_existing", on_existing)
+        target_id = choice.get("existing_offer_id", existing_offer_id)
+        if action not in {None, "update", "new"}:
+            raise InvalidTransition("重复报价必须选择更新或另报一条")
+        candidates = [row for row in library._active(db, [draft.part_id])
+                      if row.created_by == draft.created_by] if draft.part_id and not draft.no_stock else []
+        if not candidates:
+            if action == "update":
+                raise Conflict("原报价已失效或变化，请刷新后重新选择")
+            plans.append((draft, None))
+            continue
+        if action is None or (action == "update" and target_id is None and len(candidates) != 1):
+            raise Conflict("你已有有效报价，请选择更新那条或另报一条", code="existing_offer",
+                           draft_offer_id=draft.id, line_id=draft.line_id,
+                           existing_offers=visibility.offer_views(db, candidates, ctx))
+        if action == "new":
+            plans.append((draft, None))
+            continue
+        target = next((row for row in candidates if row.id == target_id), None) if target_id else candidates[0]
+        if target is None:
+            raise InvalidTransition("只能更新本人对同一 PN 的有效报价")
+        if target.id in updating:
+            raise InvalidTransition("同一有效报价不能在一批中被更新两次，请分别选择或另报一条")
+        origin = _lock_merge_inquiry(db, target.inquiry_id)
+        if origin is None or origin.status != "submitted":
+            raise InvalidTransition("原报价单已撤回或关单，请另报一条")
+        target = db.scalar(select(PresalesOffer).where(PresalesOffer.id == target.id)
+                           .with_for_update().execution_options(populate_existing=True))
+        # 旧单锁取得后重新核验，避免等待时旧单撤回使报价变更失效。
+        if target.inquiry_id != origin.id or target.status != "published":
+            raise Conflict("原报价已变化，请刷新后重试")
+        updating.add(target.id)
+        plans.append((draft, target))
+    return plans
+
+
+def _publish_choice(db, draft, target, inquiry, actor, published_at, task_id=None):
+    if target is None:
+        draft.work_item_id = task_id
+        _publish(db, draft, actor, published_at)
+        return draft
+    # 报价归属迁至本次单据，整单 M8 立即使用最新规则；旧单只保留实时受控关联。
+    old_line = db.get(PresalesInquiryLine, target.line_id)
+    if old_line is not None and old_line.id != draft.line_id:
+        if db.get(PresalesOfferLineLink, (old_line.id, target.id)) is None:
+            db.add(PresalesOfferLineLink(line_id=old_line.id, offer_id=target.id))
+        _response(db, old_line, target.created_by, target.work_item_id, "reuse", ref_offer_id=target.id)
+    _copy_quote(target, draft)
+    target.inquiry_id, target.line_id, target.work_item_id = inquiry.id, draft.line_id, task_id
+    _publish(db, target, actor, published_at, "采购明确选择更新原报价，按本次单据覆盖受众")
+    db.delete(draft)
+    return target
+
+
+def publish_proactive(db, inquiry_id, actor, *, expected_version, notice_user_ids=None,
+                      on_existing=None, existing_offer_id=None, existing_choices=None):
     user, ctx = common.resolve_actor(db, actor)
     common.require(ctx, "page_presales")
     common.require(ctx, "action_presales_offer")
@@ -425,43 +547,10 @@ def publish_proactive(db, inquiry_id, actor, *, expected_version, notice_user_id
     for offer in drafts:
         offer.part_id = part_ids[offer.line_id]
         _publishable(db, offer)
-    drafts.sort(key=lambda offer: (offer.created_by, offer.part_id or 0, offer.source_key, offer.id))
-    for owner_id, part_id in dict.fromkeys((offer.created_by, offer.part_id) for offer in drafts):
-        _serialize_source(db, owner_id, part_id, "")
+    plans = _publication_plans(db, drafts, inquiry, ctx, on_existing, existing_offer_id, existing_choices)
     published_at = common.now()
-    result = []
-    published_by_source = {}
-    for draft in drafts:
-        key = (draft.created_by, draft.part_id, draft.source_key)
-        existing = published_by_source.get(key) if draft.part_id is not None else None
-        if existing is None and draft.part_id is not None:
-            existing = db.scalar(select(PresalesOffer).join(
-                PresalesInquiry, PresalesInquiry.id == PresalesOffer.inquiry_id,
-            ).where(
-                PresalesOffer.created_by == draft.created_by,
-                PresalesOffer.part_id == draft.part_id, PresalesOffer.source_key == draft.source_key,
-                PresalesOffer.status == "published", PresalesOffer.id != draft.id,
-                PresalesInquiry.kind == "proactive_offer", PresalesInquiry.status == "submitted",
-            ).order_by(PresalesOffer.id).with_for_update(of=PresalesOffer)
-               .execution_options(populate_existing=True))
-            if existing is not None:
-                origin = _lock_merge_inquiry(db, existing.inquiry_id)
-                if origin is None or origin.kind != "proactive_offer" or origin.status != "submitted":
-                    existing = None
-        if existing is not None:
-            _copy_quote(existing, draft)
-            _publish(db, existing, actor, published_at, "同 PN 同货源重复报价，更新原报价")
-            line = next(line for line in lines if line.id == draft.line_id)
-            line.ref_offer_id = existing.id
-            db.delete(draft)
-            target = existing
-        else:
-            _publish(db, draft, actor, published_at)
-            target = draft
-        if draft.part_id is not None:
-            published_by_source[key] = target
-        if target.id not in {offer.id for offer in result}:
-            result.append(target)
+    result = [_publish_choice(db, draft, target, inquiry, actor, published_at)
+              for draft, target in plans]
     inquiry.status = "submitted"
     inquiry.submitted_at = published_at
     inquiry.version += 1

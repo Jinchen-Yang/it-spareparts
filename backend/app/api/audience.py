@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import permissions
+from app.api.work_items import workflow_context
 from app.auth import current_identity
 from app.db import get_db
 from app.models.fields_audience import AudienceGroup, AudienceGroupMember
@@ -24,24 +25,13 @@ def audience_user(
     db: Session = Depends(get_db),
 ) -> UserContext:
     """分组归属必须绑定实名账号，RBAC 总开关不改变登录要求。"""
-    if ident.get("fb") or not ident.get("sub"):
-        raise HTTPException(401, "请使用实名账号登录")
-    user = db.scalar(
-        select(SysUser).where(
-            SysUser.username == ident["sub"],
-            SysUser.is_active.is_(True),
-            SysUser.deleted_at.is_(None),
-        )
-    )
-    if user is None:
-        raise HTTPException(401, "账号不存在或已停用")
-    return UserContext(
-        user_id=user.username,
-        role=user.role,
-        salesperson_name=user.salesperson_name,
-        permissions=permissions.runtime_safe(permissions.effective_for_user(user)),
-        is_authenticated=True,
-    )
+    try:
+        viewer = workflow_context(ident, db)
+    except HTTPException as exc:
+        # 复用待办的实名门禁，同时保留受众接口既有的身份失败响应。
+        raise HTTPException(401, exc.detail) from exc
+    viewer.permissions = permissions.runtime_safe(viewer.permissions)
+    return viewer
 
 
 def manages_public_groups(viewer: UserContext) -> bool:

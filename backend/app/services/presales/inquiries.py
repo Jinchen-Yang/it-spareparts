@@ -4,10 +4,12 @@ from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 
 from app.models.dimensions import DimCustomer, DimPart
-from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer
+from app.models.presales import (
+    PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink,
+)
 from app.services import field_pool
 from app.services.presales import common
 from app.services.workflow import work_items
@@ -122,7 +124,7 @@ def _reference(db, line, ctx):
 
 def _signature(line):
     return {"part_id": line.part_id, "pn_raw": line.pn_raw, "qty": str(Decimal(line.qty).normalize()),
-            "require_exact_pn": line.require_exact_pn}
+            "require_exact_pn": line.require_exact_pn, "has_reference": line.ref_offer_id is not None}
 
 
 def _snapshot(db, inquiry):
@@ -309,15 +311,14 @@ def _reopen(db, inquiry, user, items):
     targets = set(inquiry.assignee_ids) if inquiry.assignee_ids else set(latest) - {None}
     for assignee_id in targets:
         item = latest.get(assignee_id)
-        if item is not None and assignee_id not in active and item.status == "done":
+        if item is not None and assignee_id not in active and item.status in {"done", "declined"}:
             work_items.reopen(db, item.id, user.id, expected_version=item.version)
             active.add(assignee_id)
     missing = [uid for uid in inquiry.assignee_ids if uid not in active and
                (uid not in latest or latest[uid].status == "cancelled")]
     if missing:
         work_items.open_items(db, subject(inquiry), missing, SUBJECT_TYPE, user.id)
-    elif not inquiry.assignee_ids and not active and not any(
-            item.status == "declined" for item in latest.values()):
+    elif not inquiry.assignee_ids and not active:
         work_items.open_items(db, subject(inquiry), [], SUBJECT_TYPE, user.id)
 
 
@@ -326,13 +327,30 @@ def resubmit(db, inquiry_id, actor, expected_version):
     if inquiry.kind != "sales_inquiry" or inquiry.status != "revising":
         raise InvalidTransition("只能重新提交已撤回的销售询价")
     rows = _validate_submit(db, inquiry, ctx)
-    previous = inquiry.submitted_snapshot.get("lines", {})
+    # 旧快照没有引用标记；不能仅因升级了签名就重开已经回复的待办。
+    previous = {key: {"has_reference": False, **signature}
+                for key, signature in inquiry.submitted_snapshot.get("lines", {}).items()}
     current = {line.line_key: _signature(line) for line in rows}
     changed = {key for key in previous if key not in current or previous[key] != current[key]}
     added = set(current) - set(previous)
+    # 引用切换影响派单，不改变原来的 PN、数量或报价内容。
+    stale = {key for key in changed if key not in current or any(
+        previous[key].get(field) != current[key][field]
+        for field in current[key] if field != "has_reference")}
+    all_rows = lines_for(db, inquiry.id, active=False)
+    changed_ids = [line.id for line in all_rows if line.line_key in changed]
+    if changed_ids:
+        # 新版本要重新逐行处理，沿用与不报的旧结果不能冒充本次回复。
+        db.execute(delete(PresalesLineResponse).where(PresalesLineResponse.line_id.in_(changed_ids)))
+        db.execute(delete(PresalesOfferLineLink).where(PresalesOfferLineLink.line_id.in_(changed_ids)))
+    versions = {line.id: line.version for line in rows if line.line_key not in changed}
+    if versions:
+        for response in db.scalars(select(PresalesLineResponse).where(
+                PresalesLineResponse.line_id.in_(versions))):
+            response.line_version = versions[response.line_id]
     from app.services.presales.offers import mark_stale
-    if changed:
-        ids = [line.id for line in lines_for(db, inquiry.id, active=False) if line.line_key in changed]
+    if stale:
+        ids = [line.id for line in all_rows if line.line_key in stale]
         offers = list(db.scalars(select(PresalesOffer).where(PresalesOffer.line_id.in_(ids),
             PresalesOffer.status.in_(("draft", "published"))).order_by(PresalesOffer.id).with_for_update()))
         for offer in offers:
@@ -347,7 +365,8 @@ def resubmit(db, inquiry_id, actor, expected_version):
     else:
         work_items.resume_subject(db, subject(inquiry), user.id, expected_versions=_versions(items))
         needs_reply = added | (changed & set(current))
-        if any(line.line_key in needs_reply and line.ref_offer_id is None for line in rows):
+        if any(line.ref_offer_id is None and (line.line_key in needs_reply or not items)
+               for line in rows):
             _reopen(db, inquiry, user, items)
         elif not any(line.ref_offer_id is None for line in rows):
             work_items.cancel_subject(db, subject(inquiry), user.id, "询价行已全部引用报价", expected_versions=_versions(items))
@@ -384,14 +403,37 @@ def append_lines(db, inquiry_id, actor, expected_version, lines):
 
 
 def close(db, inquiry_id, actor, expected_version, *, outcome, won_offer_id=None):
-    inquiry, user, _ = _locked(db, inquiry_id, actor, expected_version)
+    inquiry, user, ctx = _locked(db, inquiry_id, actor, expected_version)
     if inquiry.status not in {"submitted", "revising"} or outcome not in {"won", "lost", "cancelled"}:
         raise InvalidTransition("关单状态或结果无效")
     if won_offer_id is not None:
         offer = db.get(PresalesOffer, won_offer_id)
         line = db.get(PresalesInquiryLine, offer.line_id) if offer else None
-        if (outcome != "won" or offer is None or offer.inquiry_id != inquiry.id or
-                offer.status != "published" or offer.no_stock or line is None or line.status != "active"):
+        own = (offer is not None and offer.inquiry_id == inquiry.id and
+               offer.status == "published" and not offer.no_stock and
+               line is not None and line.status == "active")
+        linked = False
+        if offer is not None and not own:
+            rows = lines_for(db, inquiry.id)
+            by_id = {row.id: row for row in rows}
+            linked = any(row.ref_offer_id == offer.id and row.part_id == offer.part_id for row in rows)
+            if not linked and by_id:
+                linked = any(response.line_version == by_id[response.line_id].version and
+                             by_id[response.line_id].part_id == offer.part_id
+                             for response in db.scalars(select(PresalesLineResponse).where(
+                                 PresalesLineResponse.line_id.in_(by_id),
+                                 PresalesLineResponse.mode == "reuse",
+                                 PresalesLineResponse.ref_offer_id == offer.id)))
+                if not linked:
+                    linked = any(by_id[link.line_id].part_id == offer.part_id
+                                 for link in db.scalars(select(PresalesOfferLineLink).where(
+                                     PresalesOfferLineLink.line_id.in_(by_id),
+                                     PresalesOfferLineLink.offer_id == offer.id)))
+            if linked:
+                from app.services.presales import library, visibility
+                linked = (offer in library._active(db, [offer.part_id]) and
+                          visibility.can_view_offer(db, offer, ctx))
+        if outcome != "won" or not (own or linked):
             raise InvalidTransition("采纳报价必须是本单有效行内的已发布报价")
     items = work_items.list_by_subject(db, subject(inquiry), user.id, lock=True)
     work_items.cancel_subject(db, subject(inquiry), user.id, "询价关单", expected_versions=_versions(items))

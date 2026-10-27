@@ -50,3 +50,14 @@ it("报价库查询及实时取消参数按接口传递", async () => {
   await presales.searchLibrary("PN *", controller.signal);
   expect(http.get).toHaveBeenLastCalledWith("/presales/library/search", { params: { q: "PN *" }, signal: controller.signal });
 });
+
+it("逐行处理结果和重复报价的明确选择按契约发送", async () => {
+  const body = { expected_version: 4, work_item_id: 71, expected_work_item_version: 3,
+    line_responses: [{ line_id: 11, mode: "reuse" as const, ref_offer_id: 99 },
+      { line_id: 12, mode: "skip" as const, reason: "无货" }],
+    existing_choices: { 81: { on_existing: "update" as const, existing_offer_id: 99 } } };
+  await presales.replyInquiry(1, body);
+  expect(http.post).toHaveBeenLastCalledWith("/presales/inquiries/1/reply", body);
+  await presales.publishInquiry(1, { expected_version: 4, on_existing: "new" });
+  expect(http.post).toHaveBeenLastCalledWith("/presales/inquiries/1/publish", { expected_version: 4, on_existing: "new" });
+});

@@ -1,8 +1,11 @@
 """售前唯一的服务端输出边界；先记录准入，再合并受众与字段组限制。"""
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
-from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer, PresalesOfferRevision
+from app.models.presales import (
+    PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink,
+    PresalesOfferRevision,
+)
 from app.models.system import SysUser
 from app.services import audience, field_pool
 from app.services.presales.common import author_name, bypass, resolve_actor
@@ -152,18 +155,30 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
     lines = list(db.scalars(select(PresalesInquiryLine).where(
         PresalesInquiryLine.inquiry_id == inquiry.id, PresalesInquiryLine.status == "active",
     ).order_by(PresalesInquiryLine.seq, PresalesInquiryLine.id)))
+    responses = list(db.scalars(select(PresalesLineResponse).where(
+        PresalesLineResponse.line_id.in_([line.id for line in lines]))))
+    links = list(db.scalars(select(PresalesOfferLineLink).where(
+        PresalesOfferLineLink.line_id.in_([line.id for line in lines]))))
+    references = {line.ref_offer_id for line in lines if line.ref_offer_id is not None} | {
+        row.ref_offer_id for row in responses if row.ref_offer_id is not None} | {link.offer_id for link in links}
     offer_models = list(db.scalars(select(PresalesOffer).where(
-        PresalesOffer.inquiry_id == inquiry.id,
+        or_(PresalesOffer.inquiry_id == inquiry.id, PresalesOffer.id.in_(references)),
     ).order_by(PresalesOffer.id)))
     offers = offer_views(db, offer_models, ctx)
     views_by_id = {view["id"]: view for view in offers}
     hidden_reporters = {offer.created_by: offer for offer in offer_models
         if offer.id in views_by_id and "reporter" not in views_by_id[offer.id]}
-    if hidden_reporters:
+    if hidden_reporters and not owner:
         result.pop("assignee_ids", None)
     result["line_count"] = len(lines)
-    result["progress"] = {"quoted_lines": len({offer["line_id"] for offer in offers
-        if offer["status"] == "published"}), "line_count": len(lines)}
+    line_ids = {line.id for line in lines}
+    handled = {offer["line_id"] for offer in offers
+               if offer["status"] == "published" and offer["line_id"] in line_ids}
+    handled.update(line.id for line in lines if line.ref_offer_id in views_by_id)
+    handled.update(row.line_id for row in responses
+                   if owner or bypass(ctx) or row.created_by == user.id)
+    handled.update(link.line_id for link in links if link.offer_id in views_by_id)
+    result["progress"] = {"quoted_lines": len(handled), "line_count": len(lines)}
     if detail:
         result.update(audience.read_rules(db, {
             "offer_audience": (inquiry.offer_audience_rule_id, author),
@@ -186,18 +201,37 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
             if line.id in line_rules:
                 row["notes_audience"] = line_rules[line.id]
             row["field_values"] = values.get(f"line:{line.id}", [])
+            row["linked_offer_ids"] = [link.offer_id for link in links
+                                       if link.line_id == line.id and link.offer_id in views_by_id]
             row["field_template"] = [{"id": f.id, "name": f.name, "value_type": f.value_type,
                                        "choices": f.choices} for f in field_pool.template_for(
                 db, "presales_inquiry", "line", ctx,
                 anchor=f"part:{line.part_id}" if line.part_id else None)]
             result["lines"].append(row)
         result["offers"] = offers
+        from app.services.presales.common import now
+        moment = now()
+        models_by_id = {offer.id: offer for offer in offer_models}
+        result["line_responses"] = []
+        for response in responses:
+            if not (owner or bypass(ctx) or response.created_by == user.id):
+                continue
+            row = {key: getattr(response, key) for key in (
+                "line_id", "mode", "created_by", "work_item_id", "reason", "ref_offer_id")}
+            offer = models_by_id.get(response.ref_offer_id)
+            row["expired"] = response.mode == "reuse" and (offer is None or offer.status != "published"
+                or offer.no_stock or offer.unit_price is None
+                or offer.valid_until is None or offer.valid_until <= moment
+                or offer.valid_from is None or offer.valid_from > moment)
+            if response.ref_offer_id in views_by_id:
+                row["offer"] = views_by_id[response.ref_offer_id]
+            result["line_responses"].append(row)
         result["work_items"] = []
         for item in work_items.list_by_subject(db, Subject("presales_inquiry", inquiry.id), ctx):
             row = {"id": item.id, "assignee_id": item.assignee_id, "claimed_by": item.claimed_by,
                    "status": item.status, "paused": item.paused, "version": item.version}
             hidden = hidden_reporters.get(item.assignee_id)
-            if hidden:
+            if hidden and not owner:
                 field_rules = {field: (hidden.reporter_audience_rule_id, author_name(db, hidden.created_by))
                                for field in ("assignee_id", "claimed_by")}
                 row = audience.filter_fields(db, [row], ctx, field_rules=field_rules, bypass=bypass)[0]

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Alert, App, Button, Card, Form, Input, Select, Space, Spin, Typography } from "antd";
 import { Link, useSearchParams } from "react-router-dom";
-import { presales, type Inquiry, type Offer, type OfferInput } from "../../api/presales";
+import { presales, type ExistingChoice, type Inquiry, type Offer, type OfferInput } from "../../api/presales";
 import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
 import { getFieldTemplate, type CustomFieldValue, type FieldDefinition, type FieldLevel } from "../../api/fields";
 import type { PartSuggestion } from "../../api/search";
@@ -16,6 +16,7 @@ import { refreshWorkBadges } from "../../components/workflow/useWorkBadge";
 import QuoteEditor, { offerInput, quoteComplete } from "./QuoteEditor";
 import PartQuoteBadges from "./PartQuoteBadges";
 import { usePresalesError, isOfferActive, useNow } from "./shared";
+import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
 
 function DraftFields({ level, partId, value, onChange }: {
   level: FieldLevel; partId?: number; value: CustomFieldValue[]; onChange: (next: CustomFieldValue[]) => void;
@@ -45,6 +46,7 @@ export default function OfferNewPage() {
 
 function OfferNewContent({ draftId }: { draftId: number }) {
   const handlePresalesError = usePresalesError();
+  const { choose, dialog } = useExistingOfferChoice();
   const { message } = App.useApp();
   const [selected, setSelected] = useState<PartSuggestion[]>([]);
   const [notes, setNotes] = useState("");
@@ -137,7 +139,20 @@ function OfferNewContent({ draftId }: { draftId: number }) {
           expected_version: existing?.version ?? inquiry.version, ...(existing ? { offer_id: existing.id } : {}) });
         setSaved((previous) => ({ ...previous, [line.id]: offer }));
       }
-      await presales.publishInquiry(inquiry.id, { expected_version: inquiry.version, notice_user_ids: noticeIds });
+      const choices: Record<number, ExistingChoice> = {};
+      for (;;) {
+        try {
+          await presales.publishInquiry(inquiry.id, { expected_version: inquiry.version, notice_user_ids: noticeIds,
+            ...(Object.keys(choices).length ? { existing_choices: choices } : {}) });
+          break;
+        } catch (error) {
+          const conflict = existingOfferConflict(error);
+          if (!conflict) throw error;
+          const choice = await choose(conflict);
+          if (!choice) return;
+          choices[conflict.draft_offer_id] = choice;
+        }
+      }
       setPublished(true); refreshWorkBadges(); message.success("主动报价已发布");
     } catch (error) { await handlePresalesError(error, refresh); }
     finally { setBusy(false); }
@@ -173,7 +188,7 @@ function OfferNewContent({ draftId }: { draftId: number }) {
         <DraftFields level="line" partId={part.part_id} value={lineFields[part.part_id] ?? []}
           onChange={(next) => setLineFields((previous) => ({ ...previous, [part.part_id]: next }))} />
         {(library[part.part_id] ?? []).some((offer) => isOfferActive(offer, now))
-          && <Alert type="info" message="该 PN 存在有效报价；同一报价人、同一货源将更新已有报价" />}
+          && <Alert type="info" message="该 PN 存在有效报价；再次报价时可选择更新或另报一条" />}
       </Card>)}
       <Button type="primary" loading={busy} disabled={!selected.length || selected.length > 200} onClick={() => void create()}>生成报价草稿</Button>
     </> : (inquiry.lines ?? []).map((line) => {
@@ -181,12 +196,12 @@ function OfferNewContent({ draftId }: { draftId: number }) {
         && offer.reporter?.id === inquiry.created_by);
       return <Card key={line.id} title={<Space><PartThumb partId={line.part_id!} pn={line.pn_raw} />{line.pn_raw}
         <PriceRefBadge partId={line.part_id!} /></Space>}>
-        {!!existingOwn.length && <Alert type="info" message="你已有该 PN 的有效报价，同货源将更新已有报价" style={{ marginBottom: 12 }} />}
+        {!!existingOwn.length && <Alert type="info" message="你已有该 PN 的有效报价，发布时请选择更新或另报一条" style={{ marginBottom: 12 }} />}
         <QuoteEditor label={line.pn_raw} value={values[line.id] ?? offerInput()} existing={saved[line.id]} disabled={busy}
           onChange={(next) => setValues((previous) => ({ ...previous, [line.id]: next }))} />
       </Card>;
     })}
-    {libraryError && <Alert type="warning" message="已有报价提示加载失败，发布时仍由服务端检查同 PN 同货源报价" />}
+    {libraryError && <Alert type="warning" message="已有报价提示加载失败，发布时仍由服务端检查同 PN 有效报价" />}
     <Card title="定向通知账号（可选）">
       <Select mode="multiple" aria-label="定向通知销售" placeholder="选择需要收到新报价通知的账号" style={{ width: "100%" }}
         value={noticeIds} disabled={busy} onChange={setNoticeIds} showSearch optionFilterProp="label"
@@ -194,5 +209,6 @@ function OfferNewContent({ draftId }: { draftId: number }) {
       {candidateError && <Alert type="warning" message="通知账号加载失败，可暂不选择通知对象" />}
     </Card>
     {inquiry && <Button type="primary" loading={busy} disabled={!complete} onClick={() => void publish()}>发布主动报价</Button>}
+    {dialog}
   </Space>;
 }

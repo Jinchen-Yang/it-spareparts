@@ -6,7 +6,9 @@ from sqlalchemy.orm import object_session
 
 from sqlalchemy import or_, select
 
-from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer
+from app.models.presales import (
+    PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink,
+)
 from app.models.system import SysUser
 from app.services import audience
 from app.services.presales.common import bypass, resolve_actor
@@ -90,6 +92,16 @@ def _filter_notice_items(db, rows, ctx):
         PresalesInquiryLine.inquiry_id, PresalesInquiryLine.ref_offer_id,
     ).where(PresalesInquiryLine.inquiry_id.in_(inquiry_ids),
             PresalesInquiryLine.ref_offer_id.is_not(None))))
+    references.extend(db.execute(select(
+        PresalesInquiryLine.inquiry_id, PresalesLineResponse.ref_offer_id,
+    ).join(PresalesLineResponse, PresalesLineResponse.line_id == PresalesInquiryLine.id)
+      .where(PresalesInquiryLine.inquiry_id.in_(inquiry_ids),
+             PresalesLineResponse.ref_offer_id.is_not(None))))
+    references.extend(db.execute(select(
+        PresalesInquiryLine.inquiry_id, PresalesOfferLineLink.offer_id,
+    ).join(PresalesOfferLineLink, PresalesOfferLineLink.line_id == PresalesInquiryLine.id)
+      .where(PresalesInquiryLine.inquiry_id.in_(inquiry_ids),
+             PresalesInquiryLine.status == "active")))
     offers = list(db.scalars(select(PresalesOffer).where(or_(
         PresalesOffer.inquiry_id.in_(inquiry_ids),
         PresalesOffer.id.in_({offer_id for _, offer_id in references}),
@@ -127,6 +139,15 @@ def _validate_complete(db, item, ctx):
     quoted = set(db.scalars(select(PresalesOffer.line_id).where(
         PresalesOffer.inquiry_id == inquiry.id, PresalesOffer.created_by == item.assignee_id,
         PresalesOffer.status == "published")))
+    from app.services.presales.offers import _valid_reference
+    for response in db.scalars(select(PresalesLineResponse).where(
+        PresalesLineResponse.line_id.in_(needed), PresalesLineResponse.created_by == item.assignee_id)):
+        line = db.get(PresalesInquiryLine, response.line_id)
+        if response.line_version != line.version:
+            continue
+        if response.mode == "reuse":
+            _valid_reference(db, line, response.ref_offer_id, ctx)
+        quoted.add(line.id)
     if needed - quoted:
         raise InvalidTransition("每行必须先回复报价或标记无货，请使用询价回复接口")
 

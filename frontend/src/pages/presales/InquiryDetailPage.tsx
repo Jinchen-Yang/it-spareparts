@@ -8,7 +8,7 @@ import Timeline from "../../components/workflow/Timeline";
 import PageHeader from "../../components/PageHeader";
 import { formatBusinessDateTime } from "../../utils/date";
 import { formatMoney } from "../../utils/format";
-import { usePresalesError, isOfferActive, taxLabel, useNow } from "./shared";
+import { usePresalesError, isOfferActive, OfferBadge, taxLabel, useNow } from "./shared";
 
 const statusLabels: Record<string, string> = { draft: "草稿", submitted: "已提交", revising: "撤回修改中", closed: "已结束" };
 const outcomeLabels: Record<string, string> = { won: "成交", lost: "未成交", cancelled: "取消" };
@@ -39,7 +39,8 @@ function OfferPrice({ offer }: { offer: Offer }) {
 function Comparison({ line, offers, onHistory, now }: {
   line: InquiryLine; offers: Offer[]; onHistory: (offer: Offer) => void; now: number;
 }) {
-  const shown = offers.filter((offer) => (offer.line_id === line.id || offer.id === line.ref_offer_id) && offer.status !== "withdrawn");
+  const shown = offers.filter((offer) => (offer.line_id === line.id || offer.id === line.ref_offer_id
+    || line.linked_offer_ids?.includes(offer.id)) && offer.status !== "withdrawn");
   if (!shown.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无报价" />;
   const minima = new Map<string, number>();
   shown.filter((offer) => isOfferActive(offer, now) && !offer.no_stock && hasValue(offer.unit_price))
@@ -119,7 +120,9 @@ function InquiryDetailContent({ id }: { id: number }) {
   const [referencedOffers, setReferencedOffers] = useState<Offer[]>([]);
   const generation = useRef(0);
   const historyGeneration = useRef(0);
-  const now = useNow([...(inquiry?.offers ?? []), ...referencedOffers].flatMap((offer) => [offer.valid_from, offer.valid_until]));
+  const now = useNow([...(inquiry?.offers ?? []), ...referencedOffers,
+    ...(inquiry?.line_responses ?? []).flatMap((row) => row.offer ? [row.offer] : [])]
+    .flatMap((offer) => [offer.valid_from, offer.valid_until]));
 
   const load = useCallback(async () => {
     const current = ++generation.current;
@@ -260,6 +263,13 @@ function InquiryDetailContent({ id }: { id: number }) {
         ...(line.ref_offer_id ? [{ key: "reference", label: "引用报价", children: `#${line.ref_offer_id}` }] : []),
       ]} />
       <FieldValues values={line.field_values} />
+      {(inquiry.line_responses ?? []).filter((response) => response.line_id === line.id && response.mode !== "quote")
+        .map((response) => <div key={`${response.work_item_id}:${line.id}`}>
+          {response.mode === "skip" ? <Typography.Paragraph>无货 / 不报：{response.reason}</Typography.Paragraph>
+            : <Space wrap><Typography.Text>沿用报价 #{response.ref_offer_id}</Typography.Text>
+              {response.offer ? <OfferBadge offer={response.offer} /> : <Tag>{response.expired ? "已失效" : "当前不可见"}</Tag>}
+            </Space>}
+        </div>)}
       <Comparison line={line} offers={comparisonOffers} now={now} onHistory={(offer) => void showHistory(offer)} />
     </Card>)}
     {!lines.length && <Empty description="暂无询价行" />}

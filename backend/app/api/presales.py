@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -128,12 +129,31 @@ class WithdrawOffer(VersionInput):
     reason: str = Field(min_length=1)
 
 
-class ReplyInput(VersionInput):
+class ExistingChoice(Input):
+    on_existing: Literal["update", "new"]
+    existing_offer_id: int | None = Field(default=None, gt=0)
+
+
+class PublishChoices(VersionInput):
+    on_existing: Literal["update", "new"] | None = None
+    existing_offer_id: int | None = Field(default=None, gt=0)
+    existing_choices: dict[int, ExistingChoice] | None = None
+
+
+class LineResponseInput(Input):
+    line_id: int = Field(gt=0)
+    mode: Literal["quote", "reuse", "skip"]
+    ref_offer_id: int | None = Field(default=None, gt=0)
+    reason: str | None = None
+
+
+class ReplyInput(PublishChoices):
     work_item_id: int | None = Field(default=None, gt=0)
     expected_work_item_version: int | None = Field(default=None, ge=1)
+    line_responses: list[LineResponseInput] | None = Field(default=None, max_length=200)
 
 
-class PublishInput(VersionInput):
+class PublishInput(PublishChoices):
     notice_user_ids: list[int] | None = None
 
 
@@ -166,7 +186,7 @@ def _call(db, fn, *, write=False):
         return result
     except WorkflowError as exc:
         db.rollback()
-        raise HTTPException(exc.status_code, getattr(exc, "detail", str(exc))) from exc
+        raise HTTPException(exc.status_code, jsonable_encoder(getattr(exc, "detail", str(exc)))) from exc
     except (ValueError, PermissionError) as exc:
         db.rollback()
         raise HTTPException(getattr(exc, "status_code", 403 if isinstance(exc, PermissionError) else 422),

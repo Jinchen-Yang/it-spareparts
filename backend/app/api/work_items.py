@@ -20,7 +20,7 @@ ItemId = Annotated[int, Path(gt=0, le=2**63 - 1)]
 
 def workflow_context(ident: dict = Depends(current_identity), db: Session = Depends(get_db)) -> UserContext:
     # 外键、领取和归属均依赖 sys_user.id；共享口令身份不能代替实名账号。
-    if ident.get("fb") or ident.get("authn") == "shared":
+    if ident.get("fb") or ident.get("authn") == "shared" or not ident.get("sub"):
         raise HTTPException(403, "待办操作需要实名账号")
     ctx = UserContext(user_id=ident.get("sub"), role=ident.get("role", "guest"),
                       permissions=ident.get("perms"), is_authenticated=True)
