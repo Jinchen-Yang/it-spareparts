@@ -36,8 +36,9 @@ from app.models.system import SysAuditLog
 _log = logging.getLogger("merge")
 
 # 合并时从源补到目标的 fill-if-empty 字段
-_FILL_FIELDS = ("description", "brand", "brand_id", "category_major", "category_minor",
-                "category_id", "machine_or_part", "unit", "pn_raw_sample")
+_FILL_FIELDS = ("description", "brand", "manufacturer", "summary", "brand_id",
+                "category_major", "category_minor", "category_id", "machine_or_part",
+                "unit", "pn_raw_sample")
 
 
 class MergeError(Exception):
@@ -48,6 +49,7 @@ def _part_snapshot(p: DimPart) -> dict:
     return {
         "id": p.id, "pn_std": p.pn_std, "pn_raw_sample": p.pn_raw_sample,
         "description": p.description, "brand": p.brand, "brand_id": p.brand_id,
+        "manufacturer": p.manufacturer, "summary": p.summary,
         "category_major": p.category_major, "category_minor": p.category_minor,
         "category_id": p.category_id, "machine_or_part": p.machine_or_part,
         "unit": p.unit, "needs_review": p.needs_review,
@@ -101,8 +103,12 @@ def _merge_substitutes(db: Session, source: DimPart, target: DimPart) -> dict:
 
 
 def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
-                operated_by: str | None) -> dict:
-    """执行合并（单事务）。返回 merge_log 摘要；调用方负责随后触发重算。"""
+                operated_by: str | None, *, commit: bool = True) -> dict:
+    """执行合并（单事务）。返回 merge_log 摘要；调用方负责随后触发重算。
+
+    commit=False 供需要把幂等回执/审计与业务写入放在同一事务的调用方使用；
+    缺省仍自行提交，保持既有入口行为不变。
+    """
     if source_pn == target_pn:
         raise MergeError("源与目标是同一型号")
     pre = db.execute(select(DimPart.id, DimPart.pn_std).where(
@@ -220,13 +226,16 @@ def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
         before_json=source_snapshot,
         after_json={"merged_into": target.pn_std, "target_part_id": target.id, **counts},
         reason=reason, operated_by=operated_by))
-    db.commit()
+    db.flush()
+    if commit:
+        db.commit()
     _log.info("merged part %s -> %s (%s)", source_pn, target_pn, counts)
     return {"source_pn": source_pn, "target_pn": target_pn,
             "merge_log_id": log_row.id, "affected_counts": counts}
 
 
-def unmerge(db: Session, merge_log_id: int, operated_by: str | None) -> dict:
+def unmerge(db: Session, merge_log_id: int, operated_by: str | None, *,
+            commit: bool = True) -> dict:
     """回滚一次合并（人工 LIFO，审核说明 §4.8 可回滚要求）。
 
     安全前提（防误回滚链式/已变更状态）：
@@ -357,7 +366,9 @@ def unmerge(db: Session, merge_log_id: int, operated_by: str | None) -> dict:
                                         "inventory_ids", "f_part_inquiry_ids",
                                         "f_maintenance_line_ids")}},
         reason=f"回滚合并 #{merge_log_id}", operated_by=operated_by))
-    db.commit()
+    db.flush()
+    if commit:
+        db.commit()
     _log.info("unmerged %s <- %s (log #%s)", source.pn_std, target.pn_std, merge_log_id)
     return {"source_pn": source.pn_std, "target_pn": target.pn_std,
             "merge_log_id": merge_log_id, "restored_fields": list(restored)}

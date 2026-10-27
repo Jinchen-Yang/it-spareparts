@@ -125,6 +125,9 @@ except BaseException:
 _app_engine = engine
 
 _TABLES = [
+    "subject_event", "work_item",
+    "field_anchor_usage", "field_value", "field_def", "audience_rule_member",
+    "audience_rule", "audience_group_member", "audience_group",
     "chat_message", "chat_session",
     "replenishment_review_line",
     "replenishment_review",
@@ -139,6 +142,7 @@ _TABLES = [
     "maintenance_warehouse_document_line",
     "maintenance_warehouse_document",
     "maintenance_warehouse_import_batch",
+    "integration_request_log",
     "product_data_quality_issues", "product_merge_logs", "product_match_candidates",
     "product_specs", "product_categories", "brands",
     # 池三表：TRUNCATE 不会重置独立序列 part_pool_group_id_seq（非 owned），

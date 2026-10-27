@@ -21,8 +21,8 @@ from app.models.system import SysAuditLog
 from app.services import master_data, part_resolver, spec_extract
 
 # 采购可人工维护的字段（编辑这些 → 写进 locked_fields，重导不覆盖）
-EDITABLE_FIELDS = ("description", "brand", "category_major", "category_minor",
-                   "machine_or_part", "unit")
+EDITABLE_FIELDS = ("description", "brand", "manufacturer", "summary",
+                   "category_major", "category_minor", "machine_or_part", "unit")
 CATEGORY_FIELDS = {"category_major", "category_minor"}
 
 
@@ -36,13 +36,17 @@ class MasterEditConflict(MasterEditError):
         self.detail = {"code": code, "message": message, "conflicts": conflicts}
 
 
-def _edit_state(db: Session, part: DimPart) -> dict:
-    specs = db.execute(select(
-        ProductSpec.spec_key, ProductSpec.spec_value, ProductSpec.spec_unit,
-        ProductSpec.numeric_value, ProductSpec.source
-    ).where(ProductSpec.part_id == part.id).order_by(ProductSpec.spec_key)).all()
-    return {
+def _edit_state(db: Session, part: DimPart, specs=None, *,
+                include_locked_fields: bool = False) -> dict:
+    if specs is None:
+        specs = db.execute(select(
+            ProductSpec.spec_key, ProductSpec.spec_value, ProductSpec.spec_unit,
+            ProductSpec.numeric_value, ProductSpec.source
+        ).where(ProductSpec.part_id == part.id).order_by(ProductSpec.spec_key)).all()
+    state = {
         "version_mode": "field_snapshot",  # M2 前的现值基线，不能作为单调版本或发布水位。
+        # 对外集成用的不透明乐观并发版本（updated_at ISO）；与 version_mode 无关。
+        "version": part.updated_at.isoformat() if part.updated_at else None,
         "part_id": part.id, "pn_std": part.pn_std,
         "identity": {"part_id": part.id, "pn_std": part.pn_std,
                      "status": part.status, "merged_into_id": part.merged_into_id},
@@ -51,15 +55,53 @@ def _edit_state(db: Session, part: DimPart) -> dict:
                          "numeric_value": format(number.normalize(), "f") if number is not None else None,
                          "source": source} for key, value, unit, number, source in specs},
     }
+    if include_locked_fields:
+        # 与 fields/specs 同一次只读快照读取，供 shop 判断人工保护字段冲突。
+        state["locked_fields"] = list(part.locked_fields or [])
+    return state
 
 
-def get_part_edit_state(db: Session, part_id: int) -> dict | None:
+def get_part_edit_state(db: Session, part_id: int, *,
+                        include_locked_fields: bool = False) -> dict | None:
     # 鉴权可能已开启请求事务；独立短只读快照不改变调用方事务，也不阻挡写者。
     with Session(bind=db.get_bind()) as reader:
         reader.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         reader.execute(text("SET TRANSACTION READ ONLY"))
         part = reader.scalar(select(DimPart).where(DimPart.id == part_id))
-        return _edit_state(reader, part) if part is not None else None
+        return (_edit_state(reader, part, include_locked_fields=include_locked_fields)
+                if part is not None else None)
+
+
+def get_parts_edit_states(db: Session, part_ids: list[int], *,
+                          include_locked_fields: bool = False) -> dict[int, dict]:
+    """批量只读快照：同一 REPEATABLE READ 事务内取多个 part 的 edit_state。
+
+    供 shop 首次全量同步的批量读取使用；不存在的 id 不产生条目，由调用方列入 missing。
+    """
+    ids = sorted({int(part_id) for part_id in part_ids})
+    if not ids:
+        return {}
+    with Session(bind=db.get_bind()) as reader:
+        reader.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        reader.execute(text("SET TRANSACTION READ ONLY"))
+        parts = reader.scalars(select(DimPart).where(DimPart.id.in_(ids))).all()
+        rows = reader.execute(
+            select(ProductSpec.part_id, ProductSpec.spec_key, ProductSpec.spec_value,
+                   ProductSpec.spec_unit, ProductSpec.numeric_value, ProductSpec.source)
+            .where(ProductSpec.part_id.in_(ids))
+            .order_by(ProductSpec.part_id, ProductSpec.spec_key)
+        ).all()
+        specs_by_part: dict[int, list[tuple]] = {}
+        for part_id, key, value, unit, number, source in rows:
+            specs_by_part.setdefault(part_id, []).append(
+                (key, value, unit, number, source))
+        return {
+            part.id: _edit_state(
+                reader, part, specs_by_part.get(part.id, []),
+                include_locked_fields=include_locked_fields,
+            )
+            for part in parts
+        }
 
 
 def _audit_state(db: Session, part: DimPart) -> dict:
@@ -140,8 +182,8 @@ def _now() -> datetime:
 def _clean_fields(fields: dict) -> dict:
     if set(fields) - set(EDITABLE_FIELDS):
         raise MasterEditError("包含不可编辑字段")
-    limits = {"brand": 128, "category_major": 64, "category_minor": 128,
-              "machine_or_part": 16, "unit": 16}
+    limits = {"brand": 128, "manufacturer": 128, "category_major": 64,
+              "category_minor": 128, "machine_or_part": 16, "unit": 16}
     clean = {}
     for key, value in fields.items():
         if value is not None and not isinstance(value, str):
@@ -183,18 +225,20 @@ def find_near_duplicates(db: Session, pn_std: str, exclude_id: int | None = None
 
 def create_part_in_transaction(db: Session, *, pn_std: str, operated_by: str | None = None,
                                force: bool = False, spec_updates: dict | None = None,
-                               **fields) -> dict:
+                               master_source: str = "manual", **fields) -> dict:
     """采购手工新建型号。fields ⊆ EDITABLE_FIELDS（machine_or_part 缺省 '备件'）。
 
     硬重名（同 pn_std 已存在，含墓碑）→ 报错引导改用编辑；近似重复 → 默认返回候选不建，
-    force=True 跳过近似仅挡硬重名。所填字段进 locked_fields，master_source=manual，
-    reviewed_at=now（人工建档不进"待复核"）。
+    force=True 跳过近似仅挡硬重名。所填字段进 locked_fields，master_source 缺省 manual
+    （shop 服务建档传 shop），reviewed_at=now（人工建档不进"待复核"）。
     """
     pn = (pn_std or "").strip().upper()
     if not pn:
         raise MasterEditError("PN 不能为空")
     if len(pn) > 128:
         raise MasterEditError("PN 不能超过 128 个字符")
+    if master_source not in ("manual", "shop"):
+        raise MasterEditError(f"建档来源非法: {master_source}")
     clean = _clean_fields(fields)
     try:
         manual_specs = spec_extract.validate_manual_specs(spec_updates or {})
@@ -216,7 +260,7 @@ def create_part_in_transaction(db: Session, *, pn_std: str, operated_by: str | N
                 "message": "存在近似型号，确认无重复后可强制新建(force=true)"}
 
     locked = sorted(k for k, v in clean.items() if v is not None)
-    part = DimPart(pn_std=pn, master_source="manual", reviewed_at=_now(),
+    part = DimPart(pn_std=pn, master_source=master_source, reviewed_at=_now(),
                    locked_fields=locked,
                    category_source=("MANUAL" if clean.get("category_major") else None),
                    **clean)
@@ -233,9 +277,11 @@ def create_part_in_transaction(db: Session, *, pn_std: str, operated_by: str | N
     spec_extract.apply_manual_specs(db, part.id, manual_specs)
     audit = SysAuditLog(entity_type="part", entity_id=part.id, action="create",
                        before_json=None,
-                       after_json={"pn_std": pn, "master_source": "manual", **clean,
+                       after_json={"pn_std": pn, "master_source": master_source, **clean,
                                    "_snapshot": _audit_state(db, part)},
-                       reason="采购手工新建", operated_by=operated_by)
+                       reason=("商城服务新建" if master_source == "shop"
+                               else "采购手工新建"),
+                       operated_by=operated_by)
     db.add(audit)
     db.flush()
     return {"created": True, "id": part.id, "pn_std": pn, "near_duplicates": near,

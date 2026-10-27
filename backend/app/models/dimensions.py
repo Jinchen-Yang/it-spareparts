@@ -43,6 +43,9 @@ class DimPart(Base):
     pn_raw_sample: Mapped[str | None] = mapped_column(String(256))
     description: Mapped[str | None] = mapped_column(Text)
     brand: Mapped[str | None] = mapped_column(String(128))
+    # 厂商与中文简介（shop 集成 P1）：与 description/brand 同级的人工可维护基础资料。
+    manufacturer: Mapped[str | None] = mapped_column(String(128))
+    summary: Mapped[str | None] = mapped_column(Text)
     category_major: Mapped[str | None] = mapped_column(String(64))   # 仅取自销售表（§7.5）
     category_minor: Mapped[str | None] = mapped_column(String(128))
     machine_or_part: Mapped[str | None] = mapped_column(String(16))
@@ -79,6 +82,8 @@ class DimPart(Base):
 
     __table_args__ = (
         Index("ix_part_pn_compact", "pn_compact"),
+        Index("ix_part_search_non_ascii", "pn_std",
+              postgresql_where=text("pn_std ~ '[^ -~]'")),
         Index("ix_part_pn_compact_trgm", "pn_compact",
               postgresql_using="gin", postgresql_ops={"pn_compact": "gin_trgm_ops"}),
         Index("ix_part_search_doc_trgm", "search_doc",
@@ -119,6 +124,8 @@ class PartAlias(Base):
 
     __table_args__ = (
         Index("ix_alias_std", "pn_std"),
+        Index("ix_alias_search_non_ascii", "pn_std",
+              postgresql_where=text("pn_raw ~ '[^ -~]'")),
         Index("ix_alias_pn_compact_trgm", "pn_compact",
               postgresql_using="gin", postgresql_ops={"pn_compact": "gin_trgm_ops"}),
         # DEFERRABLE：改名(part_rename)需在同事务里改 dim_part.pn_std 与名下别名 pn_std，

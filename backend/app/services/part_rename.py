@@ -34,11 +34,12 @@ class RenameError(Exception):
 
 
 def rename_part(db: Session, part_id: int, new_pn_std: str, reason: str | None,
-                operated_by: str | None) -> dict:
+                operated_by: str | None, *, commit: bool = True) -> dict:
     """把 part_id 的 pn_std 改成 new_pn_std。
 
     返回 {"renamed": True, ...} 成功；{"renamed": False, "merge_candidate_id": ...}
     表示目标名被 active 型号占用，已转合并候选（未改名）。
+    commit=False 供需要把幂等回执与业务写入放在同一事务的调用方使用。
     """
     new_pn = (new_pn_std or "").strip()
     if not new_pn:
@@ -81,7 +82,9 @@ def rename_part(db: Session, part_id: int, new_pn_std: str, reason: str | None,
             before_json={"pn_std": old_pn},
             after_json={"target": new_pn, "occupied_by_part_id": occ_id},
             reason=reason, operated_by=operated_by))
-        db.commit()
+        db.flush()
+        if commit:
+            db.commit()
         return {"renamed": False, "part_id": part.id, "old_pn": old_pn,
                 "target_pn": new_pn, "occupied_by_part_id": occ_id,
                 "merge_candidate_id": cand_id,
@@ -109,7 +112,9 @@ def rename_part(db: Session, part_id: int, new_pn_std: str, reason: str | None,
         entity_type="part", entity_id=part.id, action="rename",
         before_json={"pn_std": old_pn}, after_json={"pn_std": new_pn},
         reason=reason, operated_by=operated_by))
-    db.commit()
+    db.flush()
+    if commit:
+        db.commit()
     _log.info("renamed part %s: %r -> %r (aliases=%d)", part.id, old_pn, new_pn, len(alias_ids))
     return {"renamed": True, "part_id": part.id, "old_pn": old_pn, "new_pn": new_pn,
             "aliases_updated": len(alias_ids), "rename_alias_inserted": inserted is not None}

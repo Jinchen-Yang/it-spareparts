@@ -1,7 +1,11 @@
 """按品类查询（宋总 2026-07-05）：自动分类回填（尊重人工/锁定）+ 搜索品类过滤 + 品类字典。"""
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.auth import hash_password
+from app.main import app
 from app.models.dimensions import DimPart
+from app.models.system import SysUser
 from app.services import master_data, part_overview
 
 
@@ -100,6 +104,32 @@ def test_search_parts_browses_all_matches_paginated(db):
     assert len(r2["items"]) == 10 and len(r3["items"]) == 5
     pns = {it["pn_std"] for it in r1["items"] + r2["items"] + r3["items"]}
     assert len(pns) == 25                                    # 三页不重叠且并成全集
+
+
+def test_search_parts_browse_includes_manufacturer_and_summary(db):
+    """主数据浏览经过接口脱敏后仍带制造商和简介，空字段保持 None。"""
+    part = _p(db, "BROWSE-FIELDS-A", "备件资料")
+    part.manufacturer = "制造商甲"
+    part.summary = "主数据简介"
+    _p(db, "BROWSE-FIELDS-B", "空资料")
+    db.add(SysUser(username="browse-purchaser", role="purchaser",
+                   password_hash=hash_password("pw123456")))
+    db.commit()
+
+    with TestClient(app) as client:
+        login = client.post("/api/auth/login", json={
+            "username": "browse-purchaser", "password": "pw123456"})
+        assert login.status_code == 200
+        client.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+        response = client.get("/api/parts/search", params={
+            "q": "BROWSE-FIELDS", "browse": "true"})
+
+    assert response.status_code == 200
+    items = {item["pn_std"]: item for item in response.json()["items"]}
+    assert items["BROWSE-FIELDS-A"]["manufacturer"] == "制造商甲"
+    assert items["BROWSE-FIELDS-A"]["summary"] == "主数据简介"
+    assert items["BROWSE-FIELDS-B"]["manufacturer"] is None
+    assert items["BROWSE-FIELDS-B"]["summary"] is None
 
 
 def test_categories_dict_from_present_data(db):

@@ -142,6 +142,36 @@ class ProductMergeLog(Base):
     )
 
 
+class IntegrationRequestLog(Base):
+    """跨系统写请求幂等回执：request_id 唯一，首次成功响应原样保存。
+
+    与业务写入同事务提交（服务函数以 commit=False 运行），命中后直接回放首次的
+    状态码与响应体，绝不重复执行写操作。
+    """
+
+    __tablename__ = "integration_request_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    # method + path + 规范化请求体 JSON 的 SHA-256；同一幂等键换了内容必须拒绝。
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_system: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor_user: Mapped[str] = mapped_column(String(64), nullable=False)
+    method: Mapped[str] = mapped_column(String(8), nullable=False)
+    path: Mapped[str] = mapped_column(String(255), nullable=False)
+    status_code: Mapped[int] = mapped_column(nullable=False)
+    response_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "request_id", name="uq_integration_request_log_request_id"
+        ),
+    )
+
+
 class ProductDataQualityIssue(Base):
     """主数据质量问题队列：幂等扫描产出，可关闭留痕（含"确认不是问题"）。"""
 

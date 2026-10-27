@@ -143,7 +143,7 @@ export default function AppShell({
         .map((it) => allowedByKey.get(it.key))
         .filter((it): it is NavItem => it !== undefined)
         .map((it) => ({
-          key: it.key, icon: it.icon, label: it.label,
+          key: it.key, icon: it.icon, label: it.menuLabel ?? it.label,
           // 只预取鼠标/键盘正在指向的目标，失败交给实际导航的错误边界处理。
           onMouseEnter: () => { void it.load().catch(() => {}); },
           onFocus: () => { void it.load().catch(() => {}); },

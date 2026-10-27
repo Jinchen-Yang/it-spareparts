@@ -10,11 +10,13 @@ from app import auth
 from app.api import (
     accounts,
     agent,
+    audience,
     chat_sessions,
     dashboard,
     data_quality,
     data_quality_calibration,
     governance,
+    field_pool,
     imports,
     inventory,
     maintenance,
@@ -55,10 +57,13 @@ from app.api import (
     maintenance_project_batch_transfer,
     maintenance_wbdd_import,
     maintenance_source_cancel_cascade,
+    part_gallery,
     parts,
+    pn_master_integration,
     pool_analysis,
     pools,
     profit,
+    presales,
     purchases,
     replenishment,
     resale_export,
@@ -67,6 +72,7 @@ from app.api import (
     sales_analytics,
     substitutes,
     system_settings,
+    work_items,
 )
 from app.config import check_security, get_settings
 from app.db import engine
@@ -104,9 +110,15 @@ app.add_middleware(
 
 app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(accounts.router, prefix=settings.api_prefix)
+app.include_router(audience.router, prefix=settings.api_prefix)
+app.include_router(field_pool.router, prefix=settings.api_prefix)
 app.include_router(role_templates.router, prefix=settings.api_prefix)
+app.include_router(work_items.router, prefix=settings.api_prefix)
+app.include_router(presales.router, prefix=settings.api_prefix)
 app.include_router(imports.router, prefix=settings.api_prefix)
 app.include_router(parts.router, prefix=settings.api_prefix)
+app.include_router(part_gallery.gallery_router, prefix=settings.api_prefix)
+app.include_router(part_gallery.router, prefix=settings.api_prefix)
 app.include_router(profit.router, prefix=settings.api_prefix)
 app.include_router(sales_analytics.router, prefix=settings.api_prefix)
 app.include_router(inventory.router, prefix=settings.api_prefix)
@@ -136,6 +148,7 @@ app.include_router(maintenance_row_workbench.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipts.router, prefix=settings.api_prefix)
 app.include_router(resale_export.router, prefix=settings.api_prefix)
 app.include_router(resale_catalog_export.router, prefix=settings.api_prefix)
+app.include_router(pn_master_integration.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipt_import.router, prefix=settings.api_prefix)
 app.include_router(
     maintenance_project_batch_transfer.router, prefix=settings.api_prefix

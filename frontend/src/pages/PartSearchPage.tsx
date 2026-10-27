@@ -8,6 +8,11 @@ import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import PoolReferencePanel from "../components/pools/PoolReferencePanel";
 import InlinePartEditModal from "../components/parts/InlinePartEditModal";
+import PartGalleryPanel from "../components/parts/PartGalleryPanel";
+import LivePartSearch from "../components/parts/LivePartSearch";
+import PartThumb from "../components/gallery/PartThumb";
+import GalleryPicker from "../components/gallery/GalleryPicker";
+import PriceRefBadge from "../components/pricing/PriceRefBadge";
 import api from "../api";
 import type { Overview, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { unifiedSearch, fetchOverview } from "../api/search";
@@ -94,7 +99,9 @@ export default function PartSearchPage() {
   const [loadingOv, setLoadingOv] = useState(false);
   const [subPn, setSubPn] = useState("");
   const [inlineEditPn, setInlineEditPn] = useState<string | null>(null);
+  const [galleryPickerOpen, setGalleryPickerOpen] = useState(false);
   useEffect(() => { setInlineEditPn(null); }, [urlPartId, urlPn]);
+  useEffect(() => { setGalleryPickerOpen(false); }, [urlPartId, urlPn]);
   // 替代料卡片折叠（记忆本机）
   const [subsOpen, setSubsOpen] = useState(() => localStorage.getItem("ps_subs_open") !== "0");
   const toggleSubs = () => setSubsOpen((o) => { localStorage.setItem("ps_subs_open", o ? "0" : "1"); return !o; });
@@ -381,14 +388,29 @@ export default function PartSearchPage() {
             if (event.key === "Enter" && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
           }}>
           <div className="part-search-keyword">
-            <Input
-              aria-label="型号或关键词"
-              aria-invalid={queryError || undefined}
-              aria-describedby={queryError ? "part-query-error" : undefined}
-              status={queryError ? "error" : undefined}
-              placeholder="输入型号 (PN) 或描述关键词；规格条件可单独使用"
-              size="large" value={qInput}
-              onChange={(e) => { setQInput(e.target.value); setQueryError(false); }} allowClear
+            <LivePartSearch
+              inputValue={qInput}
+              renderThumb={(item) => <span className="live-part-search-thumb" aria-hidden>
+                <PartThumb partId={item.part_id} pn={item.pn_std} size={40} />
+              </span>}
+              onInputChange={(text) => { setQInput(text); setQueryError(false); }}
+              inputProps={{
+                "aria-label": "型号或关键词",
+                "aria-invalid": queryError || undefined,
+                "aria-describedby": queryError ? "part-query-error" : undefined,
+                status: queryError ? "error" : undefined,
+                placeholder: "输入型号 (PN) 或描述关键词；规格条件可单独使用",
+                size: "large",
+              }}
+              onChange={(items) => {
+                const item = items[0];
+                if (!item) return;
+                const unchanged = item.pn_std === urlQ && filterQuery === "{}";
+                // 选定具体型号后按该 PN 查询；身份仍用 part_id 打开现有全景深链。
+                patchUrl({ q: item.pn_std, part_id: String(item.part_id), pn: undefined,
+                  ...Object.fromEntries(filterKeys.map((key) => [key, undefined])) });
+                if (unchanged) runSearch(item.pn_std, {}, false);
+              }}
             />
             <Button type="primary" htmlType="submit" size="large" loading={searching}>搜索</Button>
           </div>
@@ -460,6 +482,7 @@ export default function PartSearchPage() {
                 <small>近 {ov.sale_price_ref.ref_sale_samples} 单 / {ov.sale_price_ref.ref_window_days} 天加权</small>
                 {ov.sale_price_ref.ref_sale_samples < 3 && <Tag color="orange">成交少，仅供参考</Tag>}
               </> : <small>暂无成交参考价</small>}
+              <PriceRefBadge partId={ov.part.id} />
             </div>
             <div aria-label="动态可用库存" className="part-summary-metric">
               <span>动态可用库存</span>
@@ -511,6 +534,19 @@ export default function PartSearchPage() {
               <Descriptions.Item label="规格">{ov.part.category_minor || "-"}</Descriptions.Item>
             </Descriptions>
           </section>
+
+          <Button onClick={() => setGalleryPickerOpen(true)} style={{ marginBottom: 8 }}>多选下载</Button>
+          {galleryPickerOpen && <GalleryPicker
+            items={[{ partId: ov.part.id, pn: ov.part.pn_std }]}
+            mode="modal"
+            onClose={() => setGalleryPickerOpen(false)}
+          />}
+          <PartGalleryPanel
+            key={ov.part.id}
+            partId={ov.part.id}
+            pn={ov.part.pn_std}
+            canWrite={canEditPartDetails}
+          />
 
           <section aria-label="型号库存" className="part-section">
             <h3>库存</h3>
