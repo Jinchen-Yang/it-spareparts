@@ -1,17 +1,20 @@
 """售前询价 REST 接口；服务持有业务规则，接口持有提交与错误映射。"""
 
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.audience import audience_user
 from app.db import get_db
+from app.models.dimensions import DimCustomer, DimPart
 from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer
 from app.security import UserContext
 from app.services import price_reference
@@ -67,6 +70,7 @@ class LineInput(Input):
     ref_offer_id: int | None = Field(default=None, gt=0)
     notes: str | None = None
     notes_audience: AudienceInput | None = None
+    expected_delivery: date | None = None
     field_values: list[CustomValue] | None = None
 
 
@@ -218,18 +222,78 @@ def search_suppliers(db: Db, ctx: Ctx, q: str = Query(default="", max_length=256
 @router.get("/inquiries")
 def list_inquiries(db: Db, ctx: Ctx,
     kind: Literal["sales_inquiry", "proactive_offer"] | None = None,
-    scope: Literal["mine", "all"] = "mine",
+    scope: Literal["mine", "shared", "all"] = "mine",
     status: Literal["draft", "submitted", "revising", "closed"] | None = None,
-    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100)):
+    q: str = Query(default="", max_length=256),
+    date_from: date | None = None, date_to: date | None = None,
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+    sort: Literal["inquiry_no", "line_count", "status", "updated_at", "created_at"] = "updated_at",
+    dir: Literal["asc", "desc"] = "desc"):
     def read():
         user, _ = common.resolve_actor(db, ctx)
-        query = select(PresalesInquiry).order_by(PresalesInquiry.updated_at.desc(), PresalesInquiry.id.desc())
+        if date_from and date_to and date_from > date_to:
+            raise ValueError("date_from 不能晚于 date_to")
+        # 仅允许不依赖受众私密字段的排序键；先 SQL 排序，再沿用可见性过滤和分页。
+        line_count = select(func.count(PresalesInquiryLine.id)).where(
+            PresalesInquiryLine.inquiry_id == PresalesInquiry.id,
+            PresalesInquiryLine.status == "active",
+        ).correlate(PresalesInquiry).scalar_subquery()
+        columns = {
+            "inquiry_no": PresalesInquiry.inquiry_no,
+            "line_count": line_count,
+            "status": case(
+                (PresalesInquiry.status == "draft", 0),
+                (PresalesInquiry.status == "revising", 1),
+                (PresalesInquiry.status == "submitted", 2),
+                (PresalesInquiry.status == "closed", 3),
+            ),
+            "updated_at": PresalesInquiry.updated_at,
+            "created_at": PresalesInquiry.created_at,
+        }
+        column = columns[sort]
+        order = column.asc() if dir == "asc" else column.desc()
+        customer_name = func.coalesce(func.nullif(DimCustomer.name_normalized, ""), DimCustomer.name_raw)
+        query = select(PresalesInquiry, customer_name).outerjoin(
+            DimCustomer, DimCustomer.id == PresalesInquiry.customer_id,
+        ).order_by(order.nulls_last(), PresalesInquiry.id.desc())
+        if scope == "shared":
+            query = query.where(PresalesInquiry.created_by != user.id)
         if kind:
             query = query.where(PresalesInquiry.kind == kind)
         if status:
             query = query.where(PresalesInquiry.status == status)
+        if q.strip():
+            pattern = "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            matches = [PresalesInquiry.inquiry_no.ilike(pattern, escape="\\"),
+                select(PresalesInquiryLine.id).outerjoin(
+                    DimPart, DimPart.id == PresalesInquiryLine.part_id,
+                ).where(
+                    PresalesInquiryLine.inquiry_id == PresalesInquiry.id,
+                    PresalesInquiryLine.status == "active",
+                    or_(DimPart.pn_std.ilike(pattern, escape="\\"),
+                        DimPart.description.ilike(pattern, escape="\\"),
+                        PresalesInquiryLine.pn_raw.ilike(pattern, escape="\\"),
+                        PresalesInquiryLine.description.ilike(pattern, escape="\\")),
+                ).correlate(PresalesInquiry).exists()]
+            from app.services.workflow import work_items
+            if work_items.has_permission(ctx, "data_customer"):
+                # 与询价输出相同：客户字段只向单据所有人或主管开放。
+                customer_match = or_(DimCustomer.name_raw.ilike(pattern, escape="\\"),
+                                     DimCustomer.name_normalized.ilike(pattern, escape="\\"))
+                if not common.bypass(ctx):
+                    customer_match = and_(PresalesInquiry.created_by == user.id, customer_match)
+                matches.append(customer_match)
+            query = query.where(or_(*matches))
+        zone = ZoneInfo("Asia/Shanghai")
+        if date_from:
+            query = query.where(PresalesInquiry.updated_at >= datetime.combine(date_from, time.min, zone))
+        if date_to:
+            if date_to < date.max:
+                query = query.where(PresalesInquiry.updated_at < datetime.combine(date_to + timedelta(days=1), time.min, zone))
+            else:
+                query = query.where(PresalesInquiry.updated_at <= datetime.combine(date_to, time.max, zone))
         items = []
-        for inquiry in db.scalars(query):
+        for inquiry, name in db.execute(query):
             if not visibility.can_view_inquiry(db, inquiry, ctx):
                 continue
             if scope == "mine" and inquiry.created_by != user.id:
@@ -237,7 +301,10 @@ def list_inquiries(db: Db, ctx: Ctx,
                 from app.services.workflow.registry import Subject
                 if not work_items.subject_participation(db, Subject("presales_inquiry", inquiry.id), ctx)["assigned"]:
                     continue
-            items.append(visibility.inquiry_view(db, inquiry, ctx, detail=False))
+            view = visibility.inquiry_view(db, inquiry, ctx, detail=False)
+            view["customer_name"] = name if "customer_id" in view else None
+            view["is_owner"] = inquiry.created_by == user.id
+            items.append(view)
         return {"items": items[(page - 1) * page_size:page * page_size], "total": len(items),
                 "page": page, "page_size": page_size}
     return _call(db, read)

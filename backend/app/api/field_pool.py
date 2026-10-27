@@ -125,7 +125,10 @@ def template_for(
     viewer: UserContext = Depends(audience_user),
 ) -> list[dict]:
     try:
-        return _field_views(db, field_pool.template_for(db, subject_type, level, viewer, anchor=anchor))
+        fields = field_pool.template_for(db, subject_type, level, viewer, anchor=anchor)
+        if subject_type == "presales_inquiry":
+            fields = [field for field in fields if field.name != "期望交期"]
+        return _field_views(db, fields)
     except (ValueError, PermissionError) as exc:
         service_error(db, exc)
 

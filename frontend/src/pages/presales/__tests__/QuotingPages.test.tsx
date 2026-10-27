@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   withdrawOffer: vi.fn(), replyInquiry: vi.fn(), publishInquiry: vi.fn(), partCheck: vi.fn(),
   bindPart: vi.fn(), createPart: vi.fn(), library: vi.fn(), reference: vi.fn(), revisions: vi.fn(), listWorkItems: vi.fn(),
   listWorkCandidates: vi.fn(), getFieldTemplate: vi.fn(), refreshWorkBadges: vi.fn(), inbox: vi.fn(), suppliers: vi.fn(),
+  startFailed: false,
 }));
 vi.mock("../../../api/presales", () => ({ presales: mocks }));
 vi.mock("../../../api/workItems", () => ({ listWorkItems: mocks.listWorkItems, listWorkCandidates: mocks.listWorkCandidates }));
@@ -24,8 +25,11 @@ vi.mock("../../../components/audience/AudiencePicker", () => ({
   PUBLIC_AUDIENCE: { mode: "public", user_ids: [], group_ids: [] }, default: () => <span>受众选择器</span>,
 }));
 vi.mock("../../../components/workflow/WorkInbox", () => ({ default: (props: {
-  subjectType: string; onOpen: (item: WorkItem) => void;
-}) => { mocks.inbox(props); return <button onClick={() => props.onOpen({ ...task, subject_type: props.subjectType })}>打开采购待办</button>; } }));
+  subjectType: string; onOpen: (item: WorkItem) => void; beforeOpen?: (item: WorkItem) => boolean | Promise<boolean>;
+}) => { mocks.inbox(props); return <>{[1, 2].map((subjectId) => <button key={subjectId} onClick={async () => {
+  const item = { ...task, subject_id: subjectId, subject_type: props.subjectType };
+  if ((!props.beforeOpen || await props.beforeOpen(item)) && !mocks.startFailed) props.onOpen(item);
+}}>{subjectId === 1 ? "打开采购待办" : "打开另一张采购待办"}</button>)}</>; } }));
 vi.mock("../../../components/parts/LivePartSearch", () => ({ default: ({ mode, value = [], onChange }: {
   mode?: string; value?: PartSuggestion[]; onChange: (items: PartSuggestion[]) => void;
 }) => <div>{mode === "multiple" ? [1, 2].map((id) => <button key={id} onClick={() => onChange([
@@ -55,6 +59,7 @@ let currentInquiry: Inquiry;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.startFailed = false;
   localStorage.clear();
   localStorage.setItem("role", "purchaser");
   localStorage.setItem("permissions", JSON.stringify({ action_presales_quote: true, action_presales_offer: true, data_supplier: true }));
@@ -95,15 +100,16 @@ async function makeProactiveDraft() {
   mocks.createInquiry.mockImplementation(async () => ({ ...baseInquiry(), kind: "proactive_offer", status: "draft", created_by: 7 }));
   fireEvent.click(screen.getByRole("button", { name: "加入 PN-1" }));
   fireEvent.click(screen.getByRole("button", { name: "加入 PN-2" }));
+  fireEvent.click(screen.getByRole("button", { name: "展开 PN-1" }));
   fireEvent.click(screen.getByRole("button", { name: "生成报价草稿" }));
-  await screen.findByLabelText("PN-1单价");
+  await screen.findByRole("button", { name: "发布主动报价" });
 }
 
 describe("采购待办与询价处理", () => {
   it("复用售前待办组件并带待办身份打开处理页", async () => {
     function Opened() { const location = useLocation(); return <div>处理单 {(location.state as { workItem: WorkItem }).workItem.subject_id}</div>; }
     render(<MemoryRouter initialEntries={["/presales/tasks"]}><Routes>
-      <Route path="/presales/tasks" element={<TasksPage />} /><Route path="/presales/tasks/:id" element={<Opened />} />
+      <Route path="/presales/tasks" element={<TasksPage />} /><Route path="/presales/workbench" element={<Opened />} />
     </Routes></MemoryRouter>);
     expect(mocks.inbox.mock.calls[0][0].subjectType).toBe("presales_inquiry");
     fireEvent.click(screen.getByRole("button", { name: "打开采购待办" }));
@@ -155,7 +161,10 @@ describe("采购待办与询价处理", () => {
   it("逐行保存新报价或填写不报原因，1天与3天按上海自然日显示，全部完成才回复", async () => {
     processPage();
     await screen.findByLabelText("PN-1单价");
-    expect(screen.getAllByText("将于 10月25日 23:59 失效（上海时间）")).toHaveLength(2);
+    expect(screen.getByLabelText("统一有效期")).toHaveValue("1");
+    expect(screen.getByText("将于 10月25日 23:59 失效（上海时间）")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "展开 PN-1" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开 PN-2" }));
     expect(screen.getByRole("button", { name: "回复给销售" })).toBeDisabled();
     fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "120" } });
     fireEvent.change(screen.getByLabelText("PN-1有效天数"), { target: { value: "3" } });
@@ -230,6 +239,20 @@ describe("采购待办与询价处理", () => {
     expect(mocks.saveOffer.mock.calls[0][2]).not.toHaveProperty("offer_id");
   });
 
+  it("销售已引用的行仅展示钉住报价，不提供再次报价或撤销入口", async () => {
+    const published = quote({ status: "published", revision_no: 1,
+      valid_from: "2026-10-25T00:00:00Z", valid_until: "2026-10-25T15:59:59Z" });
+    currentInquiry.lines![0] = { ...currentInquiry.lines![0], ref_offer_id: published.id,
+      ref_offer_revision_no: 1, ref_offer: published };
+    currentInquiry.offers = [published];
+    processPage();
+    const referenced = (await screen.findByText("已引用报价，无需再次处理")).closest("tr")!;
+    expect(within(referenced).queryByRole("button", { name: "更新报价" })).not.toBeInTheDocument();
+    expect(within(referenced).queryByRole("button", { name: "撤销报价" })).not.toBeInTheDocument();
+    expect(within(referenced).queryByLabelText("PN-1单价")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "保存该行报价" })).toHaveLength(1);
+  });
+
   it("主动报价无需采购待办，可更新重复报价指向的原有效报价", async () => {
     const original = quote({ id: 99, line_id: 90, inquiry_id: 9, status: "published", version: 8,
       valid_from: "2026-10-25T00:00:00Z", valid_until: "2026-10-25T15:59:59Z" });
@@ -255,7 +278,8 @@ describe("采购待办与询价处理", () => {
       ? { ...currentInquiry, id: 9, offers: [expired] } : currentInquiry);
     mocks.updateOffer.mockResolvedValue({ ...expired, version: 13 });
     processPage(false);
-    fireEvent.change(await screen.findByLabelText("PN-1有效天数"), { target: { value: "3" } });
+    fireEvent.click(await screen.findByRole("button", { name: "展开 PN-1" }));
+    fireEvent.change(screen.getByLabelText("PN-1有效天数"), { target: { value: "3" } });
     fireEvent.click(screen.getByRole("button", { name: "更新报价" }));
     await waitFor(() => expect(mocks.updateOffer).toHaveBeenCalledWith(99, expect.objectContaining({ expected_version: 12, validity_days: 3 })));
     expect(mocks.revisions).toHaveBeenCalledWith(99);
@@ -275,7 +299,8 @@ describe("采购主动报价", () => {
     expect(mocks.getFieldTemplate).toHaveBeenCalledWith("presales_inquiry", "line", "part:1", expect.any(AbortSignal));
     expect(screen.getByRole("button", { name: "发布主动报价" })).toBeDisabled();
     fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "300" } });
-    fireEvent.click(screen.getAllByRole("checkbox", { name: "无货" })[1]);
+    fireEvent.click(screen.getByRole("button", { name: "展开 PN-2" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "无货" }));
     fireEvent.change(screen.getByLabelText("PN-2备注"), { target: { value: "供应商确认无货" } });
     fireEvent.click(screen.getByRole("button", { name: "发布主动报价" }));
     await screen.findByText("主动报价已发布");
@@ -288,6 +313,7 @@ describe("采购主动报价", () => {
     mocks.library.mockResolvedValue({ 1: [quote({ status: "published", valid_from: "2026-10-25T00:00:00Z", valid_until: "2026-10-25T15:59:59Z" })] });
     offerPage();
     await makeProactiveDraft();
+    fireEvent.click(screen.getByRole("button", { name: "展开 PN-1" }));
     expect(await screen.findByText("你已有该 PN 的有效报价，发布时请选择更新或另报一条")).toBeInTheDocument();
   });
 
@@ -326,7 +352,8 @@ describe("采购主动报价", () => {
       lines: [currentInquiry.lines![0]], offers: [hidden] };
     render(<MemoryRouter initialEntries={["/presales/offers/new?draft=1"]}><OfferNewPage /></MemoryRouter>);
     await screen.findByLabelText("PN-1单价");
-    for (const field of ["PN-1供应商档案 ID", "PN-1货源标识", "PN-1备注"]) expect(screen.queryByLabelText(field)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "展开 PN-1" }));
+    for (const field of ["PN-1供应商", "PN-1货源标识", "PN-1备注"]) expect(screen.queryByLabelText(field)).not.toBeInTheDocument();
     expect(screen.queryByText("当前填写人")).not.toBeInTheDocument();
   });
 });
@@ -352,8 +379,94 @@ it("处理页切换单据后，上一单保存触发的迟到刷新不会覆盖�
   fireEvent.click(await screen.findByRole("button", { name: "更新报价" }));
   await waitFor(() => expect(reads).toBe(2));
   fireEvent.click(screen.getByRole("button", { name: "打开另一单" }));
-  expect(await screen.findByText("处理询价 · XJ-2")).toBeInTheDocument();
+  expect(await screen.findByText("XJ-2")).toBeInTheDocument();
   await act(async () => { resolve(old); });
-  expect(screen.getByText("处理询价 · XJ-2")).toBeInTheDocument();
-  expect(screen.queryByText("处理询价 · XJ-1")).not.toBeInTheDocument();
+  expect(screen.getByText("XJ-2")).toBeInTheDocument();
+  expect(screen.queryByText("XJ-1")).not.toBeInTheDocument();
+});
+
+it("高密度表格默认折叠多个 PN，统一有效期同步到每行草稿", async () => {
+  processPage();
+  const grid = await screen.findByRole("table", { name: "采购报价明细" });
+  expect(within(grid).getAllByRole("row")).toHaveLength(3);
+  expect(screen.queryByLabelText("PN-1供应商")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("PN-2供应商")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("统一有效期"), { target: { value: "3" } });
+  expect(screen.getByText("将于 10月27日 23:59 失效（上海时间）")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "100" } });
+  fireEvent.change(screen.getByLabelText("PN-2单价"), { target: { value: "200" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+  await waitFor(() => expect(mocks.saveOffer).toHaveBeenCalledTimes(2));
+  expect(mocks.saveOffer).toHaveBeenCalledWith(1, 11, expect.objectContaining({ unit_price: 100, validity_days: 3 }));
+  expect(mocks.saveOffer).toHaveBeenCalledWith(1, 12, expect.objectContaining({ unit_price: 200, validity_days: 3 }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "回复给销售" })).toBeEnabled());
+});
+
+it("保存一行报价不会丢失另一行未保存的编辑", async () => {
+  processPage();
+  fireEvent.change(await screen.findByLabelText("PN-1单价"), { target: { value: "100" } });
+  fireEvent.change(screen.getByLabelText("PN-2单价"), { target: { value: "200" } });
+  fireEvent.click(screen.getAllByRole("button", { name: "保存该行报价" })[0]);
+  await screen.findByText("已保存草稿");
+  expect(screen.getByLabelText("PN-2单价")).toHaveValue("200.00");
+  expect(screen.getByRole("button", { name: "回复给销售" })).toBeDisabled();
+});
+
+it("深链接首次加载失败后重试会恢复本人待办身份", async () => {
+  mocks.getInquiry.mockRejectedValueOnce(new Error("offline"));
+  processPage(false);
+  fireEvent.click(await screen.findByRole("button", { name: /重\s*试/ }));
+  expect(await screen.findByLabelText("PN-1单价")).toBeEnabled();
+  expect(mocks.listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ tab: "assigned" }));
+  fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "100" } });
+  fireEvent.click(screen.getAllByRole("button", { name: "保存该行报价" })[0]);
+  await waitFor(() => expect(mocks.saveOffer).toHaveBeenCalledWith(1, 11, expect.objectContaining({ work_item_id: 71 })));
+});
+
+it("工作台切单先确认放弃未保存修改，取消继续保留当前输入", async () => {
+  mocks.getInquiry.mockImplementation(async (id: number) => ({ ...currentInquiry, id, inquiry_no: `XJ-${id}` }));
+  render(<MemoryRouter initialEntries={["/presales/workbench?id=1"]}><Routes>
+    <Route path="/presales/workbench" element={<TasksPage />} />
+  </Routes></MemoryRouter>);
+  fireEvent.change(await screen.findByLabelText("PN-1单价"), { target: { value: "133" } });
+  fireEvent.click(screen.getByRole("button", { name: "打开另一张采购待办" }));
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.click(within(dialog).getByRole("button", { name: "继续填写" }));
+  expect(screen.getByLabelText("PN-1单价")).toHaveValue("133.00");
+  expect(mocks.getInquiry).not.toHaveBeenCalledWith(2);
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  fireEvent.click(screen.getByRole("button", { name: "打开另一张采购待办" }));
+  fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "放弃修改并切换" }));
+  expect(await screen.findByText("XJ-2")).toBeInTheDocument();
+  expect(mocks.saveOffer).not.toHaveBeenCalled();
+});
+
+it("确认切单后新待办开始失败，重试切单仍保护原单未保存输入", async () => {
+  mocks.getInquiry.mockImplementation(async (id: number) => ({ ...currentInquiry, id, inquiry_no: `XJ-${id}` }));
+  render(<MemoryRouter initialEntries={["/presales/workbench?id=1"]}><Routes>
+    <Route path="/presales/workbench" element={<TasksPage />} />
+  </Routes></MemoryRouter>);
+  fireEvent.change(await screen.findByLabelText("PN-1单价"), { target: { value: "133" } });
+  mocks.startFailed = true;
+  fireEvent.click(screen.getByRole("button", { name: "打开另一张采购待办" }));
+  fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "放弃修改并切换" }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(screen.getByLabelText("PN-1单价")).toHaveValue("133.00");
+  expect(mocks.getInquiry).not.toHaveBeenCalledWith(2);
+  mocks.startFailed = false;
+  fireEvent.click(screen.getByRole("button", { name: "打开另一张采购待办" }));
+  fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "继续填写" }));
+  expect(mocks.getInquiry).not.toHaveBeenCalledWith(2);
+  expect(screen.getByLabelText("PN-1单价")).toHaveValue("133.00");
+});
+
+it("载入已有有效期并显示混合状态；隐藏客户要求不显示空值占位", async () => {
+  currentInquiry.offers = [quote({ validity_days: 7 }), quote({ id: 82, line_id: 12, part_id: 2, validity_days: 3 })];
+  delete currentInquiry.notes;
+  processPage();
+  await screen.findByLabelText("PN-1单价");
+  expect(screen.getByText("各行有效期不同；修改后统一应用")).toBeInTheDocument();
+  expect(screen.queryByText("无客户补充要求")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("统一有效期"), { target: { value: "7" } });
+  expect(screen.getByText("将于 10月31日 23:59 失效（上海时间）")).toBeInTheDocument();
 });

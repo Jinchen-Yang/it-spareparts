@@ -1,21 +1,22 @@
-import { useCallback, useEffect, useState } from "react";
-import { Alert, App, Button, Card, Descriptions, Empty, Input, Modal, Radio, Select, Space, Spin, Tag, Typography } from "antd";
+import { useCallback, useEffect, useState, type Key } from "react";
+import { Alert, App, Button, Input, InputNumber, Modal, Space, Spin, Tag, Typography } from "antd";
 import { Link, useLocation, useParams } from "react-router-dom";
-import { presales, type ExistingChoice, type Inquiry, type InquiryLine, type LineResponseInput, type NearDuplicate, type Offer } from "../../api/presales";
-import { listWorkItems, type WorkItem, type WorkTab } from "../../api/workItems";
+import { presales, type ExistingChoice, type Inquiry, type InquiryLine, type LineResponseInput, type NearDuplicate, type Offer, type OfferInput } from "../../api/presales";
+import { listWorkItems, releaseWorkItem, type WorkItem, type WorkTab } from "../../api/workItems";
 import type { PartSuggestion } from "../../api/search";
 import LivePartSearch from "../../components/parts/LivePartSearch";
 import PartThumb from "../../components/gallery/PartThumb";
 import GalleryPicker from "../../components/gallery/GalleryPicker";
-import PriceRefBadge from "../../components/pricing/PriceRefBadge";
 import Timeline from "../../components/workflow/Timeline";
 import { refreshWorkBadges } from "../../components/workflow/useWorkBadge";
-import QuoteEditor, { offerInput, quoteComplete } from "./QuoteEditor";
-import { formatBusinessDateTime } from "../../utils/date";
-import OfferGroups from "./OfferGroups";
+import { offerInput, quoteComplete } from "./QuoteEditor";
 import PartQuoteBadges from "./PartQuoteBadges";
-import { usePresalesError, OfferBadge, isOfferActive, useNow, flattenOffers } from "./shared";
+import { usePresalesError, isOfferActive, useNow, flattenOffers, expiryLabel } from "./shared";
+import QuoteGrid, { type QuoteGridRow } from "./QuoteGrid";
 import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
+import { WorkbookExportButton } from "../../components/workbook";
+import { presalesWorkbooks } from "../../api/presalesWorkbooks";
+import WorkbookDialog from "./WorkbookDialog";
 
 async function findOwnTask(inquiryId: number): Promise<WorkItem | undefined> {
   // 待办接口的这三个页签均按服务端当前账号过滤，不以显示名称推断身份。
@@ -107,73 +108,12 @@ function PartBinding({ line, onBound, refresh }: { line: InquiryLine; onBound: (
   </Space>;
 }
 
-function QuoteLine({ inquiry, line, offer, taskId, editable, refresh, onDirty }: {
-  inquiry: Inquiry; line: InquiryLine; offer?: Offer; taskId?: number;
-  editable: boolean; refresh: () => Promise<void>; onDirty: (lineId: number, dirty: boolean) => void;
-}) {
-  const handlePresalesError = usePresalesError();
-  const { message } = App.useApp();
-  const restart = editable && inquiry.kind === "sales_inquiry" && (offer?.status === "stale" || offer?.status === "withdrawn");
-  const newQuote = !offer || restart;
-  const [value, setValue] = useState(() => offerInput(newQuote ? undefined : offer));
-  const [busy, setBusy] = useState(false);
-  const [withdrawOpen, setWithdrawOpen] = useState(false);
-  const [reason, setReason] = useState("");
-  const published = offer?.status === "published";
-  const canEdit = editable;
-  const save = async () => {
-    setBusy(true);
-    try {
-      if (published) await presales.updateOffer(offer.id, { ...value, expected_version: offer.version });
-      else await presales.saveOffer(inquiry.id, line.id, { ...value,
-        expected_version: !newQuote && offer ? offer.version : inquiry.version,
-        ...(!newQuote && offer ? { offer_id: offer.id } : {}),
-        ...(taskId ? { work_item_id: taskId } : {}) });
-      onDirty(line.id, false);
-      message.success(published ? "报价已更新，已保存历史版本" : "该行报价已保存");
-      await refresh();
-    } catch (error) { handlePresalesError(error, refresh); }
-    finally { setBusy(false); }
-  };
-  const withdraw = async () => {
-    if (!offer || !reason.trim()) return;
-    setBusy(true);
-    try {
-      await presales.withdrawOffer(offer.id, { expected_version: offer.version, reason: reason.trim() });
-      onDirty(line.id, false); setWithdrawOpen(false); setReason("");
-      message.success("报价已撤销"); await refresh();
-    } catch (error) { handlePresalesError(error, refresh); }
-    finally { setBusy(false); }
-  };
-
-  return <>
-    {offer && <Space style={{ marginBottom: 12 }}>{offer.status === "published" && <OfferBadge offer={offer} />}
-      {offer.status === "draft" && <Tag>已保存草稿</Tag>}
-      {offer.status === "withdrawn" && <Tag>已撤销</Tag>}
-      {offer.status === "stale" && <Tag>基于旧版本</Tag>}
-    </Space>}
-    <QuoteEditor label={line.pn_raw} value={value} existing={newQuote ? undefined : offer} disabled={!canEdit || busy}
-      allowNoStock={inquiry.kind === "proactive_offer" || published}
-      onChange={(next) => { setValue(next); onDirty(line.id, true); }} />
-    {canEdit && <Space>
-      <Button type="primary" loading={busy} disabled={!quoteComplete(value) || (!line.part_id && !value.no_stock)}
-        onClick={() => void save()}>{published ? "更新报价" : "保存该行报价"}</Button>
-      {published && <Button danger disabled={busy} onClick={() => { setReason(""); setWithdrawOpen(true); }}>撤销报价</Button>}
-    </Space>}
-    <Modal title="撤销报价" open={withdrawOpen} okText="确认撤销" cancelText="取消" confirmLoading={busy}
-      okButtonProps={{ disabled: !reason.trim() }} onCancel={() => setWithdrawOpen(false)} onOk={() => void withdraw()}>
-      <Input.TextArea aria-label="撤销原因" placeholder="必须填写撤销原因" value={reason}
-        onChange={(event) => setReason(event.target.value)} />
-    </Modal>
-  </>;
-}
-
 export default function ProcessPage() {
   const { id } = useParams();
   return <ProcessContent key={id} inquiryId={Number(id)} />;
 }
 
-function ProcessContent({ inquiryId }: { inquiryId: number }) {
+export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inquiryId: number; onTaskChange?: () => void; onDirtyChange?: (dirty: boolean) => void }) {
   const handlePresalesError = usePresalesError();
   const { choose, dialog } = useExistingOfferChoice();
   const location = useLocation();
@@ -181,15 +121,25 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
   const { message } = App.useApp();
   const [inquiry, setInquiry] = useState<Inquiry>();
   const [task, setTask] = useState<WorkItem | undefined>(navigationTask?.subject_id === inquiryId ? navigationTask : undefined);
+  const [loadVersion, setLoadVersion] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [gallery, setGallery] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [values, setValues] = useState<Record<number, { key: string; value: OfferInput }>>({});
+  const [expanded, setExpanded] = useState<Key[]>([]);
+  const [validity, setValidity] = useState(1);
+  const [withdrawOffer, setWithdrawOffer] = useState<Offer>();
+  const [releaseOpen, setReleaseOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const [timeline, setTimeline] = useState(false);
   const [dirty, setDirty] = useState<Record<number, boolean>>({});
   const [timelineVersion, setTimelineVersion] = useState(0);
   const [library, setLibrary] = useState<Record<number, Offer[]>>({});
   const [libraryError, setLibraryError] = useState(false);
   const [responses, setResponses] = useState<Record<number, LineResponseInput>>({});
+  useEffect(() => { onDirtyChange?.(Object.values(dirty).some(Boolean) || Object.keys(responses).length > 0); }, [dirty, responses, onDirtyChange]);
   const now = useNow([...Object.values(library).flatMap(flattenOffers), ...(inquiry?.line_responses ?? []).flatMap((row) => row.offer ? [row.offer] : [])]
     .flatMap((offer) => [offer.valid_from, offer.valid_until]));
   const partKey = (inquiry?.lines ?? []).filter((line) => line.part_id).map((line) => line.part_id).join(",");
@@ -208,21 +158,21 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
   }, [partKey, inquiry?.version, inquiryId]);
   useEffect(() => {
     let cancelled = false;
-    setLoading(true); setLoadError(false); setInquiry(undefined); setDirty({});
+    setLoading(true); setLoadError(false); setInquiry(undefined); setDirty({}); setValues({}); setResponses({});
     const currentTask = navigationTask?.subject_id === inquiryId ? navigationTask : undefined;
     setTask(currentTask);
     loadInquiry(inquiryId).then(async (data) => {
       const ownTask = currentTask ?? (data.kind === "proactive_offer" ? undefined : await findOwnTask(inquiryId));
-      if (!cancelled) { setInquiry(data); setTask(ownTask); }
+      if (!cancelled) { setInquiry(data); setTask(ownTask); setValidity(data.offers?.[0]?.validity_days ?? 1); setExpanded((data.lines ?? []).filter((line) => !line.part_id).map((line) => line.id)); }
     })
       .catch((error) => { if (!cancelled) { setLoadError(true); handlePresalesError(error); } })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [inquiryId, navigationTask]);
+  }, [inquiryId, navigationTask, loadVersion]);
 
   if (loading) return <Spin />;
   if (!inquiry) return <Alert type="error" message={loadError ? "询价单加载失败" : "询价单不可用"}
-    action={<Button onClick={() => void refresh().catch((error) => handlePresalesError(error))}>重试</Button>} />;
+    action={<Button onClick={() => setLoadVersion((version) => version + 1)}>重试</Button>} />;
 
   const liveTask = inquiry.work_items?.find((item) => item.id === task?.id);
   const taskStatus = liveTask?.status ?? task?.status;
@@ -237,6 +187,7 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
   const responseFor = (lineId: number): LineResponseInput => responses[lineId] ?? savedResponse(lineId) ?? { line_id: lineId, mode: "quote" };
   const reusedOffer = (line: InquiryLine) => {
     const response = responseFor(line.id);
+    if (response.mode !== "reuse") return undefined;
     return (savedResponse(line.id)?.ref_offer_id === response.ref_offer_id ? savedResponse(line.id)?.offer : undefined)
       ?? flattenOffers(library[line.part_id!] ?? []).find((offer) => offer.id === response.ref_offer_id);
   };
@@ -250,7 +201,7 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
     return !dirty[line.id] && ownOffers.some((offer) => offer.line_id === line.id && ["draft", "published"].includes(offer.status)
       && quoteComplete(offer) && !offer.no_stock && !!line.part_id);
   });
-  const editable = inquiry.status === "submitted" && (proactive || !!task) && !paused;
+  const editable = inquiry.status === "submitted" && (proactive || (!!task && actorId != null)) && !paused;
   const reply = async () => {
     if (!complete || !task) return;
     setBusy(true);
@@ -275,86 +226,144 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
           choices[conflict.draft_offer_id] = choice;
         }
       }
-      message.success("已回复给销售"); refreshWorkBadges(); await refresh();
+      message.success("已回复给销售"); setResponses({}); setDirty({}); refreshWorkBadges(); onTaskChange?.(); await refresh();
     } catch (error) { handlePresalesError(error, refresh); }
     finally { setBusy(false); }
   };
 
-  return <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-    <Space wrap><Typography.Title level={3} style={{ margin: 0 }}>处理询价 · {inquiry.inquiry_no}</Typography.Title>
-      <Link to="/presales/tasks">返回采购待办</Link>
-      <Button onClick={() => setGallery(true)} disabled={!lines.some((line) => line.part_id)}>查看图片 / 多选下载</Button>
-    </Space>
-    <Descriptions size="small" bordered column={2}>
-      <Descriptions.Item label="询价行数">{lines.length}</Descriptions.Item>
-      {"notes" in inquiry && <Descriptions.Item label="客户要求">{inquiry.notes}</Descriptions.Item>}
-    </Descriptions>
-    {inquiry.field_values?.map((field, index) => <Typography.Paragraph key={`header-field-${index}`}>
-      {field.name ?? field.new_name}: {String(field.value ?? "")}
-    </Typography.Paragraph>)}
+  const currentFor = (line: InquiryLine) => {
+    const referenceId = proactive ? line.ref_offer_id ?? savedResponse(line.id)?.ref_offer_id ?? line.linked_offer_ids?.[0] : undefined;
+    return (referenceId ? ownOffers.find((offer) => offer.id === referenceId) : undefined)
+      ?? ownOffers.find((offer) => offer.line_id === line.id && offer.status !== "withdrawn" && offer.status !== "stale")
+      ?? ownOffers.find((offer) => offer.line_id === line.id);
+  };
+  const valueKey = (line: InquiryLine) => `${currentFor(line)?.id ?? "new"}:${currentFor(line)?.version ?? 0}`;
+  const valueFor = (line: InquiryLine) => {
+    if (values[line.id]?.key === valueKey(line)) return values[line.id].value;
+    const current = currentFor(line);
+    return offerInput(!proactive && (current?.status === "stale" || current?.status === "withdrawn") ? undefined : current);
+  };
+  const changeValue = (lineId: number, value: OfferInput) => {
+    const line = lines.find((item) => item.id === lineId)!;
+    setValues((previous) => ({ ...previous, [lineId]: { key: valueKey(line), value } }));
+    setDirty((previous) => ({ ...previous, [lineId]: true }));
+  };
+  const saveLine = async (line: InquiryLine) => {
+    const current = currentFor(line);
+    const value = valueFor(line);
+    const restart = !proactive && (current?.status === "stale" || current?.status === "withdrawn");
+    if (current?.status === "published") await presales.updateOffer(current.id, { ...value, expected_version: current.version });
+    else await presales.saveOffer(inquiry.id, line.id, { ...value,
+      expected_version: current && !restart ? current.version : inquiry.version,
+      ...(current && !restart ? { offer_id: current.id } : {}), ...(task ? { work_item_id: task.id } : {}) });
+    setDirty((previous) => ({ ...previous, [line.id]: false }));
+  };
+  const save = async (line?: InquiryLine) => {
+    setBusy(true);
+    try {
+      const selected = line ? [line] : required.filter((item) => responseFor(item.id).mode === "quote" && quoteComplete(valueFor(item)) && !!item.part_id);
+      for (const item of selected) await saveLine(item);
+      message.success(line && currentFor(line)?.status === "published" ? "报价已更新，已保存历史版本" : "报价草稿已保存；沿用与不报将在回复时提交");
+      await refresh();
+    } catch (error) { await handlePresalesError(error, refresh); }
+    finally { setBusy(false); }
+  };
+  const withdraw = async () => {
+    if (!withdrawOffer || !reason.trim()) return;
+    setBusy(true);
+    try {
+      await presales.withdrawOffer(withdrawOffer.id, { expected_version: withdrawOffer.version, reason: reason.trim() });
+      setWithdrawOffer(undefined); setReason(""); message.success("报价已撤销"); await refresh();
+    } catch (error) { await handlePresalesError(error, refresh); }
+    finally { setBusy(false); }
+  };
+  const release = async () => {
+    if (!task || !reason.trim()) return;
+    setBusy(true);
+    try {
+      await releaseWorkItem(task.id, { expected_version: liveTask?.version ?? task.version, reason: reason.trim() });
+      setReleaseOpen(false); setTask(undefined); refreshWorkBadges(); onTaskChange?.(); await refresh();
+    } catch (error) { await handlePresalesError(error, refresh); }
+    finally { setBusy(false); }
+  };
+  const rows: QuoteGridRow[] = lines.map((line) => {
+    const current = currentFor(line);
+    const response = responseFor(line.id);
+    const canEdit = editable && (proactive ? current?.status === "published"
+      : !line.ref_offer_id && (active || current?.status === "published"));
+    return { line, current, value: valueFor(line), response, reused: reusedOffer(line),
+      responseDraft: !!responses[line.id] || !!savedResponse(line.id)?.is_draft,
+      reporterLabel: savedResponse(line.id)?.ref_offer_id === response.ref_offer_id ? savedResponse(line.id)?.reporter_label : undefined,
+      existing: library[line.part_id!] ?? [],
+      disabled: !canEdit || busy, responseDisabled: !editable || !active || busy,
+      referenced: !!line.ref_offer_id && !proactive,
+      details: <>
+        {!line.part_id && editable && active && <PartBinding line={line} onBound={setInquiry} refresh={refresh} />}
+        {proactive && (!current || current.status !== "published") && <Alert type="info" message="当前报价不可更新，可新建主动报价"
+          action={<Link to="/presales/offers/new">新建主动报价</Link>} />}
+      </>,
+      actions: canEdit && (proactive || response.mode === "quote") && <span className="quote-row-actions">
+        <Button size="small" loading={busy} disabled={!quoteComplete(valueFor(line)) || (!line.part_id && !valueFor(line).no_stock)}
+          onClick={() => void save(line)}>{current?.status === "published" ? "更新报价" : "保存该行报价"}</Button>
+        {current?.status === "published" && <Button size="small" danger disabled={busy} onClick={() => { setReason(""); setWithdrawOffer(current); }}>撤销报价</Button>}
+      </span> };
+  });
+  const handledRows = required.filter((line) => {
+    const response = responseFor(line.id);
+    if (response.mode === "skip") return !!response.reason?.trim();
+    if (response.mode === "reuse") return !!reusedOffer(line) && isOfferActive(reusedOffer(line)!, now);
+    return !dirty[line.id] && ownOffers.some((offer) => offer.line_id === line.id && ["draft", "published"].includes(offer.status)
+      && quoteComplete(offer) && !offer.no_stock && !!line.part_id);
+  });
+  const count = (mode: LineResponseInput["mode"]) => handledRows.filter((line) => responseFor(line.id).mode === mode).length;
+
+  const dayValues = (proactive ? lines : required).map((line) => valueFor(line).validity_days ?? 1);
+  const uniformDays = dayValues.length ? dayValues.every((days) => days === dayValues[0]) ? dayValues[0] : undefined : validity;
+
+  return <section className="quote-document">
+    <header className="quote-heading"><span className="quote-number">{inquiry.inquiry_no}</span>
+      {"notes" in inquiry && <span className="quote-header-note" title={inquiry.notes ?? undefined}>{inquiry.notes || "无客户补充要求"}</span>}
+      <div className="quote-validity"><span>统一有效期</span><InputNumber size="small" aria-label="统一有效期" min={1} max={36500} precision={0}
+        value={uniformDays ?? null} placeholder="多值" title="修改后应用到本单所有待处理报价行" disabled={!editable || busy} onChange={(days) => {
+          const next = days ?? 1; setValidity(next);
+          for (const line of proactive ? lines : required) changeValue(line.id, { ...valueFor(line), validity_days: next });
+        }} /><span role="status">{uniformDays === undefined ? "各行有效期不同；修改后统一应用" : expiryLabel(uniformDays, now)}</span></div>
+      {!proactive && <><WorkbookExportButton size="small" label="下载报价表" schemaName="presales_quote_sheet" disabled={busy || !editable || !active}
+        fetchSchema={() => presalesWorkbooks.getQuoteSheetSchema()} onExport={(visible) => presalesWorkbooks.exportQuoteSheet([inquiry.id], visible)}
+        filename={`${inquiry.inquiry_no}-报价表.xlsx`} />
+        <Button size="small" disabled={busy || !editable || !active} onClick={() => setImportOpen(true)}>上传报价表</Button></>}
+      <Button size="small" onClick={() => setGallery(true)} disabled={!lines.some((line) => line.part_id)}>查看图片 / 多选下载</Button>
+    </header>
+    {inquiry.field_values?.map((field, index) => <div key={index}>{field.name ?? field.new_name}: {String(field.value ?? "")}</div>)}
     {!task && !proactive && <Alert type="info" message="请从自己的采购待办打开本单，领取或接受后即可处理" />}
     {paused && <Alert type="warning" message="询价已撤回，待办暂停" />}
     {libraryError && <Alert type="warning" message="已有有效报价加载失败，请刷新后重试；仍可报新价或不报" />}
-    {!lines.length && <Empty description="暂无询价行" />}
-    {lines.map((line) => {
-      const response = responseFor(line.id);
-      const existing = (library[line.part_id!] ?? []).filter((offer) => isOfferActive(offer, now));
-      const reused = reusedOffer(line);
-      const changeResponse = (patch: Partial<LineResponseInput>) => setResponses((previous) => ({
-        ...previous, [line.id]: { ...responseFor(line.id), ...patch },
-      }));
-      const referenceId = proactive ? line.ref_offer_id ?? savedResponse(line.id)?.ref_offer_id ?? line.linked_offer_ids?.[0] : undefined;
-      const current = (referenceId ? ownOffers.find((offer) => offer.id === referenceId) : undefined)
-        ?? ownOffers.find((offer) => offer.line_id === line.id && offer.status !== "withdrawn" && offer.status !== "stale")
-        ?? ownOffers.find((offer) => offer.line_id === line.id);
-      return <Card key={`line-${line.id}`} title={<Space wrap>
-        {line.part_id && <PartThumb partId={line.part_id} pn={line.pn_raw} />}
-        <span>{line.seq}. {line.pn_raw}</span><Tag>需求 {line.qty}</Tag>
-        {line.require_exact_pn && <Tag>要求 PN 一致</Tag>}
-        {line.part_id && <PriceRefBadge partId={line.part_id} />}
-      </Space>}>
-        {line.description && <Typography.Paragraph>{line.description}</Typography.Paragraph>}
-        {"notes" in line && line.notes && <Typography.Paragraph>{line.notes}</Typography.Paragraph>}
-        {line.field_values?.map((field, index) => <Typography.Paragraph key={index}>{field.name ?? field.new_name}: {String(field.value ?? "")}</Typography.Paragraph>)}
-        {line.ref_offer_id && !proactive ? <Space wrap><Tag>已引用报价，无需再次处理</Tag>
-          {line.ref_offer && <OfferBadge offer={line.ref_offer} />}</Space> : <>
-          {!proactive && <Space direction="vertical" style={{ width: "100%", marginBottom: 12 }}>
-            <Typography.Text strong>已有有效报价</Typography.Text>
-            {existing.length ? <OfferGroups offers={existing} renderOffer={(offer) => <OfferBadge offer={offer} />} />
-              : <Typography.Text type="secondary">暂无可见的有效报价</Typography.Text>}
-            <div role="radiogroup" aria-label={`${line.pn_raw}处理方式`}><Radio.Group value={response.mode} disabled={!editable || !active || busy}
-              onChange={(event) => changeResponse({ mode: event.target.value })}>
-              <Radio value="quote">报新价</Radio><Radio value="reuse" disabled={!existing.length}>沿用有效报价</Radio><Radio value="skip">无货 / 不报</Radio>
-            </Radio.Group></div>
-            {response.mode === "reuse" && <>
-              <Select aria-label={`${line.pn_raw}沿用报价`} placeholder="请选择沿用的有效报价" style={{ minWidth: 280 }}
-                value={response.ref_offer_id} disabled={!editable || !active || busy} onChange={(value) => changeResponse({ ref_offer_id: value })}
-                options={flattenOffers(existing).filter((offer) => isOfferActive(offer, now)).map((offer) => ({ value: offer.id, label: <span>报价 #{offer.id} <OfferBadge offer={offer} /></span> }))} />
-              {reused && <div>所沿用报价：<OfferBadge offer={reused} />
-                <span>原报价人：{(savedResponse(line.id)?.ref_offer_id === reused.id ? savedResponse(line.id)?.reporter_label : undefined) ?? reused.reporter?.name ?? "其他采购"}</span>
-                {reused.valid_from && <span> · 原报价时间：{formatBusinessDateTime(reused.valid_from)}</span>}
-              </div>}
-              {!reused && response.ref_offer_id && <Tag>沿用报价当前不可见或已失效</Tag>}
-            </>}
-            {response.mode === "skip" && <Input.TextArea aria-label={`${line.pn_raw}不报原因`} value={response.reason ?? ""}
-              placeholder="无货或不报的原因（必填）" disabled={!editable || !active || busy}
-              onChange={(event) => changeResponse({ reason: event.target.value })} />}
-          </Space>}
-          {!line.part_id && editable && active && <PartBinding line={line} onBound={setInquiry} refresh={refresh} />}
-          {(proactive ? !!current : response.mode === "quote") && <QuoteLine key={`${current?.id ?? "new"}:${current?.version ?? 0}`} inquiry={inquiry} line={line} offer={current}
-            taskId={task?.id} editable={editable && (proactive ? current?.status === "published" : active || current?.status === "published")} refresh={refresh}
-            onDirty={(lineId, isDirty) => setDirty((previous) => ({ ...previous, [lineId]: isDirty }))} />}
-        </>}
-        {proactive && (!current || current.status !== "published") && <Alert type="info"
-          message={line.ref_offer_id && !current ? "引用报价当前不可用，请回原来源单查看，或新建主动报价" : "当前报价不可更新，可新建主动报价"}
-          action={<Link to="/presales/offers/new">新建主动报价</Link>} />}
-      </Card>;
-    })}
-    {active && <Button type="primary" loading={busy} disabled={!complete || !editable} onClick={() => void reply()}>回复给销售</Button>}
-    {active && !complete && <Typography.Text type="secondary">每行保存新报价、沿用有效报价或填写不报原因后，才能回复给销售。</Typography.Text>}
+    <QuoteGrid id="presales-workbench-lines" rows={rows} now={now} proactive={proactive} onChange={changeValue}
+      expandedRowKeys={expanded} onExpandedRowKeysChange={setExpanded} onResponse={(lineId, patch) => {
+        setResponses((previous) => ({ ...previous, [lineId]: { ...responseFor(lineId), ...patch } }));
+        if (patch.mode === "reuse") setExpanded((previous) => [...new Set([...previous, lineId])]);
+      }} />
+    <footer className="quote-footer"><span>填写完成 <b>{handledRows.length}</b> / {required.length} 行（报价 {count("quote")} · 沿用 {count("reuse")} · 不报 {count("skip")}）</span>
+      <div className="quote-footer-actions"><Button size="small" onClick={() => setTimeline(!timeline)}>{timeline ? "隐藏动态" : "查看动态"}</Button>
+        {active && <><Button disabled={busy || !editable || !task?.allowed_actions.includes("release")} onClick={() => { setReason(""); setReleaseOpen(true); }}>退回公共池</Button>
+          <Button loading={busy} disabled={!editable || !required.some((line) => responseFor(line.id).mode === "quote" && quoteComplete(valueFor(line)) && !!line.part_id)} onClick={() => void save()}>保存草稿</Button>
+          <Button type="primary" loading={busy} disabled={!complete || !editable} onClick={() => void reply()}>回复给销售</Button></>}
+      </div>
+    </footer>
+    {active && !complete && <div className="quote-muted">每行保存新报价、沿用有效报价或填写不报原因后，才能回复给销售。</div>}
     {dialog}
-    <Timeline key={`timeline-${timelineVersion}`} subjectType="presales_inquiry" subjectId={inquiry.id} />
-    {gallery && <GalleryPicker mode="modal" items={lines.filter((line) => line.part_id)
-      .map((line) => ({ partId: line.part_id!, pn: line.pn_raw }))} onClose={() => setGallery(false)} />}
-  </Space>;
+    <Modal title="撤销报价" open={!!withdrawOffer} okText="确认撤销" cancelText="取消" confirmLoading={busy}
+      okButtonProps={{ disabled: !reason.trim() }} onCancel={() => setWithdrawOffer(undefined)} onOk={() => void withdraw()}>
+      <Input.TextArea aria-label="撤销原因" placeholder="必须填写撤销原因" value={reason} onChange={(event) => setReason(event.target.value)} />
+    </Modal>
+    <Modal title="退回公共池" open={releaseOpen} okText="确认退回" cancelText="取消" confirmLoading={busy}
+      okButtonProps={{ disabled: !reason.trim() }} onCancel={() => setReleaseOpen(false)} onOk={() => void release()}>
+      <Input.TextArea aria-label="退回原因" placeholder="必须填写退回原因" value={reason} onChange={(event) => setReason(event.target.value)} />
+    </Modal>
+    {timeline && <Timeline key={`timeline-${timelineVersion}`} subjectType="presales_inquiry" subjectId={inquiry.id} />}
+    {gallery && <GalleryPicker mode="modal" items={lines.filter((line) => line.part_id).map((line) => ({ partId: line.part_id!, pn: line.pn_raw }))} onClose={() => setGallery(false)} />}
+    {importOpen && <WorkbookDialog mode="quote" inquiryId={inquiry.id} onClose={() => setImportOpen(false)} onApplied={() => {
+      message.success("已保存为草稿，请在页面确认后回复"); setImportOpen(false); setLoadVersion((version) => version + 1); onTaskChange?.();
+    }} />}
+  </section>;
 }

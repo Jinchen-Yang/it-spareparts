@@ -142,6 +142,7 @@ from app.models.system import (
     SysUser,
 )
 from app.models.workflow import SubjectEvent, WorkItem
+from app.models.workbook import WorkbookOperation
 from app.models.presales import (
     OfferPriceDaily, PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer,
     PresalesOfferLineLink,
@@ -159,6 +160,7 @@ from app.models.replenishment import (
 )
 
 __all__ = [
+    "WorkbookOperation",
     "AudienceGroup", "AudienceGroupMember", "AudienceRule", "AudienceRuleMember",
     "FieldDef", "FieldValue", "FieldAnchorUsage",
     "ChatSession",

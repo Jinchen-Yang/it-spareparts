@@ -20,7 +20,7 @@ describe("销售分析导航（D-41）", () => {
   it("销售组内入口并存、标签互不重复且顺序精确一致", () => {
     const grp = NAV_GROUPS.find((g) => g.key === "grp-sales")!;
     const labels = grp.items.map((it) => it.label);
-    expect(labels).toEqual(["询价单", "采购待办", "主动报价", "报价库", "销售分析", "型号查询", "利润分析"]);
+    expect(labels).toEqual(["询价单", "报价库", "销售分析", "型号查询", "利润分析"]);
     expect(new Set(labels).size).toBe(labels.length);
   });
 

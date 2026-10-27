@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type Key, type ReactNode } from "react";
 import { Alert, App, Badge, Button, Input, List, Modal, Select, Space, Tabs, Tag } from "antd";
 import {
   claimWorkItem, completeWorkItem, declineWorkItem, listWorkCandidates, listWorkItems,
   reassignWorkItem, releaseWorkItem, startWorkItem, transferWorkItem,
   type WorkAction, type WorkActionBody, type WorkCandidate, type WorkItem, type WorkTab,
 } from "../../api/workItems";
+import DataGrid from "../datagrid/DataGrid";
 import { refreshWorkBadges, useWorkBadge } from "./useWorkBadge";
 
 interface Props {
@@ -12,6 +13,11 @@ interface Props {
   conflictMessage?: string;
   renderRow: (item: WorkItem) => ReactNode;
   onOpen: (item: WorkItem) => void | Promise<void>;
+  beforeOpen?: (item: WorkItem) => boolean | Promise<boolean>;
+  compact?: boolean;
+  refreshKey?: number;
+  onSelectionChange?: (items: WorkItem[]) => void;
+  isRowSelectable?: (item: WorkItem) => boolean;
 }
 
 type ReasonAction = "release" | "transfer" | "reassign" | "decline";
@@ -28,12 +34,16 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-export default function WorkInbox({ subjectType, conflictMessage, renderRow, onOpen }: Props) {
+export default function WorkInbox({ subjectType, conflictMessage, renderRow, onOpen, beforeOpen, compact = false, refreshKey = 0,
+  onSelectionChange, isRowSelectable }: Props) {
   const { message } = App.useApp();
   const badge = useWorkBadge();
+  const [query, setQuery] = useState("");
+  const [queueSort, setQueueSort] = useState("new");
   const [tab, setTab] = useState<WorkTab>("assigned");
   const [page, setPage] = useState(1);
   const [items, setItems] = useState<WorkItem[]>([]);
+  const [selected, setSelected] = useState<Key[]>([]);
   const [total, setTotal] = useState(0);
   const [canSupervise, setCanSupervise] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -56,12 +66,22 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
 
   useEffect(() => {
     const controller = new AbortController();
+    setSelected([]); onSelectionChange?.([]);
     setItems([]);
     setTotal(0);
     setLoading(true);
     setLoadError(undefined);
-    void listWorkItems({ tab, subject_type: subjectType, page, page_size: 20 }, controller.signal)
-      .then((data) => {
+    void listWorkItems({ tab, subject_type: subjectType, page: compact ? 1 : page, page_size: compact ? 100 : 20 }, controller.signal)
+      .then(async (data) => {
+        if (compact) {
+          const all = [...data.items];
+          for (let nextPage = 2; (nextPage - 1) * 100 < data.total; nextPage += 1) {
+            if (controller.signal.aborted) return;
+            const next = await listWorkItems({ tab, subject_type: subjectType, page: nextPage, page_size: 100 }, controller.signal);
+            all.push(...next.items);
+          }
+          data = { ...data, items: all };
+        }
         if (controller.signal.aborted) return;
         setItems(data.items);
         setTotal(data.total);
@@ -73,7 +93,7 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [tab, subjectType, page, reload]);
+  }, [tab, subjectType, page, reload, compact, refreshKey, onSelectionChange]);
 
   useEffect(() => {
     ++contextVersion.current;
@@ -160,13 +180,39 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
     { key: "claimed", label: <Space>我已领取<Badge count={badge.claimed} /></Space> },
     { key: "done", label: "已处理" },
   ];
-  if (canSupervise) tabs.push({ key: "all", label: "全部" });
+  if (canSupervise && !compact) tabs.push({ key: "all", label: "全部" });
 
+  const openItem = async (item: WorkItem) => {
+    if (beforeOpen && !await beforeOpen(item)) return;
+    if (item.allowed_actions.includes("start")) await perform(item, "start", { expected_version: item.version });
+    else await onOpen(item);
+  };
+  const actions = (item: WorkItem) => <Space size={4} wrap>
+    <Button size={compact ? "small" : "middle"} disabled={busy !== null} onClick={() => void openItem(item)}>打开</Button>
+    {item.allowed_actions.filter((action) => action !== "start").map((action) => <Button key={action}
+      size={compact ? "small" : "middle"} loading={busy === item.id} disabled={busy !== null} onClick={() => {
+        if (["release", "transfer", "reassign", "decline"].includes(action)) openDialog(item, action as ReasonAction);
+        else void perform(item, action, { expected_version: item.version });
+      }}>{actionLabels[action]}</Button>)}
+  </Space>;
+  const queue = compact ? items.filter((item) => JSON.stringify(item.summary).toLowerCase().includes(query.trim().toLowerCase())).sort((a, b) =>
+    queueSort === "lines" ? Number(b.summary.line_count ?? 0) - Number(a.summary.line_count ?? 0)
+      : queueSort === "no" ? new Intl.Collator("en", { numeric: true }).compare(String(a.summary.inquiry_no ?? ""), String(b.summary.inquiry_no ?? ""))
+        : (Date.parse(b.created_at) - Date.parse(a.created_at)) * (queueSort === "old" ? -1 : 1)) : items;
   return (
     <>
       <Tabs activeKey={tab} items={tabs} onChange={(key) => { setTab(key as WorkTab); setPage(1); }} />
       {loadError && <Alert type="error" showIcon message={loadError} action={<Button onClick={() => setReload((value) => value + 1)}>重试</Button>} />}
-      <List
+      {compact && <div className="quote-queue-filters"><Input size="small" aria-label="筛选待办" placeholder="筛选单号" value={query} onChange={(event) => setQuery(event.target.value)} />
+        <Select size="small" aria-label="队列排序" value={queueSort} onChange={setQueueSort} options={[
+          { value: "new", label: "最新在前" }, { value: "old", label: "最早在前" }, { value: "lines", label: "行数多在前" }, { value: "no", label: "单号 A→Z" },
+        ]} /></div>}
+      {compact ? <DataGrid id="presales-work-queue" ariaLabel="报价工作台队列" rows={queue} rowKey={(item) => item.id} loading={loading} error={loadError}
+        selectable={!!onSelectionChange} selectedRowKeys={selected} isRowSelectable={isRowSelectable}
+        onSelectedRowKeysChange={(keys) => { setSelected(keys); onSelectionChange?.(items.filter((item) => keys.includes(item.id))); }}
+        onRetry={() => setReload((value) => value + 1)} columns={[{ key: "inquiry", title: "待办队列", width: onSelectionChange ? 233 : 265, identity: true,
+          render: (item) => <div className="quote-queue-row">{renderRow(item)}<span><Tag>{statusLabels[item.status]}</Tag>{item.paused && <Tag>已暂停</Tag>}</span>{actions(item)}</div> }]}
+        emptyText={loadError ? "未加载待办" : "暂无待办"} /> : <List
         rowKey="id"
         loading={loading}
         dataSource={items}
@@ -174,10 +220,7 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
         pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }}
         renderItem={(item) => (
           <List.Item actions={[
-            <Button key="open" disabled={busy !== null} onClick={() => {
-              if (item.allowed_actions.includes("start")) void perform(item, "start", { expected_version: item.version });
-              else void onOpen(item);
-            }}>打开</Button>,
+            <Button key="open" disabled={busy !== null} onClick={() => void openItem(item)}>打开</Button>,
             ...item.allowed_actions.filter((action) => action !== "start").map((action) => (
               <Button key={action} loading={busy === item.id} disabled={busy !== null} onClick={() => {
                 if (["release", "transfer", "reassign", "decline"].includes(action)) openDialog(item, action as ReasonAction);
@@ -191,7 +234,7 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
             </Space>
           </List.Item>
         )}
-      />
+      />}
       <Modal
         open={!!dialog}
         title={dialog ? `${actionLabels[dialog.action]}待办` : "待办操作"}

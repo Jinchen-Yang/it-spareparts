@@ -1,5 +1,6 @@
 """询价单生命周期；待办、时间线和自定义字段仅走通用服务。"""
 
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -7,6 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, select, text
 
 from app.models.dimensions import DimCustomer, DimPart
+from app.models.fields_audience import FieldValue
 from app.models.presales import (
     PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink,
 )
@@ -17,7 +19,7 @@ from app.services.workflow.registry import Forbidden, InvalidTransition, Subject
 
 SUBJECT_TYPE = "presales_inquiry"
 _LINE_FIELDS = {"line_key", "part_id", "pn_raw", "description", "qty", "require_exact_pn",
-                "ref_offer_id", "notes", "notes_audience", "field_values"}
+                "ref_offer_id", "notes", "notes_audience", "field_values", "expected_delivery"}
 
 
 def subject(inquiry):
@@ -106,6 +108,44 @@ def _text(value, name, limit=None):
     return value
 
 
+def _date(value):
+    if isinstance(value, str):
+        try:
+            parsed = date.fromisoformat(value)
+            if parsed.isoformat() != value:
+                raise ValueError
+            return parsed
+        except ValueError:
+            raise InvalidTransition("期望交期必须为 YYYY-MM-DD 日期") from None
+    if value is not None and type(value) is not date:
+        raise InvalidTransition("期望交期必须为 YYYY-MM-DD 日期")
+    return value
+
+
+def delivery_value(line, visible_fields):
+    """旧 M7 值仅在当前用户可见时兜底；读取不写库。"""
+    if line.expected_delivery is not None:
+        return line.expected_delivery
+    for field in visible_fields:
+        if field["name"] == "期望交期" and field["value"]:
+            return _date(field["value"])
+    return None
+
+
+def _migrate_delivery(db, line, ctx, *, explicit=False):
+    subject = field_pool.Subject(SUBJECT_TYPE, f"line:{line.id}", "line")
+    field_pool._lock(db, f"field-values:{SUBJECT_TYPE}:{subject.subject_id}:line")
+    values = field_pool.read_values(db, [subject], ctx, common.bypass)[subject.subject_id]
+    legacy = [value for value in values if value["name"] == "期望交期"]
+    if not explicit:
+        line.expected_delivery = delivery_value(line, legacy)
+    # 不删除当前账号看不到的旧值，也不删除字段定义。
+    ids = [value["field_def_id"] for value in legacy]
+    if ids:
+        db.execute(delete(FieldValue).where(FieldValue.subject_type == SUBJECT_TYPE,
+            FieldValue.subject_id == subject.subject_id, FieldValue.field_def_id.in_(ids)))
+
+
 def _reference(db, line, ctx, *, allow_new=False):
     if line.ref_offer_id is None:
         line.ref_offer_revision_no = None
@@ -192,6 +232,7 @@ def _write_line(db, inquiry, data, seq, ctx, existing=None):
         line.ref_offer_revision_no = None
     line.require_exact_pn, line.ref_offer_id = exact, ref
     line.description = _text(data.get("description", line.description), "描述")
+    line.expected_delivery = _date(data.get("expected_delivery", line.expected_delivery))
     line.notes = _text(data.get("notes", line.notes), "备注")
     if "notes_audience" in data:
         line.notes_audience_rule_id = common.rule_id(db, data["notes_audience"], ctx)
@@ -207,6 +248,7 @@ def _write_line(db, inquiry, data, seq, ctx, existing=None):
     if data.get("field_values") is not None:
         field_pool.save_values(db, field_pool.Subject(SUBJECT_TYPE, f"line:{line.id}", "line"),
                                data["field_values"], ctx, anchor=anchor)
+    _migrate_delivery(db, line, ctx, explicit="expected_delivery" in data)
     return line
 
 
@@ -441,6 +483,7 @@ def close(db, inquiry_id, actor, expected_version, *, outcome, won_offer_id=None
                              by_id[response.line_id].part_id == offer.part_id
                              for response in db.scalars(select(PresalesLineResponse).where(
                                  PresalesLineResponse.line_id.in_(by_id),
+                                 PresalesLineResponse.is_draft.is_(False),
                                  PresalesLineResponse.mode == "reuse",
                                  PresalesLineResponse.ref_offer_id == offer.id)))
                 if not linked:
@@ -476,7 +519,8 @@ def copy_as_new(db, inquiry_id, actor, expected_version):
     user, ctx = _owner(db, inquiry, actor)
     source_lines = lines_for(db, inquiry.id)
     payload = [{"part_id": line.part_id, "pn_raw": line.pn_raw, "description": line.description,
-        "qty": line.qty, "require_exact_pn": line.require_exact_pn, "notes": line.notes}
+        "qty": line.qty, "require_exact_pn": line.require_exact_pn, "notes": line.notes,
+        "expected_delivery": line.expected_delivery}
         for line in source_lines]
     copied = create_draft(db, user.id, kind=inquiry.kind, customer_id=inquiry.customer_id,
         notes=inquiry.notes, lines=payload, assignee_ids=list(inquiry.assignee_ids))
