@@ -3426,15 +3426,20 @@ def _merge_manual_cost_to_line(
                 existing.updated_by = operated_by
                 changed = True
         if line.cost_source in (None, "none", "manual"):
-            line_changed = (
-                line.unit_cost_ex_tax != refill.unit_cost_ex_tax
-                or line.unit_cost_inc_tax != refill.unit_cost_inc_tax
-                or line.cost_source != "manual"
+            cost_fields = (
+                "unit_cost_ex_tax", "unit_cost_inc_tax",
+                "cost_amount_ex_tax", "cost_amount_inc_tax",
+                "cost_source", "cost_tax_basis", "unit_cost", "cost_amount",
             )
+            before_cost = tuple(getattr(line, field) for field in cost_fields)
+            # 与 maintenance_cost.recompute 的人工路径使用同一持久化契约。
+            line.cost_source = "manual"
+            line.cost_tax_basis = "ex"
             _recompute_line_amounts(line, unit_cost_ex_tax=refill.unit_cost_ex_tax,
                                     unit_cost_inc_tax=refill.unit_cost_inc_tax)
-            line.cost_source = "manual"
-            changed = line_changed or changed
+            changed = before_cost != tuple(
+                getattr(line, field) for field in cost_fields
+            ) or changed
     elif refill.reason is not None:
         if existing is not None and existing.reason != refill.reason:
             existing.reason = refill.reason
@@ -3461,6 +3466,12 @@ def _recompute_line_amounts(line: FMaintenanceLine, *,
     if line.unit_cost_inc_tax is not None:
         line.cost_amount_inc_tax = (line.unit_cost_inc_tax * effective_qty).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP)
+    # 仅完整人工证据同步兼容金额；缺量、缺侧的历史残额不能升格为已知成本。
+    if (line.cost_source == "manual" and line.cost_tax_basis in ("ex", "inc")
+            and line.qty is not None
+            and line.unit_cost_ex_tax is not None and line.unit_cost_inc_tax is not None):
+        line.unit_cost = getattr(line, f"unit_cost_{line.cost_tax_basis}_tax")
+        line.cost_amount = getattr(line, f"cost_amount_{line.cost_tax_basis}_tax")
 
 
 def _write_audit(db: Session, *, project_id: str, entity_type: str,
