@@ -73,6 +73,7 @@ from app.api import (
     substitutes,
     system_settings,
     work_items,
+    workbooks,
 )
 from app.config import check_security, get_settings
 from app.db import engine
@@ -114,6 +115,7 @@ app.include_router(audience.router, prefix=settings.api_prefix)
 app.include_router(field_pool.router, prefix=settings.api_prefix)
 app.include_router(role_templates.router, prefix=settings.api_prefix)
 app.include_router(work_items.router, prefix=settings.api_prefix)
+app.include_router(workbooks.router, prefix=settings.api_prefix)
 app.include_router(presales.router, prefix=settings.api_prefix)
 app.include_router(imports.router, prefix=settings.api_prefix)
 app.include_router(parts.router, prefix=settings.api_prefix)
