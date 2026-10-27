@@ -18,7 +18,7 @@ from app.models.dimensions import DimCustomer, DimPart
 from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer
 from app.security import UserContext
 from app.services import price_reference
-from app.services.presales import binding, candidates, common, inquiries, library, offers, visibility
+from app.services.presales import binding, candidates, common, inquiries, library, offers, visibility, part_history
 from app.services.presales.registration import register_subjects
 from app.services.resale_price_reference import PriceReferenceUnavailable
 from app.services.workflow.registry import WorkflowError
@@ -466,3 +466,9 @@ def reference(body: ReferenceInput, db: Db, ctx: Ctx):
         return {"reference": prices, "offers": library.batch(db, part_ids, ctx, owner_id=owner_id),
                 "gallery": [{"part_id": part_id} for part_id in prices]}
     return _call(db, read)
+
+
+@router.get("/parts/{part_id}/inquiries")
+def part_inquiries(part_id: int, db: Db, ctx: Ctx,
+                   page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100)):
+    return _call(db, lambda: part_history.list_lines(db, part_id, ctx, page=page, page_size=page_size))

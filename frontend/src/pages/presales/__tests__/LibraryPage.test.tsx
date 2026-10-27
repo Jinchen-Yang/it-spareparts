@@ -116,9 +116,9 @@ it("每位报价人保留主报价，展开后才显示服务端 more 中的其�
   await search();
   expect(screen.getAllByRole("button", { name: "用这条报价建询价单" })).toHaveLength(2);
   expect(screen.queryByLabelText("报价 8")).not.toBeInTheDocument();
-  fireEvent.click(screen.getAllByRole("button", { name: "展开更多（1 条）" })[0]);
+  fireEvent.click(screen.getAllByRole("button", { name: "报价详情（更多 1 条）" })[0]);
   expect(screen.getByLabelText("报价 8")).toHaveTextContent("¥80");
-  expect(screen.getAllByRole("button", { name: "用这条报价建询价单" })).toHaveLength(3);
+  expect(within(screen.getByRole("dialog")).getAllByRole("button", { name: "用这条报价建询价单" })).toHaveLength(2);
   expect(screen.queryByLabelText("报价 10")).not.toBeInTheDocument();
 });
 
@@ -137,13 +137,12 @@ it("更多报价也能展开各自的可供数量与交期，不误用主报价�
     ] }),
   ] }]);
   await search();
-  fireEvent.click(screen.getByRole("button", { name: "展开更多（1 条）" }));
+  fireEvent.click(screen.getByRole("button", { name: "报价详情（更多 1 条）" }));
   const nested = screen.getByRole("table", { name: "PN-A 更多报价" });
-  expect(within(nested).queryByText("可供数量：42")).not.toBeInTheDocument();
-  fireEvent.click(within(nested).getByRole("button", { name: "展开 PN-A" }));
-  expect(within(nested).getByText("可供数量：42")).toBeVisible();
-  expect(within(nested).getByText("交期：三个工作日")).toBeVisible();
-  expect(within(nested).queryByText("交期：主报价交期")).not.toBeInTheDocument();
+  const row = within(nested).getByLabelText("报价 8").closest("tr")!;
+  expect(row).toHaveTextContent("可供数量42");
+  expect(row).toHaveTextContent("交期三个工作日");
+  expect(row).not.toHaveTextContent("主报价交期");
 });
 
 it("主报价到期但同组旧报价仍有效时，主行提升为可引用的最新有效报价", async () => {

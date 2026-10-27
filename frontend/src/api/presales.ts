@@ -149,6 +149,7 @@ export interface Inquiry {
   notes_audience?: AudienceRuleRead;
   assignee_ids?: number[];
   created_by?: number;
+  created_by_name?: string | null;
   created_at: string;
   updated_at: string;
   submitted_at?: string | null;
@@ -164,6 +165,17 @@ export interface Inquiry {
   work_items?: InquiryWorkItem[];
   line_responses?: LineResponse[];
   field_values?: ReadFieldValue[];
+}
+
+export interface PartInquiryRecord {
+  line_id: number;
+  inquiry_id: number;
+  created_at: string;
+  created_by_name?: string | null;
+  qty: string | number;
+  status: Inquiry["status"];
+  has_quote: boolean;
+  lowest_valid_quotes: { unit_price: string | number; is_tax_inclusive: boolean | null }[];
 }
 
 export interface InquiryPage { items: Inquiry[]; total: number; page: number; page_size: number }
@@ -196,6 +208,9 @@ async function inquiryAction(id: number, action: string, body: VersionInput) {
 
 /** 返回值保持服务端过滤后的形状，不补出被受众规则删去的字段。 */
 export const presales = {
+  async partInquiries(partId: number, page = 1, signal?: AbortSignal) {
+    return (await api.get<{ items: PartInquiryRecord[]; total: number; page: number; page_size: number }>(`${root}/parts/${partId}/inquiries`, { params: { page, page_size: 20 }, signal })).data;
+  },
   async customers(q = "", signal?: AbortSignal) {
     return (await api.get<PresalesCandidate[]>(`${root}/customers`, { params: { q, limit: 20 }, signal })).data;
   },

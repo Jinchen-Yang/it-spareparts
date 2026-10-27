@@ -9,17 +9,10 @@ interface Props {
   renderEvent?: (event: SubjectEvent) => ReactNode;
 }
 
-const kindLabels: Record<string, string> = {
-  open: "创建了待办", claim: "领取了待办", start: "开始处理待办", release: "退回了待办",
-  transfer: "转交了待办", reassign: "改派了待办", complete: "完成了待办", decline: "拒绝了待办",
-  cancel: "取消了待办", cancel_subject: "取消了待办", pause: "暂停了待办", pause_subject: "暂停了待办",
-  resume: "恢复了待办", resume_subject: "恢复了待办",
-};
-
 function defaultEvent(event: SubjectEvent) {
   const actor = event.actor_name || (event.actor === null ? "系统" : `用户 ${event.actor}`);
   const reason = typeof event.payload.reason === "string" ? event.payload.reason : "";
-  return <><div>{actor} {kindLabels[event.kind] || event.kind}</div>{reason && <Typography.Text type="secondary">原因：{reason}</Typography.Text>}</>;
+  return <><div>{actor} {event.kind_label || "业务动态"}</div>{reason && <Typography.Text type="secondary">原因：{reason}</Typography.Text>}</>;
 }
 
 export default function Timeline({ subjectType, subjectId, renderEvent }: Props) {

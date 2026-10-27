@@ -28,7 +28,7 @@ def _summarize(db, inquiry_ids, ctx):
         if inquiry and _can_view(db, inquiry_id, ctx):
             view = inquiry_view(db, inquiry, ctx, detail=False)
             result[inquiry_id] = {key: view[key] for key in (
-                "inquiry_no", "kind", "status", "customer_id", "line_count", "progress"
+                "inquiry_no", "kind", "status", "customer_id", "line_count", "progress", "created_by_name", "created_at"
             ) if key in view}
     return result
 

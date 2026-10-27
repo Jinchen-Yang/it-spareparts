@@ -1,4 +1,4 @@
-import { Checkbox, Form, Input, InputNumber, Select, Space, Typography } from "antd";
+import { Checkbox, Descriptions, Form, Input, InputNumber, Select, Space, Typography } from "antd";
 import type { Offer, OfferInput } from "../../api/presales";
 import type { AudienceRule } from "../../api/audience";
 import AudienceLock from "../../components/audience/AudienceLock";
@@ -33,10 +33,9 @@ interface Props {
   disabled?: boolean;
   label?: string;
   allowNoStock?: boolean;
-  section?: "price" | "tax" | "location" | "details";
 }
 
-export default function QuoteEditor({ value, onChange, existing, disabled = false, label = "报价", allowNoStock = true, section }: Props) {
+export default function QuoteEditor({ value, onChange, existing, disabled = false, label = "报价", allowNoStock = true }: Props) {
   const now = useNow();
   const permissions = readPermissionMap();
   const supplierVisible = localStorage.getItem("role") === "admin"
@@ -49,25 +48,23 @@ export default function QuoteEditor({ value, onChange, existing, disabled = fals
       onChange={(rule) => change({ [field]: changedAudience(rule, existing?.[field]) })} />
   ) : null;
 
-  if (section === "price") return <InputNumber size="small" aria-label={`${label}单价`} min={0} max={999999999999.99} precision={2}
-    disabled={disabled || value.no_stock} value={value.unit_price == null ? null : Number(value.unit_price)}
-    onChange={(next) => change({ unit_price: next })} />;
-  if (section === "tax") return <Select size="small" aria-label={`${label}含税口径`}
-    value={value.is_tax_inclusive === true ? "inc" : value.is_tax_inclusive === false ? "ex" : "unknown"}
-    disabled={disabled || value.no_stock} options={[{ value: "unknown", label: "未声明" }, { value: "inc", label: "含税" }, { value: "ex", label: "不含税" }]}
-    onChange={(next) => change({ is_tax_inclusive: next === "unknown" ? null : next === "inc" })} />;
-  if (section === "location") return <Input size="small" aria-label={`${label}货物所在地`} disabled={disabled} maxLength={256}
-    value={value.stock_location ?? ""} onChange={(event) => change({ stock_location: event.target.value })} />;
-  return <Form layout="vertical" component="div" disabled={disabled} className={section === "details" ? "quote-details-form" : undefined}>
+  if (disabled) return <Descriptions column={1} items={[
+    { key: "price", label: "单价", children: value.no_stock ? "无货" : value.unit_price ?? "待填写" },
+    { key: "tax", label: "含税口径", children: value.is_tax_inclusive === true ? "含税" : value.is_tax_inclusive === false ? "不含税" : "未声明" },
+    ...([ ["qty_available", "可供数量"], ["stock_location", "货物所在地"], ["lead_time", "交期"],
+      ["validity_days", "有效天数"], ["supplier_id", "供应商"], ["source_key", "货源标识"], ["notes", "采购备注"] ] as const)
+      .filter(([key]) => key in value).map(([key, title]) => ({ key, label: title, children: String(value[key] ?? "—") })),
+  ]} />;
+  return <Form layout="vertical" component="div" className="presales-form">
     {allowNoStock && <Form.Item><Checkbox checked={value.no_stock} disabled={disabled}
       onChange={(event) => change({ no_stock: event.target.checked })}>无货</Checkbox></Form.Item>}
-    <Space wrap align="start" style={{ width: "100%" }}>
-      {section !== "details" && <Form.Item label="单价" required={!value.no_stock}>
+    <div className="presales-form presales-wide">
+      {<Form.Item label="单价" required={!value.no_stock}>
         <InputNumber aria-label={`${label}单价`} min={0} max={999999999999.99} precision={2}
           disabled={disabled || value.no_stock} value={value.unit_price == null ? null : Number(value.unit_price)}
           onChange={(next) => change({ unit_price: next })} />
       </Form.Item>}
-      {section !== "details" && <Form.Item label="含税口径">
+      {<Form.Item label="含税口径">
         <Select aria-label={`${label}含税口径`} value={value.is_tax_inclusive === true ? "inc" : value.is_tax_inclusive === false ? "ex" : "unknown"}
           style={{ width: 150 }} disabled={disabled || value.no_stock}
           options={[{ value: "unknown", label: "未声明" }, { value: "inc", label: "含税" }, { value: "ex", label: "不含税" }]}
@@ -78,7 +75,7 @@ export default function QuoteEditor({ value, onChange, existing, disabled = fals
           disabled={disabled || value.no_stock} value={value.qty_available == null ? null : Number(value.qty_available)}
           onChange={(next) => change({ qty_available: next })} />
       </Form.Item>
-      {section !== "details" && <Form.Item label="货物所在地">
+      {<Form.Item label="货物所在地">
         <Input aria-label={`${label}货物所在地`} disabled={disabled} maxLength={256} value={value.stock_location ?? ""}
           onChange={(event) => change({ stock_location: event.target.value })} />
       </Form.Item>}
@@ -86,8 +83,8 @@ export default function QuoteEditor({ value, onChange, existing, disabled = fals
         <Input aria-label={`${label}交期`} disabled={disabled} maxLength={256} value={value.lead_time ?? ""}
           onChange={(event) => change({ lead_time: event.target.value })} />
       </Form.Item>
-    </Space>
-    <Form.Item label="有效天数（自然日）" required>
+    </div>
+    <Form.Item className="presales-wide" label="有效天数（自然日）" required>
       <Space wrap>
         <Select aria-label={`${label}有效天数预设`} style={{ width: 150 }} disabled={disabled}
           value={[1, 3, 7, 15, 30].includes(value.validity_days ?? 1) ? value.validity_days ?? 1 : "custom"}

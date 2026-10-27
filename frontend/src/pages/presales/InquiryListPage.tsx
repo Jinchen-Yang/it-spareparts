@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Key } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, App, Button, DatePicker, Input, Pagination, Select, Tabs, Tag } from "antd";
+import { Alert, App, Button, DatePicker, Input, Drawer, Select, Segmented, Space, Table, Tabs, Tag } from "antd";
 import type { Dayjs } from "dayjs";
 import { presales, type Inquiry, type InquiryLine, type Offer } from "../../api/presales";
 import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
@@ -8,14 +8,16 @@ import { presalesWorkbooks } from "../../api/presalesWorkbooks";
 import { WorkbookExportButton } from "../../components/workbook";
 import WorkbookDialog from "./WorkbookDialog";
 import { readPermissionMap } from "../../nav";
-import DataGrid, { type DataGridColumn, type DataGridSort } from "../../components/datagrid/DataGrid";
+import type { ColumnsType } from "antd/es/table";
+import PageHeader from "../../components/PageHeader";
+type InquirySort = { key: string; dir: "asc" | "desc" };
 import { isOfferActive, useNow } from "./shared";
 import { moneyExact } from "../../utils/format";
 import "./presales.css";
 
 const statuses: Record<string, string> = { draft: "草稿", submitted: "已提交", revising: "撤回修改中", closed: "已结束" };
 const workStatuses: Record<string, string> = { pending: "待处理", in_progress: "处理中", done: "已回复", declined: "已退回", cancelled: "已取消" };
-const defaultSort: DataGridSort = { key: "updated_at", dir: "desc" };
+const defaultSort: InquirySort = { key: "updated_at", dir: "desc" };
 const serverKeys = new Set(["inquiry_no", "line_count", "status", "updated_at", "created_at"]);
 
 function lineOffers(detail: Inquiry | undefined, line: InquiryLine): Offer[] {
@@ -39,6 +41,7 @@ export default function InquiryListPage() {
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
   const [range, setRange] = useState<[Dayjs | null, Dayjs | null] | null>(null);
+  const [detailId, setDetailId] = useState<number>();
   const [items, setItems] = useState<Inquiry[]>([]);
   const [details, setDetails] = useState<Record<number, Inquiry>>({});
   const [candidates, setCandidates] = useState<WorkCandidate[]>([]);
@@ -46,7 +49,7 @@ export default function InquiryListPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const [sort, setSort] = useState<DataGridSort | null>(defaultSort);
+  const [sort, setSort] = useState<InquirySort | null>(defaultSort);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [detailError, setDetailError] = useState(false);
@@ -105,74 +108,63 @@ export default function InquiryListPage() {
   }, [details]);
   const filtered = useMemo(() => items.filter((item) => !stage || progress(item).startsWith(stage)), [items, stage, progress]);
   const exportIds = filtered.filter((item) => scope === "mine" && item.is_owner && item.kind === "sales_inquiry" && selected.includes(item.id)).map((item) => item.id);
-  const onSortChange = useCallback((value: DataGridSort | null) => { setSort(value); setPage(1); }, []);
-  const columns: DataGridColumn<Inquiry>[] = [
-    { key: "inquiry_no", title: "单号", width: 180, identity: true, type: "code", value: (r) => r.inquiry_no,
-      render: (r) => <><button className="presales-cell-link presales-mono" onClick={() => navigate(`/presales/inquiries/${r.id}`)}>{r.inquiry_no}</button>{r.kind === "proactive_offer" && <span className="presales-pill presales-pill-purple">主动报价</span>}</> },
-    { key: "customer", title: "客户", width: 180, sortable: false, value: (r) => r.customer_name },
-    { key: "pns", title: "PN（前 3 个）", width: 240, sortable: false, value: (r) => {
-      const lines = details[r.id]?.lines || [];
-      return lines.slice(0, 3).map((l) => l.pn_raw).join(" · ") + (lines.length > 3 ? ` +${lines.length - 3}` : "");
-    } },
-    { key: "line_count", title: "行数", width: 64, type: "number", align: "right", value: (r) => r.line_count },
-    { key: "status", title: "进度", width: 160, type: "rank", value: (r) => r.status, rank: ["draft", "revising", "submitted", "closed"],
-      render: (r) => <Tag title="排序按单据阶段：草稿、撤回修改、已提交、已结束">{progress(r)}</Tag> },
-    { key: "handlers", title: "处理人状态", width: 240, sortable: false, render: (row) => <span>{(details[row.id]?.work_items || []).map((item) => {
-      const userId = item.claimed_by ?? item.assignee_id;
-      const person = candidates.find((candidate) => candidate.id === userId);
-      return <Tag key={item.id}>{userId != null ? `${person?.display_name || `账号 #${userId}`} · ` : item.assignee_id === null && item.claimed_by === null ? "公共池 · " : ""}
-        {item.paused ? "已暂停" : workStatuses[item.status] || item.status}</Tag>;
-    })}</span> },
-    { key: "amount", title: "最低报价合计（含税）", width: 165, hidden: true, sortable: false, render: (r) => {
-      const detail = details[r.id]; const lines = detail?.lines || [];
-      const values = lines.map((line) => lineOffers(detail, line).filter((o) => isOfferActive(o, now) && o.is_tax_inclusive === true).map((o) => Number(o.unit_price)));
-      return lines.length && values.every((v) => v.length) ? moneyExact(values.reduce((sum, v, i) => sum + Math.min(...v) * Number(lines[i].qty), 0)) : "—";
-    } },
-    { key: "updated_at", title: "最近动态", width: 170, type: "time", value: (r) => r.updated_at,
-      render: (r) => new Date(r.updated_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) },
+  const columns: ColumnsType<Inquiry> = [
+    { key: "inquiry_no", title: "单号 / 客户", sorter: true, render: (_, row) => <><Button type="link" onClick={() => navigate(`/presales/inquiries/${row.id}`)}>{row.inquiry_no}</Button>
+      <div className="presales-muted">{row.customer_name}{row.kind === "proactive_offer" && <Tag>主动报价</Tag>}</div></> },
+    { key: "pns", title: "PN（前 3 个）", render: (_, row) => (details[row.id]?.lines ?? []).slice(0, 3).map((line) => line.pn_raw).join(" · ") },
+    { key: "line_count", title: "行数", width: 80, sorter: true, render: (_, row) => row.line_count },
+    { key: "status", title: "进度 / 处理人", width: 180, sorter: true, render: (_, row) => <><Tag>{progress(row)}</Tag><div>{(details[row.id]?.work_items ?? []).map((work) => {
+      const person = work.claimed_by ?? work.assignee_id;
+      return <div className="presales-muted" key={work.id}>{person == null ? "公共池" : candidates.find((candidate) => candidate.id === person)?.display_name ?? `账号 #${person}`} · {work.paused ? "已暂停" : workStatuses[work.status]}</div>;
+    })}</div></> },
+    { key: "updated_at", title: "最近动态", width: 170, sorter: true, defaultSortOrder: "descend", render: (_, row) => new Date(row.updated_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) },
+    { key: "actions", title: "操作", width: 170, render: (_, row) => <Space size={0} wrap><Button type="link" onClick={() => navigate(`/presales/inquiries/${row.id}`)}>打开</Button><Button type="link" onClick={() => setDetailId(row.id)}>报价概览</Button></Space> },
   ];
-  return <section className="presales-page presales-inquiry-list">
-    <div className="presales-heading"><h1>询价单</h1>
+  const detail = detailId ? details[detailId] : undefined;
+  const minimums = (detail?.lines ?? []).map((line) => lineOffers(detail, line).filter((offer) => isOfferActive(offer, now) && offer.is_tax_inclusive === true).map((offer) => Number(offer.unit_price)));
+  return <section className="presales-page">
+    <PageHeader title="询价单" subtitle="创建询价、跟进采购回复与查看报价" extra={<Space><Button onClick={() => setReload((value) => value + 1)}>刷新</Button>
+      <Button onClick={() => setImportOpen(true)}>从 Excel 新建</Button><Button type="primary" onClick={() => navigate("/presales/inquiries/new")}>新建询价</Button></Space>} />
+    <div className="presales-panel">
       <Tabs activeKey={scope} onChange={(value) => { setScope(value as typeof scope); setPage(1); }} items={[
         { key: "mine", label: "我的询价" }, { key: "shared", label: "共享给我" }, ...(supervisor ? [{ key: "all", label: "全部" }] : []),
-      ]} /><span className="presales-spacer" />
-      <Input size="small" className="presales-search" aria-label="搜索单号、客户或 PN" placeholder="单号 / 客户 / PN / 描述" allowClear value={query} onChange={(e) => setQuery(e.target.value)} />
-      <Button size="small" onClick={() => setReload((v) => v + 1)}>刷新</Button>
-      <Button size="small" onClick={() => setImportOpen(true)}>从 Excel 新建</Button>
-      <Button size="small" type="primary" onClick={() => navigate("/presales/inquiries/new")}>新建询价</Button>
+      ]} />
+      <div className="presales-toolbar">
+        <Segmented value={stage} options={[{ value: "", label: "全部状态" }, ...["草稿", "待处理", "处理中", "已回复", "已结束"].map((value) => ({ value, label: value }))]}
+          onChange={(value) => { setStage(value); setStatus(value === "草稿" ? "draft" : value === "已结束" ? "closed" : value ? "submitted" : undefined); setPage(1); }} />
+        <Input aria-label="搜索单号、客户或 PN" placeholder="单号 / 客户 / PN / 描述" allowClear value={query} style={{ width: 240 }} onChange={(event) => setQuery(event.target.value)} />
+        <Select aria-label="询价类型" allowClear placeholder="类型" style={{ width: 120 }} value={kind} options={[{ value: "sales_inquiry", label: "销售询价" }, { value: "proactive_offer", label: "主动报价" }]}
+          onChange={(value) => { setKind(value); setPage(1); }} />
+        <Select aria-label="询价状态" allowClear placeholder="单据状态" style={{ width: 125 }} value={status} options={Object.entries(statuses).map(([value, label]) => ({ value, label }))}
+          onChange={(value) => { setStatus(value); setStage(""); setPage(1); }} />
+        <DatePicker.RangePicker aria-label="最近动态日期" value={range} onChange={(value) => { setRange(value); setPage(1); }} />
+      </div>
+      <div className="presales-toolbar"><WorkbookExportButton label="合并下载" schemaName="presales_sales_summary" disabled={!exportIds.length || loading}
+        fetchSchema={() => presalesWorkbooks.getSalesSummarySchema()} onExport={(visible) => presalesWorkbooks.exportSalesSummary(exportIds, visible)} filename="销售询价汇总.xlsx" />
+        <span className="presales-muted">选择本人销售询价后按 PN 汇总下载。处理进度筛选当前页。</span></div>
+      {error && <Alert type="error" message={error} action={<Button onClick={() => setReload((value) => value + 1)}>重试</Button>} />}
+      {detailError && <Alert type="warning" message="部分处理人状态加载失败，请刷新后查看。" />}
+      <Table aria-label="询价单列表" rowKey="id" columns={columns} dataSource={filtered} loading={loading} tableLayout="fixed"
+        rowSelection={scope === "mine" ? { selectedRowKeys: selected, onChange: setSelected, getCheckboxProps: (row) => ({ "aria-label": `选择 ${row.inquiry_no}`, disabled: !row.is_owner || row.kind !== "sales_inquiry" }) } : undefined}
+        pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, showTotal: () => `本页显示 ${filtered.length} / ${items.length} 张 · 范围内共 ${total} 张` }}
+        onChange={(pagination, _filters, sorter) => {
+          const value = Array.isArray(sorter) ? sorter[0] : sorter;
+          setSort(value.order && value.columnKey ? { key: String(value.columnKey), dir: value.order === "ascend" ? "asc" : "desc" } : defaultSort);
+          setPage(value.columnKey !== sort?.key || (value.order === "ascend" ? "asc" : "desc") !== sort?.dir ? 1 : pagination.current ?? 1);
+        }} />
     </div>
-    <div className="presales-filters">
-      {["", "草稿", "待处理", "处理中", "已回复", "已结束"].map((name) => <Button size="small" shape="round" key={name} type={stage === name ? "primary" : "default"}
-        onClick={() => { setStage(name); setStatus(name === "草稿" ? "draft" : name === "已结束" ? "closed" : name ? "submitted" : undefined); setPage(1); }}>{name || "全部状态"}</Button>)}
-      <Select size="small" aria-label="询价类型" allowClear placeholder="类型" style={{ width: 110 }} value={kind}
-        options={[{ value: "sales_inquiry", label: "销售询价" }, { value: "proactive_offer", label: "主动报价" }]} onChange={(value) => { setKind(value); setPage(1); }} />
-      <Select size="small" aria-label="询价状态" allowClear placeholder="单据状态" style={{ width: 115 }} value={status}
-        options={Object.entries(statuses).map(([value, label]) => ({ value, label }))} onChange={(value) => { setStatus(value); setStage(""); setPage(1); }} />
-      <DatePicker.RangePicker size="small" aria-label="最近动态日期" value={range} onChange={(value) => { setRange(value); setPage(1); }} />
-    </div>
-    <div className="presales-filters"><WorkbookExportButton size="small" label="合并下载" schemaName="presales_sales_summary"
-      disabled={!exportIds.length || loading} fetchSchema={() => presalesWorkbooks.getSalesSummarySchema()}
-      onExport={(visible) => presalesWorkbooks.exportSalesSummary(exportIds, visible)} filename="销售询价汇总.xlsx" />
-      <span className="presales-filter-note">在「我的询价」选择销售询价后按 PN 汇总下载。处理进度筛选当前页；搜索、日期和排序由服务端处理。</span></div>
-    {detailError && <Alert type="warning" message="部分处理人状态加载失败，请刷新后查看。" />}
-    <DataGrid id="presales-inquiries" rows={filtered} columns={columns} rowKey={(r) => r.id} loading={loading} error={error}
-      selectable={scope === "mine"} selectedRowKeys={selected} onSelectedRowKeysChange={setSelected} isRowSelectable={(row) => !!row.is_owner && row.kind === "sales_inquiry"}
-      onRetry={() => setReload((v) => v + 1)} defaultSort={defaultSort} serverSort onSortChange={onSortChange} ariaLabel="询价单列表"
-      renderExpanded={(row) => <DataGrid id="presales-inquiry-summary" rows={details[row.id]?.lines || []} rowKey={(l) => l.id} ariaLabel="PN 报价状态" columns={[
-        { key: "pn", title: "PN", identity: true, type: "code", width: 180, value: (l) => l.pn_raw },
-        { key: "description", title: "描述", type: "zh", width: 350, value: (l) => l.description },
-        { key: "qty", title: "数量", type: "number", width: 70, value: (l) => l.qty },
-        { key: "quote", title: "报价状态", width: 170, render: (l) => {
-          const count = lineOffers(details[row.id], l).filter((o) => isOfferActive(o, now)).length;
-          const skipped = (details[row.id]?.line_responses || []).filter((response) => !response.is_draft && response.line_id === l.id && response.mode === "skip");
-          const drafts = (details[row.id]?.line_responses || []).filter((response) => response.line_id === l.id && response.is_draft);
-          return <>{drafts.length > 0 && <Tag>草稿（未回复）</Tag>}{count ? <span className="presales-pill presales-pill-success">{l.ref_offer_id ? "已引用 · " : ""}{count} 条有效报价</span>
-            : skipped.length ? <span className="presales-pill presales-pill-warning" title={skipped.map((response) => response.reason).filter(Boolean).join("；")}>不报 · {skipped.map((response) => response.reason).filter(Boolean).join("；")}</span>
-              : <span className="presales-pill presales-pill-warning">待报价</span>}</>;
+    <Drawer title={detail ? `${detail.inquiry_no} · 报价概览` : "报价概览"} open={!!detailId} width={640} onClose={() => setDetailId(undefined)} destroyOnHidden>
+      {detail && <><Table aria-label="PN 报价状态" rowKey="id" dataSource={detail.lines} tableLayout="fixed" pagination={{ pageSize: 10 }} columns={[
+        { title: "PN / 描述", key: "pn", render: (_, line) => <>{line.pn_raw}<div className="presales-muted">{line.description}</div></> },
+        { title: "数量", dataIndex: "qty", width: 70 },
+        { title: "报价状态", key: "state", render: (_, line) => {
+          const count = lineOffers(detail, line).filter((offer) => isOfferActive(offer, now)).length;
+          const responses = (detail.line_responses ?? []).filter((response) => response.line_id === line.id);
+          const skipped = responses.filter((response) => !response.is_draft && response.mode === "skip");
+          return <>{responses.some((response) => response.is_draft) && <Tag>草稿（未回复）</Tag>}{count ? `${line.ref_offer_id ? "已引用 · " : ""}${count} 条有效报价` : skipped.length ? `不报 · ${skipped.map((response) => response.reason).join("；")}` : "待报价"}</>;
         } },
-      ]} />} />
-    <div className="presales-list-footer"><span>本页显示 {filtered.length} / {items.length} 张 · 范围内共 {total} 张</span>
-      <Pagination size="small" current={page} pageSize={20} total={total} showSizeChanger={false} onChange={setPage} /></div>
+      ]} /><p>最低报价合计（含税）：{minimums.length && minimums.every((values) => values.length) ? moneyExact(minimums.reduce((sum, values, index) => sum + Math.min(...values) * Number(detail.lines![index].qty), 0)) : "—"}</p></>}
+    </Drawer>
     {importOpen && <WorkbookDialog mode="inquiry" onClose={() => setImportOpen(false)} onApplied={(response) => {
       const id = (response as { inquiry_id?: number })?.inquiry_id;
       if (typeof id === "number" && id > 0) navigate(`/presales/inquiries/${id}/edit`);

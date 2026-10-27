@@ -1,4 +1,4 @@
-import { useEffect, useState, type Key } from "react";
+import { useEffect, useState } from "react";
 import { Alert, App, Button, Input, InputNumber, Select, Space, Spin } from "antd";
 import { Link, useSearchParams } from "react-router-dom";
 import { presales, type ExistingChoice, type Inquiry, type InquiryLine, type Offer, type OfferInput } from "../../api/presales";
@@ -16,6 +16,8 @@ import { offerInput, quoteComplete } from "./QuoteEditor";
 import PartQuoteBadges from "./PartQuoteBadges";
 import { usePresalesError, isOfferActive, useNow, expiryLabel, flattenOffers } from "./shared";
 import QuoteGrid from "./QuoteGrid";
+import PageHeader from "../../components/PageHeader";
+import "./presales.css";
 import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
 
 function DraftFields({ level, partId, value, onChange }: {
@@ -48,7 +50,6 @@ function OfferNewContent({ draftId }: { draftId: number }) {
   const handlePresalesError = usePresalesError();
   const { choose, dialog } = useExistingOfferChoice();
   const { message } = App.useApp();
-  const [expanded, setExpanded] = useState<Key[]>([]);
   const [validity, setValidity] = useState(1);
   const [extra, setExtra] = useState(false);
   const [selected, setSelected] = useState<PartSuggestion[]>([]);
@@ -119,7 +120,6 @@ function OfferNewContent({ draftId }: { draftId: number }) {
           description: part.description, qty: 1, field_values: lineFields[part.part_id] ?? [] })) });
       setInquiry(draft);
       setValues(Object.fromEntries((draft.lines ?? []).map((line) => [line.id, values[-line.part_id!] ?? { ...offerInput(), validity_days: validity }])));
-      setExpanded([]);
       message.success("报价草稿已生成，请逐行填写后发布");
     } catch (error) { await handlePresalesError(error); }
     finally { setBusy(false); }
@@ -193,23 +193,25 @@ function OfferNewContent({ draftId }: { draftId: number }) {
   const changeValue = (lineId: number, value: OfferInput) => setValues((previous) => ({ ...previous, [lineId]: value }));
   const dayValues = lines.map((line) => values[line.id]?.validity_days ?? validity);
   const uniformDays = dayValues.length ? dayValues.every((days) => days === dayValues[0]) ? dayValues[0] : undefined : validity;
-  return <section className="quote-offer-page quote-document">
-    <header className="quote-heading"><h2>主动报价{inquiry ? ` · ${inquiry.inquiry_no}` : ""}</h2><Link to="/presales/workbench">报价工作台</Link>
-      <div className="quote-validity"><span>统一有效期</span><InputNumber size="small" aria-label="统一有效期" min={1} max={36500} precision={0}
+  return <section className="presales-page">
+    <PageHeader title="主动报价" subtitle="选择型号并逐行填写报价，发布后进入报价库" extra={<Link to="/presales/workbench">报价工作台</Link>} />
+    <div className="presales-panel">
+    <div className="presales-toolbar">
+      <div className="presales-toolbar"><span>统一有效期</span><InputNumber size="small" aria-label="统一有效期" min={1} max={36500} precision={0}
         value={uniformDays ?? null} placeholder="多值" title="修改后应用到所有报价行" disabled={busy} onChange={(days) => {
           const next = days ?? 1; setValidity(next);
           setValues((previous) => ({ ...previous, ...Object.fromEntries(lines.map((line) => [line.id,
             { ...(previous[line.id] ?? offerInput()), validity_days: next }])) }));
         }} /><span role="status">{uniformDays === undefined ? "各行有效期不同；修改后统一应用" : expiryLabel(uniformDays, now)}</span></div>
       <Button size="small" onClick={() => setExtra(!extra)}>{extra ? "收起单头信息" : "单头备注 / 自定义字段"}</Button>
-    </header>
-    {!inquiry && <div className="quote-offer-tools"><LivePartSearch mode="multiple" value={selected}
-      onChange={(parts) => { setSelected(parts); setExpanded([]); }} inputProps={{ "aria-label": "主动报价检索 PN" }}
+    </div>
+    {!inquiry && <div className="presales-toolbar"><LivePartSearch mode="multiple" value={selected}
+      onChange={(parts) => { setSelected(parts); }} inputProps={{ "aria-label": "主动报价检索 PN" }}
       renderThumb={(part) => <PartThumb partId={part.part_id} pn={part.pn_std} size={24} />}
       renderBadges={(part) => <PartQuoteBadges partId={part.part_id} />} />
-      <div><span className="quote-muted">本单报价可见性</span><AudiencePicker value={audience} onChange={setAudience} /></div>
+      <div><span className="presales-muted">本单报价可见性</span><AudiencePicker value={audience} onChange={setAudience} /></div>
     </div>}
-    {extra && !inquiry && <div className="quote-offer-extra"><Space>单头备注<AudienceLock label="单头备注" value={notesAudience} onChange={setNotesAudience} /></Space>
+    {extra && !inquiry && <div className="presales-wide"><Space>单头备注<AudienceLock label="单头备注" value={notesAudience} onChange={setNotesAudience} /></Space>
       <Input.TextArea aria-label="主动报价单头备注" value={notes} onChange={(event) => setNotes(event.target.value)} />
       <DraftFields level="header" value={headerFields} onChange={setHeaderFields} /></div>}
     <QuoteGrid id="presales-proactive-lines" proactive rows={lines.map((line) => ({ line,
@@ -221,14 +223,14 @@ function OfferNewContent({ draftId }: { draftId: number }) {
           message={inquiry && flattenOffers(library[line.part_id!] ?? []).some((offer) => isOfferActive(offer, now) && offer.reporter?.id === inquiry.created_by)
             ? "你已有该 PN 的有效报价，发布时请选择更新或另报一条" : "该 PN 存在有效报价；再次报价时可选择更新或另报一条"} />}</>,
       actions: !inquiry && <Button size="small" danger aria-label={`删除 ${line.pn_raw}`} onClick={() => setSelected((previous) => previous.filter((part) => part.part_id !== line.part_id))}>删除</Button>,
-    }))} now={now} onChange={changeValue} expandedRowKeys={expanded} onExpandedRowKeysChange={setExpanded} />
+    }))} now={now} onChange={changeValue} />
     {libraryError && <Alert type="warning" message="已有报价提示加载失败，发布时仍由服务端检查同 PN 有效报价" />}
-    <div className="quote-offer-tools"><span>定向通知账号（可选）</span><Select mode="multiple" aria-label="定向通知销售" placeholder="选择需要收到新报价通知的账号"
+    <div className="presales-toolbar"><span>定向通知账号（可选）</span><Select mode="multiple" aria-label="定向通知销售" placeholder="选择需要收到新报价通知的账号"
       value={noticeIds} disabled={busy} onChange={setNoticeIds} showSearch optionFilterProp="label" style={{ minWidth: 250 }}
       options={candidates.map((candidate) => ({ value: candidate.id, label: candidate.display_name }))} /></div>
     {candidateError && <Alert type="warning" message="通知账号加载失败，可暂不选择通知对象" />}
-    <footer className="quote-footer"><span>{lines.length} 行 · 已填写 {lines.filter((line) => quoteComplete(values[line.id] ?? {})).length} 行</span>
-      <div className="quote-footer-actions">{!inquiry ? <Button type="primary" loading={busy} disabled={!selected.length || selected.length > 200} onClick={() => void create()}>生成报价草稿</Button>
+    </div><footer className="presales-footer"><span>{lines.length} 行 · 已填写 {lines.filter((line) => quoteComplete(values[line.id] ?? {})).length} 行</span>
+      <div className="presales-toolbar">{!inquiry ? <Button type="primary" loading={busy} disabled={!selected.length || selected.length > 200} onClick={() => void create()}>生成报价草稿</Button>
         : <><Button loading={busy} disabled={!lines.some((line) => quoteComplete(values[line.id] ?? {}))} onClick={() => void saveDraft()}>保存草稿</Button>
           <Button type="primary" loading={busy} disabled={!complete} onClick={() => void publish()}>发布主动报价</Button></>}</div>
     </footer>{dialog}
