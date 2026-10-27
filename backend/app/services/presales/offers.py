@@ -341,6 +341,9 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
         decisions[line.id] = data
     for row in previous:
         if row.line_id not in decisions and row.line_version == by_line[row.line_id].version:
+            # 旧沿用没有钉住版本时不能猜成当前价，必须由采购显式重选。
+            if row.mode == "reuse" and row.ref_offer_revision_no is None:
+                continue
             decisions[row.line_id] = {"mode": row.mode, "ref_offer_id": row.ref_offer_id, "reason": row.reason}
     quoted = {offer.line_id for offer in own}
     if any(line.id not in quoted and decisions.get(line.id, {}).get("mode", "quote") == "quote"

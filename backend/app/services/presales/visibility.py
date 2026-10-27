@@ -236,12 +236,13 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
     if hidden_reporters and not owner:
         result.pop("assignee_ids", None)
     result["line_count"] = len(lines)
-    line_ids = {line.id for line in lines}
+    line_versions = {line.id: line.version for line in lines}
     handled = {offer["line_id"] for offer in offers
-               if offer["status"] == "published" and offer["line_id"] in line_ids}
+               if offer["status"] == "published" and offer["line_id"] in line_versions}
     handled.update(line_id for line_id, view in line_references.items() if view is not None)
     handled.update(row.line_id for row in responses
-                   if owner or bypass(ctx) or row.created_by == user.id)
+                   if row.line_version == line_versions[row.line_id]
+                   and (owner or bypass(ctx) or row.created_by == user.id))
     handled.update(line_id for (line_id, _), view in link_references.items() if view is not None)
     result["progress"] = {"quoted_lines": len(handled), "line_count": len(lines)}
     if detail:
