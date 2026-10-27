@@ -70,6 +70,7 @@ class LineInput(Input):
     ref_offer_id: int | None = Field(default=None, gt=0)
     notes: str | None = None
     notes_audience: AudienceInput | None = None
+    expected_delivery: date | None = None
     field_values: list[CustomValue] | None = None
 
 
@@ -221,7 +222,7 @@ def search_suppliers(db: Db, ctx: Ctx, q: str = Query(default="", max_length=256
 @router.get("/inquiries")
 def list_inquiries(db: Db, ctx: Ctx,
     kind: Literal["sales_inquiry", "proactive_offer"] | None = None,
-    scope: Literal["mine", "all"] = "mine",
+    scope: Literal["mine", "shared", "all"] = "mine",
     status: Literal["draft", "submitted", "revising", "closed"] | None = None,
     q: str = Query(default="", max_length=256),
     date_from: date | None = None, date_to: date | None = None,
@@ -255,6 +256,8 @@ def list_inquiries(db: Db, ctx: Ctx,
         query = select(PresalesInquiry, customer_name).outerjoin(
             DimCustomer, DimCustomer.id == PresalesInquiry.customer_id,
         ).order_by(order.nulls_last(), PresalesInquiry.id.desc())
+        if scope == "shared":
+            query = query.where(PresalesInquiry.created_by != user.id)
         if kind:
             query = query.where(PresalesInquiry.kind == kind)
         if status:

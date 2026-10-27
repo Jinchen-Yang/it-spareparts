@@ -16,7 +16,7 @@ from app.models.presales import (
 )
 from app.models.workbook import WorkbookOperation
 from app.models.workflow import WorkItem
-from app.services import price_reference
+from app.services import field_pool, price_reference
 from app.services.presales import common, library, offers, visibility
 from app.services.workbook.export import export_workbook
 from app.services.workbook.registry import Conflict as WorkbookConflict
@@ -175,6 +175,11 @@ def _exports_accessible(db, exports, lines, ctx):
                     return False
                 if record is None or not visibility._allowed(db, record.notes_audience_rule_id, ctx, author):
                     return False
+            for line_id, field_id in row.get("delivery_fields", []):
+                subject = field_pool.Subject("presales_inquiry", f"line:{line_id}", "line")
+                visible = field_pool.read_values(db, [subject], ctx, common.bypass)[subject.subject_id]
+                if field_id not in {field["field_def_id"] for field in visible}:
+                    return False
             for offer_id in row.get("active_offer_ids", []):
                 offer = db.get(PresalesOffer, offer_id)
                 viewers = [ctx, *(common.resolve_actor(db, inquiry.created_by)[1]
@@ -246,6 +251,8 @@ def _load(db, ids, ctx):
         .order_by(PresalesInquiryLine.id).with_for_update().execution_options(populate_existing=True)))
     if any(line.status != "active" or line.ref_offer_id is not None for line in lines):
         raise Forbidden("已删除或已引用报价的来源行不可处理")
+    for line in lines:
+        field_pool._lock(db, f"field-values:presales_inquiry:line:{line.id}:line")
     drafts = list(db.scalars(select(PresalesOffer).where(
         PresalesOffer.line_id.in_(ids), PresalesOffer.created_by == user.id,
         PresalesOffer.status == "draft").order_by(PresalesOffer.id)
@@ -444,7 +451,12 @@ def _export_scope(db, data, values, columns):
                      if line.notes and visibility._allowed(db, line.notes_audience_rule_id, ctx,
                                                           inquiries[line.inquiry_id].created_by))
     draft_keys = sorted(present.intersection(_DATA_KEYS) | ({"supplier_id"} if "supplier" in present else set()))
-    return {"line_ids": [line.id for line in lines], "notes": notes,
+    subjects = [field_pool.Subject("presales_inquiry", f"line:{line.id}", "line")
+                for line in lines if line.expected_delivery is None] if "customer_requirements" in present else []
+    legacy = field_pool.read_values(db, subjects, ctx, common.bypass)
+    delivery_fields = [[line.id, field["field_def_id"]] for line in lines
+                       for field in legacy.get(f"line:{line.id}", []) if field["name"] == "期望交期"]
+    return {"line_ids": [line.id for line in lines], "notes": notes, "delivery_fields": delivery_fields,
             "active_offer_ids": [int(match) for match in re.findall(r"^#([0-9]+)：", values["active_offers"], re.MULTILINE)]
                 if "active_offers" in present else [],
             "field_groups": sorted({column.field_group for column in columns

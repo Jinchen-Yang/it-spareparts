@@ -21,7 +21,7 @@ const serverKeys = new Set(["inquiry_no", "line_count", "status", "updated_at", 
 function lineOffers(detail: Inquiry | undefined, line: InquiryLine): Offer[] {
   // 本行已有引用时只使用钉住快照，不能用当前报价的续期或降价改写摘要。
   const pinned = new Map([...(line.linked_offers || []), ...(line.ref_offer ? [line.ref_offer] : []),
-    ...(detail?.line_responses || []).filter((response) => response.line_id === line.id && response.mode === "reuse" && response.offer)
+    ...(detail?.line_responses || []).filter((response) => !response.is_draft && response.line_id === line.id && response.mode === "reuse" && response.offer)
       .map((response) => response.offer!)].map((offer) => [offer.id, offer]));
   const current = (detail?.offers || []).filter((offer) => offer.line_id === line.id && !pinned.has(offer.id));
   return [...pinned.values(), ...current];
@@ -40,7 +40,6 @@ export default function InquiryListPage() {
   const [search, setSearch] = useState("");
   const [range, setRange] = useState<[Dayjs | null, Dayjs | null] | null>(null);
   const [items, setItems] = useState<Inquiry[]>([]);
-  const [mineIds, setMineIds] = useState<Set<number>>(new Set());
   const [details, setDetails] = useState<Record<number, Inquiry>>({});
   const [candidates, setCandidates] = useState<WorkCandidate[]>([]);
   const [selected, setSelected] = useState<Key[]>([]);
@@ -66,24 +65,10 @@ export default function InquiryListPage() {
     let disposed = false;
     setLoading(true); setError(""); setItems([]); setDetails({}); setDetailError(false);
     const selected = sort && serverKeys.has(sort.key) ? sort : defaultSort;
-    void presales.listInquiries({ scope: scope === "shared" ? "all" : scope, kind, status, page, page_size: 20,
+    void presales.listInquiries({ scope, kind, status, page, page_size: 20,
       q: search || undefined, date_from: dateFrom, date_to: dateTo,
       sort: selected.key as "updated_at", dir: selected.dir }).then(async (data) => {
       if (disposed) return;
-      if (scope === "shared") {
-        const ids = new Set<number>();
-        let minePage = 1;
-        // 只用既有权限范围识别“共享”；不通过报价人或客户字段推断身份。
-        while (!disposed) {
-          const mine = await presales.listInquiries({ scope: "mine", page: minePage, page_size: 100 });
-          mine.items.forEach((item) => ids.add(item.id));
-          if (minePage * 100 >= mine.total || !mine.items.length) break;
-          minePage++;
-        }
-        if (disposed) return;
-        setMineIds(ids);
-      }
-      // 共享页的全部前置请求成功后再重置，避免 mine 持续冲突触发无限重试。
       conflictRetried.current = false;
       setItems(data.items); setTotal(data.total);
       const rows = await Promise.allSettled(data.items.map((item) => presales.getInquiry(item.id)));
@@ -118,9 +103,7 @@ export default function InquiryListPage() {
     if (!work.length && (detail.lines || []).length && (detail.lines || []).every((line) => line.ref_offer_id)) return "已回复";
     return "待处理";
   }, [details]);
-  const filtered = useMemo(() => items.filter((item) => {
-    return (scope !== "shared" || !mineIds.has(item.id)) && (!stage || progress(item).startsWith(stage));
-  }), [items, scope, mineIds, stage, progress]);
+  const filtered = useMemo(() => items.filter((item) => !stage || progress(item).startsWith(stage)), [items, stage, progress]);
   const exportIds = filtered.filter((item) => scope === "mine" && item.is_owner && item.kind === "sales_inquiry" && selected.includes(item.id)).map((item) => item.id);
   const onSortChange = useCallback((value: DataGridSort | null) => { setSort(value); setPage(1); }, []);
   const columns: DataGridColumn<Inquiry>[] = [
@@ -170,7 +153,7 @@ export default function InquiryListPage() {
     <div className="presales-filters"><WorkbookExportButton size="small" label="合并下载" schemaName="presales_sales_summary"
       disabled={!exportIds.length || loading} fetchSchema={() => presalesWorkbooks.getSalesSummarySchema()}
       onExport={(visible) => presalesWorkbooks.exportSalesSummary(exportIds, visible)} filename="销售询价汇总.xlsx" />
-      <span className="presales-filter-note">在「我的询价」选择销售询价后按 PN 汇总下载。处理进度与共享范围筛选当前页；搜索、日期和排序由服务端处理。</span></div>
+      <span className="presales-filter-note">在「我的询价」选择销售询价后按 PN 汇总下载。处理进度筛选当前页；搜索、日期和排序由服务端处理。</span></div>
     {detailError && <Alert type="warning" message="部分处理人状态加载失败，请刷新后查看。" />}
     <DataGrid id="presales-inquiries" rows={filtered} columns={columns} rowKey={(r) => r.id} loading={loading} error={error}
       selectable={scope === "mine"} selectedRowKeys={selected} onSelectedRowKeysChange={setSelected} isRowSelectable={(row) => !!row.is_owner && row.kind === "sales_inquiry"}
@@ -181,10 +164,11 @@ export default function InquiryListPage() {
         { key: "qty", title: "数量", type: "number", width: 70, value: (l) => l.qty },
         { key: "quote", title: "报价状态", width: 170, render: (l) => {
           const count = lineOffers(details[row.id], l).filter((o) => isOfferActive(o, now)).length;
-          const skipped = (details[row.id]?.line_responses || []).filter((response) => response.line_id === l.id && response.mode === "skip");
-          return count ? <span className="presales-pill presales-pill-success">{l.ref_offer_id ? "已引用 · " : ""}{count} 条有效报价</span>
+          const skipped = (details[row.id]?.line_responses || []).filter((response) => !response.is_draft && response.line_id === l.id && response.mode === "skip");
+          const drafts = (details[row.id]?.line_responses || []).filter((response) => response.line_id === l.id && response.is_draft);
+          return <>{drafts.length > 0 && <Tag>草稿（未回复）</Tag>}{count ? <span className="presales-pill presales-pill-success">{l.ref_offer_id ? "已引用 · " : ""}{count} 条有效报价</span>
             : skipped.length ? <span className="presales-pill presales-pill-warning" title={skipped.map((response) => response.reason).filter(Boolean).join("；")}>不报 · {skipped.map((response) => response.reason).filter(Boolean).join("；")}</span>
-              : <span className="presales-pill presales-pill-warning">待报价</span>;
+              : <span className="presales-pill presales-pill-warning">待报价</span>}</>;
         } },
       ]} />} />
     <div className="presales-list-footer"><span>本页显示 {filtered.length} / {items.length} 张 · 范围内共 {total} 张</span>

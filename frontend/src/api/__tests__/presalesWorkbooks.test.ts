@@ -12,7 +12,6 @@ beforeEach(() => {
 
 describe("售前工作簿 API", () => {
   it.each([
-    ["getInquirySchema", "presales_inquiry_lines"],
     ["getQuoteSheetSchema", "presales_quote_sheet"],
   ] as const)("%s 复用通用 schema 接口", async (method, name) => {
     const controller = new AbortController();
@@ -111,5 +110,20 @@ describe("售前工作簿 API", () => {
       signal: controller.signal,
     });
     expect((http.post.mock.calls[0][1] as FormData).get("file")).toBe(file);
+  });
+});
+
+
+it("询价列清单携带当前单据，空模板也读取可见自定义列", async () => {
+  const controller = new AbortController();
+  const schema = { name: "presales_inquiry_lines", version: 1, sheets: [], instructions: [] };
+  http.get.mockResolvedValue({ data: schema });
+  expect(await presalesWorkbooks.getInquirySchema(controller.signal, 7)).toBe(schema);
+  expect(http.get).toHaveBeenLastCalledWith("/presales/workbooks/inquiry-schema", {
+    params: { inquiry_id: 7 }, signal: controller.signal,
+  });
+  await presalesWorkbooks.getInquirySchema();
+  expect(http.get).toHaveBeenLastCalledWith("/presales/workbooks/inquiry-schema", {
+    params: { inquiry_id: undefined }, signal: undefined,
   });
 });

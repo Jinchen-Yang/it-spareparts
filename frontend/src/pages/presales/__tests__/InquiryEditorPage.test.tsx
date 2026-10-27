@@ -76,7 +76,7 @@ beforeEach(() => {
 afterEach(cleanupAntd);
 
 describe("销售询价编辑", () => {
-  it("多选加入、直接引用、按原文待建档、M7 交期与多人指派组成正确提交体", async () => {
+  it("多选加入、直接引用、按原文待建档、列存储交期与多人指派组成正确提交体", async () => {
     mount();
     await addPart("PN-A");
     fireEvent.click(await screen.findByRole("button", { name: "直接引用" }));
@@ -101,8 +101,8 @@ describe("销售询价编辑", () => {
     await waitFor(() => expect(mocks.presales.submitInquiry).toHaveBeenCalledWith(9, { expected_version: 1 }));
     expect(mocks.presales.createInquiry).toHaveBeenCalledWith(expect.objectContaining({ kind: "sales_inquiry", customer_id: 5,
       notes: "尽快报价", assignee_ids: [2, 3], offer_audience: { mode: "public", user_ids: [], group_ids: [] }, lines: [
-        expect.objectContaining({ part_id: 10, qty: 4, require_exact_pn: true, ref_offer_id: 70, field_values: [
-          { field_def_id: 31, value: "三年" }, { new_name: "期望交期", value: "2026-11-01" },
+        expect.objectContaining({ part_id: 10, qty: 4, require_exact_pn: true, ref_offer_id: 70, expected_delivery: "2026-11-01", field_values: [
+          { field_def_id: 31, value: "三年" },
         ] }), expect.objectContaining({ part_id: 11, ref_offer_id: null }), expect.objectContaining({ part_id: null, pn_raw: "RAW-NEW" }),
       ] }));
     expect(mocks.getFieldTemplate).toHaveBeenCalledWith("presales_inquiry", "line", "part:10", expect.any(AbortSignal));
@@ -141,6 +141,7 @@ describe("销售询价编辑", () => {
     const data = inquiry({ notes_audience: privateRule, offer_audience: includeRule,
       field_values: [{ field_def_id: 32, name: "单头说明", value: "原说明", rule: excludeRule }] });
     data.lines![0].notes_audience = excludeRule;
+    data.lines![0].expected_delivery = "2026-11-01";
     data.lines![0].field_values = [{ field_def_id: 31, name: "质保要求", value: "一年", rule: privateRule },
       { field_def_id: 33, name: "期望交期", value: "2026-11-01", rule: includeRule }];
     mocks.getFieldTemplate.mockImplementation(async (_subject, level) => level === "line" ? [field] : [{ ...field, id: 32, name: "单头说明", level: "header" }]);
@@ -152,7 +153,8 @@ describe("销售询价编辑", () => {
     fireEvent.click(screen.getByRole("button", { name: "设置本单报价可见范围" }));
     expect(screen.getByRole("button", { name: "客户要求可见性：私密" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "PN-A 行备注可见性：不给谁看" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "PN-A 期望交期可见性：部分可见" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /PN-A 期望交期可见性/ })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("PN-A 期望交期")).toHaveValue("2026-11-01");
     expect(screen.getByRole("button", { name: "质保要求可见性：私密" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "单头说明可见性：不给谁看" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "谁可以看" }).closest(".ant-select")).toHaveTextContent("销售甲");
@@ -165,7 +167,8 @@ describe("销售询价编辑", () => {
     expect(body).not.toHaveProperty("notes_audience");
     expect(body.lines[0]).not.toHaveProperty("notes_audience");
     expect(body.field_values).toEqual([{ field_def_id: 32, value: "新说明" }]);
-    expect(body.lines[0].field_values).toEqual([{ field_def_id: 31, value: "三年" }, { field_def_id: 33, value: "2026-11-01" }]);
+    expect(body.lines[0].field_values).toEqual([{ field_def_id: 31, value: "三年" }]);
+    expect(body.lines[0].expected_delivery).toBe("2026-11-01");
   });
 
   it("撤回后的单据保留 line_key，先保存最新版本再重新提交且不重置可见性", async () => {
@@ -290,15 +293,15 @@ it("新增第二个 PN 收起已有详情，必需补充描述的原文行单独
   await addPart("PN-A");
   expect(screen.getByLabelText("PN-A 期望交期")).toBeInTheDocument();
   await addPart("PN-B");
-  expect(screen.queryByLabelText("PN-A 期望交期")).not.toBeInTheDocument();
-  expect(screen.queryByLabelText("PN-B 期望交期")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("PN-A 期望交期")).toBeVisible();
+  expect(screen.getByLabelText("PN-B 期望交期")).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "批量粘贴 PN" }));
   fireEvent.change(screen.getByRole("textbox", { name: "批量 PN" }), { target: { value: "RAW-A\nRAW-B;RAW-A;PN-A" } });
   fireEvent.click(screen.getByRole("button", { name: "按原文加入" }));
   expect(screen.getByRole("textbox", { name: "RAW-A 描述" })).toBeInTheDocument();
   expect(screen.getByRole("textbox", { name: "RAW-B 描述" })).toBeInTheDocument();
   expect(screen.getAllByRole("spinbutton")).toHaveLength(4);
-  expect(screen.queryByLabelText("PN-A 期望交期")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("PN-A 期望交期")).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "全部展开" }));
   expect(screen.getByLabelText("PN-A 期望交期")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "全部折叠" }));
@@ -314,7 +317,7 @@ it("继续加入 PN 时保留缺描述的原文行展开，已补齐的行恢复
   fireEvent.click(await screen.findByRole("button", { name: /按原文添加「RAW-A」/ }));
   await addPart("PN-A");
   expect(screen.getByRole("textbox", { name: "RAW-A 描述" })).toBeVisible();
-  expect(screen.queryByLabelText("PN-A 期望交期")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("PN-A 期望交期")).toBeVisible();
   fireEvent.change(screen.getByRole("textbox", { name: "RAW-A 描述" }), { target: { value: "已补齐规格说明" } });
   await addPart("PN-B");
   expect(screen.queryByRole("textbox", { name: "RAW-A 描述" })).not.toBeInTheDocument();

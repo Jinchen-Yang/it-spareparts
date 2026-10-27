@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, select, text
 
 from app.models.dimensions import DimCustomer, DimPart
+from app.models.fields_audience import FieldValue
 from app.models.presales import (
     PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink,
 )
@@ -121,6 +122,30 @@ def _date(value):
     return value
 
 
+def delivery_value(line, visible_fields):
+    """旧 M7 值仅在当前用户可见时兜底；读取不写库。"""
+    if line.expected_delivery is not None:
+        return line.expected_delivery
+    for field in visible_fields:
+        if field["name"] == "期望交期" and field["value"]:
+            return _date(field["value"])
+    return None
+
+
+def _migrate_delivery(db, line, ctx, *, explicit=False):
+    subject = field_pool.Subject(SUBJECT_TYPE, f"line:{line.id}", "line")
+    field_pool._lock(db, f"field-values:{SUBJECT_TYPE}:{subject.subject_id}:line")
+    values = field_pool.read_values(db, [subject], ctx, common.bypass)[subject.subject_id]
+    legacy = [value for value in values if value["name"] == "期望交期"]
+    if not explicit:
+        line.expected_delivery = delivery_value(line, legacy)
+    # 不删除当前账号看不到的旧值，也不删除字段定义。
+    ids = [value["field_def_id"] for value in legacy]
+    if ids:
+        db.execute(delete(FieldValue).where(FieldValue.subject_type == SUBJECT_TYPE,
+            FieldValue.subject_id == subject.subject_id, FieldValue.field_def_id.in_(ids)))
+
+
 def _reference(db, line, ctx, *, allow_new=False):
     if line.ref_offer_id is None:
         line.ref_offer_revision_no = None
@@ -223,6 +248,7 @@ def _write_line(db, inquiry, data, seq, ctx, existing=None):
     if data.get("field_values") is not None:
         field_pool.save_values(db, field_pool.Subject(SUBJECT_TYPE, f"line:{line.id}", "line"),
                                data["field_values"], ctx, anchor=anchor)
+    _migrate_delivery(db, line, ctx, explicit="expected_delivery" in data)
     return line
 
 

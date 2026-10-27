@@ -292,6 +292,7 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
     const canEdit = editable && (proactive ? current?.status === "published"
       : !line.ref_offer_id && (active || current?.status === "published"));
     return { line, current, value: valueFor(line), response, reused: reusedOffer(line),
+      responseDraft: !!responses[line.id] || !!savedResponse(line.id)?.is_draft,
       reporterLabel: savedResponse(line.id)?.ref_offer_id === response.ref_offer_id ? savedResponse(line.id)?.reporter_label : undefined,
       existing: library[line.part_id!] ?? [],
       disabled: !canEdit || busy, responseDisabled: !editable || !active || busy,
@@ -342,7 +343,7 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
         setResponses((previous) => ({ ...previous, [lineId]: { ...responseFor(lineId), ...patch } }));
         if (patch.mode === "reuse") setExpanded((previous) => [...new Set([...previous, lineId])]);
       }} />
-    <footer className="quote-footer"><span>已处理 <b>{handledRows.length}</b> / {required.length} 行（报价 {count("quote")} · 沿用 {count("reuse")} · 不报 {count("skip")}）</span>
+    <footer className="quote-footer"><span>填写完成 <b>{handledRows.length}</b> / {required.length} 行（报价 {count("quote")} · 沿用 {count("reuse")} · 不报 {count("skip")}）</span>
       <div className="quote-footer-actions"><Button size="small" onClick={() => setTimeline(!timeline)}>{timeline ? "隐藏动态" : "查看动态"}</Button>
         {active && <><Button disabled={busy || !editable || !task?.allowed_actions.includes("release")} onClick={() => { setReason(""); setReleaseOpen(true); }}>退回公共池</Button>
           <Button loading={busy} disabled={!editable || !required.some((line) => responseFor(line.id).mode === "quote" && quoteComplete(valueFor(line)) && !!line.part_id)} onClick={() => void save()}>保存草稿</Button>

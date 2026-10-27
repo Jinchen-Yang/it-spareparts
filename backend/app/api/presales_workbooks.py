@@ -49,6 +49,14 @@ def _error(db, exc):
     return HTTPException(status, getattr(exc, "detail", str(exc)))
 
 
+@router.get("/inquiry-schema")
+def inquiry_schema(db: Db, ctx: Ctx, inquiry_id: int | None = Query(default=None, gt=0)):
+    try:
+        return inquiry_workbook.export_schema(db, ctx, inquiry_id)
+    except (WorkflowError, WorkbookError, PermissionError, ValueError) as exc:
+        raise _error(db, exc) from exc
+
+
 @router.get("/inquiry/{inquiry_id}")
 def inquiry_export(inquiry_id: InquiryId, db: Db, ctx: Ctx,
                    visible_columns: str | None = Query(default=None, max_length=20000)):

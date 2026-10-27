@@ -295,3 +295,17 @@ it("点矩阵报价选择成交采纳，过期与旧版本不可选择，时间�
   await user.click(screen.getByRole("button", { name: "确认关单" }));
   await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 2 }));
 });
+
+it("详情草稿沿用不进入可采纳报价，草稿不报与沿用均标为未回复", async () => {
+  const reused = offer(90, { line_id: 99 });
+  const data = inquiry({ offers: [], work_items: [{ id: 1, assignee_id: 21, status: "in_progress", paused: false, version: 1 }],
+    line_responses: [{ line_id: 11, mode: "reuse", ref_offer_id: 90, offer: reused, is_draft: true, created_by: 21, work_item_id: 1, expired: false },
+      { line_id: 11, mode: "skip", reason: "尚未确认无货", is_draft: true, created_by: 22, work_item_id: 2, expired: false }] });
+  data.lines![0].expected_delivery = "2026-12-06";
+  await openPage(data);
+  expect(screen.getByText("2026-12-06")).toBeVisible();
+  expect(screen.getByText(/草稿（未回复） · 沿用报价 #90/)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "采纳 PN-8 报价 90" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "展开 PN-8" }));
+  expect(screen.getAllByText("草稿（未回复）")).toHaveLength(2);
+});

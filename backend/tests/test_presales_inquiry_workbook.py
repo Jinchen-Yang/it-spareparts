@@ -44,6 +44,9 @@ def _edit(content, fn):
 
 def _set(sheet, columns, row, **values):
     for header, value in values.items():
+        if header not in columns and header.startswith("+"):
+            columns[header] = sheet.max_column + 1
+            sheet.cell(1, columns[header], header)
         sheet.cell(row, columns[header], value)
 
 

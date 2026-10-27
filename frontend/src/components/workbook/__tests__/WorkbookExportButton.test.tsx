@@ -66,3 +66,22 @@ it("业务可在紧凑工具栏使用明确的下载按钮文案", async () => {
   fireEvent.click(screen.getByRole("button", { name: "合并下载" }));
   expect(await screen.findByRole("checkbox", { name: "备注" })).toBeInTheDocument();
 });
+
+it("自定义列与固定列默认全选，取消某列后只发送保留的列", async () => {
+  const customSchema: WorkbookSchema = { ...schema, sheets: [{ ...schema.sheets[0], custom_columns: true,
+    columns: [...schema.sheets[0].columns,
+      { key: "+质保", header: "+质保", type: "text", edit: "optional", hint: "", custom: true },
+      { key: "+包装", header: "+包装", type: "text", edit: "optional", hint: "", custom: true }],
+  }] };
+  const onExport = vi.fn().mockResolvedValue(undefined);
+  render(<WorkbookExportButton schemaName="demo" fetchSchema={vi.fn().mockResolvedValue(customSchema)} onExport={onExport} />);
+  fireEvent.click(screen.getByRole("button", { name: "导出工作簿" }));
+  expect(await screen.findByRole("checkbox", { name: "+质保" })).toBeChecked();
+  expect(screen.getByRole("checkbox", { name: "+包装" })).toBeChecked();
+  fireEvent.click(screen.getByRole("button", { name: "下载 Excel" }));
+  await waitFor(() => expect(onExport).toHaveBeenLastCalledWith({ items: ["entity_id", "pn", "qty", "note", "+质保", "+包装"] }));
+  fireEvent.click(screen.getByRole("button", { name: "导出工作簿" }));
+  fireEvent.click(await screen.findByRole("checkbox", { name: "+包装" }));
+  fireEvent.click(screen.getByRole("button", { name: "下载 Excel" }));
+  await waitFor(() => expect(onExport).toHaveBeenLastCalledWith({ items: ["entity_id", "pn", "qty", "note", "+质保"] }));
+});

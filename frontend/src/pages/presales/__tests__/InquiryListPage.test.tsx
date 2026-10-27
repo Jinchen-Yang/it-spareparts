@@ -71,7 +71,7 @@ it("表头三态排序调用服务端并回到第一页，取消时恢复最近�
 
 it("共享页复用可见范围并排除我的单据，不推断被过滤的客户和报价人", async () => {
   const shared = { ...row, id: 2, inquiry_no: "XJ002" }; delete shared.customer_id;
-  mocks.listInquiries.mockImplementation(({ scope }: { scope: string }) => Promise.resolve({ items: scope === "all" ? [row, shared] : [row], total: scope === "all" ? 2 : 1 }));
+  mocks.listInquiries.mockImplementation(({ scope }: { scope: string }) => Promise.resolve({ items: scope === "shared" ? [shared] : [row], total: 1 }));
   mocks.getInquiry.mockImplementation((id: number) => Promise.resolve(id === 2 ? shared : row));
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
   await screen.findByText("XJ001");
@@ -80,9 +80,9 @@ it("共享页复用可见范围并排除我的单据，不推断被过滤的客�
   await waitFor(() => expect(screen.queryByText("XJ001")).not.toBeInTheDocument());
 });
 
-it("共享页 mine 前置请求持续 409 时只自动重试一次，随后保留错误供手动重试", async () => {
+it("共享页 shared 请求持续 409 时只自动重试一次，随后保留错误供手动重试", async () => {
   const pending: Array<(reason: unknown) => void> = [];
-  mocks.listInquiries.mockImplementation(({ page_size }: { page_size: number }) => page_size === 100
+  mocks.listInquiries.mockImplementation(({ scope }: { scope: string }) => scope === "shared"
     ? new Promise((_, reject) => { pending.push(reject); })
     : Promise.resolve({ items: [row], total: 1 }));
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
@@ -159,4 +159,30 @@ it("引用快照在毫秒截止边界刷新摘要，不等待当前报价的续�
     view.unmount();
     vi.useRealTimers();
   }
+});
+
+it("共享分页直接请求 shared，服务端结果完整展示，不再拉取 mine 排除", async () => {
+  render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
+  await screen.findByText("XJ001");
+  mocks.listInquiries.mockClear();
+  fireEvent.click(screen.getByRole("tab", { name: "共享给我" }));
+  await waitFor(() => expect(mocks.listInquiries).toHaveBeenCalledWith(expect.objectContaining({ scope: "shared", page: 1 })));
+  expect(await screen.findByText("XJ001")).toBeVisible();
+  expect(mocks.listInquiries.mock.calls.every(([params]) => params.scope === "shared")).toBe(true);
+});
+
+it("草稿沿用和不报标为未回复，不显示为有效报价或正式不报", async () => {
+  const reused: Offer = { id: 90, inquiry_id: 9, line_id: 99, part_id: 1, status: "published", revision_no: 1, version: 1,
+    unit_price: "123", valid_from: "2020-01-01T00:00:00Z", valid_until: "2099-01-01T00:00:00Z" };
+  mocks.getInquiry.mockResolvedValue({ ...row, offers: [], work_items: [{ id: 11, assignee_id: 2, status: "in_progress", paused: false, version: 1 }],
+    lines: [11, 12].map((id) => ({ id, line_key: `line-${id}`, inquiry_id: 1, seq: id, pn_raw: `DRAFT-${id}`, qty: 1, status: "active", version: 1 })),
+    line_responses: [{ line_id: 11, mode: "reuse", ref_offer_id: 90, offer: reused, is_draft: true, created_by: 2 },
+      { line_id: 12, mode: "skip", reason: "草稿无货", is_draft: true, created_by: 2 }] });
+  render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
+  await screen.findByText("DRAFT-11 · DRAFT-12");
+  fireEvent.click(screen.getByRole("button", { name: "展开 XJ001" }));
+  expect(screen.getAllByText("草稿（未回复）")).toHaveLength(2);
+  expect(screen.queryByText(/条有效报价/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/不报 · 草稿无货/)).not.toBeInTheDocument();
+  expect(screen.getByText("处理中「已回复 0/1」")).toBeVisible();
 });

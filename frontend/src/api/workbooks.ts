@@ -14,6 +14,7 @@ export interface WorkbookColumn {
   decimals?: number | null;
   field_group?: string | null;
   mandatory?: boolean;
+  custom?: boolean;
 }
 
 export interface WorkbookSheet {

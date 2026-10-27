@@ -21,6 +21,7 @@ export interface LineInput {
   part_id?: number | null;
   pn_raw?: string | null;
   description?: string | null;
+  expected_delivery?: string | null;
   qty?: number | string;
   require_exact_pn?: boolean;
   ref_offer_id?: number | null;
@@ -113,6 +114,7 @@ export interface LineResponseInput {
 }
 
 export interface LineResponse extends LineResponseInput {
+  is_draft?: boolean;
   created_by: number;
   work_item_id: number | null;
   offer?: Offer;
@@ -200,7 +202,7 @@ export const presales = {
   async suppliers(q = "", signal?: AbortSignal) {
     return (await api.get<PresalesCandidate[]>(`${root}/suppliers`, { params: { q, limit: 20 }, signal })).data;
   },
-  async listInquiries(params: { kind?: Inquiry["kind"]; scope?: "mine" | "all"; status?: Inquiry["status"]; page?: number; page_size?: number;
+  async listInquiries(params: { kind?: Inquiry["kind"]; scope?: "mine" | "shared" | "all"; status?: Inquiry["status"]; page?: number; page_size?: number;
     q?: string; date_from?: string; date_to?: string;
     sort?: "inquiry_no" | "line_count" | "status" | "updated_at" | "created_at"; dir?: "asc" | "desc" } = {}) {
     return (await api.get<InquiryPage>(`${root}/inquiries`, { params })).data;

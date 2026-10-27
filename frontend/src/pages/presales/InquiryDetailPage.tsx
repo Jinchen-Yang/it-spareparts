@@ -39,7 +39,7 @@ function OfferPrice({ offer }: { offer: Offer }) {
 /** 引用、沿用按本行钉住快照显示，绝不补查当前报价覆盖旧价格。 */
 function offersForLine(line: InquiryLine, inquiry: Inquiry): Offer[] {
   const pinned = new Map([...(line.linked_offers ?? []), ...(line.ref_offer ? [line.ref_offer] : []),
-    ...(inquiry.line_responses ?? []).flatMap((response) => response.line_id === line.id && response.mode === "reuse" && response.offer ? [response.offer] : [])]
+    ...(inquiry.line_responses ?? []).flatMap((response) => !response.is_draft && response.line_id === line.id && response.mode === "reuse" && response.offer ? [response.offer] : [])]
     .map((offer) => [offer.id, offer]));
   return [...pinned.values(), ...(inquiry.offers ?? []).filter((offer) => !pinned.has(offer.id))].filter((offer) =>
     (offer.line_id === line.id || offer.id === line.ref_offer_id || pinned.has(offer.id) || line.linked_offer_ids?.includes(offer.id))
@@ -168,15 +168,15 @@ function InquiryDetailContent({ id }: { id: number }) {
   const canAmend = inquiry.kind === "sales_inquiry";
   const adopted = inquiry.won_offer;
   const lineForOffer = (offer: Offer) => lines.find((line) => line.id === offer.line_id || line.ref_offer_id === offer.id
-    || line.linked_offer_ids?.includes(offer.id) || line.linked_offers?.some((linked) => linked.id === offer.id) || inquiry.line_responses?.some((row) => row.line_id === line.id && row.mode === "reuse" && row.ref_offer_id === offer.id));
+    || line.linked_offer_ids?.includes(offer.id) || line.linked_offers?.some((linked) => linked.id === offer.id) || inquiry.line_responses?.some((row) => !row.is_draft && row.line_id === line.id && row.mode === "reuse" && row.ref_offer_id === offer.id));
   const closeOptions = [...new Map([...offers, ...lines.flatMap((line) => [...(line.linked_offers ?? []), ...(line.ref_offer ? [line.ref_offer] : [])]),
-    ...(inquiry.line_responses ?? []).flatMap((row) => row.mode === "reuse" && row.offer ? [row.offer] : [])]
+    ...(inquiry.line_responses ?? []).flatMap((row) => !row.is_draft && row.mode === "reuse" && row.offer ? [row.offer] : [])]
     .map((offer) => [offer.id, offer])).values()].filter((offer) => isOfferActive(offer, now) && !!lineForOffer(offer));
   const galleryItems = lines.filter((line) => line.part_id).map((line) => ({ partId: line.part_id!, pn: line.pn_raw }));
 
   const lineOffers = new Map(lines.map((line) => [line.id, offersForLine(line, inquiry)]));
   const referenceIds = (line: InquiryLine) => new Set([...(line.linked_offer_ids ?? []), ...(line.linked_offers ?? []).map((offer) => offer.id),
-    ...(line.ref_offer_id ? [line.ref_offer_id] : []), ...(inquiry.line_responses ?? []).filter((response) => response.line_id === line.id && response.mode === "reuse")
+    ...(line.ref_offer_id ? [line.ref_offer_id] : []), ...(inquiry.line_responses ?? []).filter((response) => !response.is_draft && response.line_id === line.id && response.mode === "reuse")
       .flatMap((response) => response.ref_offer_id ? [response.ref_offer_id] : [])]);
   const reporters = new Map<string, string>();
   lines.forEach((line) => (lineOffers.get(line.id) ?? []).filter((offer) => !referenceIds(line).has(offer.id)).forEach((offer) =>
@@ -214,12 +214,14 @@ function InquiryDetailContent({ id }: { id: number }) {
         <span className="sales-mono">{line.pn_raw}</span>{line.require_exact_pn && <span title="要求 PN 一致" className="sales-muted">一致</span>}</span> },
     { key: "description", title: "描述", width: 200, type: "zh", value: (line) => line.description },
     { key: "qty", title: "数量", width: 64, type: "number", value: (line) => line.qty },
+    { key: "expected_delivery", title: "期望交期", width: 120, value: (line) => line.expected_delivery },
     ...[...reporters].map(([key, title]): DataGridColumn<InquiryLine> => ({ key, title, width: 230, render: (line) => {
       const quoted = (lineOffers.get(line.id) ?? []).filter((offer) => !referenceIds(line).has(offer.id)
         && (offer.reporter ? `person:${offer.reporter.id}` : `offer:${offer.id}`) === key);
       if (quoted.length) return <span className="sales-inline">{quoted.map((offer) => renderOffer(line, offer))}</span>;
       const person = key.startsWith("person:") ? Number(key.slice(7)) : undefined;
       const response = inquiry.line_responses?.find((item) => item.line_id === line.id && item.created_by === person);
+      if (response?.is_draft) return <span>草稿（未回复） · {response.mode === "skip" ? `不报：${response.reason}` : `沿用报价 #${response.ref_offer_id}`}</span>;
       if (response?.mode === "skip") return <span title={response.reason}>不报：{response.reason}</span>;
       if (response?.mode === "reuse") return <span>沿用报价 #{response.ref_offer_id}</span>;
       const work = inquiry.work_items?.find((item) => (item.claimed_by ?? item.assignee_id) === person);
@@ -269,6 +271,7 @@ function InquiryDetailContent({ id }: { id: number }) {
           {hasValue(line.notes) && <p>行要求：{line.notes}</p>}
           <FieldValues values={line.field_values} />
           {(inquiry.line_responses ?? []).filter((response) => response.line_id === line.id && response.mode !== "quote").map((response) => <div key={`${response.work_item_id}:${line.id}`}>
+            {response.is_draft && <Tag>草稿（未回复）</Tag>}
             {response.mode === "skip" ? <p>无货 / 不报：{response.reason}</p> : <Space wrap><span>沿用报价 #{response.ref_offer_id}</span>
               {response.offer ? <><span>原报价人：{response.reporter_label ?? response.offer.reporter?.name ?? "其他采购"}</span>
                 {response.offer.valid_from && <span>原报价时间：{formatBusinessDateTime(response.offer.valid_from)}</span>}</>

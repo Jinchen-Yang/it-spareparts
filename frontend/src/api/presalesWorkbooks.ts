@@ -5,8 +5,11 @@ import type { WorkbookPreviewResult, WorkbookSchema, WorkbookVisibleColumns } fr
 const root = "/presales/workbooks";
 
 export const presalesWorkbooks = {
-  getInquirySchema(signal?: AbortSignal): Promise<WorkbookSchema> {
-    return getWorkbookSchema("presales_inquiry_lines", signal);
+  async getInquirySchema(signal?: AbortSignal, inquiryId?: number): Promise<WorkbookSchema> {
+    const { data } = await api.get<WorkbookSchema>(`${root}/inquiry-schema`, {
+      params: { inquiry_id: inquiryId }, signal,
+    });
+    return data;
   },
 
   getQuoteSheetSchema(signal?: AbortSignal): Promise<WorkbookSchema> {

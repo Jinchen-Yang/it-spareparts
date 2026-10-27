@@ -30,8 +30,8 @@ type DraftLine = {
   brand?: string | null; qty: number; require_exact_pn: boolean; ref_offer_id?: number | null;
   ref_offer_revision_no?: number | null; ref_offer?: Offer;
   notes?: string | null; notes_audience?: AudienceRule; notesVisible: boolean; field_values: CustomFieldValue[];
-  savedNotesAudience?: AudienceRuleRead; savedDeliveryAudience?: AudienceRuleRead;
-  originalFields: ReadField[]; expectedDelivery: string; deliveryFieldId?: number; deliveryAudience?: AudienceRule;
+  savedNotesAudience?: AudienceRuleRead;
+  originalFields: ReadField[]; expectedDelivery: string;
 };
 const DELIVERY_FIELD = "期望交期";
 const fieldKey = (value: { field_def_id?: number; new_name?: string }) => value.field_def_id ? `id:${value.field_def_id}` : `new:${value.new_name}`;
@@ -94,12 +94,10 @@ function EffectiveOffers({ offers, now, onReference }: { offers: Offer[]; now: n
 
 function fromLine(line: InquiryLine): DraftLine {
   const fields = (line.field_values || []) as ReadField[];
-  const delivery = fields.find((field) => field.name === DELIVERY_FIELD);
   return { key: line.line_key, line_key: line.line_key, part_id: line.part_id ?? null, pn_raw: line.pn_raw,
     description: line.description, qty: Number(line.qty), require_exact_pn: !!line.require_exact_pn,
     ref_offer_id: line.ref_offer_id, ref_offer_revision_no: line.ref_offer_revision_no, ref_offer: line.ref_offer, notes: line.notes, notesVisible: "notes" in line, field_values: editableFields(fields, true), originalFields: fields,
-    savedNotesAudience: line.notes_audience, savedDeliveryAudience: delivery?.rule,
-    expectedDelivery: delivery?.value == null ? "" : String(delivery.value), deliveryFieldId: delivery?.field_def_id };
+    savedNotesAudience: line.notes_audience, expectedDelivery: line.expected_delivery ?? "" };
 }
 
 export default function InquiryEditorPage() {
@@ -230,9 +228,8 @@ function InquiryEditorContent() {
     description: line.description ?? null, qty: line.qty, require_exact_pn: line.require_exact_pn,
     ref_offer_id: line.ref_offer_id ?? null, ...(line.notesVisible ? { notes: line.notes ?? null } : {}),
     ...(changedAudience(line.notes_audience, line.savedNotesAudience) ? { notes_audience: line.notes_audience } : {}),
-    field_values: [...serializeFields(line.field_values, line.originalFields, true),
-      ...(line.expectedDelivery || line.deliveryFieldId ? [{ ...(line.deliveryFieldId ? { field_def_id: line.deliveryFieldId } : { new_name: DELIVERY_FIELD }),
-        value: line.expectedDelivery || null, ...(changedAudience(line.deliveryAudience, line.savedDeliveryAudience) ? { rule: line.deliveryAudience } : {}) }] : [])],
+    expected_delivery: line.expectedDelivery || null,
+    field_values: serializeFields(line.field_values, line.originalFields, true),
   }));
   const save = async (submit: boolean) => {
     if (busy || blocked) return;
@@ -294,6 +291,9 @@ function InquiryEditorContent() {
     { key: "qty", title: "数量", width: 84, type: "number", value: (line) => line.qty, render: (line) => <InputNumber size="small"
       aria-label={`${line.pn_raw} 数量`} min={0.001} max={99999999999.999} precision={3} value={line.qty} disabled={busy || blocked}
       onChange={(qty) => updateLine(line.key, { qty: qty ?? 0 })} style={{ width: "100%" }} /> },
+    { key: "expected_delivery", title: "期望交期", width: 150, value: (line) => line.expectedDelivery,
+      render: (line) => <Input size="small" aria-label={`${line.pn_raw} 期望交期`} type="date" value={line.expectedDelivery}
+        disabled={busy || blocked} onChange={(event) => updateLine(line.key, { expectedDelivery: event.target.value })} /> },
     { key: "exact", title: "PN 一致", width: 88, render: (line) => <Checkbox aria-label="要求 PN 一致" checked={line.require_exact_pn}
       disabled={busy || blocked} onChange={(event) => updateLine(line.key, { require_exact_pn: event.target.checked })}>一致</Checkbox> },
     { key: "reference", title: "参考价（30 天）", width: 180, render: (line) => line.part_id ? <span className="sales-price-ref"><PriceRefBadge partId={line.part_id} /></span> : "—" },
@@ -307,7 +307,7 @@ function InquiryEditorContent() {
       <h1>{append ? "追加询价行" : inquiry ? `编辑询价 ${inquiry.inquiry_no}` : "新建询价"}</h1>
       <span className="sales-muted">{inquiry?.status === "revising" ? "撤回修改中" : "草稿"}</span>
       {!append && !blocked && <><WorkbookExportButton size="small" label="下载本单 Excel" schemaName="presales_inquiry_lines" disabled={busy}
-        fetchSchema={() => presalesWorkbooks.getInquirySchema()} filename={`${inquiry?.inquiry_no || "询价空模板"}.xlsx`}
+        fetchSchema={() => presalesWorkbooks.getInquirySchema(undefined, inquiry?.id)} filename={`${inquiry?.inquiry_no || "询价空模板"}.xlsx`}
         onExport={(visible) => inquiry ? presalesWorkbooks.exportInquiry(inquiry.id, visible) : presalesWorkbooks.exportInquiryTemplate(visible)} />
         <Button size="small" disabled={busy} onClick={() => setImportOpen(true)}>上传 Excel</Button>
         <span className="sales-muted">下载使用已保存的数据</span></>}
@@ -350,9 +350,6 @@ function InquiryEditorContent() {
         <Form.Item className="sales-full-width" label="完整描述">{line.part_id ? <div className="sales-full-description">{line.description || "—"}</div>
           : <Input.TextArea rows={2} aria-label={`${line.pn_raw} 描述`} value={line.description || ""}
             placeholder="补充规格、品牌或其他描述，便于采购建档" onChange={(event) => updateLine(line.key, { description: event.target.value })} />}</Form.Item>
-        <Form.Item label={<Space>期望交期{(!line.deliveryFieldId || line.savedDeliveryAudience) && <AudienceLock label={`${line.pn_raw} 期望交期`}
-          savedRule={line.savedDeliveryAudience} value={line.deliveryAudience} onChange={(rule) => updateLine(line.key, { deliveryAudience: rule })} />}</Space>}>
-          <Input aria-label={`${line.pn_raw} 期望交期`} type="date" value={line.expectedDelivery} onChange={(event) => updateLine(line.key, { expectedDelivery: event.target.value })} /></Form.Item>
         {line.notesVisible && <Form.Item label={<Space>行备注{(!line.line_key || line.savedNotesAudience) && <AudienceLock label={`${line.pn_raw} 行备注`} savedRule={line.savedNotesAudience} value={line.notes_audience}
           onChange={(rule) => updateLine(line.key, { notes_audience: rule })} />}</Space>}><Input.TextArea rows={1} aria-label={`${line.pn_raw} 行备注`} value={line.notes || ""} onChange={(event) => updateLine(line.key, { notes: event.target.value })} /></Form.Item>}
         <Form.Item className="sales-full-width sales-compact-fields" label="行自定义字段"><Fields key={`${line.key}:${inquiry?.version ?? "new"}`} level="line" partId={line.part_id} savedValues={line.originalFields}

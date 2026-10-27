@@ -229,7 +229,9 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
     link_references = {(link.line_id, link.offer_id): read_pin(link.offer_id, link.offer_revision_no)
                        for link in links}
     views_by_id = {view["id"]: view for view in offers}
-    for view in [*line_references.values(), *response_references.values(), *link_references.values()]:
+    for view in [*line_references.values(),
+                 *(response_references[row.id] for row in responses if not row.is_draft and row.id in response_references),
+                 *link_references.values()]:
         if view is not None and view["id"] not in views_by_id:
             offers.append(view)
             views_by_id[view["id"]] = view
@@ -268,7 +270,10 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
                 field_rules={"notes": (line.notes_audience_rule_id, author)}, bypass=bypass)[0]
             if line.id in line_rules:
                 row["notes_audience"] = line_rules[line.id]
-            row["field_values"] = values.get(f"line:{line.id}", [])
+            from app.services.presales.inquiries import delivery_value
+            visible_fields = values.get(f"line:{line.id}", [])
+            row["expected_delivery"] = delivery_value(line, visible_fields)
+            row["field_values"] = [field for field in visible_fields if field["name"] != "期望交期"]
             if line.id in line_references:
                 ref = line_references[line.id]
                 row["ref_offer"] = ref
@@ -281,7 +286,7 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
             row["field_template"] = [{"id": f.id, "name": f.name, "value_type": f.value_type,
                                        "choices": f.choices} for f in field_pool.template_for(
                 db, "presales_inquiry", "line", ctx,
-                anchor=f"part:{line.part_id}" if line.part_id else None)]
+                anchor=f"part:{line.part_id}" if line.part_id else None) if f.name != "期望交期"]
             result["lines"].append(row)
         result["offers"] = offers
         if inquiry.won_offer_id is not None:

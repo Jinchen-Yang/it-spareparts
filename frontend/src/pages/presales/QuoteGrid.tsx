@@ -15,6 +15,7 @@ export interface QuoteGridRow {
   current?: Offer;
   existing?: Offer[];
   response?: LineResponseInput;
+  responseDraft?: boolean;
   reused?: Offer;
   reporterLabel?: string;
   disabled?: boolean;
@@ -47,6 +48,7 @@ export default function QuoteGrid({ id, rows, now, proactive = false, onChange, 
       render: (row) => <span title={row.line.pn_raw}>{row.line.pn_raw}{row.line.require_exact_pn && <span className="quote-muted"> · 一致</span>}</span> },
     { key: "description", title: "描述", type: "zh", width: 205, value: (row) => row.line.description },
     { key: "qty", title: "数量", type: "number", width: 60, value: (row) => row.line.qty },
+    { key: "expected_delivery", title: "期望交期", width: 120, value: (row) => row.line.expected_delivery },
     { key: "reference", title: "参考价 采 / 售", width: 160, render: (row) => row.line.part_id ? <PriceRefBadge partId={row.line.part_id} /> : "待建档" },
     { key: "existing", title: "已有有效报价", type: "number", width: 165, value: (row) => visible(row).length,
       render: (row) => {
@@ -73,6 +75,7 @@ export default function QuoteGrid({ id, rows, now, proactive = false, onChange, 
     { key: "tax", title: "含税", width: 94, render: (row) => showQuote(row) ? editor(row, "tax") : row.reused ? taxLabel(row.reused.is_tax_inclusive) : "—" },
     { key: "location", title: "货源 / 所在地", width: 140, render: (row) => showQuote(row) ? editor(row, "location") : row.reused?.stock_location ?? "—" },
     { key: "actions", title: "操作 / 状态", width: 174, render: (row) => <Space size={4}>
+      {row.responseDraft && <Tag>草稿（未回复）</Tag>}
       {row.current?.status === "draft" && <Tag>已保存草稿</Tag>}{row.current?.status === "stale" && <Tag>基于旧版本</Tag>}
       {row.current?.status === "withdrawn" && <Tag>已撤销</Tag>}{row.actions}</Space> },
   ];

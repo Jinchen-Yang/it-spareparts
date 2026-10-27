@@ -11,7 +11,7 @@ from app.models.dimensions import DimPart
 from app.models.fields_audience import FieldDef, FieldValue
 from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer, PresalesWorkbookExport
 from app.models.workbook import WorkbookOperation
-from app.services import field_pool, price_reference
+from app.services import audience, field_pool, price_reference
 from app.services.presales import common, inquiries, library, visibility
 from app.services.workbook.export import export_workbook
 from app.services.workbook.registry import Forbidden as WorkbookForbidden
@@ -207,8 +207,8 @@ def _line_values(db, lines, ctx, *, fields=None):
         values[line.id] = {
             "pn": part.pn_std if part else None, "pn_raw": line.pn_raw, "qty": line.qty,
             "description": line.description, "require_exact_pn": line.require_exact_pn,
-            "expected_delivery": line.expected_delivery, "notes": line.notes if note else None,
-            "custom_fields": {item["name"]: item["value"] for item in fields[f"line:{line.id}"]},
+            "expected_delivery": inquiries.delivery_value(line, fields[f"line:{line.id}"]), "notes": line.notes if note else None,
+            "custom_fields": {item["name"]: item["value"] for item in fields[f"line:{line.id}"] if item["name"] != "期望交期"},
         }
     return values
 
@@ -273,12 +273,36 @@ def _custom_names(db, lines, ctx, values):
         if line.part_id is not None:
             fields.update({field.name: field for field in field_pool.template_for(
                 db, inquiries.SUBJECT_TYPE, "line", ctx, anchor=f"part:{line.part_id}")})
-    names = [field.name for field in sorted(fields.values(), key=lambda item: (item.sort, item.name, item.id))]
+    visible_names = {name for value in values.values() for name in value["custom_fields"]}
+    stored_names = set(db.scalars(select(FieldDef.name).join(FieldValue).where(
+        FieldValue.subject_type == inquiries.SUBJECT_TYPE,
+        FieldValue.subject_id.in_([f"line:{line.id}" for line in lines]))))
+    names = [field.name for field in sorted(fields.values(), key=lambda item: (item.sort, item.name, item.id))
+             if field.name != "期望交期" and (field.name in visible_names or (
+                 field.name not in stored_names and audience.filter_fields(
+                     db, [{"visible": True}], ctx, field_rules={"visible":
+                         (field.default_rule_id, field.owner_id)}, bypass=common.bypass)[0]))]
     for value in values.values():
         for name in value["custom_fields"]:
             if name not in names:
                 names.append(name)
     return names
+
+
+def export_schema(db, ctx, inquiry_id=None):
+    _, ctx = common.resolve_actor(db, ctx)
+    if inquiry_id is None:
+        if not can_access(db, ctx, None, None):
+            raise Forbidden("无权下载销售询价模板")
+        lines = []
+    else:
+        inquiry = _editable_inquiry(db, inquiry_id, ctx)
+        lines = inquiries.lines_for(db, inquiry.id)
+    names = _custom_names(db, lines, ctx, _line_values(db, lines, ctx))
+    result = INQUIRY_SCHEMA.to_dict(ctx=ctx)
+    result["sheets"][0]["columns"].extend({"key": "+" + name, "header": "+" + name,
+        "type": "text", "edit": "optional", "hint": "自定义字段", "custom": True} for name in names)
+    return result
 
 
 def _export(db, inquiry, ctx, visible_columns):
@@ -321,11 +345,14 @@ def _export(db, inquiry, ctx, visible_columns):
                               ctx=ctx, visible_columns=visible_columns, custom_fields={"lines": names})
     if inquiry is not None:
         selected = None if visible_columns is None else visible_columns.get("lines", [])
+        def exported_field(line, item):
+            return item["name"] in names or (item["name"] == "期望交期"
+                and line.expected_delivery is None and (selected is None or "expected_delivery" in selected))
         scope = {"inquiry_id": inquiry.id,
                  "fields": [[line.id, item["field_def_id"]] for line in lines
-                            for item in fields[f"line:{line.id}"] if item["name"] in names],
+                            for item in fields[f"line:{line.id}"] if exported_field(line, item)],
                  "field_authors": {f"{line.id}:{item['field_def_id']}": authors[f"{line.id}:{item['field_def_id']}"]
-                                   for line in lines for item in fields[f"line:{line.id}"] if item["name"] in names},
+                                   for line in lines for item in fields[f"line:{line.id}"] if exported_field(line, item)},
                  "notes": [line.id for line in lines if values[line.id].get("notes")
                            and (selected is None or "notes" in selected)],
                  "offers": sorted({offer["id"] for rows in offers.values() for row in rows

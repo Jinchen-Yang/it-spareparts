@@ -314,3 +314,16 @@ it("最新报价先到期时保留同组仍有效的旧报价供沿用", async (
   fireEvent.click(await screen.findByText(/报价 #10/, { selector: ".ant-select-item-option-content span" }));
   expect(screen.getByRole("button", { name: "回复给销售" })).toBeEnabled();
 });
+
+it("Excel 草稿处理在工作台明确标为未回复，填写完成数独立显示", async () => {
+  inquiry = { ...inquiry, line_responses: [
+    { line_id: 11, mode: "reuse", ref_offer_id: 99, offer: activeQuote(), is_draft: true, created_by: 7, work_item_id: 71, expired: false },
+    { line_id: 12, mode: "skip", reason: "草稿不报", is_draft: true, created_by: 7, work_item_id: 71, expired: false },
+  ] };
+  inquiry.lines![0].expected_delivery = "2026-12-06";
+  process();
+  expect(await screen.findAllByText("草稿（未回复）")).toHaveLength(2);
+  expect(screen.getByText("2026-12-06")).toBeVisible();
+  expect(screen.getByText(/填写完成/)).toHaveTextContent("2 / 2");
+  expect(screen.queryByText(/已回复/)).not.toBeInTheDocument();
+});
