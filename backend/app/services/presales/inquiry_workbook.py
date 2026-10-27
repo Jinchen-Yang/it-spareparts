@@ -133,6 +133,9 @@ def _exports_accessible(db, ctx, inquiry_id):
             stored = db.scalar(select(FieldValue.id).where(
                 FieldValue.subject_type == inquiries.SUBJECT_TYPE,
                 FieldValue.subject_id == f"line:{line_id}", FieldValue.field_def_id == field_id))
+            # 旧模板把交期混记在 fields 中；仅豁免已迁移删除的交期，其他字段保持原判权。
+            if stored is None and db.scalar(select(FieldDef.name).where(FieldDef.id == field_id)) == "期望交期":
+                continue
             author = scope.get("field_authors", {}).get(f"{line_id}:{field_id}")
             # 作者清空自己的值不撤销其历史可见性；被他人改成私密仍须拒绝。
             if stored is not None or (author != ctx.user_id and not common.bypass(ctx)):
@@ -346,8 +349,7 @@ def _export(db, inquiry, ctx, visible_columns):
     if inquiry is not None:
         selected = None if visible_columns is None else visible_columns.get("lines", [])
         def exported_field(line, item):
-            return item["name"] in names or (item["name"] == "期望交期"
-                and line.expected_delivery is None and (selected is None or "expected_delivery" in selected))
+            return item["name"] != "期望交期" and item["name"] in names
         scope = {"inquiry_id": inquiry.id,
                  "fields": [[line.id, item["field_def_id"]] for line in lines
                             for item in fields[f"line:{line.id}"] if exported_field(line, item)],

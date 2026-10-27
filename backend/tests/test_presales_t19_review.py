@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models.fields_audience import FieldValue
+from app.models.presales import PresalesWorkbookExport
 from app.services import field_pool
 from app.services.presales import common, inquiries, inquiry_workbook, quote_workbook, offers, visibility
 from app.services.presales.workbook_registration import register_workbooks
@@ -212,6 +213,11 @@ def test_legacy_delivery_export_rechecks_m8_after_rule_changes(db, presales_user
     subject = field_pool.Subject(inquiries.SUBJECT_TYPE, f'line:{line.id}', 'line')
     field_pool.save_values(db, subject, [{'field_def_id': field.id, 'value': '2026-12-10'}], boss_ctx)
     content = inquiry_workbook.export_inquiry(db, inquiry.id, _ctx(db, owner))
+    # T20 新导出不再记录交期；显式构造旧范围，继续验证尚存旧值的 M8 保护。
+    exported = db.scalar(select(PresalesWorkbookExport))
+    exported.scope = {**exported.scope, 'fields': [[line.id, field.id]],
+        'field_authors': {f'{line.id}:{field.id}': presales_users.boss.id}}
+    db.flush()
     field_pool.save_values(db, subject, [{'field_def_id': field.id, 'value': '2026-12-10',
         'rule': {'mode': 'private'}}], boss_ctx)
     from app.services.workbook.registry import Forbidden
@@ -228,6 +234,11 @@ def test_quote_legacy_delivery_export_rechecks_m8_after_rule_changes(db, quote_d
     field_pool.save_values(db, subject, [{'new_name': '期望交期', 'value': '2026-12-10'}], owner_ctx)
     field = field_pool.list_defs(db, inquiries.SUBJECT_TYPE, 'line', owner_ctx)[0]
     content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
+    # 旧导出的交期值仍存在时，收窄 M8 规则仍须拒绝。
+    exported = db.scalar(select(PresalesWorkbookExport))
+    exported.scope = {**exported.scope, 'rows': [
+        {**row, 'delivery_fields': [[line.id, field.id]]} for row in exported.scope['rows']]}
+    db.flush()
     field_pool.save_values(db, subject, [{'field_def_id': field.id, 'value': '2026-12-10',
         'rule': {'mode': 'private'}}], owner_ctx)
     from app.services.workbook.registry import Forbidden
