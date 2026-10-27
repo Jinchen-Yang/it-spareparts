@@ -13,8 +13,12 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     version: "1.41.0",
-    date: "2026-10-27",
-    items: ["维保：新增领用与返还跨项目搜索（PN/SN/快递单号/备注），AI 助手可直接查询"],
+    date: "2026-10-28",
+    items: [
+      "维保：新增领用与返还跨项目搜索（PN/SN/快递单号/备注），AI 助手可直接查询",
+      "维保数据看板：项目对比导出补上期间下单量、期间下单单数",
+      "维保工作簿：手工补价后成本不再显示为未知；上传领用工作簿时，排队期间权限变化会被重新核验",
+    ],
   },
   {
     version: "1.40.1",
