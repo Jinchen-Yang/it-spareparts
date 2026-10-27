@@ -26,6 +26,7 @@ import json
 import logging
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
@@ -6369,13 +6370,14 @@ def apply_project_master_v2(
     operated_by: str,
     import_batch_id: str,
     user_ctx: UserContext | None = None,
+    reauthorize: Callable[[], UserContext] | None = None,
 ) -> dict:
     # 本服务拥有整本事务及 commit；所有写入/flush（含下游原语与回执）
     # 的约束失败都必须回滚，不能把 failed Session 或数据库 500 留给调用方。
     try:
         return _apply_project_master_v2(
             db, plan, operated_by=operated_by, import_batch_id=import_batch_id,
-            user_ctx=user_ctx,
+            user_ctx=user_ctx, reauthorize=reauthorize,
         )
     except IntegrityError as exc:
         db.rollback()
@@ -6407,7 +6409,9 @@ def _apply_project_master_v2(
     operated_by: str,
     import_batch_id: str,
     user_ctx: UserContext | None = None,
+    reauthorize: Callable[[], UserContext] | None = None,
 ) -> dict:
+    # 可信内部调用可省略回调；HTTP 06 修改由调用者提供当前授权核验。
     # All mutations deliberately happen on this one Session transaction.
     apply_operation_key = _v2_apply_operation_key(plan, operated_by)
     if apply_operation_key is not None:
@@ -6582,6 +6586,8 @@ def _apply_project_master_v2(
                     "idempotency_conflict",
                     "工作簿应用回执与当前请求不一致，请重新下载",
                 )
+            if reauthorize is not None:
+                reauthorize()
             stored_result = _v2_stored_apply_result(db, receipt)
             db.commit()
             if stored_result is not None:
@@ -6656,6 +6662,9 @@ def _apply_project_master_v2(
     if current_merges != plan.site_issue_merges:
         raise WorkbookError("stale_site_issue_merge",
             "领用单合并对象、明细或单头已变化，本次未写入；请重新校验并核对合并计划后再应用")
+    if reauthorize is not None:
+        # 事实和合单锁已取得，在整本首次写入前重读当前资格。
+        user_ctx = reauthorize()
     if plan.project_note_change is not None:
         from app.services import maintenance_project_catalog as catalog
 
@@ -7516,5 +7525,8 @@ def _apply_project_master_v2(
             operated_by=operated_by,
             operated_at=receipt.created_at,
         ))
+    if reauthorize is not None:
+        # 混合工作簿可能在后续 sheet 等锁，提交前再次核验；拒绝则整本回滚。
+        reauthorize()
     db.commit()
     return result
