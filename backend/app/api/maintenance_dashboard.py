@@ -787,17 +787,34 @@ def export(
             db, filters, include_amounts=visible,
             ratio=ratio if visible else None,
         )
+        # M01 期间下单与 /orders 同参同集（不传 q）；数量域，任何角色都给。
+        orders = consumption.period_orders(
+            db, start=filters.start, end=filters.end, projects=filters.projects,
+        )
+        orders_by_project = {
+            row["project_id"]: row for row in orders["rows"]
+        }
         header, columns = _project_export_columns(visible)
         # 静态审查补充（§106）：混合单位按 项目×单位 展开——数量/率用本桶
         # 值，金额不重复父项总额（单位内已估金额；待估单位留空）。单一单位
-        # 行保持原样。
+        # 行保持原样。下单并入同单位行（B-F09）。
         data = []
         for row in rows:
             buckets = row.get("unit_breakdown") or []
+            items: list[dict] = []
+            unit_keys: list[object] = []
             if len(buckets) <= 1:
                 item = dict(row)
                 item["_unit_label"] = _unit_label_of(row)
-                data.append(item)
+                items.append(item)
+                # 空桶是「项目无单位事实」，不是「待核」桶：用哨兵区分。
+                unit_keys.append(
+                    buckets[0].get("unit") if buckets else _NO_UNIT
+                )
+                data.extend(_merge_project_orders(
+                    row, items, unit_keys,
+                    orders_by_project.get(row["project_id"]),
+                ))
                 continue
             valuation = dict(row.get("valuation") or {})
             main_by_unit = {
@@ -872,7 +889,12 @@ def export(
                             unit_domains[domain] = merged
                         unit_valuation["domains"] = unit_domains
                     item["valuation"] = unit_valuation
-                data.append(item)
+                items.append(item)
+                unit_keys.append(unit)
+            data.extend(_merge_project_orders(
+                row, items, unit_keys,
+                orders_by_project.get(row["project_id"]),
+            ))
     elif kind == "parts":
         rows = dash.build_part_rows(
             db, filters, include_amounts=visible,
@@ -1014,6 +1036,9 @@ def export(
 
 ExportColumn = tuple[str, str | None, bool]  # (标签, 取值路径或常量列, 是否数值)
 
+# 项目对比行没有任何单位事实（空桶）；与「待核」桶（unit=None）区分。
+_NO_UNIT = object()
+
 
 def _unit_label_of(row: dict) -> str:
     """单位列显示（B-F09/M12）：单一单位照写；仅待核写「待核」；混合「混合」。"""
@@ -1026,6 +1051,45 @@ def _unit_label_of(row: dict) -> str:
     if len(breakdown) == 1 and breakdown[0].get("unit") is None:
         return "待核"
     return "混合"
+
+
+def _merge_project_orders(
+    project_row: dict,
+    items: list[dict],
+    unit_keys: list[object],
+    order: dict | None,
+) -> list[dict]:
+    """项目×单位导出行并入 M01 期间下单（B-F09，数量绝不跨单位相加）。
+
+    - 下单量只落单位相同的行；项目对比行没有该单位时追加一行（项目名称/
+      编码/业务类型照填，其他数量列与金额列留空，不是 0）。
+    - 去重单数不可相加：每个项目只在首行写一次，其余行留空；无下单写 0。
+    - 无制单日期下单不入期间（与 /orders 页面列同口径）。
+    """
+    order_by_unit = {
+        entry.get("unit"): entry
+        for entry in (order or {}).get("unit_breakdown", [])
+    }
+    covered = {unit for unit in unit_keys if unit is not _NO_UNIT}
+    for item, unit in zip(items, unit_keys):
+        entry = order_by_unit.get(unit) if unit is not _NO_UNIT else None
+        item["order_qty"] = (entry or {}).get("order_qty", "0.000")
+        item["order_count"] = None
+    for unit in dash.sorted_unit_keys(
+        unit for unit in order_by_unit if unit not in covered
+    ):
+        items.append({
+            "project_id": project_row["project_id"],
+            "project_code": project_row["project_code"],
+            "display_name": project_row["display_name"],
+            "business_type": project_row["business_type"],
+            "_unit_label": unit or "待核",
+            "order_qty": order_by_unit[unit].get("order_qty", "0.000"),
+            "order_count": None,
+        })
+    if items:
+        items[0]["order_count"] = (order or {}).get("order_count", 0)
+    return items
 
 
 def _cell(row: dict, path: str):
@@ -1068,6 +1132,8 @@ def _project_export_columns(visible: bool) -> tuple[list[str], list[ExportColumn
         ("项目名称", "display_name", False),
         ("业务类型", "business_type", False),
         ("单位", "_unit_label", False),
+        ("期间下单量（原qty）", "order_qty", True),
+        ("期间下单单数", "order_count", True),
         ("返件实收合计", "receipt_qty", True),
         ("其中坏件实收", "bad_receipt_qty", True),
         ("其中废品", "scrap_receipt_qty", True),
