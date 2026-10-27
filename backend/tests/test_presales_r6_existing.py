@@ -147,7 +147,8 @@ def test_explicit_update_moves_authority_and_filters_original_public_views(db, r
     _, other = common.resolve_actor(db, users.other.id)
     assert library.batch(db, [users.part.id], other)[users.part.id] == []
     old_view = visibility.inquiry_view(db, original, other)
-    assert not old_view["offers"]
+    assert [row["unit_price"] for row in old_view["offers"]] == [Decimal("100.00")]
+    assert all("latest" not in row for row in old_view["offers"])
     assert library.boost_part_ids(db, users.part.pn_std, other) == []
     results = library.search(db, users.part.pn_std, other)
     matched = next(row for row in results if row["part_id"] == users.part.id)
@@ -198,15 +199,20 @@ def test_original_line_keeps_each_source_link_after_separate_cross_inquiry_updat
     _, sales = common.resolve_actor(db, users.other.id)
     original_view = visibility.inquiry_view(db, original, sales)
     line_view = next(row for row in original_view["lines"] if row["id"] == original_line.id)
-    expected_ids = {first.id} if restricted else {first.id, second.id}
+    expected_ids = {first.id, second.id}
     assert set(line_view["linked_offer_ids"]) == expected_ids
     assert {row["id"] for row in original_view["offers"]} == expected_ids
-    assert {row["unit_price"] for row in original_view["offers"]} == (
-        {Decimal("80.00")} if restricted else {Decimal("80.00"), Decimal("70.00")})
+    assert {row["unit_price"] for row in original_view["offers"]} == {Decimal("100.00"), Decimal("200.00")}
+    by_id = {row["id"]: row for row in original_view["offers"]}
+    assert by_id[first.id]["latest"]["unit_price"] == Decimal("80.00")
+    if restricted:
+        assert "latest" not in by_id[second.id]
+    else:
+        assert by_id[second.id]["latest"]["unit_price"] == Decimal("70.00")
     owner_view = visibility.inquiry_view(db, original, common.resolve_actor(db, users.buyer.id)[1])
     owner_line = next(row for row in owner_view["lines"] if row["id"] == original_line.id)
     assert set(owner_line["linked_offer_ids"]) == {first.id, second.id}
-    assert {row["unit_price"] for row in owner_view["offers"]} == {Decimal("80.00"), Decimal("70.00")}
+    assert {row["unit_price"] for row in owner_view["offers"]} == {Decimal("100.00"), Decimal("200.00")}
 
 
 def test_expired_quote_does_not_require_repeat_choice(db, r6_actors, monkeypatch):

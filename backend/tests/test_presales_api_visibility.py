@@ -66,7 +66,8 @@ def _quoted(db, users, *, rule=None, whole=None):
         data.update(supplier_audience=rule, reporter_audience=rule, notes_audience=rule)
     offer = offers.save_draft(db, inquiry.id, inquiries.lines_for(db, inquiry.id)[0].id,
                              users.buyer.id, data, expected_version=inquiry.version)
-    offers.reply(db, inquiry.id, users.buyer.id, expected_version=inquiry.version)
+    offers.reply(db, inquiry.id, users.buyer.id,
+        expected_version=inquiry.version, on_existing="new")
     db.commit()
     return inquiry, offer
 
@@ -249,7 +250,7 @@ def test_supervisor_can_manage_team_fields_and_public_groups(db, users):
     assert group.status_code == 201, group.text
 
 
-def test_public_pool_claimant_hidden_with_reporter_in_detail_and_timeline(db, users):
+def test_public_pool_owner_sees_claimant_while_other_sales_cannot(db, users):
     inquiry = inquiries.create_draft(db, users.seller.id, lines=[{"part_id": users.part.id}])
     inquiries.submit(db, inquiry.id, users.seller.id, inquiry.version)
     item = work_items.list_by_subject(db, Subject("presales_inquiry", inquiry.id), users.seller.id)[0]
@@ -262,9 +263,14 @@ def test_public_pool_claimant_hidden_with_reporter_in_detail_and_timeline(db, us
     ctx = _ctx(db, users.seller)
     detail = visibility.inquiry_view(db, inquiry, ctx)
     assert "reporter" not in detail["offers"][0]
-    assert "assignee_ids" not in detail
-    assert "assignee_id" not in detail["work_items"][0]
-    assert "claimed_by" not in detail["work_items"][0]
+    assert detail["assignee_ids"] == []
+    assert detail["work_items"][0]["assignee_id"] == users.buyer.id
+    assert detail["work_items"][0]["claimed_by"] == users.buyer.id
+    assert detail["work_items"][0]["status"] == "done"
+    other_detail = visibility.inquiry_view(db, inquiry, _ctx(db, users.other))
+    assert "reporter" not in other_detail["offers"][0]
+    assert "assignee_ids" not in other_detail
+    assert other_detail["work_items"] == []
     for row in events.list_events(db, Subject("presales_inquiry", inquiry.id), ctx):
         if row.actor is None:
             assert row.work_item_id is None

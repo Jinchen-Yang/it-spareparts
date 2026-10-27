@@ -59,14 +59,17 @@ def _inquiry(db, actors, *, kind="proactive_offer", line_count=1):
 
 def _draft(db, inquiry, line, actor, **data):
     return offers.save_draft(db, inquiry.id, line.id, actor.id,
-        {"unit_price": "100.25", "validity_days": 3, **data}, expected_version=inquiry.version)
+        {"unit_price": "100.25", "validity_days": 3,
+         **({"notes": "供应商暂无货"} if data.get("no_stock") else {}), **data},
+        expected_version=inquiry.version)
 
 
 def _published(db, actors, monkeypatch, **data):
     monkeypatch.setattr(common, "now", lambda: FIXED)
     inquiry, lines = _inquiry(db, actors)
     draft = _draft(db, inquiry, lines[0], actors.buyer, **data)
-    result = offers.publish_proactive(db, inquiry.id, actors.buyer.id, expected_version=inquiry.version)
+    result = offers.publish_proactive(db, inquiry.id, actors.buyer.id,
+        expected_version=inquiry.version, on_existing="new")
     return inquiry, result[0]
 
 
@@ -106,7 +109,10 @@ def test_publish_update_renew_withdraw_appends_complete_snapshots(db, actors, mo
         PresalesOfferRevision.offer_id == offer.id).order_by(PresalesOfferRevision.revision_no)))
     assert history[0].snapshot["unit_price"] == "100.25"
     assert history[1].snapshot["unit_price"] == "102.50"
-    assert set(history[1].snapshot) == set(PresalesOffer.__table__.columns.keys())
+    assert set(history[1].snapshot) == set(PresalesOffer.__table__.columns.keys()) | {"_inquiry"}
+    assert history[1].snapshot["_inquiry"]["id"] == inquiry.id
+    assert history[1].snapshot["_inquiry"]["created_by"] == actors.buyer.id
+    assert history[1].snapshot["_inquiry"]["offer_audience_rule_id"] == inquiry.offer_audience_rule_id
     assert history[1].snapshot["supplier_id"] == actors.supplier.id
     assert history[1].snapshot["notes"] == "原备注"
     assert history[1].snapshot["is_tax_inclusive"] is True
@@ -126,17 +132,19 @@ def test_library_expires_at_end_microsecond_and_next_midnight(db, actors, monkey
     assert library.batch(db, ids, actors.sales.id, now=offer.valid_until + timedelta(microseconds=1))[actors.part.id] == []
 
 
-def test_repeat_proactive_quote_updates_existing_same_source_and_keeps_other_sources(db, actors, monkeypatch):
+def test_explicit_repeat_update_keeps_identity_and_explicit_new_keeps_other_sources(db, actors, monkeypatch):
     _, first = _published(db, actors, monkeypatch, source_key="stock-A")
     inquiry, lines = _inquiry(db, actors)
     _draft(db, inquiry, lines[0], actors.buyer, source_key="stock-A", unit_price="90.00")
-    repeated = offers.publish_proactive(db, inquiry.id, actors.buyer.id, expected_version=inquiry.version)
+    repeated = offers.publish_proactive(db, inquiry.id, actors.buyer.id,
+        expected_version=inquiry.version, on_existing="update", existing_offer_id=first.id)
     assert repeated[0].id == first.id and first.revision_no == 2
-    assert first.unit_price == Decimal("90.00") and lines[0].ref_offer_id == first.id
+    assert first.unit_price == Decimal("90.00") and first.line_id == lines[0].id
     assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 1
     other, rows = _inquiry(db, actors)
     _draft(db, other, rows[0], actors.buyer, source_key="stock-B")
-    second = offers.publish_proactive(db, other.id, actors.buyer.id, expected_version=other.version)[0]
+    second = offers.publish_proactive(db, other.id, actors.buyer.id,
+        expected_version=other.version, on_existing="new")[0]
     assert second.id != first.id
 
 
@@ -154,30 +162,31 @@ def test_concurrent_repeat_proactive_quotes_are_serialized(db, actors, monkeypat
     def publish(info):
         with SessionLocal() as other_db:
             barrier.wait(timeout=10)
-            result = offers.publish_proactive(other_db, info[0], user_id, expected_version=info[1])
+            result = offers.publish_proactive(other_db, info[0], user_id,
+                expected_version=info[1], on_existing="new")
             offer_id = result[0].id
             other_db.commit()
             return offer_id
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(publish, pending))
-    assert len(set(results)) == 1
+    assert len(set(results)) == 2
     db.expire_all()
-    assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 1
-    current = db.get(PresalesOffer, results[0])
-    assert current.revision_no == 2
+    assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 2
+    assert all(db.get(PresalesOffer, offer_id).revision_no == 1 for offer_id in results)
 
 
-def test_same_batch_repeated_part_and_source_merge_before_header_is_published(db, actors, monkeypatch):
+def test_same_batch_repeated_part_and_source_publish_independent_quotes(db, actors, monkeypatch):
     monkeypatch.setattr(common, "now", lambda: FIXED)
     inquiry, lines = _inquiry(db, actors, line_count=2)
     first = _draft(db, inquiry, lines[0], actors.buyer, source_key="same", unit_price="100.00")
-    _draft(db, inquiry, lines[1], actors.buyer, source_key="same", unit_price="88.00")
+    second = _draft(db, inquiry, lines[1], actors.buyer, source_key="same", unit_price="88.00")
     result = offers.publish_proactive(db, inquiry.id, actors.buyer.id, expected_version=inquiry.version)
-    assert [offer.id for offer in result] == [first.id]
-    assert first.unit_price == Decimal("88.00") and first.revision_no == 2
-    assert lines[1].ref_offer_id == first.id
-    assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 1
+    assert {offer.id for offer in result} == {first.id, second.id}
+    assert first.unit_price == Decimal("100.00") and first.revision_no == 1
+    assert second.unit_price == Decimal("88.00") and second.revision_no == 1
+    assert lines[1].ref_offer_id is None
+    assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 2
 
 
 def test_post_binding_multi_part_publish_uses_consistent_lock_order(db, actors, monkeypatch):
@@ -205,17 +214,19 @@ def test_post_binding_multi_part_publish_uses_consistent_lock_order(db, actors, 
         with SessionLocal() as other_db:
             other_db.execute(text("SET LOCAL lock_timeout = '5s'"))
             barrier.wait(timeout=10)
-            result = offers.publish_proactive(other_db, info[0], user_id, expected_version=info[1])
+            result = offers.publish_proactive(other_db, info[0], user_id,
+                expected_version=info[1], on_existing="new")
             ids = {offer.id for offer in result}
             other_db.commit()
             return ids
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(publish, pending))
-    assert results[0] == results[1]
+    assert len(results[0]) == len(results[1]) == 2
+    assert results[0].isdisjoint(results[1])
     db.expire_all()
     current = list(db.scalars(select(PresalesOffer)))
-    assert len(current) == 2 and all(offer.revision_no == 2 for offer in current)
+    assert len(current) == 4 and all(offer.revision_no == 1 for offer in current)
 
 
 def test_repeat_publish_conflicts_when_original_header_is_locked(db, actors, monkeypatch):
@@ -228,7 +239,8 @@ def test_repeat_publish_conflicts_when_original_header_is_locked(db, actors, mon
         common.lock_inquiry(closer, ids[0])
         with SessionLocal() as publisher:
             with pytest.raises(Conflict):
-                offers.publish_proactive(publisher, ids[1], ids[3], expected_version=ids[2])
+                offers.publish_proactive(publisher, ids[1], ids[3], expected_version=ids[2],
+                    on_existing="update", existing_offer_id=ids[5])
             publisher.rollback()
         closer.rollback()
     db.expire_all()
@@ -273,7 +285,8 @@ def test_reopened_handler_reuses_own_line_and_source_quote(db, actors, monkeypat
     work_items.open_items(db, Subject("presales_inquiry", inquiry.id),
         [actors.buyer.id], "presales_inquiry", actors.sales.id)
     _draft(db, inquiry, lines[0], actors.buyer, source_key="same", unit_price="88.00")
-    result = offers.reply(db, inquiry.id, actors.buyer.id, expected_version=inquiry.version)
+    result = offers.reply(db, inquiry.id, actors.buyer.id,
+        expected_version=inquiry.version, on_existing="update", existing_offer_id=original.id)
     assert [row.id for row in result] == [original.id]
     assert original.unit_price == Decimal("88.00") and original.revision_no == 2
     assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 1
@@ -303,18 +316,18 @@ def test_default_source_separates_suppliers(db, actors, monkeypatch):
     inquiry, lines = _inquiry(db, actors)
     _draft(db, inquiry, lines[0], actors.buyer, supplier_id=supplier2.id)
     second = offers.publish_proactive(db, inquiry.id, actors.buyer.id,
-        expected_version=inquiry.version)[0]
+        expected_version=inquiry.version, on_existing="new")[0]
     assert initial.source_key != second.source_key and initial.id != second.id
 
 
-def test_source_update_cannot_create_a_duplicate_published_quote(db, actors, monkeypatch):
+def test_source_update_keeps_explicitly_separate_published_quotes(db, actors, monkeypatch):
     _, initial = _published(db, actors, monkeypatch, source_key="A")
     _, second = _published(db, actors, monkeypatch, source_key="B")
-    with pytest.raises(Conflict), db.begin_nested():
-        offers.update_offer(db, second.id, actors.buyer.id,
-            {"source_key": "A"}, expected_version=second.version)
-    assert initial.source_key == "A" and second.source_key == "B"
-    assert second.revision_no == 1
+    offers.update_offer(db, second.id, actors.buyer.id,
+        {"source_key": "A"}, expected_version=second.version)
+    assert initial.source_key == second.source_key == "A" and initial.id != second.id
+    assert initial.revision_no == 1 and second.revision_no == 2
+    assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 2
 
 
 def test_updating_explicit_draft_requires_its_own_version(db, actors):
@@ -387,7 +400,7 @@ def test_repeat_quote_does_not_change_closed_inquiry(db, actors, monkeypatch):
     inquiry, lines = _inquiry(db, actors)
     _draft(db, inquiry, lines[0], actors.buyer, unit_price="90.00")
     current = offers.publish_proactive(db, inquiry.id, actors.buyer.id,
-        expected_version=inquiry.version)[0]
+        expected_version=inquiry.version, on_existing="new")[0]
     assert current.id != old.id
     assert old.unit_price == Decimal("100.25") and old.revision_no == 1
 

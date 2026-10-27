@@ -42,6 +42,9 @@ export interface InquiryLine extends Omit<LineInput, "notes_audience" | "field_v
   field_values?: ReadFieldValue[];
   field_template?: Pick<FieldDefinition, "id" | "name" | "value_type" | "choices">[];
   linked_offer_ids?: number[];
+  linked_offers?: Offer[];
+  ref_offer_revision_no?: number | null;
+  ref_offer?: Offer;
 }
 
 export interface InquiryInput {
@@ -87,6 +90,10 @@ export interface Offer extends Omit<OfferInput, "supplier_audience" | "reporter_
   reporter?: { id: number; name: string };
   created_at?: string;
   updated_at?: string;
+  latest?: Pick<Offer, "unit_price" | "is_tax_inclusive" | "revision_no">;
+  original_withdrawn?: boolean;
+  expired?: boolean;
+  more?: Offer[];
 }
 
 export interface InquiryWorkItem {
@@ -110,6 +117,8 @@ export interface LineResponse extends LineResponseInput {
   work_item_id: number | null;
   offer?: Offer;
   expired: boolean;
+  ref_offer_revision_no?: number | null;
+  reporter_label?: string;
 }
 
 export interface ExistingChoice {
@@ -142,6 +151,8 @@ export interface Inquiry {
   closed_at?: string | null;
   closed_outcome?: "won" | "lost" | "cancelled" | null;
   won_offer_id?: number | null;
+  won_offer_revision_no?: number | null;
+  won_offer?: Offer;
   line_count: number;
   progress: { quoted_lines: number; line_count: number };
   lines?: InquiryLine[];

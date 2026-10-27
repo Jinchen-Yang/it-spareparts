@@ -8,7 +8,7 @@ import Timeline from "../../components/workflow/Timeline";
 import PageHeader from "../../components/PageHeader";
 import { formatBusinessDateTime } from "../../utils/date";
 import { formatMoney } from "../../utils/format";
-import { usePresalesError, isOfferActive, OfferBadge, taxLabel, useNow } from "./shared";
+import { usePresalesError, isOfferActive, OfferBadge, taxLabel, useNow, OfferUpdates } from "./shared";
 
 const statusLabels: Record<string, string> = { draft: "草稿", submitted: "已提交", revising: "撤回修改中", closed: "已结束" };
 const outcomeLabels: Record<string, string> = { won: "成交", lost: "未成交", cancelled: "取消" };
@@ -39,8 +39,9 @@ function OfferPrice({ offer }: { offer: Offer }) {
 function Comparison({ line, offers, onHistory, now }: {
   line: InquiryLine; offers: Offer[]; onHistory: (offer: Offer) => void; now: number;
 }) {
-  const shown = offers.filter((offer) => (offer.line_id === line.id || offer.id === line.ref_offer_id
-    || line.linked_offer_ids?.includes(offer.id)) && offer.status !== "withdrawn");
+  const pinned = new Map([...(line.linked_offers ?? []), ...(line.ref_offer ? [line.ref_offer] : [])].map((offer) => [offer.id, offer]));
+  const shown = [...pinned.values(), ...offers.filter((offer) => !pinned.has(offer.id))].filter((offer) => (offer.line_id === line.id
+    || offer.id === line.ref_offer_id || pinned.has(offer.id) || line.linked_offer_ids?.includes(offer.id)) && offer.status !== "withdrawn");
   if (!shown.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无报价" />;
   const minima = new Map<string, number>();
   shown.filter((offer) => isOfferActive(offer, now) && !offer.no_stock && hasValue(offer.unit_price))
@@ -74,6 +75,7 @@ function Comparison({ line, offers, onHistory, now }: {
               {offer.status === "draft" && <Tag>报价草稿</Tag>}
               {offer.status === "published" && !offer.no_stock && !active && <Tag>已失效</Tag>}
             </Space>
+            <OfferUpdates offer={offer} />
             <Button type="link" size="small" aria-label={`查看报价 ${offer.id} 历史`} onClick={() => onHistory(offer)}>报价历史</Button>
           </Space>
         </th>;
@@ -117,10 +119,9 @@ function InquiryDetailContent({ id }: { id: number }) {
   const [closeOpen, setCloseOpen] = useState(false);
   const [outcome, setOutcome] = useState<"won" | "lost" | "cancelled">("won");
   const [wonOfferId, setWonOfferId] = useState<number>();
-  const [referencedOffers, setReferencedOffers] = useState<Offer[]>([]);
   const generation = useRef(0);
   const historyGeneration = useRef(0);
-  const now = useNow([...(inquiry?.offers ?? []), ...referencedOffers,
+  const now = useNow([...(inquiry?.offers ?? []), ...(inquiry?.lines ?? []).flatMap((line) => [...(line.linked_offers ?? []), ...(line.ref_offer ? [line.ref_offer] : [])]),
     ...(inquiry?.line_responses ?? []).flatMap((row) => row.offer ? [row.offer] : [])]
     .flatMap((offer) => [offer.valid_from, offer.valid_until]));
 
@@ -140,19 +141,6 @@ function InquiryDetailContent({ id }: { id: number }) {
     void load();
     return () => { ++generation.current; ++historyGeneration.current; };
   }, [load]);
-
-  const referenceKey = (inquiry?.lines ?? []).filter((line) => line.part_id && line.ref_offer_id)
-    .map((line) => `${line.part_id}:${line.ref_offer_id}`).join(",");
-  useEffect(() => {
-    let disposed = false;
-    setReferencedOffers([]);
-    if (!referenceKey) return;
-    const references = referenceKey.split(",").map((entry) => entry.split(":").map(Number));
-    void presales.library([...new Set(references.map(([partId]) => partId))]).then((data) => {
-      if (!disposed) setReferencedOffers(Object.values(data).flat().filter((offer) => references.some(([, offerId]) => offerId === offer.id)));
-    }).catch(() => { /* 不补出无权限、已过期或暂不可用的外单报价字段。 */ });
-    return () => { disposed = true; };
-  }, [referenceKey, inquiry?.version]);
 
   const showHistory = async (offer: Offer) => {
     const current = ++historyGeneration.current;
@@ -202,12 +190,14 @@ function InquiryDetailContent({ id }: { id: number }) {
 
   const lines = inquiry.lines ?? [];
   const offers = inquiry.offers ?? [];
-  const comparisonOffers = [...offers, ...referencedOffers.filter((offer) => isOfferActive(offer, now)
-    && !offers.some((existing) => existing.id === offer.id))];
+  const comparisonOffers = offers;
   const canAmend = inquiry.kind === "sales_inquiry";
-  const adopted = offers.find((offer) => offer.id === inquiry.won_offer_id);
-  const closeOptions = offers.filter((offer) => offer.status === "published" && !offer.no_stock
-    && lines.some((line) => line.id === offer.line_id));
+  const adopted = inquiry.won_offer;
+  const lineForOffer = (offer: Offer) => lines.find((line) => line.id === offer.line_id || line.ref_offer_id === offer.id
+    || line.linked_offer_ids?.includes(offer.id) || line.linked_offers?.some((linked) => linked.id === offer.id) || inquiry.line_responses?.some((row) => row.line_id === line.id && row.mode === "reuse" && row.ref_offer_id === offer.id));
+  const closeOptions = [...new Map([...offers, ...lines.flatMap((line) => [...(line.linked_offers ?? []), ...(line.ref_offer ? [line.ref_offer] : [])]),
+    ...(inquiry.line_responses ?? []).flatMap((row) => row.mode === "reuse" && row.offer ? [row.offer] : [])]
+    .map((offer) => [offer.id, offer])).values()].filter((offer) => isOfferActive(offer, now) && !!lineForOffer(offer));
   const galleryItems = lines.filter((line) => line.part_id).map((line) => ({ partId: line.part_id!, pn: line.pn_raw }));
 
   return <Space direction="vertical" size="middle" style={{ width: "100%" }}>
@@ -238,7 +228,7 @@ function InquiryDetailContent({ id }: { id: number }) {
         { key: "created", label: "创建时间", children: formatBusinessDateTime(inquiry.created_at) },
         { key: "updated", label: "最近动态", children: formatBusinessDateTime(inquiry.updated_at) },
         ...(inquiry.closed_outcome ? [{ key: "outcome", label: "关单结果", children: outcomeLabels[inquiry.closed_outcome] || inquiry.closed_outcome }] : []),
-        ...(adopted ? [{ key: "adopted", label: "采纳报价", children: <Button type="link" onClick={() => void showHistory(adopted)}>报价 #{adopted.id}</Button> }] : []),
+        ...(adopted ? [{ key: "adopted", label: "采纳报价", children: <Space wrap><Button type="link" onClick={() => void showHistory(adopted)}>报价 #{adopted.id} · 第 {adopted.revision_no} 版</Button><OfferBadge offer={adopted} /></Space> }] : []),
       ]} />
       <FieldValues values={inquiry.field_values} />
       {!!inquiry.work_items?.length && <Space wrap>{inquiry.work_items.map((work) => <Tag key={work.id}>
@@ -267,7 +257,10 @@ function InquiryDetailContent({ id }: { id: number }) {
         .map((response) => <div key={`${response.work_item_id}:${line.id}`}>
           {response.mode === "skip" ? <Typography.Paragraph>无货 / 不报：{response.reason}</Typography.Paragraph>
             : <Space wrap><Typography.Text>沿用报价 #{response.ref_offer_id}</Typography.Text>
-              {response.offer ? <OfferBadge offer={response.offer} /> : <Tag>{response.expired ? "已失效" : "当前不可见"}</Tag>}
+              {response.offer ? <><OfferBadge offer={response.offer} />
+                <span>原报价人：{response.reporter_label ?? response.offer.reporter?.name ?? "其他采购"}</span>
+                {response.offer.valid_from && <span>原报价时间：{formatBusinessDateTime(response.offer.valid_from)}</span>}
+              </> : <Tag>{response.expired ? "已失效" : "当前不可见"}</Tag>}
             </Space>}
         </div>)}
       <Comparison line={line} offers={comparisonOffers} now={now} onHistory={(offer) => void showHistory(offer)} />
@@ -299,7 +292,9 @@ function InquiryDetailContent({ id }: { id: number }) {
         </Radio.Group></Form.Item>
         {outcome === "won" && <Form.Item label="采纳本单报价（可选）">
           <Select aria-label="采纳报价" allowClear value={wonOfferId} onChange={setWonOfferId} placeholder="选择采纳的本单报价（可选）" options={closeOptions.map((offer) => ({
-            value: offer.id, label: `${lines.find((line) => line.id === offer.line_id)?.pn_raw || ""} · 报价 #${offer.id}${offer.reporter ? ` · ${offer.reporter.name}` : ""} · ${formatMoney(offer.unit_price, { prefix: "¥" })} · ${taxLabel(offer.is_tax_inclusive)}`,
+            value: offer.id, label: `${lineForOffer(offer)?.pn_raw || ""} · 报价 #${offer.id}${offer.reporter ? ` · ${offer.reporter.name}` : ""} · ${offer.latest
+              ? `当前${formatMoney(offer.latest.unit_price, { prefix: "¥" })} · ${taxLabel(offer.latest.is_tax_inclusive)} · 第 ${offer.latest.revision_no} 版`
+              : `${formatMoney(offer.unit_price, { prefix: "¥" })} · ${taxLabel(offer.is_tax_inclusive)}`}`,
           }))} />
         </Form.Item>}
       </Form>

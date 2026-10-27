@@ -137,28 +137,29 @@ describe("询价详情", () => {
     const user = userEvent.setup();
     const data = inquiry({ offers: [] });
     data.lines![0].ref_offer_id = 7;
-    mocks.library.mockResolvedValue({ 8: [offer(7, { inquiry_id: 3, line_id: 99, unit_price: "120.00" })] });
+    data.lines![0].ref_offer_revision_no = 1;
+    data.lines![0].ref_offer = offer(7, { inquiry_id: 3, line_id: 99, unit_price: "120.00" });
     mocks.closeInquiry.mockResolvedValue({ ...data, status: "closed", closed_outcome: "won", version: 5 });
     await openPage(data);
     expect(await screen.findByText("采购7")).toBeInTheDocument();
     expect(screen.getByRole("table", { name: "PN-8 比价" })).toHaveTextContent("¥120.00");
-    expect(mocks.library).toHaveBeenCalledWith([8]);
+    expect(mocks.library).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "关单" }));
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByText("采纳本单报价（可选）")).toBeInTheDocument();
     await user.click(within(dialog).getByRole("combobox", { name: "采纳报价" }));
-    expect(screen.queryByRole("option", { name: /报价 #7/ })).toBeNull();
+    expect(screen.getByText(/PN-8 · 报价 #7/)).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "确认关单" }));
     await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won" }));
   });
 
-  it("外单引用已失效时不展示过期内容或字段占位", async () => {
+  it("外单引用未返回授权快照时不补查当前报价或生成字段占位", async () => {
     const data = inquiry({ offers: [] });
     data.lines![0].ref_offer_id = 7;
     mocks.library.mockResolvedValue({ 8: [offer(7, { inquiry_id: 3, line_id: 99,
       valid_until: "2020-01-01T00:00:00Z", notes: "过期报价备注" })] });
     await openPage(data);
-    await waitFor(() => expect(mocks.library).toHaveBeenCalledWith([8]));
+    expect(mocks.library).not.toHaveBeenCalled();
     expect(screen.queryByText("采购7")).toBeNull();
     expect(screen.queryByText("采购备注")).toBeNull();
     expect(screen.queryByText("过期报价备注")).toBeNull();
@@ -226,4 +227,55 @@ describe("询价详情", () => {
     expect(await screen.findByText("编辑路由")).toBeInTheDocument();
     expect(screen.getByLabelText("编辑地址")).toHaveTextContent(target);
   });
+});
+
+it("引用只展示行内钉住版本，当前报价不覆盖旧价格，续期也不使旧报价复活", async () => {
+  const data = inquiry({ offers: [offer(7, { unit_price: "999.00", revision_no: 3 })] });
+  data.lines![0] = { ...data.lines![0], ref_offer_id: 7, ref_offer_revision_no: 1,
+    ref_offer: offer(7, { unit_price: "120.00", valid_until: "2020-01-01T00:00:00Z",
+      latest: { unit_price: "999.00", is_tax_inclusive: false, revision_no: 3 } }) };
+  await openPage(data);
+  const table = screen.getByRole("table", { name: "PN-8 比价" });
+  expect(within(table).getByText(/¥120.00/)).toBeInTheDocument();
+  expect(within(table).getByText("已失效")).toBeInTheDocument();
+  expect(within(table).getByText("该报价已更新为 ¥999 · 不含税")).toBeInTheDocument();
+  expect(within(table).queryByText("¥999.00 · 含税")).not.toBeInTheDocument();
+  expect(mocks.library).not.toHaveBeenCalled();
+});
+
+it("成交采用独立钉住快照并显示原报价撤销，未授权 latest 不生成更新提示", async () => {
+  await openPage(inquiry({ status: "closed", won_offer_id: 7, won_offer_revision_no: 1,
+    won_offer: offer(7, { unit_price: "155.00", original_withdrawn: true }), offers: [] }));
+  expect(screen.getByText("报价 #7 · 第 1 版")).toBeInTheDocument();
+  expect(screen.getByText(/已失效 ¥155/)).toBeInTheDocument();
+  expect(screen.getByText("原报价已撤销")).toBeInTheDocument();
+  expect(screen.queryByText(/该报价已更新为/)).not.toBeInTheDocument();
+});
+
+it("采纳已更新的沿用报价时，下拉明确告知当前价格税基及版本后按报价ID成交", async () => {
+  const user = userEvent.setup();
+  const data = inquiry({ offers: [] });
+  data.line_responses = [{ line_id: 11, mode: "reuse", ref_offer_id: 7, ref_offer_revision_no: 1,
+    created_by: 3, work_item_id: 1, expired: false, offer: offer(7, { line_id: 99, inquiry_id: 9, unit_price: "120.00",
+      latest: { unit_price: "75.00", is_tax_inclusive: false, revision_no: 2 } }) }];
+  mocks.closeInquiry.mockResolvedValue({ ...data, status: "closed", won_offer_id: 7, won_offer_revision_no: 2 });
+  await openPage(data);
+  await user.click(screen.getByRole("button", { name: "关单" }));
+  await user.click(screen.getByRole("combobox", { name: "采纳报价" }));
+  await user.click(await screen.findByText(/PN-8 · 报价 #7 · 采购7 · 当前¥75.00 · 不含税 · 第 2 版/));
+  await user.click(screen.getByRole("button", { name: "确认关单" }));
+  await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 7 }));
+});
+
+it("同一报价ID在不同询价行钉住不同版本时，逐行使用各自快照比价", async () => {
+  const data = inquiry({ offers: [offer(7, { unit_price: "999.00", revision_no: 3 })] });
+  data.lines = [
+    { ...data.lines![0], linked_offer_ids: [7], linked_offers: [offer(7, { unit_price: "100.00", revision_no: 1 })] },
+    { ...data.lines![0], id: 12, seq: 2, line_key: "line-b", pn_raw: "PN-9", linked_offer_ids: [7],
+      linked_offers: [offer(7, { line_id: 12, unit_price: "200.00", revision_no: 2 })] },
+  ];
+  await openPage(data);
+  expect(screen.getByRole("table", { name: "PN-8 比价" })).toHaveTextContent("¥100.00");
+  expect(screen.getByRole("table", { name: "PN-9 比价" })).toHaveTextContent("¥200.00");
+  expect(screen.queryByText(/¥999.00/)).not.toBeInTheDocument();
 });

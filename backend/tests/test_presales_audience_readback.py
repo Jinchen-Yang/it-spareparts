@@ -56,7 +56,7 @@ def test_http_rules_follow_each_field_author_without_exposing_hidden_values(db, 
     library = client.get(f"/api/presales/library?part_ids={users.part.id}")
     assert library.status_code == 200, library.text
     quote = library.json()[str(users.part.id)][0]
-    assert quote == detail["offers"][0]
+    assert quote == {**detail["offers"][0], "more": []}
     manages_offer = viewer in {"buyer", "supervisor"}
     sees_offer_values = manages_offer or mode == "public" or (
         mode == "include" and viewer == "other") or (mode == "exclude" and viewer != "other")

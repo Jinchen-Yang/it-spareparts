@@ -38,6 +38,7 @@ class PresalesInquiry(Base):
     won_offer_id: Mapped[int | None] = mapped_column(ForeignKey(
         "presales_offer.id", use_alter=True, name="fk_presales_inquiry_won_offer",
     ))
+    won_offer_revision_no: Mapped[int | None] = mapped_column(Integer)
 
     __table_args__ = (
         CheckConstraint("kind IN ('sales_inquiry', 'proactive_offer')", name="ck_presales_inquiry_kind"),
@@ -64,6 +65,7 @@ class PresalesInquiryLine(Base):
     ref_offer_id: Mapped[int | None] = mapped_column(ForeignKey(
         "presales_offer.id", use_alter=True, name="fk_presales_line_ref_offer",
     ))
+    ref_offer_revision_no: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     notes: Mapped[str | None] = mapped_column(Text)
@@ -121,11 +123,12 @@ class PresalesOffer(Base):
 
 
 class PresalesOfferLineLink(Base):
-    """跨单更新保留原行关联；当前价格与受众仍只读原报价。"""
+    """跨单更新保留原行关联，并钉住迁移前的报价版本。"""
     __tablename__ = "presales_offer_line_link"
 
     line_id: Mapped[int] = mapped_column(ForeignKey("presales_inquiry_line.id"), primary_key=True)
     offer_id: Mapped[int] = mapped_column(ForeignKey("presales_offer.id"), primary_key=True)
+    offer_revision_no: Mapped[int | None] = mapped_column(Integer)
 
 
 class PresalesLineResponse(Base):
@@ -139,6 +142,7 @@ class PresalesLineResponse(Base):
     line_version: Mapped[int] = mapped_column(Integer)
     mode: Mapped[str] = mapped_column(String(8))
     ref_offer_id: Mapped[int | None] = mapped_column(ForeignKey("presales_offer.id"))
+    ref_offer_revision_no: Mapped[int | None] = mapped_column(Integer)
     reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 

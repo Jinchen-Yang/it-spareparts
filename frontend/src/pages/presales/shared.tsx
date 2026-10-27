@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { App, Tag } from "antd";
+import { App, Space, Tag, Typography } from "antd";
 import type { Offer } from "../../api/presales";
 import { moneyExact } from "../../utils/format";
 
@@ -37,7 +37,7 @@ export function useNow(deadlines: (string | null | undefined)[] = []) {
 }
 
 export function isOfferActive(offer: Offer, now = Date.now()) {
-  return offer.status === "published" && !offer.no_stock && offer.unit_price != null
+  return !offer.original_withdrawn && offer.status === "published" && !offer.no_stock && offer.unit_price != null
     && !!offer.valid_from && offerDeadline(offer.valid_from) <= now
     && offerDeadline(offer.valid_until) > now;
 }
@@ -59,10 +59,22 @@ export function OfferBadge({ offer }: { offer: Offer }) {
   const now = useNow([offer.valid_from, offer.valid_until]);
   const active = isOfferActive(offer, now);
   const days = Math.max(0, Math.ceil((offerDeadline(offer.valid_until) - now) / 86_400_000));
-  return <Tag color={active ? "green" : undefined} style={{ color: active ? undefined : "var(--mb-text-3)" }}>
+  return <Space wrap size={4}><Tag color={active ? "green" : undefined} style={{ color: active ? undefined : "var(--mb-text-3)" }}>
     {active ? "有效报价" : "已失效"} {moneyExact(offer.unit_price == null ? null : Number(offer.unit_price))} · {taxLabel(offer.is_tax_inclusive)}
     {active && ` · 剩 ${days} 天`}{offer.reporter && ` · ${offer.reporter.name}`}
-  </Tag>;
+  </Tag><OfferUpdates offer={offer} /></Space>;
+}
+
+/** 更新提示只使用服务端已授权的 latest，不请求当前报价来补全。 */
+export function OfferUpdates({ offer }: { offer: Offer }) {
+  return <>
+    {offer.latest && <Typography.Text type="secondary">该报价已更新为 {moneyExact(offer.latest.unit_price == null ? null : Number(offer.latest.unit_price))} · {taxLabel(offer.latest.is_tax_inclusive)}</Typography.Text>}
+    {offer.original_withdrawn && <Tag color="warning">原报价已撤销</Tag>}
+  </>;
+}
+
+export function flattenOffers(offers: Offer[]): Offer[] {
+  return offers.flatMap((offer) => [offer, ...(offer.more ?? [])]);
 }
 
 export function usePresalesError() {

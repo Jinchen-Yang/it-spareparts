@@ -56,7 +56,7 @@ def _items(db, inquiry, users):
     return work_items.list_by_subject(db, inquiries.subject(inquiry), users.sales.id)
 
 
-def _offer(db, inquiry, line, buyer, *, valid_until=None):
+def _offer(db, inquiry, line, buyer, *, valid_until=None, with_snapshot=False):
     offer = PresalesOffer(inquiry_id=inquiry.id, line_id=line.id, part_id=line.part_id,
         created_by=buyer.id, unit_price=Decimal("12.34"), is_tax_inclusive=True,
         status="published", no_stock=False, valid_from=datetime.now(timezone.utc),
@@ -64,6 +64,9 @@ def _offer(db, inquiry, line, buyer, *, valid_until=None):
         revision_no=0, version=1, source_key="test")
     db.add(offer)
     db.flush()
+    if with_snapshot:
+        from app.services.presales.offers import append_revision
+        append_revision(db, offer, buyer.id, PresalesOffer.__table__.columns.keys(), "测试发布完整快照")
     return offer
 
 
@@ -145,7 +148,7 @@ def test_effective_reference_skips_dispatch_and_expired_is_rejected(db, presales
     users, parts = presales_users, presales_parts
     original = _create(db, users, parts)
     line = inquiries.lines_for(db, original.id)[0]
-    offer = _offer(db, original, line, users.buyer)
+    offer = _offer(db, original, line, users.buyer, with_snapshot=True)
     reused = inquiries.create_draft(db, users.sales.id, assignee_ids=[users.buyer.id],
         lines=[{"part_id": parts[0].id, "ref_offer_id": offer.id}])
     inquiries.submit(db, reused.id, users.sales.id, reused.version)
@@ -162,7 +165,7 @@ def test_won_offer_must_belong_to_this_inquiry(db, presales_users, presales_part
     users, parts = presales_users, presales_parts
     first = _create(db, users, parts)
     other = _create(db, users, parts)
-    own_offer = _offer(db, first, inquiries.lines_for(db, first.id)[0], users.buyer)
+    own_offer = _offer(db, first, inquiries.lines_for(db, first.id)[0], users.buyer, with_snapshot=True)
     with pytest.raises(InvalidTransition):
         inquiries.close(db, other.id, users.sales.id, other.version, outcome="won", won_offer_id=own_offer.id)
     inquiries.close(db, first.id, users.sales.id, first.version, outcome="won", won_offer_id=own_offer.id)
@@ -314,7 +317,7 @@ def test_all_references_after_withdraw_then_append_opens_fresh_tasks(db, presale
     users, parts = presales_users, presales_parts
     inquiry = _create(db, users, parts)
     line = inquiries.lines_for(db, inquiry.id)[0]
-    offer = _offer(db, inquiry, line, users.buyer)
+    offer = _offer(db, inquiry, line, users.buyer, with_snapshot=True)
     inquiries.withdraw(db, inquiry.id, users.sales.id, inquiry.version)
     inquiries.update_draft(db, inquiry.id, users.sales.id, inquiry.version,
                            lines=[{"line_key": line.line_key, "ref_offer_id": offer.id}])

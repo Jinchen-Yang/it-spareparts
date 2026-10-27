@@ -106,10 +106,22 @@ def _text(value, name, limit=None):
     return value
 
 
-def _reference(db, line, ctx):
+def _reference(db, line, ctx, *, allow_new=False):
     if line.ref_offer_id is None:
+        line.ref_offer_revision_no = None
         return
-    offer = db.get(PresalesOffer, line.ref_offer_id)
+    if line.ref_offer_revision_no is not None:
+        from app.services.presales.visibility import pinned_offer_view
+        view = pinned_offer_view(db, line.ref_offer_id, line.ref_offer_revision_no, ctx)
+        if view is None or view["expired"] or view["original_withdrawn"]:
+            raise InvalidTransition("只能引用有效期内且可见的报价版本")
+        if line.part_id != view["part_id"]:
+            raise InvalidTransition("引用报价的 PN 与询价行不一致")
+        return
+    if not allow_new:
+        raise InvalidTransition("原引用缺少历史版本，请先取消引用再重新选择")
+    offer = db.scalar(select(PresalesOffer).where(PresalesOffer.id == line.ref_offer_id)
+                      .with_for_update().execution_options(populate_existing=True))
     now = common.now()
     if (offer is None or offer.status != "published" or offer.no_stock or
             offer.valid_from is None or now < offer.valid_from or
@@ -120,6 +132,10 @@ def _reference(db, line, ctx):
     from app.services.presales.visibility import can_view_offer
     if not can_view_offer(db, offer, ctx):
         raise Forbidden("无权引用该报价")
+    from app.services.presales.visibility import pinned_offer_view
+    if pinned_offer_view(db, offer.id, offer.revision_no, ctx) is None:
+        raise InvalidTransition("报价历史版本不可用，请由原报价人更新后重新选择")
+    line.ref_offer_revision_no = offer.revision_no
 
 
 def _signature(line):
@@ -171,6 +187,9 @@ def _write_line(db, inquiry, data, seq, ctx, existing=None):
     if ref is not None and (type(ref) is not int or ref < 1):
         raise InvalidTransition("引用报价 ID 无效")
     line.seq, line.part_id, line.pn_raw, line.qty = seq, part_id, pn.strip(), qty
+    new_reference = existing is None or ref != line.ref_offer_id
+    if ref != line.ref_offer_id:
+        line.ref_offer_revision_no = None
     line.require_exact_pn, line.ref_offer_id = exact, ref
     line.description = _text(data.get("description", line.description), "描述")
     line.notes = _text(data.get("notes", line.notes), "备注")
@@ -180,7 +199,7 @@ def _write_line(db, inquiry, data, seq, ctx, existing=None):
         line.version += 1
         line.updated_at = common.now()
     db.add(line)
-    _reference(db, line, ctx)
+    _reference(db, line, ctx, allow_new=new_reference)
     db.flush()
     anchor = f"part:{part_id}" if part_id is not None else None
     if existing is None:
@@ -435,6 +454,9 @@ def close(db, inquiry_id, actor, expected_version, *, outcome, won_offer_id=None
                           visibility.can_view_offer(db, offer, ctx))
         if outcome != "won" or not (own or linked):
             raise InvalidTransition("采纳报价必须是本单有效行内的已发布报价")
+        from app.services.presales.visibility import pinned_offer_view
+        if pinned_offer_view(db, offer.id, offer.revision_no, ctx) is None:
+            raise InvalidTransition("报价历史版本不可用，请由原报价人更新后重新选择")
     items = work_items.list_by_subject(db, subject(inquiry), user.id, lock=True)
     work_items.cancel_subject(db, subject(inquiry), user.id, "询价关单", expected_versions=_versions(items))
     if inquiry.kind == "proactive_offer":
@@ -443,6 +465,7 @@ def close(db, inquiry_id, actor, expected_version, *, outcome, won_offer_id=None
         work_items.cancel_subject(db, notices, user.id, "主动报价关单", expected_versions=_versions(notice_items))
     inquiry.status, inquiry.closed_outcome = "closed", outcome
     inquiry.won_offer_id, inquiry.closed_at = won_offer_id, common.now()
+    inquiry.won_offer_revision_no = offer.revision_no if won_offer_id is not None else None
     _touch(inquiry)
     return _record(db, inquiry, user.id, "inquiry.closed", {"outcome": outcome, "won_offer_id": won_offer_id})
 

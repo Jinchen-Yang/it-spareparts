@@ -256,3 +256,26 @@ describe("销售询价编辑", () => {
     await waitFor(() => expect(mocks.presales.updateInquiry).toHaveBeenCalledWith(2, expect.objectContaining({ expected_version: 8 })));
   });
 });
+
+it("已保存引用按钉住快照判断失效，当前续期不能让旧引用恢复有效", async () => {
+  const data = inquiry();
+  data.lines![0] = { ...data.lines![0], ref_offer_id: 70, ref_offer_revision_no: 1,
+    ref_offer: { ...validOffer, valid_until: "2020-01-02T00:00:00Z" } };
+  mocks.presales.getInquiry.mockResolvedValue(data);
+  mount("/presales/inquiries/1/edit");
+  expect(await screen.findByText("引用已失效")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
+  expect(await screen.findByText("引用报价已失效，请重新选择有效报价或取消引用")).toBeInTheDocument();
+  expect(mocks.presales.updateInquiry).not.toHaveBeenCalled();
+});
+
+it("从报价库展开报价带入的新引用可在 more 中校验并建单", async () => {
+  mocks.presales.library.mockResolvedValue({ 10: [{ ...validOffer, id: 71, more: [validOffer] }] });
+  mount("/presales/inquiries/new", { referenceOffer: validOffer, part: partA });
+  await screen.findByText("已引用报价 #70 · 本行不再派单");
+  await waitFor(() => expect(screen.queryByText("引用已失效")).not.toBeInTheDocument());
+  fireEvent.click(screen.getByRole("button", { name: "提交" }));
+  await waitFor(() => expect(mocks.presales.createInquiry).toHaveBeenCalledWith(expect.objectContaining({
+    lines: [expect.objectContaining({ ref_offer_id: 70 })],
+  })));
+});

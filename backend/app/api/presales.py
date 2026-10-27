@@ -386,14 +386,16 @@ def reference(body: ReferenceInput, db: Db, ctx: Ctx):
     def read():
         common.require(ctx, "action_presales_quote")
         part_ids = body.part_ids
+        owner_id = None
         if body.inquiry_id is not None:
             inquiry = common.get_inquiry(db, body.inquiry_id)
             if not visibility.can_view_inquiry(db, inquiry, ctx):
                 raise HTTPException(403, "无权查看询价参考")
+            owner_id = inquiry.created_by
             part_ids = list(db.scalars(select(PresalesInquiryLine.part_id).where(
                 PresalesInquiryLine.inquiry_id == inquiry.id, PresalesInquiryLine.status == "active",
                 PresalesInquiryLine.part_id.is_not(None))))
         prices = price_reference.batch(db, part_ids, ctx)
-        return {"reference": prices, "offers": library.batch(db, part_ids, ctx),
+        return {"reference": prices, "offers": library.batch(db, part_ids, ctx, owner_id=owner_id),
                 "gallery": [{"part_id": part_id} for part_id in prices]}
     return _call(db, read)

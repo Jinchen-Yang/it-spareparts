@@ -32,3 +32,15 @@ it("切换 PN 后忽略旧请求，不产生隐藏报价的占位", async () => 
   await act(async () => { resolve({ 8: [quote] }); });
   expect(screen.queryByText(/有效报价|¥25|已失效/)).not.toBeInTheDocument();
 });
+
+it("置顶只显示主列表首条同税基优先最低价及报价人数，不用 more 低价替代", async () => {
+  library.mockResolvedValue({ 8: [
+    { ...quote, unit_price: "100.00", is_tax_inclusive: true, more: [{ ...quote, id: 2, unit_price: "1.00" }] },
+    { ...quote, id: 3, unit_price: "50.00", is_tax_inclusive: false },
+  ] });
+  render(<PartQuoteBadges partId={8} />);
+  await act(async () => {});
+  expect(screen.getByText(/有效报价 ¥100.*含税/)).toBeInTheDocument();
+  expect(screen.getByText("最低价 · 2 位报价人")).toBeInTheDocument();
+  expect(screen.queryByText(/¥50|¥1 ·/)).not.toBeInTheDocument();
+});

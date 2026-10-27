@@ -18,10 +18,10 @@
 | POST | `/inquiries/{inquiry_id}/withdraw` | 撤回为 revising，暂停未结束待办 |
 | POST | `/inquiries/{inquiry_id}/resubmit` | 按 line_key 比较上一提交版，报价 stale、恢复或重开待办，revision 加一 |
 | POST | `/inquiries/{inquiry_id}/lines` | 追加新行，不需撤回；body 为 expected_version、lines |
-| POST | `/inquiries/{inquiry_id}/close` | outcome=won/lost/cancelled，won_offer_id 可选且必须是本单报价；结束未完成待办 |
+| POST | `/inquiries/{inquiry_id}/close` | outcome=won/lost/cancelled，won_offer_id 可选且必须属于本单或本单引用／沿用的报价；记录采纳版本并结束未完成待办 |
 | POST | `/inquiries/{inquiry_id}/copy` | 返回新草稿、新编号和新 line_key；保留原生字段及可见性，不复制报价、引用、成交、字段值 |
 | POST | `/inquiries/{inquiry_id}/lines/{line_id}/offers` | 创建或保存报价草稿；采购需 `action_presales_quote` 且为本单处理人，主动报价需 `action_presales_offer` |
-| POST | `/inquiries/{inquiry_id}/reply` | 独立回复；所有未引用活动行有报价或无货，锁定本人草稿、发布快照并完成本人待办 |
+| POST | `/inquiries/{inquiry_id}/reply` | 独立回复；所有未引用活动行必须报新价、沿用或不报，锁定本人草稿、发布快照并完成本人待办 |
 | POST | `/inquiries/{inquiry_id}/publish` | 主动报价发布；notice_user_ids 可定向通知在职且有 page_presales 的账号 |
 | PATCH | `/offers/{offer_id}` | 发布报价更新并续期、追加完整快照；报价本人或主管，需对应 quote/offer 动作权限 |
 | POST | `/offers/{offer_id}/withdraw` | 立即下架，reason 必填且非空白；追加撤销快照 |
@@ -29,9 +29,9 @@
 | GET | `/lines/{line_id}/part-check?pn_std=` | 待建档查重，复用 master_edit.find_near_duplicates |
 | POST | `/lines/{line_id}/bind-part` | body 为 part_id、expected_version；绑定已有 PN，仅可绑定一次 |
 | POST | `/lines/{line_id}/create-part` | body 为 pn_std、主数据字段、expected_version；查重有候选时拒绝新建，要求绑定 |
-| GET | `/library?part_ids=1,2` | 批量返回 `{part_id: [offer]}`，空列表表示无可见有效报价 |
-| GET | `/library/search?q=&limit=` | M1 实时检索，M8 过滤后的有效报价加权，每个候选附 offers、offer_count |
-| POST | `/reference` | 采购参考：part_ids 或 inquiry_id；返回 M3 reference、offers、gallery=[{part_id}] |
+| GET | `/library?part_ids=1,2` | 批量返回 `{part_id: [offer]}`；每 PN 每报价人一条最新有效主报价，其他可见有效报价置于 more；空列表表示无可见有效报价 |
+| GET | `/library/search?q=&limit=` | M1 实时检索，M8 过滤后的有效报价加权，每个候选附去重后的 offers、offer_count（报价人数） |
+| POST | `/reference` | 采购参考：part_ids 或 inquiry_id；返回 M3 reference、offers、gallery=[{part_id}]；指定 inquiry_id 时沿用候选同时满足查看者与单据所有人的 M8／字段组权限 |
 
 建档两种写动作以及查重均要求 `action_presales_bind_part` 和 `page_master_data`，且必须为处理人、
 主动报价发起人或主管。公共池先领单。主数据字段包括 description、brand、manufacturer、summary、
@@ -65,6 +65,18 @@ reply 可附 work_item_id、expected_work_item_version，未提供时服务读�
 报价草稿与独立回复不递增询价 version，避免互不相关的采购回复互相冲突。询价行、报价各自递增版本。
 版本冲突返回 409，响应 detail 含 message 与当前 version；业务状态非法 422，无权 403，不存在 404。
 
+发布和回复支持 `on_existing=new|update`、`existing_offer_id`，或按草稿 ID 指定的
+`existing_choices={draft_offer_id: {on_existing, existing_offer_id?}}`。同采购对同 PN 已有有效报价时，
+必须明确选择另报一条或更新某条；不按货源或受众自动归并。缺选择返回 409，detail 包含
+`code=existing_offer`、`draft_offer_id`、`line_id`、经 M8 过滤的 `existing_offers`。
+多条候选时 update 必须指定目标；整批预检通过后才写入，不允许一批多个草稿更新同一目标。
+同批首次发布的多个草稿分别保留。
+
+`reply.line_responses=[{line_id, mode: quote|reuse|skip, ref_offer_id?, reason?}]`：
+quote 对应本人新报价草稿；reuse 挂接当前有效报价；skip 表示无货／不报且必须提供非空白原因。
+沿用目标必须既对执行采购可见，也对询价单所有人 `created_by` 按报价库完全相同的 M8 与字段组规则可见，
+否则 422。沿用不复制价格、不追加报价历史，只保存报价 ID 和当时版本。主动无货报价也必须在 notes 填原因。
+
 受众输入对象为 `{mode: public|private|include|exclude, user_ids: [username], group_ids: [id]}`。
 user_ids 使用账号字符串；assignee_ids、notice_user_ids 使用账号整数主键。供应商默认 private，报价人、备注默认 public。
 私密内容本人和主管可见，同时继续满足 data_supplier/data_customer 字段组。
@@ -93,8 +105,42 @@ M5 注册 presales_inquiry（池 action_presales_quote，主管 action_presales_
 团队字段池和公共分组接受售前主管。业务层不直接查询或更新通用模块的表。
 
 每次发布、更新、撤销、stale 都增加 revision_no 并追加完整快照；数据库触发器拒绝 UPDATE/DELETE。
-同人同 PN 同货源的主动报价再次发布时更新原报价，原来源单和行保留，新行 ref_offer_id 指向原报价。
-销售询价按本单本行更新，以保持 won_offer_id 的本单约束。关单后只能复制，报价不能再改。
+明确 update 时保留报价 ID，完整覆盖最新价格、货源和受众，归属迁移到本次单据和行；
+原行保存钉版本的稳定关联，不能通过旧归属获得新的受限价格。关单后只能复制，不能更新该单报价。
+
+### 钉住的报价版本（r7）
+
+销售引用保存 `line.ref_offer_id` 和 `line.ref_offer_revision_no`；采购沿用保存
+`line_response.ref_offer_id` 和 `line_response.ref_offer_revision_no`；成交保存
+`won_offer_id` 和 `won_offer_revision_no`；跨单更新的原行关联保存 `offer_revision_no`。
+版本由服务端确定，客户端不能自行提交版本号。后续续期不能延长原引用的有效期。
+价格、含税口径、数量、货源、有效期及受众均读取所钉版本的 `presales_offer_revision.snapshot`，
+不取当前报价覆盖。新快照保存当时整单准入所需信息；内部准入信息不出现在业务响应中。
+单据详情返回行级 `ref_offer`、跨单原行级 `linked_offers`、成交级 `won_offer` 和沿用结果中的 `offer` 快照；
+不可读快照返回 null 或省略 offer，不用当前报价补全。
+同一报价 ID 可以在不同行钉住不同版本；展示时优先使用每行的 linked_offers，不能用顶层 offers 按 ID 反查替代。
+
+快照可见性仍通过 M8 和查看者当前字段组权限过滤；分组成员变更仍按 M8 的实时成员规则生效。
+当前版本较新且查看者对当前版本也有权限时，快照视图额外包含
+`latest={unit_price, is_tax_inclusive, revision_no}`；否则整个省略 latest，不能透露新价或更新版本号。
+前端以 latest 显示「该报价已更新为 ¥x」。有效性按快照的 valid_until 判断，当前撤销另标「原报价已撤销」。
+快照视图返回 `expired` 与 `original_withdrawn`，行及沿用结果同步返回这两个标志。
+沿用行显示原报价人和报价时间；`reporter_label` 依据所有人权限返回姓名或「其他采购」，不泄露身份。
+
+新增四列均可空。r7 之前的旧关联无法可靠反推当时版本，迁移不猜测、不把当前版本回填为历史版本，
+也不改写只追加历史；缺少钉版本的旧关联待主管核对。
+缺少整单准入元信息的旧格式历史不可用于新引用、沿用或成交采纳，保守返回 422；原报价人更新后可生成完整的新快照。
+已有 NULL 版本引用不会因编辑备注自动绑定当前版本，需要明确取消后重新选择。
+原行已完成的沿用在追加其他行、再次回复或显式重发相同选择时保持原版本，不因再次回复而续期。
+成交按关单当时版本记录；若引用版本已更新，前端采纳选项使用获授权的 latest 当前价、税基和版本提示。
+
+### 报价库分组与排序（r7）
+
+先做 M8 和字段组过滤，再按 `(part_id, created_by)` 分组，主列表选最新有效报价；
+同人的其他有效报价放进该条 `more`（不递归分组）。分组使用服务内部身份，隐藏 reporter 不会妨碍去重，
+也不能借分组键返回隐藏的人员 ID。报价库与处理页沿用候选使用相同结构。
+主列表和 more 均先按含税、未税、税基未知分区，再在区内按价格升序；不换算税基，也不跨税基比价。
+M1 角标的最低价取主列表首条，人数取主列表长度。
 
 报价日缓存可通过 `python -m app.services.presales.daily --rebuild [--since YYYY-MM-DD]` 重建。
 取上海变更日每条报价最后快照，按含税、未税、未声明税基分开聚合，不推算价格，不跨日补齐。

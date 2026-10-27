@@ -9,6 +9,7 @@ from sqlalchemy import event
 
 from app.db import engine
 from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer
+from app.models.system import SysUser
 from app.services import audience
 from app.services.presales import common, inquiries, library, offers, visibility
 from app.services.workflow import work_items
@@ -50,7 +51,8 @@ def test_batch_and_single_views_share_field_matrix_without_cross_record_rules(db
             users.peer.id, {"unit_price": "51.00", "supplier_id": users.supplier.id,
                 "notes": "另一条公开备注", "supplier_audience": {"mode": "public"}},
             expected_version=inquiry.version)
-        offers.reply(db, inquiry.id, users.peer.id, expected_version=inquiry.version)
+        offers.reply(db, inquiry.id, users.peer.id,
+            expected_version=inquiry.version, on_existing="new")
         ctx = _ctx(db, getattr(users, viewer))
         before = len(calls)
         result = visibility.offer_views(db, [first, second], ctx)
@@ -108,6 +110,11 @@ def test_1500_effective_quotes_have_bounded_library_and_boost_queries(db, users)
     owner, writer = _ctx(db, users.seller), _ctx(db, users.buyer)
     public_rule = common.rule_id(db, {"mode": "public"}, owner)
     private_rule = common.rule_id(db, {"mode": "private"}, writer)
+    # 每位报价人一条主报价，保留大结果集的查询数与字段矩阵契约。
+    reporters = [SysUser(username=f"batch_buyer_{index}", role="purchaser",
+        password_hash="测试账号") for index in range(1500)]
+    db.add_all(reporters)
+    db.flush()
     headers = [PresalesInquiry(kind="sales_inquiry", inquiry_no=f"BATCH{i:010d}",
         status="submitted", submitted_at=moment, created_by=users.seller.id,
         offer_audience_rule_id=public_rule) for i in range(1500)]
@@ -118,11 +125,11 @@ def test_1500_effective_quotes_have_bounded_library_and_boost_queries(db, users)
     db.add_all(lines)
     db.flush()
     db.add_all([PresalesOffer(inquiry_id=line.inquiry_id, line_id=line.id,
-        created_by=users.buyer.id, part_id=users.part.id, status="published",
+        created_by=reporter.id, part_id=users.part.id, status="published",
         unit_price=Decimal("20.25"), source_key="supplier", supplier_id=users.supplier.id,
         supplier_audience_rule_id=private_rule, notes_audience_rule_id=private_rule,
         valid_from=moment - timedelta(hours=1), valid_until=moment + timedelta(days=30))
-        for line in lines])
+        for line, reporter in zip(lines, reporters)])
     db.flush()
     viewer_id, part_id = users.other.id, users.part.id
     db.expire_all()

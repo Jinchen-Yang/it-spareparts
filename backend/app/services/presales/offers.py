@@ -47,6 +47,11 @@ def append_revision(db, offer, actor, changed_fields, reason=None):
     db.flush()
     snapshot = {column.name: _json(getattr(offer, column.name))
                 for column in PresalesOffer.__table__.columns}
+    inquiry = common.get_inquiry(db, offer.inquiry_id)
+    snapshot["_inquiry"] = {key: _json(getattr(inquiry, key)) for key in (
+        "id", "kind", "created_by", "offer_audience_rule_id", "status", "submitted_at")}
+    if offer.status == "published":
+        snapshot["_inquiry"].update(status="submitted", submitted_at=_json(offer.valid_from))
     revision = PresalesOfferRevision(
         offer_id=offer.id, revision_no=offer.revision_no, snapshot=snapshot,
         changed_fields=sorted(set(changed_fields)), reason=reason, actor=user.id,
@@ -257,7 +262,8 @@ def _copy_quote(target, source):
         setattr(target, field, getattr(source, field))
 
 
-def _response(db, line, user_id, task_id, mode, *, ref_offer_id=None, reason=None):
+def _response(db, line, user_id, task_id, mode, *, ref_offer_id=None, reason=None,
+              ref_offer_revision_no=None):
     row = db.scalar(select(PresalesLineResponse).where(
         PresalesLineResponse.line_id == line.id, PresalesLineResponse.created_by == user_id))
     if row is None:
@@ -265,16 +271,22 @@ def _response(db, line, user_id, task_id, mode, *, ref_offer_id=None, reason=Non
         db.add(row)
     row.line_version, row.work_item_id = line.version, task_id
     row.mode, row.ref_offer_id, row.reason = mode, ref_offer_id, reason
+    row.ref_offer_revision_no = ref_offer_revision_no
     return row
 
 
-def _valid_reference(db, line, offer_id, ctx):
+def _valid_reference(db, line, offer_id, ctx, owner_id=None):
     from app.services.presales import library, visibility
 
+    if owner_id is None:
+        owner_id = common.get_inquiry(db, line.inquiry_id).created_by
     if type(offer_id) is not int or line.part_id is None:
         raise InvalidTransition("请选择同 PN 的有效报价")
     offer = next((offer for offer in library._active(db, [line.part_id]) if offer.id == offer_id), None)
-    if offer is None or not visibility.can_view_offer(db, offer, ctx):
+    owner_ctx = common.resolve_actor(db, owner_id)[1]
+    if (offer is None or not visibility.can_view_offer(db, offer, ctx)
+            or visibility.offer_view(db, offer, owner_ctx) is None
+            or visibility.pinned_offer_view(db, offer.id, offer.revision_no, owner_ctx) is None):
         raise InvalidTransition("沿用报价已失效、不可见或与本行 PN 不同")
     return offer
 
@@ -301,6 +313,14 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
         PresalesOffer.status.in_(["draft", "published"]),
     ).order_by(PresalesOffer.id).with_for_update().execution_options(populate_existing=True)))
     by_line = {line.id: line for line in lines}
+    previous = list(db.scalars(select(PresalesLineResponse).where(
+        PresalesLineResponse.line_id.in_(by_line), PresalesLineResponse.created_by == user.id)))
+    previous_by_line = {row.line_id: row for row in previous}
+    def unchanged_reuse(line_id, data):
+        row = previous_by_line.get(line_id)
+        return (row is not None and row.line_version == by_line[line_id].version
+                and row.mode == data["mode"] == "reuse" and row.ref_offer_id == data.get("ref_offer_id")
+                and row.ref_offer_revision_no is not None)
     decisions = {}
     for data in line_responses or []:
         if (not isinstance(data, dict) or data.get("line_id") not in by_line
@@ -311,19 +331,16 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
         if mode == "reuse":
             if data.get("reason"):
                 raise InvalidTransition("沿用报价不能同时填写不报原因")
-            _valid_reference(db, line, data.get("ref_offer_id"), ctx)
+            if not unchanged_reuse(line.id, data):
+                _valid_reference(db, line, data.get("ref_offer_id"), ctx, inquiry.created_by)
         elif mode == "skip":
             if data.get("ref_offer_id") is not None or not isinstance(data.get("reason"), str) or not data["reason"].strip():
                 raise InvalidTransition("无货或不报必须填写原因")
         elif data.get("ref_offer_id") is not None or data.get("reason"):
             raise InvalidTransition("报新价不能同时选择沿用或不报")
         decisions[line.id] = data
-    previous = list(db.scalars(select(PresalesLineResponse).where(
-        PresalesLineResponse.line_id.in_(by_line), PresalesLineResponse.created_by == user.id)))
     for row in previous:
         if row.line_id not in decisions and row.line_version == by_line[row.line_id].version:
-            if row.mode == "reuse":
-                _valid_reference(db, by_line[row.line_id], row.ref_offer_id, ctx)
             decisions[row.line_id] = {"mode": row.mode, "ref_offer_id": row.ref_offer_id, "reason": row.reason}
     quoted = {offer.line_id for offer in own}
     if any(line.id not in quoted and decisions.get(line.id, {}).get("mode", "quote") == "quote"
@@ -341,9 +358,11 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
         if decisions.get(row.line_id, {}).get("mode", "quote") == "quote":
             db.delete(row)
     for line_id, data in decisions.items():
-        if data["mode"] != "quote":
+        if data["mode"] != "quote" and not unchanged_reuse(line_id, data):
             _response(db, by_line[line_id], user.id, task.id, data["mode"],
                       ref_offer_id=data.get("ref_offer_id"),
+                      ref_offer_revision_no=(db.get(PresalesOffer, data["ref_offer_id"]).revision_no
+                                             if data["mode"] == "reuse" else None),
                       reason=data["reason"].strip() if data["mode"] == "skip" else None)
     for offer in own:
         if offer.status == "draft" and decisions.get(offer.line_id, {}).get("mode", "quote") != "quote":
@@ -513,8 +532,10 @@ def _publish_choice(db, draft, target, inquiry, actor, published_at, task_id=Non
     old_line = db.get(PresalesInquiryLine, target.line_id)
     if old_line is not None and old_line.id != draft.line_id:
         if db.get(PresalesOfferLineLink, (old_line.id, target.id)) is None:
-            db.add(PresalesOfferLineLink(line_id=old_line.id, offer_id=target.id))
-        _response(db, old_line, target.created_by, target.work_item_id, "reuse", ref_offer_id=target.id)
+            db.add(PresalesOfferLineLink(line_id=old_line.id, offer_id=target.id,
+                                        offer_revision_no=target.revision_no))
+        _response(db, old_line, target.created_by, target.work_item_id, "reuse", ref_offer_id=target.id,
+                  ref_offer_revision_no=target.revision_no)
     _copy_quote(target, draft)
     target.inquiry_id, target.line_id, target.work_item_id = inquiry.id, draft.line_id, task_id
     _publish(db, target, actor, published_at, "采购明确选择更新原报价，按本次单据覆盖受众")

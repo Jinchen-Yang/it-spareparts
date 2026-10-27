@@ -61,7 +61,7 @@ def test_reuse_links_existing_offer_without_copying_price_and_expires_with_it(db
     assert library.batch(db, [users.part.id], users.sales.id)[users.part.id] == []
 
 
-def test_reused_offer_reads_current_price_and_current_field_visibility(db, r6_actors):
+def test_reused_offer_reads_pinned_price_and_pinned_field_visibility(db, r6_actors):
     users = r6_actors
     _, _, _, original = _publish(db, users, fields={"notes_audience": {"mode": "public"}})
     inquiry, lines = _pending(db, users)
@@ -70,13 +70,15 @@ def test_reused_offer_reads_current_price_and_current_field_visibility(db, r6_ac
         {"unit_price": "75.00", "notes": "仅采购可看", "notes_audience": {"mode": "private"},
          "reporter_audience": {"mode": "private"}}, expected_version=original.version)
     result = _response_view(db, inquiry, users.sales, lines[0].id)
-    assert result["offer"]["unit_price"] == Decimal("75.00")
-    assert "notes" not in result["offer"] and "reporter" not in result["offer"]
+    assert result["offer"]["unit_price"] == Decimal("100.00")
+    assert result["offer"]["notes"] == "报价备注" and result["offer"]["reporter"]["id"] == users.buyer.id
+    assert result["offer"]["latest"]["unit_price"] == Decimal("75.00")
+    assert "仅采购可看" not in str(result["offer"])
     assert result["ref_offer_id"] == original.id
     assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 1
 
 
-def test_reused_offer_becomes_expired_when_source_is_updated_to_no_stock(db, r6_actors):
+def test_reused_offer_keeps_pinned_validity_when_source_is_updated_to_no_stock(db, r6_actors):
     users = r6_actors
     _, _, _, original = _publish(db, users)
     inquiry, lines = _pending(db, users)
@@ -87,7 +89,9 @@ def test_reused_offer_becomes_expired_when_source_is_updated_to_no_stock(db, r6_
     assert original.status == "published" and original.valid_until > common.now()
     assert original.unit_price is None and original.no_stock is True
     result = _response_view(db, inquiry, users.sales, lines[0].id)
-    assert result["expired"] is True
+    assert result["expired"] is False
+    assert result["offer"]["unit_price"] == Decimal("100.00")
+    assert result["offer"]["latest"]["unit_price"] is None
     assert result["ref_offer_id"] == original.id
     assert library.batch(db, [users.part.id], users.sales.id)[users.part.id] == []
 
@@ -191,7 +195,7 @@ def test_reuse_rejects_invisible_offer_and_reference_list_uses_m8(db, r6_actors)
     assert [row["id"] for row in response.json()["offers"][str(users.part.id)]] == [public.id]
 
 
-def test_reuse_response_rechecks_record_audience_after_it_becomes_private(db, r6_actors):
+def test_reuse_response_keeps_pinned_record_audience_when_current_becomes_private(db, r6_actors):
     users = r6_actors
     source, _, _, original = _publish(db, users)
     inquiry, lines = _pending(db, users)
@@ -201,7 +205,8 @@ def test_reuse_response_rechecks_record_audience_after_it_becomes_private(db, r6
     source.offer_audience_rule_id = common.rule_id(db, {"mode": "private"}, buyer_ctx)
     db.flush()
     result = _response_view(db, inquiry, users.sales, lines[0].id)
-    assert result.get("offer") is None
+    assert result["offer"]["unit_price"] == Decimal("100.00")
+    assert "latest" not in result["offer"]
     assert "unit_price" not in result
 
 

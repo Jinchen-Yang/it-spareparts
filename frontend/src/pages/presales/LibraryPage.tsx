@@ -5,7 +5,8 @@ import { presales, type Inquiry, type LibraryPart, type Offer } from "../../api/
 import LivePartSearch from "../../components/parts/LivePartSearch";
 import PartThumb from "../../components/gallery/PartThumb";
 import PriceRefBadge from "../../components/pricing/PriceRefBadge";
-import { usePresalesError, isOfferActive, OfferBadge, useNow } from "./shared";
+import { usePresalesError, isOfferActive, OfferBadge, useNow, flattenOffers } from "./shared";
+import OfferGroups from "./OfferGroups";
 import PartQuoteBadges from "./PartQuoteBadges";
 
 export default function LibraryPage() {
@@ -18,7 +19,7 @@ export default function LibraryPage() {
   const [error, setError] = useState(false);
   const [reload, setReload] = useState(0);
   const sourceCache = useRef<Record<number, Inquiry["kind"]>>({});
-  const now = useNow(items.flatMap((item) => item.offers.flatMap((offer) => [offer.valid_from, offer.valid_until])));
+  const now = useNow(items.flatMap((item) => flattenOffers(item.offers).flatMap((offer) => [offer.valid_from, offer.valid_until])));
 
   useEffect(() => {
     const controller = new AbortController();
@@ -33,7 +34,7 @@ export default function LibraryPage() {
         setItems(data);
         setLoading(false);
         setSources({ ...sourceCache.current });
-        const ids = [...new Set(data.flatMap((part) => part.offers.map((offer) => offer.inquiry_id)))].filter((id) => !sourceCache.current[id]);
+        const ids = [...new Set(data.flatMap((part) => flattenOffers(part.offers).map((offer) => offer.inquiry_id)))].filter((id) => !sourceCache.current[id]);
         let index = 0;
         // 报价库没有来源类型：缓存真实单据类型，并限制补取并发，搜索变化即取消。
         await Promise.allSettled(Array.from({ length: Math.min(4, ids.length) }, async () => {
@@ -80,7 +81,7 @@ export default function LibraryPage() {
     </Space>}>
       {part.description && <Typography.Paragraph>{part.description}</Typography.Paragraph>}
       <Space direction="vertical" style={{ width: "100%" }}>
-        {part.offers.map((offer) => {
+        <OfferGroups offers={part.offers} renderOffer={(offer) => {
           const active = isOfferActive(offer, now);
           return <div key={offer.id} aria-label={`报价 ${offer.id}`} aria-disabled={!active}
             style={{ width: "100%", padding: 12, border: "1px solid var(--mb-border-soft)", borderRadius: 6,
@@ -94,7 +95,7 @@ export default function LibraryPage() {
               <Button type="link" onClick={() => navigate(`/presales/inquiries/${offer.inquiry_id}`)}>查看来源单</Button>
             </Space>
           </div>;
-        })}
+        }} />
       </Space>
     </Card>)}
   </Space>;

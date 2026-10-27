@@ -105,3 +105,27 @@ it("1 天和 3 天按上海自然日计算，覆盖月底及周末", () => {
   expect(isOfferActive(offer(), Date.parse("2026-10-25T16:00:00Z"))).toBe(false);
   expect(offerDeadline("2026-10-25T16:00:00.000000Z")).toBe(Date.parse("2026-10-25T16:00:00Z"));
 });
+
+it("每位报价人保留主报价，展开后才显示服务端 more 中的其他报价", async () => {
+  api.searchLibrary.mockResolvedValue([{ part_id: 1, pn_std: "PN-A", offer_count: 2, offers: [
+    offer({ id: 7, unit_price: "100.00", reporter: { id: 1, name: "采购甲" }, more: [
+      offer({ id: 8, unit_price: "80.00", reporter: { id: 1, name: "采购甲" } }),
+    ] }),
+    offer({ id: 9, unit_price: "150.00", reporter: { id: 2, name: "采购乙" }, more: [offer({ id: 10, unit_price: "130.00" })] }),
+  ] }]);
+  await search();
+  expect(screen.getAllByRole("button", { name: "用这条报价建询价单" })).toHaveLength(2);
+  expect(screen.queryByLabelText("报价 8")).not.toBeInTheDocument();
+  fireEvent.click(screen.getAllByRole("button", { name: "展开更多（1 条）" })[0]);
+  expect(screen.getByLabelText("报价 8")).toHaveTextContent("¥80");
+  expect(screen.getAllByRole("button", { name: "用这条报价建询价单" })).toHaveLength(3);
+  expect(screen.queryByLabelText("报价 10")).not.toBeInTheDocument();
+});
+
+it("钉版本角标只用已授权 latest 展示更新提示，并标出原报价撤销", () => {
+  render(<OfferBadge offer={offer({ unit_price: "100.00", original_withdrawn: true,
+    latest: { unit_price: "250.00", is_tax_inclusive: true, revision_no: 2 } })} />);
+  expect(screen.getByText(/已失效 ¥100/)).toBeInTheDocument();
+  expect(screen.getByText("该报价已更新为 ¥250 · 含税")).toBeInTheDocument();
+  expect(screen.getByText("原报价已撤销")).toBeInTheDocument();
+});

@@ -11,8 +11,10 @@ import PriceRefBadge from "../../components/pricing/PriceRefBadge";
 import Timeline from "../../components/workflow/Timeline";
 import { refreshWorkBadges } from "../../components/workflow/useWorkBadge";
 import QuoteEditor, { offerInput, quoteComplete } from "./QuoteEditor";
+import { formatBusinessDateTime } from "../../utils/date";
+import OfferGroups from "./OfferGroups";
 import PartQuoteBadges from "./PartQuoteBadges";
-import { usePresalesError, OfferBadge, isOfferActive, useNow } from "./shared";
+import { usePresalesError, OfferBadge, isOfferActive, useNow, flattenOffers } from "./shared";
 import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
 
 async function findOwnTask(inquiryId: number): Promise<WorkItem | undefined> {
@@ -30,11 +32,17 @@ async function findOwnTask(inquiryId: number): Promise<WorkItem | undefined> {
 
 async function loadInquiry(inquiryId: number) {
   const inquiry = await presales.getInquiry(inquiryId);
-  const references = (inquiry.lines ?? []).filter((line) => line.ref_offer_id && line.part_id);
+  const references = (inquiry.lines ?? []).flatMap((line) => [...new Set([
+    ...(line.ref_offer_id ? [line.ref_offer_id] : []), ...(line.linked_offer_ids ?? []), ...(line.linked_offers ?? []).map((offer) => offer.id),
+    ...(inquiry.line_responses ?? []).filter((row) => row.line_id === line.id && row.mode === "reuse" && row.ref_offer_id)
+      .map((row) => row.ref_offer_id!),
+  ])].map((ref_offer_id) => ({ ref_offer_id, part_id: line.part_id })));
   if (inquiry.kind !== "proactive_offer" || !references.length) return inquiry;
-  const library = await presales.library(references.map((line) => line.part_id!));
-  const offers = new Map((inquiry.offers ?? []).map((offer) => [offer.id, offer]));
-  for (const offer of Object.values(library).flat()) {
+  const library = await presales.library([...new Set(references.flatMap((row) => row.part_id ? [row.part_id] : []))]);
+  // 处理页编辑当前报价；原单关联中的钉版本只在销售详情显示，不能当作并发更新版本。
+  const offers = new Map((inquiry.offers ?? []).filter((offer) => !references.some((row) => row.ref_offer_id === offer.id))
+    .map((offer) => [offer.id, offer]));
+  for (const offer of Object.values(library).flatMap(flattenOffers)) {
     if (references.some((line) => line.ref_offer_id === offer.id)) offers.set(offer.id, offer);
   }
   // 过期报价已从报价库移除。历史只用于定位原单，再读当前记录获取最新并发版本。
@@ -182,7 +190,7 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
   const [library, setLibrary] = useState<Record<number, Offer[]>>({});
   const [libraryError, setLibraryError] = useState(false);
   const [responses, setResponses] = useState<Record<number, LineResponseInput>>({});
-  const now = useNow([...Object.values(library).flat(), ...(inquiry?.line_responses ?? []).flatMap((row) => row.offer ? [row.offer] : [])]
+  const now = useNow([...Object.values(library).flatMap(flattenOffers), ...(inquiry?.line_responses ?? []).flatMap((row) => row.offer ? [row.offer] : [])]
     .flatMap((offer) => [offer.valid_from, offer.valid_until]));
   const partKey = (inquiry?.lines ?? []).filter((line) => line.part_id).map((line) => line.part_id).join(",");
   const refresh = useCallback(async () => {
@@ -193,11 +201,11 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
     let cancelled = false;
     setLibraryError(false);
     if (!partKey) { setLibrary({}); return; }
-    presales.library([...new Set(partKey.split(",").map(Number))]).then((data) => {
-      if (!cancelled) setLibrary(data);
+    presales.reference({ inquiry_id: inquiryId }).then((data) => {
+      if (!cancelled) setLibrary(data.offers);
     }).catch(() => { if (!cancelled) { setLibrary({}); setLibraryError(true); } });
     return () => { cancelled = true; };
-  }, [partKey, inquiry?.version]);
+  }, [partKey, inquiry?.version, inquiryId]);
   useEffect(() => {
     let cancelled = false;
     setLoading(true); setLoadError(false); setInquiry(undefined); setDirty({});
@@ -229,8 +237,8 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
   const responseFor = (lineId: number): LineResponseInput => responses[lineId] ?? savedResponse(lineId) ?? { line_id: lineId, mode: "quote" };
   const reusedOffer = (line: InquiryLine) => {
     const response = responseFor(line.id);
-    return (library[line.part_id!] ?? []).find((offer) => offer.id === response.ref_offer_id)
-      ?? (savedResponse(line.id)?.ref_offer_id === response.ref_offer_id ? savedResponse(line.id)?.offer : undefined);
+    return (savedResponse(line.id)?.ref_offer_id === response.ref_offer_id ? savedResponse(line.id)?.offer : undefined)
+      ?? flattenOffers(library[line.part_id!] ?? []).find((offer) => offer.id === response.ref_offer_id);
   };
   const complete = required.length > 0 && required.every((line) => {
     const response = responseFor(line.id);
@@ -295,7 +303,7 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
       const changeResponse = (patch: Partial<LineResponseInput>) => setResponses((previous) => ({
         ...previous, [line.id]: { ...responseFor(line.id), ...patch },
       }));
-      const referenceId = proactive ? line.ref_offer_id ?? savedResponse(line.id)?.ref_offer_id : undefined;
+      const referenceId = proactive ? line.ref_offer_id ?? savedResponse(line.id)?.ref_offer_id ?? line.linked_offer_ids?.[0] : undefined;
       const current = (referenceId ? ownOffers.find((offer) => offer.id === referenceId) : undefined)
         ?? ownOffers.find((offer) => offer.line_id === line.id && offer.status !== "withdrawn" && offer.status !== "stale")
         ?? ownOffers.find((offer) => offer.line_id === line.id);
@@ -308,10 +316,11 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
         {line.description && <Typography.Paragraph>{line.description}</Typography.Paragraph>}
         {"notes" in line && line.notes && <Typography.Paragraph>{line.notes}</Typography.Paragraph>}
         {line.field_values?.map((field, index) => <Typography.Paragraph key={index}>{field.name ?? field.new_name}: {String(field.value ?? "")}</Typography.Paragraph>)}
-        {line.ref_offer_id && !proactive ? <Tag color="success">已引用有效报价，无需再次处理</Tag> : <>
+        {line.ref_offer_id && !proactive ? <Space wrap><Tag>已引用报价，无需再次处理</Tag>
+          {line.ref_offer && <OfferBadge offer={line.ref_offer} />}</Space> : <>
           {!proactive && <Space direction="vertical" style={{ width: "100%", marginBottom: 12 }}>
             <Typography.Text strong>已有有效报价</Typography.Text>
-            {existing.length ? existing.map((offer) => <div key={offer.id}><OfferBadge offer={offer} /></div>)
+            {existing.length ? <OfferGroups offers={existing} renderOffer={(offer) => <OfferBadge offer={offer} />} />
               : <Typography.Text type="secondary">暂无可见的有效报价</Typography.Text>}
             <div role="radiogroup" aria-label={`${line.pn_raw}处理方式`}><Radio.Group value={response.mode} disabled={!editable || !active || busy}
               onChange={(event) => changeResponse({ mode: event.target.value })}>
@@ -320,8 +329,11 @@ function ProcessContent({ inquiryId }: { inquiryId: number }) {
             {response.mode === "reuse" && <>
               <Select aria-label={`${line.pn_raw}沿用报价`} placeholder="请选择沿用的有效报价" style={{ minWidth: 280 }}
                 value={response.ref_offer_id} disabled={!editable || !active || busy} onChange={(value) => changeResponse({ ref_offer_id: value })}
-                options={existing.map((offer) => ({ value: offer.id, label: <span>报价 #{offer.id} <OfferBadge offer={offer} /></span> }))} />
-              {reused && <div>所沿用报价：<OfferBadge offer={reused} /></div>}
+                options={flattenOffers(existing).filter((offer) => isOfferActive(offer, now)).map((offer) => ({ value: offer.id, label: <span>报价 #{offer.id} <OfferBadge offer={offer} /></span> }))} />
+              {reused && <div>所沿用报价：<OfferBadge offer={reused} />
+                <span>原报价人：{(savedResponse(line.id)?.ref_offer_id === reused.id ? savedResponse(line.id)?.reporter_label : undefined) ?? reused.reporter?.name ?? "其他采购"}</span>
+                {reused.valid_from && <span> · 原报价时间：{formatBusinessDateTime(reused.valid_from)}</span>}
+              </div>}
               {!reused && response.ref_offer_id && <Tag>沿用报价当前不可见或已失效</Tag>}
             </>}
             {response.mode === "skip" && <Input.TextArea aria-label={`${line.pn_raw}不报原因`} value={response.reason ?? ""}

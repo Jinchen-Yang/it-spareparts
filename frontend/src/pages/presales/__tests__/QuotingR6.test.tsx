@@ -4,7 +4,7 @@ import { cleanupAntd, fireEvent, render, screen, waitFor, within } from "../../.
 import type { Inquiry, Offer } from "../../../api/presales";
 import type { WorkItem } from "../../../api/workItems";
 
-const mocks = vi.hoisted(() => ({ getInquiry: vi.fn(), library: vi.fn(), listWorkItems: vi.fn(),
+const mocks = vi.hoisted(() => ({ getInquiry: vi.fn(), library: vi.fn(), reference: vi.fn(), listWorkItems: vi.fn(),
   saveOffer: vi.fn(), replyInquiry: vi.fn(), publishInquiry: vi.fn(), suppliers: vi.fn(),
   listWorkCandidates: vi.fn(), getFieldTemplate: vi.fn(), refreshWorkBadges: vi.fn() }));
 vi.mock("../../../api/presales", () => ({ presales: mocks }));
@@ -45,6 +45,7 @@ beforeEach(() => {
       pn_raw: `PN-${id}`, qty: "2", status: "active", version: 1 })), offers: [],
     work_items: [{ id: 71, assignee_id: 7, claimed_by: null, status: "in_progress", version: 3, paused: false }] };
   mocks.getInquiry.mockImplementation(async () => inquiry);
+  mocks.reference.mockImplementation(async () => ({ offers: await mocks.library() }));
   mocks.library.mockResolvedValue({ 1: [activeQuote()] });
   mocks.suppliers.mockResolvedValue([]);
   mocks.getFieldTemplate.mockResolvedValue([]);
@@ -217,4 +218,40 @@ describe("r6 重复报价必须明确选择", () => {
     fireEvent.change(screen.getByLabelText("PN-1备注"), { target: { value: "供应商售罄" } });
     expect(screen.getByRole("button", { name: "发布主动报价" })).toBeEnabled();
   });
+});
+
+it("处理页通过询价参考接口读取所有人可见候选，同一报价人的其他价可展开", async () => {
+  inquiry.lines = [inquiry.lines![0]];
+  mocks.library.mockResolvedValue({ 1: [{ ...activeQuote(), more: [{ ...activeQuote(), id: 100, unit_price: "140.00" }] }] });
+  process();
+  await screen.findByText(/有效报价 ¥120/);
+  expect(mocks.reference).toHaveBeenCalledWith({ inquiry_id: 1 });
+  expect(screen.queryByText(/有效报价 ¥140/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "展开更多（1 条）" }));
+  expect(screen.getByText(/有效报价 ¥140/)).toBeInTheDocument();
+});
+
+it("沿用行保留钉住的价格与原报价时间，隐藏报价人显示其他采购", async () => {
+  const pinned = activeQuote();
+  delete pinned.reporter;
+  inquiry.line_responses = [{ line_id: 11, mode: "reuse", ref_offer_id: 99, ref_offer_revision_no: 1,
+    created_by: 7, work_item_id: 71, offer: pinned, expired: false, reporter_label: "其他采购" }];
+  render(<MemoryRouter initialEntries={["/presales/inquiries/1"]}><Routes>
+    <Route path="/presales/inquiries/:id" element={<InquiryDetailPage />} /></Routes></MemoryRouter>);
+  expect(await screen.findByText("原报价人：其他采购")).toBeInTheDocument();
+  expect(screen.getByText(/原报价时间：2026-10-25/)).toBeInTheDocument();
+  expect(screen.getByText(/有效报价 ¥120/)).toBeInTheDocument();
+  expect(screen.queryByText("采购甲")).not.toBeInTheDocument();
+});
+
+it("主动报价编辑跨单旧行关联时先读当前报价，不以钉快照的旧价格版本编辑", async () => {
+  const pinned = { ...activeQuote(), unit_price: "120.00", version: 2,
+    latest: { unit_price: "180.00", is_tax_inclusive: true, revision_no: 3 } };
+  inquiry = { ...inquiry, kind: "proactive_offer", created_by: 7, lines: [{ ...inquiry.lines![0], linked_offer_ids: [99] }],
+    offers: [pinned], work_items: [] };
+  mocks.library.mockResolvedValue({ 1: [{ ...activeQuote(), unit_price: "180.00", version: 8, revision_no: 3 }] });
+  process();
+  expect(await screen.findByLabelText("PN-1单价")).toHaveValue("180.00");
+  expect(screen.getByRole("button", { name: "更新报价" })).toBeEnabled();
+  expect(screen.queryByText(/该报价已更新为/)).not.toBeInTheDocument();
 });

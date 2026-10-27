@@ -1,5 +1,9 @@
 """售前唯一的服务端输出边界；先记录准入，再合并受众与字段组限制。"""
 
+from datetime import datetime
+from decimal import Decimal
+from types import SimpleNamespace
+
 from sqlalchemy import or_, select
 
 from app.models.presales import (
@@ -51,7 +55,10 @@ def _offer_batch(db, offers, ctx, *, fields):
         return []
     inquiries = {row.id: row for row in db.scalars(select(PresalesInquiry).where(
         PresalesInquiry.id.in_({offer.inquiry_id for offer in offers})))}
+    def inquiry_for(offer):
+        return getattr(offer, "_inquiry_snapshot", None) or inquiries.get(offer.inquiry_id)
     owner_ids = {offer.created_by for offer in offers} | {row.created_by for row in inquiries.values()}
+    owner_ids.update(inquiry_for(offer).created_by for offer in offers if inquiry_for(offer) is not None)
     authors = {row.id: row for row in db.scalars(select(SysUser).where(SysUser.id.in_(owner_ids)))}
     bypassed = bypass(ctx)
     shared_sales = work_items.has_permission(ctx, "action_presales_inquire")
@@ -59,16 +66,16 @@ def _offer_batch(db, offers, ctx, *, fields):
     def shared(inquiry):
         return inquiry.submitted_at is not None and (
             shared_sales or (inquiry.kind == "proactive_offer" and shared_buyer))
-    needed = {offer.inquiry_id for offer in offers if offer.inquiry_id in inquiries
+    needed = {offer.inquiry_id for offer in offers if inquiry_for(offer) is not None
         and not bypassed and offer.created_by != user.id and offer.status != "draft"
-        and inquiries[offer.inquiry_id].created_by != user.id
-        and inquiries[offer.inquiry_id].status != "draft" and not shared(inquiries[offer.inquiry_id])}
+        and inquiry_for(offer).created_by != user.id
+        and inquiry_for(offer).status != "draft" and not shared(inquiry_for(offer))}
     participation = work_items.participation_batch(db, "presales_inquiry", needed, ctx) if needed else {}
     flat, rules, candidates = {}, {}, []
     omitted = {"created_by", "work_item_id", "supplier_audience_rule_id",
                "reporter_audience_rule_id", "notes_audience_rule_id"}
     for index, offer in enumerate(offers):
-        inquiry = inquiries.get(offer.inquiry_id)
+        inquiry = inquiry_for(offer)
         if inquiry is None:
             continue
         direct = bypassed or offer.created_by == user.id
@@ -136,6 +143,46 @@ def offer_view(db, offer, ctx):
     return views[0] if views else None
 
 
+
+def _snapshot_offer(revision):
+    values = {column.name: revision.snapshot.get(column.name) for column in PresalesOffer.__table__.columns}
+    for key in ("valid_from", "valid_until", "created_at", "updated_at"):
+        if isinstance(values[key], str):
+            values[key] = datetime.fromisoformat(values[key])
+    for key in ("unit_price", "qty_available"):
+        if values[key] is not None:
+            values[key] = Decimal(str(values[key]))
+    inquiry = revision.snapshot.get("_inquiry")
+    if inquiry is not None:
+        values["_inquiry_snapshot"] = SimpleNamespace(**inquiry)
+    return SimpleNamespace(**values, __table__=PresalesOffer.__table__)
+
+
+def pinned_offer_view(db, offer_id, revision_no, ctx):
+    """旧单只读明确钉住的历史，不把未知版本猜成当前版本。"""
+    if offer_id is None or revision_no is None:
+        return None
+    revision = db.scalar(select(PresalesOfferRevision).where(
+        PresalesOfferRevision.offer_id == offer_id, PresalesOfferRevision.revision_no == revision_no))
+    current = db.get(PresalesOffer, offer_id)
+    if revision is None or current is None or "_inquiry" not in revision.snapshot:
+        return None
+    snapshot = _snapshot_offer(revision)
+    view = offer_view(db, snapshot, ctx)
+    if view is None:
+        return None
+    from app.services.presales.common import now
+    moment = now()
+    view["expired"] = (snapshot.status != "published" or snapshot.no_stock or snapshot.unit_price is None
+        or snapshot.valid_until is None or snapshot.valid_until <= moment
+        or snapshot.valid_from is None or snapshot.valid_from > moment)
+    view["original_withdrawn"] = current.status == "withdrawn"
+    if current.revision_no > revision_no:
+        latest = offer_view(db, current, ctx)
+        if latest is not None:
+            view["latest"] = {key: latest[key] for key in ("unit_price", "is_tax_inclusive", "revision_no")}
+    return view
+
 def inquiry_view(db, inquiry, ctx, *, detail=True):
     if not can_view_inquiry(db, inquiry, ctx):
         raise Forbidden("无权查看该询价单")
@@ -161,11 +208,29 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
         PresalesOfferLineLink.line_id.in_([line.id for line in lines]))))
     references = {line.ref_offer_id for line in lines if line.ref_offer_id is not None} | {
         row.ref_offer_id for row in responses if row.ref_offer_id is not None} | {link.offer_id for link in links}
+    if inquiry.won_offer_id is not None:
+        references.add(inquiry.won_offer_id)
     offer_models = list(db.scalars(select(PresalesOffer).where(
         or_(PresalesOffer.inquiry_id == inquiry.id, PresalesOffer.id.in_(references)),
     ).order_by(PresalesOffer.id)))
-    offers = offer_views(db, offer_models, ctx)
+    offers = offer_views(db, [offer for offer in offer_models if offer.inquiry_id == inquiry.id], ctx)
+    pinned = {}
+    def read_pin(offer_id, revision_no):
+        key = (offer_id, revision_no)
+        if key not in pinned:
+            pinned[key] = pinned_offer_view(db, offer_id, revision_no, ctx)
+        return pinned[key]
+    line_references = {line.id: read_pin(line.ref_offer_id, line.ref_offer_revision_no)
+                       for line in lines if line.ref_offer_id is not None}
+    response_references = {row.id: read_pin(row.ref_offer_id, row.ref_offer_revision_no)
+                           for row in responses if row.ref_offer_id is not None}
+    link_references = {(link.line_id, link.offer_id): read_pin(link.offer_id, link.offer_revision_no)
+                       for link in links}
     views_by_id = {view["id"]: view for view in offers}
+    for view in [*line_references.values(), *response_references.values(), *link_references.values()]:
+        if view is not None and view["id"] not in views_by_id:
+            offers.append(view)
+            views_by_id[view["id"]] = view
     hidden_reporters = {offer.created_by: offer for offer in offer_models
         if offer.id in views_by_id and "reporter" not in views_by_id[offer.id]}
     if hidden_reporters and not owner:
@@ -174,10 +239,10 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
     line_ids = {line.id for line in lines}
     handled = {offer["line_id"] for offer in offers
                if offer["status"] == "published" and offer["line_id"] in line_ids}
-    handled.update(line.id for line in lines if line.ref_offer_id in views_by_id)
+    handled.update(line_id for line_id, view in line_references.items() if view is not None)
     handled.update(row.line_id for row in responses
                    if owner or bypass(ctx) or row.created_by == user.id)
-    handled.update(link.line_id for link in links if link.offer_id in views_by_id)
+    handled.update(line_id for (line_id, _), view in link_references.items() if view is not None)
     result["progress"] = {"quoted_lines": len(handled), "line_count": len(lines)}
     if detail:
         result.update(audience.read_rules(db, {
@@ -201,30 +266,37 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
             if line.id in line_rules:
                 row["notes_audience"] = line_rules[line.id]
             row["field_values"] = values.get(f"line:{line.id}", [])
+            if line.id in line_references:
+                ref = line_references[line.id]
+                row["ref_offer"] = ref
+                row["expired"] = ref is None or ref["expired"]
+                row["original_withdrawn"] = bool(ref and ref["original_withdrawn"])
             row["linked_offer_ids"] = [link.offer_id for link in links
-                                       if link.line_id == line.id and link.offer_id in views_by_id]
+                if link.line_id == line.id and link_references[(link.line_id, link.offer_id)] is not None]
+            row["linked_offers"] = [link_references[(link.line_id, link.offer_id)] for link in links
+                if link.line_id == line.id and link_references[(link.line_id, link.offer_id)] is not None]
             row["field_template"] = [{"id": f.id, "name": f.name, "value_type": f.value_type,
                                        "choices": f.choices} for f in field_pool.template_for(
                 db, "presales_inquiry", "line", ctx,
                 anchor=f"part:{line.part_id}" if line.part_id else None)]
             result["lines"].append(row)
         result["offers"] = offers
-        from app.services.presales.common import now
-        moment = now()
-        models_by_id = {offer.id: offer for offer in offer_models}
+        if inquiry.won_offer_id is not None:
+            result["won_offer"] = read_pin(inquiry.won_offer_id, inquiry.won_offer_revision_no)
         result["line_responses"] = []
         for response in responses:
             if not (owner or bypass(ctx) or response.created_by == user.id):
                 continue
             row = {key: getattr(response, key) for key in (
-                "line_id", "mode", "created_by", "work_item_id", "reason", "ref_offer_id")}
-            offer = models_by_id.get(response.ref_offer_id)
-            row["expired"] = response.mode == "reuse" and (offer is None or offer.status != "published"
-                or offer.no_stock or offer.unit_price is None
-                or offer.valid_until is None or offer.valid_until <= moment
-                or offer.valid_from is None or offer.valid_from > moment)
-            if response.ref_offer_id in views_by_id:
-                row["offer"] = views_by_id[response.ref_offer_id]
+                "line_id", "mode", "created_by", "work_item_id", "reason", "ref_offer_id", "ref_offer_revision_no")}
+            offer = response_references.get(response.id)
+            row["expired"] = response.mode == "reuse" and (offer is None or offer["expired"])
+            row["original_withdrawn"] = bool(offer and offer["original_withdrawn"])
+            if offer is not None:
+                row["offer"] = offer
+                owner_view = pinned_offer_view(db, response.ref_offer_id, response.ref_offer_revision_no,
+                                              resolve_actor(db, inquiry.created_by)[1])
+                row["reporter_label"] = (owner_view or {}).get("reporter", {}).get("name", "其他采购")
             result["line_responses"].append(row)
         result["work_items"] = []
         for item in work_items.list_by_subject(db, Subject("presales_inquiry", inquiry.id), ctx):

@@ -1,26 +1,26 @@
-method	path	operation_id
-DELETE	/api/presales/inquiries/{inquiry_id}	delete_inquiry_api_presales_inquiries__inquiry_id__delete
-GET	/api/presales/customers	search_customers_api_presales_customers_get
-GET	/api/presales/inquiries	list_inquiries_api_presales_inquiries_get
-GET	/api/presales/inquiries/{inquiry_id}	get_inquiry_api_presales_inquiries__inquiry_id__get
-GET	/api/presales/library	get_library_api_presales_library_get
-GET	/api/presales/library/search	search_library_api_presales_library_search_get
-GET	/api/presales/lines/{line_id}/part-check	check_part_api_presales_lines__line_id__part_check_get
-GET	/api/presales/offers/{offer_id}/revisions	offer_revisions_api_presales_offers__offer_id__revisions_get
-GET	/api/presales/suppliers	search_suppliers_api_presales_suppliers_get
-PATCH	/api/presales/inquiries/{inquiry_id}	update_inquiry_api_presales_inquiries__inquiry_id__patch
-PATCH	/api/presales/offers/{offer_id}	update_offer_api_presales_offers__offer_id__patch
-POST	/api/presales/inquiries	create_inquiry_api_presales_inquiries_post
-POST	/api/presales/inquiries/{inquiry_id}/close	close_inquiry_api_presales_inquiries__inquiry_id__close_post
-POST	/api/presales/inquiries/{inquiry_id}/copy	copy_inquiry_api_presales_inquiries__inquiry_id__copy_post
-POST	/api/presales/inquiries/{inquiry_id}/lines	append_lines_api_presales_inquiries__inquiry_id__lines_post
-POST	/api/presales/inquiries/{inquiry_id}/lines/{line_id}/offers	save_offer_api_presales_inquiries__inquiry_id__lines__line_id__offers_post
-POST	/api/presales/inquiries/{inquiry_id}/publish	publish_api_presales_inquiries__inquiry_id__publish_post
-POST	/api/presales/inquiries/{inquiry_id}/reply	reply_api_presales_inquiries__inquiry_id__reply_post
-POST	/api/presales/inquiries/{inquiry_id}/resubmit	resubmit_inquiry_api_presales_inquiries__inquiry_id__resubmit_post
-POST	/api/presales/inquiries/{inquiry_id}/submit	submit_inquiry_api_presales_inquiries__inquiry_id__submit_post
-POST	/api/presales/inquiries/{inquiry_id}/withdraw	withdraw_inquiry_api_presales_inquiries__inquiry_id__withdraw_post
-POST	/api/presales/lines/{line_id}/bind-part	bind_part_api_presales_lines__line_id__bind_part_post
-POST	/api/presales/lines/{line_id}/create-part	create_part_api_presales_lines__line_id__create_part_post
-POST	/api/presales/offers/{offer_id}/withdraw	withdraw_offer_api_presales_offers__offer_id__withdraw_post
-POST	/api/presales/reference	reference_api_presales_reference_post
+method	path	operation_id	response_contract
+DELETE	/api/presales/inquiries/{inquiry_id}	delete_inquiry_api_presales_inquiries__inquiry_id__delete	沿用presales.md基础契约
+GET	/api/presales/customers	search_customers_api_presales_customers_get	沿用presales.md基础契约
+GET	/api/presales/inquiries	list_inquiries_api_presales_inquiries_get	沿用presales.md基础契约
+GET	/api/presales/inquiries/{inquiry_id}	get_inquiry_api_presales_inquiries__inquiry_id__get	r7: ref_offer/won_offer/line_responses.offer为钉版本快照；latest仅当前版本可见时返回
+GET	/api/presales/library	get_library_api_presales_library_get	r7: 每PN每报价人最新有效价+more；M8过滤后按含税/未税/未知分区升价
+GET	/api/presales/library/search	search_library_api_presales_library_search_get	r7: offers去重+more；offer_count为报价人数；最低价取主列表
+GET	/api/presales/lines/{line_id}/part-check	check_part_api_presales_lines__line_id__part_check_get	沿用presales.md基础契约
+GET	/api/presales/offers/{offer_id}/revisions	offer_revisions_api_presales_offers__offer_id__revisions_get	沿用presales.md基础契约
+GET	/api/presales/suppliers	search_suppliers_api_presales_suppliers_get	沿用presales.md基础契约
+PATCH	/api/presales/inquiries/{inquiry_id}	update_inquiry_api_presales_inquiries__inquiry_id__patch	r7: 新引用钉版本；已有引用保持原版本
+PATCH	/api/presales/offers/{offer_id}	update_offer_api_presales_offers__offer_id__patch	沿用presales.md基础契约
+POST	/api/presales/inquiries	create_inquiry_api_presales_inquiries_post	r7: ref_offer_revision_no由服务端记录
+POST	/api/presales/inquiries/{inquiry_id}/close	close_inquiry_api_presales_inquiries__inquiry_id__close_post	r7: won_offer_revision_no由服务端记录；成交快照不随更新改变
+POST	/api/presales/inquiries/{inquiry_id}/copy	copy_inquiry_api_presales_inquiries__inquiry_id__copy_post	沿用presales.md基础契约
+POST	/api/presales/inquiries/{inquiry_id}/lines	append_lines_api_presales_inquiries__inquiry_id__lines_post	r7: 追加引用钉版本
+POST	/api/presales/inquiries/{inquiry_id}/lines/{line_id}/offers	save_offer_api_presales_inquiries__inquiry_id__lines__line_id__offers_post	沿用presales.md基础契约
+POST	/api/presales/inquiries/{inquiry_id}/publish	publish_api_presales_inquiries__inquiry_id__publish_post	r7: new/update显式选择；跨单旧行关联钉版本
+POST	/api/presales/inquiries/{inquiry_id}/reply	reply_api_presales_inquiries__inquiry_id__reply_post	r7: reuse须所有人可见并记录ref_offer_revision_no；缺显式选择409；skip须原因
+POST	/api/presales/inquiries/{inquiry_id}/resubmit	resubmit_inquiry_api_presales_inquiries__inquiry_id__resubmit_post	沿用presales.md基础契约
+POST	/api/presales/inquiries/{inquiry_id}/submit	submit_inquiry_api_presales_inquiries__inquiry_id__submit_post	沿用presales.md基础契约
+POST	/api/presales/inquiries/{inquiry_id}/withdraw	withdraw_inquiry_api_presales_inquiries__inquiry_id__withdraw_post	沿用presales.md基础契约
+POST	/api/presales/lines/{line_id}/bind-part	bind_part_api_presales_lines__line_id__bind_part_post	沿用presales.md基础契约
+POST	/api/presales/lines/{line_id}/create-part	create_part_api_presales_lines__line_id__create_part_post	沿用presales.md基础契约
+POST	/api/presales/offers/{offer_id}/withdraw	withdraw_offer_api_presales_offers__offer_id__withdraw_post	沿用presales.md基础契约
+POST	/api/presales/reference	reference_api_presales_reference_post	r7: inquiry_id候选取查看者与所有人M8/字段组交集；去重+more

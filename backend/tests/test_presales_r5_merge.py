@@ -1,4 +1,4 @@
-"""重复主动报价只有整单和字段受众均等价时才更新原记录。"""
+"""重复报价按采购的显式选择更新或独立发布，保留受众参数矩阵。"""
 
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -11,9 +11,8 @@ from app.models.dimensions import DimPart
 from app.models.presales import PresalesOffer
 from app.models.system import SysUser
 from app.services import audience
-from app.services.presales import common, inquiries, library, offers, visibility
+from app.services.presales import common, inquiries, offers
 from app.services.presales.registration import register_subjects
-from app.services.workflow.registry import Forbidden
 
 
 @pytest.fixture()
@@ -31,7 +30,8 @@ def actors(db, monkeypatch):
     return SimpleNamespace(**users, part=part)
 
 
-def _publish(db, actors, *, whole=None, fields=None, price="100.00"):
+def _publish(db, actors, *, whole=None, fields=None, price="100.00",
+             on_existing="new", existing_offer_id=None):
     inquiry = inquiries.create_draft(db, actors.buyer.id, kind="proactive_offer",
         lines=[{"part_id": actors.part.id}], offer_audience=whole)
     line = inquiries.lines_for(db, inquiry.id)[0]
@@ -40,35 +40,14 @@ def _publish(db, actors, *, whole=None, fields=None, price="100.00"):
         expected_version=inquiry.version)
     draft_id = draft.id
     result = offers.publish_proactive(db, inquiry.id, actors.buyer.id,
-                                      expected_version=inquiry.version)
+                                      expected_version=inquiry.version, on_existing=on_existing,
+                                      existing_offer_id=existing_offer_id)
     return inquiry, line, draft_id, result[0]
-
-
-@pytest.mark.parametrize("mode", ["private", "include"])
-def test_restricted_repeat_keeps_public_price_in_library_original_inquiry_and_search(db, actors, mode):
-    original, _, _, first = _publish(db, actors)
-    rule = {"mode": mode}
-    if mode == "include":
-        rule["user_ids"] = [actors.sales.username]
-    restricted, line, draft_id, second = _publish(db, actors, whole=rule, price="1.00")
-    assert second.id == draft_id and second.id != first.id
-    assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 2
-    assert line.ref_offer_id is None
-    assert first.unit_price == Decimal("100.00") and first.revision_no == 1
-    ctx = common.resolve_actor(db, actors.other.id)[1]
-    assert [row["unit_price"] for row in library.batch(db, [actors.part.id], ctx)[actors.part.id]] == [Decimal("100.00")]
-    assert [row["unit_price"] for row in visibility.inquiry_view(db, original, ctx)["offers"]] == [Decimal("100.00")]
-    with pytest.raises(Forbidden):
-        visibility.inquiry_view(db, restricted, ctx)
-    results = library.search(db, actors.part.pn_std, ctx)
-    assert len(results) == 1 and results[0]["offer_count"] == 1
-    assert [row["unit_price"] for row in results[0]["offers"]] == [Decimal("100.00")]
-    assert len(library.batch(db, [actors.part.id], actors.buyer.id)[actors.part.id]) == 2
 
 
 @pytest.mark.parametrize("field", ["supplier", "reporter", "notes"])
 @pytest.mark.parametrize("mode", ["private", "include"])
-def test_any_field_audience_difference_preserves_independent_quote(db, actors, field, mode):
+def test_explicit_new_preserves_independent_quote_with_field_audience_difference(db, actors, field, mode):
     _, _, _, first = _publish(db, actors, fields={field + "_audience": {"mode": "public"}})
     rule = {"mode": mode}
     if mode == "include":
@@ -83,7 +62,7 @@ def test_any_field_audience_difference_preserves_independent_quote(db, actors, f
 
 @pytest.mark.parametrize("scope", ["whole", "supplier", "reporter", "notes"])
 @pytest.mark.parametrize("target", ["user", "group"])
-def test_same_mode_different_member_sets_keep_quotes_separate(db, actors, scope, target):
+def test_explicit_new_keeps_different_member_sets_separate(db, actors, scope, target):
     if target == "user":
         first_rule = {"mode": "include", "user_ids": [actors.sales.username]}
         second_rule = {"mode": "include", "user_ids": [actors.other.username]}
@@ -107,7 +86,7 @@ def test_same_mode_different_member_sets_keep_quotes_separate(db, actors, scope,
 
 
 @pytest.mark.parametrize("mode", ["public", "private", "include", "exclude"])
-def test_equivalent_rule_content_updates_despite_new_ids_and_reordered_members(db, actors, mode):
+def test_explicit_update_accepts_equivalent_rules_with_new_ids_and_reordered_members(db, actors, mode):
     ctx = common.resolve_actor(db, actors.buyer.id)[1]
     groups = [audience.create_group(db, name, "personal", [], ctx, bypass=common.bypass)
               for name in ("组一", "组二")]
@@ -121,40 +100,30 @@ def test_equivalent_rule_content_updates_despite_new_ids_and_reordered_members(d
     _, _, _, first = _publish(db, actors, whole=rule,
         fields={field + "_audience": rule for field in ("supplier", "reporter", "notes")})
     _, line, draft_id, repeated = _publish(db, actors, whole=reversed_rule, price="90.00",
-        fields={field + "_audience": reversed_rule for field in ("supplier", "reporter", "notes")})
+        fields={field + "_audience": reversed_rule for field in ("supplier", "reporter", "notes")},
+        on_existing="update", existing_offer_id=first.id)
     assert repeated.id == first.id and repeated.revision_no == 2
-    assert repeated.unit_price == Decimal("90.00") and line.ref_offer_id == first.id
+    assert repeated.unit_price == Decimal("90.00") and repeated.line_id == line.id
     assert db.get(PresalesOffer, draft_id) is None
     assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 1
 
 
-def test_repeat_finds_equivalent_candidate_after_different_audience(db, actors):
+def test_explicit_update_targets_selected_private_quote_among_different_audiences(db, actors):
     _, _, _, public = _publish(db, actors)
     _, _, _, private = _publish(db, actors, whole={"mode": "private"}, price="50.00")
-    _, line, _, repeated = _publish(db, actors, whole={"mode": "private"}, price="40.00")
+    _, line, _, repeated = _publish(db, actors, whole={"mode": "private"}, price="40.00",
+        on_existing="update", existing_offer_id=private.id)
     assert public.id != private.id
     assert repeated.id == private.id and repeated.revision_no == 2
     assert public.unit_price == Decimal("100.00") and public.revision_no == 1
-    assert line.ref_offer_id == private.id
+    assert repeated.line_id == line.id
     assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 2
 
 
-def test_same_batch_different_field_audiences_do_not_merge(db, actors):
-    inquiry = inquiries.create_draft(db, actors.buyer.id, kind="proactive_offer",
-        lines=[{"part_id": actors.part.id}, {"part_id": actors.part.id}])
-    for line, mode in zip(inquiries.lines_for(db, inquiry.id), ("public", "private")):
-        offers.save_draft(db, inquiry.id, line.id, actors.buyer.id,
-            {"unit_price": "100.00", "source_key": "same-source",
-             "reporter_audience": {"mode": mode}}, expected_version=inquiry.version)
-    result = offers.publish_proactive(db, inquiry.id, actors.buyer.id,
-                                      expected_version=inquiry.version)
-    assert len(result) == 2
-    assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 2
-
-
-def test_default_public_and_explicit_public_are_equivalent(db, actors):
+def test_explicit_new_keeps_default_and_explicit_public_quotes_independent(db, actors):
     _, _, _, first = _publish(db, actors)
     _, line, _, repeated = _publish(db, actors, whole={"mode": "public"},
         fields={"reporter_audience": {"mode": "public"}, "notes_audience": {"mode": "public"}})
-    assert repeated.id == first.id and repeated.revision_no == 2
-    assert line.ref_offer_id == first.id
+    assert repeated.id != first.id and repeated.revision_no == 1
+    assert first.revision_no == 1 and line.ref_offer_id is None
+    assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 2

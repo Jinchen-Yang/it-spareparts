@@ -13,7 +13,8 @@ import AudiencePicker, { PUBLIC_AUDIENCE } from "../../components/audience/Audie
 import AudienceLock from "../../components/audience/AudienceLock";
 import CustomFieldsEditor from "../../components/fields/CustomFieldsEditor";
 import PartQuoteBadges from "./PartQuoteBadges";
-import { isOfferActive as activeOffer, OfferBadge, useNow } from "./shared";
+import { isOfferActive as activeOffer, OfferBadge, useNow, flattenOffers } from "./shared";
+import OfferGroups from "./OfferGroups";
 import CandidateSelect from "./CandidateSelect";
 import { changedAudience } from "../../components/audience/rules";
 import { readPermissionMap } from "../../nav";
@@ -22,6 +23,7 @@ type ReadField = { field_def_id?: number; new_name?: string; name?: string; valu
 type DraftLine = {
   key: string; line_key?: string; part_id: number | null; pn_raw: string; description?: string | null;
   brand?: string | null; qty: number; require_exact_pn: boolean; ref_offer_id?: number | null;
+  ref_offer_revision_no?: number | null; ref_offer?: Offer;
   notes?: string | null; notes_audience?: AudienceRule; notesVisible: boolean; field_values: CustomFieldValue[];
   savedNotesAudience?: AudienceRuleRead; savedDeliveryAudience?: AudienceRuleRead;
   originalFields: ReadField[]; expectedDelivery: string; deliveryFieldId?: number; deliveryAudience?: AudienceRule;
@@ -67,10 +69,10 @@ function Fields({ level, partId, value, savedValues, onChange, disabled = false 
 }
 
 function EffectiveOffers({ offers, now, onReference }: { offers: Offer[]; now: number; onReference?: (offer: Offer) => void }) {
-  return <Space wrap>{offers.filter((offer) => activeOffer(offer, now)).map((offer) => <Space key={offer.id} size={2}>
+  return <OfferGroups offers={offers.filter((offer) => activeOffer(offer, now))} renderOffer={(offer) => <Space key={offer.id} size={2}>
     <OfferBadge offer={offer} />
     {onReference && <Button size="small" onClick={() => onReference(offer)}>直接引用</Button>}
-  </Space>)}</Space>;
+  </Space>} />;
 }
 
 function fromLine(line: InquiryLine): DraftLine {
@@ -78,7 +80,7 @@ function fromLine(line: InquiryLine): DraftLine {
   const delivery = fields.find((field) => field.name === DELIVERY_FIELD);
   return { key: line.line_key, line_key: line.line_key, part_id: line.part_id ?? null, pn_raw: line.pn_raw,
     description: line.description, qty: Number(line.qty), require_exact_pn: !!line.require_exact_pn,
-    ref_offer_id: line.ref_offer_id, notes: line.notes, notesVisible: "notes" in line, field_values: editableFields(fields, true), originalFields: fields,
+    ref_offer_id: line.ref_offer_id, ref_offer_revision_no: line.ref_offer_revision_no, ref_offer: line.ref_offer, notes: line.notes, notesVisible: "notes" in line, field_values: editableFields(fields, true), originalFields: fields,
     savedNotesAudience: line.notes_audience, savedDeliveryAudience: delivery?.rule,
     expectedDelivery: delivery?.value == null ? "" : String(delivery.value), deliveryFieldId: delivery?.field_def_id };
 }
@@ -108,7 +110,10 @@ function InquiryEditorContent() {
   const [candidates, setCandidates] = useState<WorkCandidate[]>([]);
   const [candidateError, setCandidateError] = useState(false);
   const [library, setLibrary] = useState<Record<number, Offer[]>>({});
-  const now = useNow(Object.values(library).flatMap((offers) => offers.flatMap((offer) => [offer.valid_from, offer.valid_until])));
+  const now = useNow([...Object.values(library).flatMap(flattenOffers), ...lines.flatMap((line) => line.ref_offer ? [line.ref_offer] : [])]
+    .flatMap((offer) => [offer.valid_from, offer.valid_until]));
+  const referencedOffer = (line: DraftLine) => line.ref_offer_revision_no != null && line.ref_offer?.id === line.ref_offer_id
+    ? line.ref_offer : flattenOffers(library[line.part_id || 0] ?? []).find((offer) => offer.id === line.ref_offer_id);
   const [loading, setLoading] = useState(!!id);
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -190,7 +195,7 @@ function InquiryEditorContent() {
     if (busy || blocked) return;
     if (!lines.length && (submit || append)) { void message.warning("请至少加入一行询价"); return; }
     if (lines.some((line) => !Number.isFinite(line.qty) || line.qty <= 0)) { void message.warning("数量必须大于 0"); return; }
-    if (lines.some((line) => line.ref_offer_id && !(library[line.part_id || 0] || []).some((offer) => offer.id === line.ref_offer_id && activeOffer(offer, Date.now())))) {
+    if (lines.some((line) => line.ref_offer_id && (!referencedOffer(line) || !activeOffer(referencedOffer(line)!, Date.now())))) {
       void message.warning("引用报价已失效，请重新选择有效报价或取消引用"); return;
     }
     setBusy(true);
@@ -283,8 +288,9 @@ function InquiryEditorContent() {
             </Row>
             {line.part_id && <Form.Item label="有效报价">
               {line.ref_offer_id ? <Space wrap><Tag color="green">已引用报价 #{line.ref_offer_id} · 本行不再派单</Tag>
-                {!(library[line.part_id] || []).some((offer) => offer.id === line.ref_offer_id && activeOffer(offer, now)) && <Tag color="red">引用已失效</Tag>}
-                <Button onClick={() => updateLine(line.key, { ref_offer_id: null })}>取消引用</Button></Space>
+                {referencedOffer(line) && <OfferBadge offer={referencedOffer(line)!} />}
+                {(!referencedOffer(line) || !activeOffer(referencedOffer(line)!, now)) && <Tag color="red">引用已失效</Tag>}
+                <Button onClick={() => updateLine(line.key, { ref_offer_id: null, ref_offer_revision_no: null, ref_offer: undefined })}>取消引用</Button></Space>
                 : <EffectiveOffers offers={library[line.part_id] || []} now={now} onReference={(offer) => updateLine(line.key, { ref_offer_id: offer.id })} />}
             </Form.Item>}
             {line.notesVisible && <Form.Item label={<Space>行备注{(!line.line_key || line.savedNotesAudience) && <AudienceLock label={`${line.pn_raw} 行备注`} savedRule={line.savedNotesAudience} value={line.notes_audience}

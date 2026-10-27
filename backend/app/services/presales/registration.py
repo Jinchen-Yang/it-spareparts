@@ -139,14 +139,16 @@ def _validate_complete(db, item, ctx):
     quoted = set(db.scalars(select(PresalesOffer.line_id).where(
         PresalesOffer.inquiry_id == inquiry.id, PresalesOffer.created_by == item.assignee_id,
         PresalesOffer.status == "published")))
-    from app.services.presales.offers import _valid_reference
+    from app.services.presales.visibility import pinned_offer_view
     for response in db.scalars(select(PresalesLineResponse).where(
         PresalesLineResponse.line_id.in_(needed), PresalesLineResponse.created_by == item.assignee_id)):
         line = db.get(PresalesInquiryLine, response.line_id)
         if response.line_version != line.version:
             continue
         if response.mode == "reuse":
-            _valid_reference(db, line, response.ref_offer_id, ctx)
+            if pinned_offer_view(db, response.ref_offer_id, response.ref_offer_revision_no,
+                                 resolve_actor(db, inquiry.created_by)[1]) is None:
+                raise InvalidTransition("沿用报价的历史版本不可用，请重新选择")
         quoted.add(line.id)
     if needed - quoted:
         raise InvalidTransition("每行必须先回复报价或标记无货，请使用询价回复接口")

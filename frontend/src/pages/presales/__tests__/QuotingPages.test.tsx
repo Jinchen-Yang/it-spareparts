@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "../../../test/antdRender";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import type { Inquiry, Offer } from "../../../api/presales";
 import type { PartSuggestion } from "../../../api/search";
 import type { WorkItem } from "../../../api/workItems";
@@ -8,7 +8,7 @@ import type { WorkItem } from "../../../api/workItems";
 const mocks = vi.hoisted(() => ({
   getInquiry: vi.fn(), createInquiry: vi.fn(), saveOffer: vi.fn(), updateOffer: vi.fn(),
   withdrawOffer: vi.fn(), replyInquiry: vi.fn(), publishInquiry: vi.fn(), partCheck: vi.fn(),
-  bindPart: vi.fn(), createPart: vi.fn(), library: vi.fn(), revisions: vi.fn(), listWorkItems: vi.fn(),
+  bindPart: vi.fn(), createPart: vi.fn(), library: vi.fn(), reference: vi.fn(), revisions: vi.fn(), listWorkItems: vi.fn(),
   listWorkCandidates: vi.fn(), getFieldTemplate: vi.fn(), refreshWorkBadges: vi.fn(), inbox: vi.fn(), suppliers: vi.fn(),
 }));
 vi.mock("../../../api/presales", () => ({ presales: mocks }));
@@ -65,6 +65,7 @@ beforeEach(() => {
   mocks.listWorkItems.mockResolvedValue({ items: [task], total: 1, page: 1, page_size: 100, can_supervise: false });
   mocks.listWorkCandidates.mockResolvedValue({ items: [{ id: 3, display_name: "销售甲" }] });
   mocks.getFieldTemplate.mockResolvedValue([]);
+  mocks.reference.mockImplementation(async () => ({ offers: await mocks.library() }));
   mocks.library.mockResolvedValue({});
   mocks.revisions.mockResolvedValue([]);
   mocks.replyInquiry.mockImplementation(async () => {
@@ -151,7 +152,7 @@ describe("采购待办与询价处理", () => {
     }));
   });
 
-  it("逐行保存报价/无货，1天与3天按上海自然日显示，全部完成才回复", async () => {
+  it("逐行保存新报价或填写不报原因，1天与3天按上海自然日显示，全部完成才回复", async () => {
     processPage();
     await screen.findByLabelText("PN-1单价");
     expect(screen.getAllByText("将于 10月25日 23:59 失效（上海时间）")).toHaveLength(2);
@@ -167,12 +168,14 @@ describe("采购待办与询价处理", () => {
     })));
     await waitFor(() => expect(screen.getByText("已保存草稿")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "回复给销售" })).toBeDisabled();
-    fireEvent.click(screen.getAllByRole("checkbox", { name: "无货" })[1]);
-    fireEvent.click(screen.getAllByRole("button", { name: "保存该行报价" })[1]);
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "PN-2处理方式" })).getByRole("radio", { name: "无货 / 不报" }));
+    expect(screen.getByRole("button", { name: "回复给销售" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("PN-2不报原因"), { target: { value: "供应商确认无货" } });
     await waitFor(() => expect(screen.getByRole("button", { name: "回复给销售" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "回复给销售" }));
     await waitFor(() => expect(mocks.replyInquiry).toHaveBeenCalledWith(1, {
       expected_version: 4, work_item_id: 71, expected_work_item_version: 3,
+      line_responses: [{ line_id: 11, mode: "quote" }, { line_id: 12, mode: "skip", reason: "供应商确认无货" }],
     }));
     await screen.findAllByRole("button", { name: "更新报价" });
     expect(screen.queryByRole("button", { name: "回复给销售" })).not.toBeInTheDocument();
@@ -273,6 +276,7 @@ describe("采购主动报价", () => {
     expect(screen.getByRole("button", { name: "发布主动报价" })).toBeDisabled();
     fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "300" } });
     fireEvent.click(screen.getAllByRole("checkbox", { name: "无货" })[1]);
+    fireEvent.change(screen.getByLabelText("PN-2备注"), { target: { value: "供应商确认无货" } });
     fireEvent.click(screen.getByRole("button", { name: "发布主动报价" }));
     await screen.findByText("主动报价已发布");
     expect(mocks.saveOffer).toHaveBeenCalledTimes(2);
@@ -280,11 +284,11 @@ describe("采购主动报价", () => {
     expect(mocks.refreshWorkBadges).toHaveBeenCalled();
   });
 
-  it("本人同 PN 有效报价提示将更新已有报价", async () => {
+  it("本人同 PN 有效报价提示发布时明确选择更新或另报一条", async () => {
     mocks.library.mockResolvedValue({ 1: [quote({ status: "published", valid_from: "2026-10-25T00:00:00Z", valid_until: "2026-10-25T15:59:59Z" })] });
     offerPage();
     await makeProactiveDraft();
-    expect(await screen.findByText("你已有该 PN 的有效报价，同货源将更新已有报价")).toBeInTheDocument();
+    expect(await screen.findByText("你已有该 PN 的有效报价，发布时请选择更新或另报一条")).toBeInTheDocument();
   });
 
   it("复制出的主动报价草稿可通过 draft 参数继续填写，支持定向通知", async () => {
