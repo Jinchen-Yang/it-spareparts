@@ -6,6 +6,11 @@ const shadow = {
 };
 
 const color = {
+  presales: {
+    page: "#F5F6F8", surface: "#FFFFFF", text: "#1F2328", text2: "#5B6470",
+    border: "#E3E6EA", accent: "#1D4ED8", hover: "#EEF3FE",
+    warning: "#9A3412", success: "#14532D", purple: "#5B21B6",
+  },
   page: "#F4F1EC",
   surface: "#FFFFFF",
   inset: "#F6F3EE",

@@ -1,41 +1,78 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, App, Button, Card, DatePicker, Select, Space, Table, Tabs, Tag, Typography } from "antd";
+import { Alert, App, Button, DatePicker, Input, Pagination, Select, Tabs, Tag } from "antd";
 import type { Dayjs } from "dayjs";
-import { presales, type Inquiry } from "../../api/presales";
+import { presales, type Inquiry, type InquiryLine, type Offer } from "../../api/presales";
 import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
 import { fetchPurchaseAnalyticsOptions } from "../../api/purchaseAnalytics";
 import { readPermissionMap } from "../../nav";
+import DataGrid, { type DataGridColumn, type DataGridSort } from "../../components/datagrid/DataGrid";
+import { isOfferActive, useNow } from "./shared";
+import { moneyExact } from "../../utils/format";
+import "./presales.css";
 
 const statuses: Record<string, string> = { draft: "草稿", submitted: "已提交", revising: "撤回修改中", closed: "已结束" };
 const workStatuses: Record<string, string> = { pending: "待处理", in_progress: "处理中", done: "已回复", declined: "已退回", cancelled: "已取消" };
+const defaultSort: DataGridSort = { key: "updated_at", dir: "desc" };
+const serverKeys = new Set(["inquiry_no", "line_count", "status", "updated_at", "created_at"]);
+
+function lineOffers(detail: Inquiry | undefined, line: InquiryLine): Offer[] {
+  // 本行已有引用时只使用钉住快照，不能用当前报价的续期或降价改写摘要。
+  const pinned = new Map([...(line.linked_offers || []), ...(line.ref_offer ? [line.ref_offer] : []),
+    ...(detail?.line_responses || []).filter((response) => response.line_id === line.id && response.mode === "reuse" && response.offer)
+      .map((response) => response.offer!)].map((offer) => [offer.id, offer]));
+  const current = (detail?.offers || []).filter((offer) => offer.line_id === line.id && !pinned.has(offer.id));
+  return [...pinned.values(), ...current];
+}
 
 export default function InquiryListPage() {
   const navigate = useNavigate();
   const { message } = App.useApp();
   const permissions = readPermissionMap();
   const supervisor = !!permissions.action_presales_supervise || ["admin", "boss"].includes(localStorage.getItem("role") || "");
-  const [scope, setScope] = useState<"mine" | "all">("mine");
+  const [scope, setScope] = useState<"mine" | "shared" | "all">("mine");
   const [kind, setKind] = useState<Inquiry["kind"]>();
   const [status, setStatus] = useState<Inquiry["status"]>();
+  const [stage, setStage] = useState("");
+  const [query, setQuery] = useState("");
   const [range, setRange] = useState<[Dayjs | null, Dayjs | null] | null>(null);
   const [items, setItems] = useState<Inquiry[]>([]);
+  const [mineIds, setMineIds] = useState<Set<number>>(new Set());
   const [details, setDetails] = useState<Record<number, Inquiry>>({});
   const [candidates, setCandidates] = useState<WorkCandidate[]>([]);
   const [customers, setCustomers] = useState<Record<number, string>>({});
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
+  const [sort, setSort] = useState<DataGridSort | null>(defaultSort);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [detailError, setDetailError] = useState(false);
   const [reload, setReload] = useState(0);
   const conflictRetried = useRef(false);
-  useEffect(() => { conflictRetried.current = false; }, [scope, kind, status, page]);
+  const now = useNow(Object.values(details).flatMap((detail) => (detail.lines || []).flatMap((line) => lineOffers(detail, line)
+    .flatMap((offer) => [offer.valid_from, offer.valid_until]))));
+  useEffect(() => { conflictRetried.current = false; }, [scope, kind, status, page, sort]);
   useEffect(() => {
     let disposed = false;
-    setLoading(true); setError(""); setDetails({}); setDetailError(false);
-    void presales.listInquiries({ scope, kind, status, page, page_size: 20 }).then(async (data) => {
+    setLoading(true); setError(""); setItems([]); setDetails({}); setDetailError(false);
+    const selected = sort && serverKeys.has(sort.key) ? sort : defaultSort;
+    void presales.listInquiries({ scope: scope === "shared" ? "all" : scope, kind, status, page, page_size: 20,
+      sort: selected.key as "updated_at", dir: selected.dir }).then(async (data) => {
       if (disposed) return;
+      if (scope === "shared") {
+        const ids = new Set<number>();
+        let minePage = 1;
+        // 只用既有权限范围识别“共享”；不通过报价人或客户字段推断身份。
+        while (!disposed) {
+          const mine = await presales.listInquiries({ scope: "mine", page: minePage, page_size: 100 });
+          mine.items.forEach((item) => ids.add(item.id));
+          if (minePage * 100 >= mine.total || !mine.items.length) break;
+          minePage++;
+        }
+        if (disposed) return;
+        setMineIds(ids);
+      }
+      // 共享页的全部前置请求成功后再重置，避免 mine 持续冲突触发无限重试。
       conflictRetried.current = false;
       setItems(data.items); setTotal(data.total);
       const rows = await Promise.allSettled(data.items.map((item) => presales.getInquiry(item.id)));
@@ -53,7 +90,7 @@ export default function InquiryListPage() {
       }
     }).finally(() => { if (!disposed) setLoading(false); });
     return () => { disposed = true; };
-  }, [scope, kind, status, page, reload, message]);
+  }, [scope, kind, status, page, reload, message, sort]);
   useEffect(() => {
     let disposed = false;
     void listWorkCandidates("presales_inquiry").then((data) => { if (!disposed) setCandidates(data.items); }).catch(() => {});
@@ -69,11 +106,7 @@ export default function InquiryListPage() {
     }).catch(() => {});
     return () => { disposed = true; };
   }, [customerIds]);
-  const filtered = useMemo(() => items.filter((item) => {
-    const time = Date.parse(item.updated_at);
-    return (!range?.[0] || time >= range[0].startOf("day").valueOf()) && (!range?.[1] || time <= range[1].endOf("day").valueOf());
-  }), [items, range]);
-  const progress = (row: Inquiry) => {
+  const progress = useCallback((row: Inquiry) => {
     if (row.status !== "submitted") return statuses[row.status] || row.status;
     const detail = details[row.id];
     if (!detail) return "已提交";
@@ -83,44 +116,76 @@ export default function InquiryListPage() {
     if (replied || work.some((item) => item.status === "in_progress")) return `处理中「已回复 ${replied}/${work.length}」`;
     if (!work.length && (detail.lines || []).length && (detail.lines || []).every((line) => line.ref_offer_id)) return "已回复";
     return "待处理";
-  };
-  return <Space direction="vertical" size="large" style={{ width: "100%" }}>
-    <Space wrap style={{ justifyContent: "space-between", width: "100%" }}>
-      <Typography.Title level={3} style={{ margin: 0 }}>询价单</Typography.Title>
-      <Space><Button onClick={() => setReload((value) => value + 1)}>刷新</Button>
-        <Button type="primary" onClick={() => navigate("/presales/inquiries/new")}>新建询价</Button></Space>
-    </Space>
-    <Card>
-      <Tabs activeKey={scope} onChange={(value) => { setScope(value as "mine" | "all"); setPage(1); }}
-        items={[{ key: "mine", label: "我的询价" }, ...(supervisor ? [{ key: "all", label: "全部" }] : [])]} />
-      <Space wrap style={{ marginBottom: 16 }}>
-        <Select aria-label="询价类型" allowClear placeholder="类型" style={{ width: 150 }} value={kind}
-          options={[{ value: "sales_inquiry", label: "销售询价" }, { value: "proactive_offer", label: "主动报价" }]}
-          onChange={(value) => { setKind(value); setPage(1); }} />
-        <Select aria-label="询价状态" allowClear placeholder="状态" style={{ width: 150 }} value={status}
-          options={Object.entries(statuses).map(([value, label]) => ({ value, label }))}
-          onChange={(value) => { setStatus(value); setPage(1); }} />
-        <DatePicker.RangePicker aria-label="最近动态日期" value={range} onChange={(value) => setRange(value)} />
-        <Typography.Text type="secondary">日期筛选作用于当前页最近动态时间。</Typography.Text>
-      </Space>
-      {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 12 }} />}
-      {detailError && <Alert type="warning" message="部分处理人状态加载失败，请刷新后查看。" style={{ marginBottom: 12 }} />}
-      <Table<Inquiry> rowKey="id" dataSource={filtered} loading={loading} scroll={{ x: 950 }}
-        pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }}
-        columns={[
-          { title: "单号", dataIndex: "inquiry_no", render: (value, row) => <Button type="link" onClick={() => navigate(`/presales/inquiries/${row.id}`)}>{value}</Button> },
-          { title: "类型", dataIndex: "kind", render: (value) => value === "proactive_offer" ? "主动报价" : "销售询价" },
-          { title: "客户", render: (_, row) => "customer_id" in row && row.customer_id != null ? (customers[row.customer_id] || `客户 #${row.customer_id}`) : null },
-          { title: "行数", dataIndex: "line_count" },
-          { title: "进度", render: (_, row) => <Tag>{progress(row)}</Tag> },
-          { title: "处理人", render: (_, row) => <Space wrap>{(details[row.id]?.work_items || []).map((item) => {
-            const userId = item.claimed_by ?? item.assignee_id;
-            const person = candidates.find((candidate) => candidate.id === userId);
-            return <Tag key={item.id}>{userId != null ? `${person?.display_name || `账号 #${userId}`} · ` : item.assignee_id === null && item.claimed_by === null ? "公共池 · " : ""}
-              {item.paused ? "已暂停" : workStatuses[item.status] || item.status}</Tag>;
-          })}</Space> },
-          { title: "最近动态", dataIndex: "updated_at", render: (value) => value ? new Date(value).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) : null },
-        ]} />
-    </Card>
-  </Space>;
+  }, [details]);
+  const filtered = useMemo(() => items.filter((item) => {
+    const time = Date.parse(item.updated_at);
+    const detail = details[item.id];
+    const search = [item.inquiry_no, item.customer_id ? customers[item.customer_id] : "", ...(detail?.lines || []).flatMap((l) => [l.pn_raw, l.description])].join(" ").toLocaleLowerCase();
+    return (scope !== "shared" || !mineIds.has(item.id)) && (!stage || progress(item).startsWith(stage))
+      && (!query.trim() || search.includes(query.trim().toLocaleLowerCase()))
+      && (!range?.[0] || time >= range[0].startOf("day").valueOf()) && (!range?.[1] || time <= range[1].endOf("day").valueOf());
+  }), [items, range, query, details, customers, scope, mineIds, stage, progress]);
+  const onSortChange = useCallback((value: DataGridSort | null) => { setSort(value); setPage(1); }, []);
+  const columns: DataGridColumn<Inquiry>[] = [
+    { key: "inquiry_no", title: "单号", width: 180, identity: true, type: "code", value: (r) => r.inquiry_no,
+      render: (r) => <><button className="presales-cell-link presales-mono" onClick={() => navigate(`/presales/inquiries/${r.id}`)}>{r.inquiry_no}</button>{r.kind === "proactive_offer" && <span className="presales-pill presales-pill-purple">主动报价</span>}</> },
+    { key: "customer", title: "客户", width: 180, sortable: false, value: (r) => r.customer_id ? customers[r.customer_id] || `客户 #${r.customer_id}` : "" },
+    { key: "pns", title: "PN（前 3 个）", width: 240, sortable: false, value: (r) => {
+      const lines = details[r.id]?.lines || [];
+      return lines.slice(0, 3).map((l) => l.pn_raw).join(" · ") + (lines.length > 3 ? ` +${lines.length - 3}` : "");
+    } },
+    { key: "line_count", title: "行数", width: 64, type: "number", align: "right", value: (r) => r.line_count },
+    { key: "status", title: "进度", width: 160, type: "rank", value: (r) => r.status, rank: ["draft", "revising", "submitted", "closed"],
+      render: (r) => <Tag title="排序按单据阶段：草稿、撤回修改、已提交、已结束">{progress(r)}</Tag> },
+    { key: "handlers", title: "处理人状态", width: 240, sortable: false, render: (row) => <span>{(details[row.id]?.work_items || []).map((item) => {
+      const userId = item.claimed_by ?? item.assignee_id;
+      const person = candidates.find((candidate) => candidate.id === userId);
+      return <Tag key={item.id}>{userId != null ? `${person?.display_name || `账号 #${userId}`} · ` : item.assignee_id === null && item.claimed_by === null ? "公共池 · " : ""}
+        {item.paused ? "已暂停" : workStatuses[item.status] || item.status}</Tag>;
+    })}</span> },
+    { key: "amount", title: "最低报价合计（含税）", width: 165, hidden: true, sortable: false, render: (r) => {
+      const detail = details[r.id]; const lines = detail?.lines || [];
+      const values = lines.map((line) => lineOffers(detail, line).filter((o) => isOfferActive(o, now) && o.is_tax_inclusive === true).map((o) => Number(o.unit_price)));
+      return lines.length && values.every((v) => v.length) ? moneyExact(values.reduce((sum, v, i) => sum + Math.min(...v) * Number(lines[i].qty), 0)) : "—";
+    } },
+    { key: "updated_at", title: "最近动态", width: 170, type: "time", value: (r) => r.updated_at,
+      render: (r) => new Date(r.updated_at).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) },
+  ];
+  return <section className="presales-page presales-inquiry-list">
+    <div className="presales-heading"><h1>询价单</h1>
+      <Tabs activeKey={scope} onChange={(value) => { setScope(value as typeof scope); setPage(1); }} items={[
+        { key: "mine", label: "我的询价" }, { key: "shared", label: "共享给我" }, ...(supervisor ? [{ key: "all", label: "全部" }] : []),
+      ]} /><span className="presales-spacer" />
+      <Input size="small" className="presales-search" aria-label="搜索单号、客户或 PN" placeholder="单号 / 客户 / PN / 描述" allowClear value={query} onChange={(e) => setQuery(e.target.value)} />
+      <Button size="small" onClick={() => setReload((v) => v + 1)}>刷新</Button>
+      <Button size="small" type="primary" onClick={() => navigate("/presales/inquiries/new")}>新建询价</Button>
+    </div>
+    <div className="presales-filters">
+      {["", "草稿", "待处理", "处理中", "已回复", "已结束"].map((name) => <Button size="small" shape="round" key={name} type={stage === name ? "primary" : "default"}
+        onClick={() => { setStage(name); setStatus(name === "草稿" ? "draft" : name === "已结束" ? "closed" : name ? "submitted" : undefined); setPage(1); }}>{name || "全部状态"}</Button>)}
+      <Select size="small" aria-label="询价类型" allowClear placeholder="类型" style={{ width: 110 }} value={kind}
+        options={[{ value: "sales_inquiry", label: "销售询价" }, { value: "proactive_offer", label: "主动报价" }]} onChange={(value) => { setKind(value); setPage(1); }} />
+      <Select size="small" aria-label="询价状态" allowClear placeholder="单据状态" style={{ width: 115 }} value={status}
+        options={Object.entries(statuses).map(([value, label]) => ({ value, label }))} onChange={(value) => { setStatus(value); setStage(""); setPage(1); }} />
+      <DatePicker.RangePicker size="small" aria-label="最近动态日期" value={range} onChange={setRange} />
+    </div>
+    <div className="presales-filter-note">日期筛选作用于当前页最近动态时间。搜索、处理进度及共享范围同样筛选当前页；单号、行数、单据阶段和最近动态按服务端全局排序。</div>
+    {detailError && <Alert type="warning" message="部分处理人状态加载失败，请刷新后查看。" />}
+    <DataGrid id="presales-inquiries" rows={filtered} columns={columns} rowKey={(r) => r.id} loading={loading} error={error}
+      onRetry={() => setReload((v) => v + 1)} defaultSort={defaultSort} serverSort onSortChange={onSortChange} ariaLabel="询价单列表"
+      renderExpanded={(row) => <DataGrid id="presales-inquiry-summary" rows={details[row.id]?.lines || []} rowKey={(l) => l.id} ariaLabel="PN 报价状态" columns={[
+        { key: "pn", title: "PN", identity: true, type: "code", width: 180, value: (l) => l.pn_raw },
+        { key: "description", title: "描述", type: "zh", width: 350, value: (l) => l.description },
+        { key: "qty", title: "数量", type: "number", width: 70, value: (l) => l.qty },
+        { key: "quote", title: "报价状态", width: 170, render: (l) => {
+          const count = lineOffers(details[row.id], l).filter((o) => isOfferActive(o, now)).length;
+          const skipped = (details[row.id]?.line_responses || []).filter((response) => response.line_id === l.id && response.mode === "skip");
+          return count ? <span className="presales-pill presales-pill-success">{l.ref_offer_id ? "已引用 · " : ""}{count} 条有效报价</span>
+            : skipped.length ? <span className="presales-pill presales-pill-warning" title={skipped.map((response) => response.reason).filter(Boolean).join("；")}>不报 · {skipped.map((response) => response.reason).filter(Boolean).join("；")}</span>
+              : <span className="presales-pill presales-pill-warning">待报价</span>;
+        } },
+      ]} />} />
+    <div className="presales-list-footer"><span>本页显示 {filtered.length} / {items.length} 张 · 范围内共 {total} 张</span>
+      <Pagination size="small" current={page} pageSize={20} total={total} showSizeChanger={false} onChange={setPage} /></div>
+  </section>;
 }

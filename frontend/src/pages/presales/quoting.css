@@ -1,0 +1,42 @@
+.quote-workbench { display: grid; grid-template-columns: 285px minmax(0, 1fr); gap: 12px; align-items: start; color: var(--mb-presales-text); }
+.quote-queue, .quote-document, .quote-offer-page { min-width: 0; background: var(--mb-presales-surface); }
+.quote-queue { border: 1px solid var(--mb-presales-border); border-radius: 6px; padding: 8px; }
+.quote-document { display: flex; flex-direction: column; min-height: calc(100vh - 150px); }
+.quote-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 10px 12px; border-bottom: 1px solid var(--mb-presales-border); }
+.quote-heading h2, .quote-heading h3 { margin: 0; font-size: 16px; }
+.quote-heading .quote-number { font-family: ui-monospace, 'JetBrains Mono', monospace; font-weight: 600; }
+.quote-muted { color: var(--mb-presales-text-2); font-size: 12px; }
+.quote-header-note { max-width: 260px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--mb-presales-text-2); }
+.quote-validity { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.quote-validity .ant-input-number { width: 68px; }
+.quote-grid { margin: 8px 0; }
+.quote-grid .ant-form-item { margin-bottom: 0; }
+.quote-grid .ant-radio-button-wrapper { padding-inline: 8px; font-size: 12px; }
+.quote-grid .ant-input-number, .quote-grid .ant-select { width: 100%; }
+.quote-grid .ant-tag { margin-inline-end: 2px; font-size: 12px; }
+.quote-grid [aria-label="价格参考角标"] { flex-wrap: nowrap !important; }
+.quote-grid [aria-label="价格参考角标"] .ant-tag { background: transparent; border: 0; padding: 0 2px; }
+.quote-expanded { padding: 10px; display: grid; gap: 8px; }
+.quote-full-description { white-space: pre-wrap; overflow-wrap: anywhere; }
+.quote-details-form { display: flex; flex-wrap: wrap; align-items: start; gap: 8px 14px; }
+.quote-details-form .ant-form-item-label { padding-bottom: 2px; }
+.quote-details-form .ant-form-item-label > label { font-size: 12px; color: var(--mb-presales-text-2); }
+.quote-details-form .ant-form-item { min-width: 150px; flex: 1 1 180px; }
+.quote-details-form > .ant-space { display: contents; }
+.quote-details-form > .ant-space > .ant-space-item { flex: 1 1 160px; }
+.quote-footer { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: auto; position: sticky; bottom: 0; z-index: 4; background: var(--mb-presales-surface); border-top: 1px solid var(--mb-presales-border); padding: 10px 12px; font-size: 13px; }
+.quote-footer-actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.quote-row-actions { display: inline-flex; gap: 4px; }
+.quote-row-actions .ant-btn { font-size: 12px; padding-inline: 5px; }
+.quote-queue .ant-tabs-nav { margin-bottom: 8px; }
+.quote-queue .ant-tabs-tab { font-size: 12px; padding: 5px 0; }
+.quote-queue .ant-tabs-tab + .ant-tabs-tab { margin-left: 10px; }
+.quote-queue-row { display: flex; flex-direction: column; gap: 2px; line-height: 18px; }
+.quote-queue-filters { display: flex; gap: 4px; margin-bottom: 6px; }
+.quote-queue-filters .ant-select { width: 112px; flex-shrink: 0; }
+.quote-offer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 0; }
+.quote-offer-tools > div { flex: 1 1 240px; }
+.quote-offer-extra { padding: 8px; border-block: 1px solid var(--mb-presales-border); }
+@media (max-width: 700px) { .quote-workbench { grid-template-columns: minmax(0, 1fr); } .quote-queue { max-height: 300px; overflow: auto; } .quote-document { min-height: 0; } .quote-footer-actions { margin-left: 0; } }
+.quote-workbench .ant-btn-primary, .quote-offer-page .ant-btn-primary { background: var(--mb-presales-accent); }
+.quote-workbench .ant-btn-primary:disabled, .quote-offer-page .ant-btn-primary:disabled { background: var(--mb-presales-page); color: var(--mb-presales-text-2); }

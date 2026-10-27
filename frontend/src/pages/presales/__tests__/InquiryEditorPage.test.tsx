@@ -84,6 +84,8 @@ describe("销售询价编辑", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "搜索并批量加入 PN" }), { target: { value: "RAW-NEW" } });
     fireEvent.click(await screen.findByRole("button", { name: /按原文添加「RAW-NEW」/ }));
     expect(screen.getByText("待建档", { exact: true })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "展开 PN-A" }));
+    fireEvent.click(screen.getByRole("button", { name: "客户要求 / 自定义字段" }));
     fireEvent.change(screen.getByRole("spinbutton", { name: "PN-A 数量" }), { target: { value: "4" } });
     fireEvent.click(screen.getAllByRole("checkbox", { name: "要求 PN 一致" })[0]);
     fireEvent.change(screen.getByLabelText("PN-A 期望交期"), { target: { value: "2026-11-01" } });
@@ -146,11 +148,13 @@ describe("销售询价编辑", () => {
     mocks.presales.getInquiry.mockResolvedValue(data);
     mount("/presales/inquiries/1/edit");
     const warranty = await screen.findByRole("textbox", { name: "质保要求字段值" });
+    fireEvent.click(screen.getByRole("button", { name: "客户要求 / 自定义字段" }));
+    fireEvent.click(screen.getByRole("button", { name: "设置本单报价可见范围" }));
     expect(screen.getByRole("button", { name: "客户要求可见性：私密" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "PN-A 行备注可见性：不给谁看" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "PN-A 期望交期可见性：部分可见" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "质保要求可见性：私密" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "单头说明可见性：不给谁看" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "单头说明可见性：不给谁看" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "谁可以看" }).closest(".ant-select")).toHaveTextContent("销售甲");
     fireEvent.change(warranty, { target: { value: "三年" } });
     fireEvent.change(screen.getByRole("textbox", { name: "单头说明字段值" }), { target: { value: "新说明" } });
@@ -278,4 +282,42 @@ it("从报价库展开报价带入的新引用可在 more 中校验并建单", a
   await waitFor(() => expect(mocks.presales.createInquiry).toHaveBeenCalledWith(expect.objectContaining({
     lines: [expect.objectContaining({ ref_offer_id: 70 })],
   })));
+});
+
+it("新增第二个 PN 收起已有详情，必需补充描述的原文行单独展开，支持全部展开折叠", async () => {
+  mount();
+  expect(screen.queryByRole("textbox", { name: "客户要求" })).not.toBeInTheDocument();
+  await addPart("PN-A");
+  expect(screen.getByLabelText("PN-A 期望交期")).toBeInTheDocument();
+  await addPart("PN-B");
+  expect(screen.queryByLabelText("PN-A 期望交期")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("PN-B 期望交期")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "批量粘贴 PN" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "批量 PN" }), { target: { value: "RAW-A\nRAW-B;RAW-A;PN-A" } });
+  fireEvent.click(screen.getByRole("button", { name: "按原文加入" }));
+  expect(screen.getByRole("textbox", { name: "RAW-A 描述" })).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "RAW-B 描述" })).toBeInTheDocument();
+  expect(screen.getAllByRole("spinbutton")).toHaveLength(4);
+  expect(screen.queryByLabelText("PN-A 期望交期")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "全部展开" }));
+  expect(screen.getByLabelText("PN-A 期望交期")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "全部折叠" }));
+  expect(screen.queryByRole("textbox", { name: "RAW-A 描述" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
+  await waitFor(() => expect(mocks.presales.createInquiry).toHaveBeenCalled());
+  expect(mocks.presales.createInquiry.mock.calls[0][0].lines.map((line: { pn_raw: string }) => line.pn_raw)).toEqual(["PN-A", "PN-B", "RAW-A", "RAW-B"]);
+});
+
+it("继续加入 PN 时保留缺描述的原文行展开，已补齐的行恢复折叠", async () => {
+  mount();
+  fireEvent.change(screen.getByRole("textbox", { name: "搜索并批量加入 PN" }), { target: { value: "RAW-A" } });
+  fireEvent.click(await screen.findByRole("button", { name: /按原文添加「RAW-A」/ }));
+  await addPart("PN-A");
+  expect(screen.getByRole("textbox", { name: "RAW-A 描述" })).toBeVisible();
+  expect(screen.queryByLabelText("PN-A 期望交期")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByRole("textbox", { name: "RAW-A 描述" }), { target: { value: "已补齐规格说明" } });
+  await addPart("PN-B");
+  expect(screen.queryByRole("textbox", { name: "RAW-A 描述" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "展开 RAW-A" }));
+  expect(screen.getByRole("textbox", { name: "RAW-A 描述" })).toHaveValue("已补齐规格说明");
 });

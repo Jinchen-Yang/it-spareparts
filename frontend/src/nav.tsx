@@ -106,8 +106,8 @@ const loadSystemSettings = () => import("./pages/SystemSettingsPage");
 const loadInquiryList = () => import("./pages/presales/InquiryListPage");
 const loadInquiryEditor = () => import("./pages/presales/InquiryEditorPage");
 const loadInquiryDetail = () => import("./pages/presales/InquiryDetailPage");
-const loadPresalesTasks = () => import("./pages/presales/TasksPage");
-const loadPresalesProcess = () => import("./pages/presales/ProcessPage");
+const loadPresalesWorkbench = () => import("./pages/presales/QuoteWorkbenchPage");
+const loadPresalesRedirect = () => import("./pages/presales/TaskRedirect");
 const loadOfferNew = () => import("./pages/presales/OfferNewPage");
 const loadPresalesLibrary = () => import("./pages/presales/LibraryPage");
 
@@ -146,8 +146,8 @@ const SystemSettingsPage = lazy(loadSystemSettings);
 const InquiryListPage = lazy(loadInquiryList);
 const InquiryEditorPage = lazy(loadInquiryEditor);
 const InquiryDetailPage = lazy(loadInquiryDetail);
-const PresalesTasksPage = lazy(loadPresalesTasks);
-const PresalesProcessPage = lazy(loadPresalesProcess);
+const PresalesWorkbenchPage = lazy(loadPresalesWorkbench);
+const PresalesRedirectPage = lazy(loadPresalesRedirect);
 const OfferNewPage = lazy(loadOfferNew);
 const PresalesLibraryPage = lazy(loadPresalesLibrary);
 
@@ -179,8 +179,6 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "销售管理",
     items: [
       { key: "presales-inquiries", path: "/presales/inquiries", label: "询价单", icon: <FileSearchOutlined />, perm: "page_presales", page: InquiryListPage, load: loadInquiryList },
-      { key: "presales-tasks", path: "/presales/tasks", label: "采购待办", menuLabel: <PresalesWorkLabel />, icon: <ScheduleOutlined />, perm: "page_presales", page: PresalesTasksPage, load: loadPresalesTasks },
-      { key: "presales-offers-new", path: "/presales/offers/new", label: "主动报价", icon: <DollarOutlined />, perm: "page_presales", page: OfferNewPage, load: loadOfferNew },
       { key: "presales-library", path: "/presales/library", label: "报价库", icon: <ProfileOutlined />, perm: "page_presales", page: PresalesLibraryPage, load: loadPresalesLibrary },
       // 销售分析（D-41）：页面权限键与采购侧不对称（page_sales_analysis），
       // 模板仅 admin/boss；后端另有角色硬门（purchaser/readonly/sales 即便授权也 403），
@@ -194,6 +192,8 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-purchase",
     label: "采购管理",
     items: [
+      { key: "presales-workbench", path: "/presales/workbench", label: "报价工作台", menuLabel: <PresalesWorkLabel />, icon: <ScheduleOutlined />, perm: "page_presales", page: PresalesWorkbenchPage, load: loadPresalesWorkbench },
+      { key: "presales-offers-new", path: "/presales/offers/new", label: "主动报价", icon: <DollarOutlined />, perm: "page_presales", page: OfferNewPage, load: loadOfferNew },
       // 采购分析（D-39，客户需求 Round1）：仅老板/管理员（page_purchase_analytics 模板仅
       // boss，admin 由 App 层恒放行；后端本轮加角色硬门，菜单同口径按角色过滤 §9）；
       // 日期/分类/三口径 + 分组下钻。
@@ -316,7 +316,7 @@ export const DETAIL_ROUTES: DetailRoute[] = [
   { key: "presales-inquiry-new", path: "/presales/inquiries/new", pattern: /^\/presales\/inquiries\/new$/, label: "新建询价", perm: "page_presales", menuKey: "presales-inquiries", page: InquiryEditorPage, load: loadInquiryEditor },
   { key: "presales-inquiry-edit", path: "/presales/inquiries/:id/edit", pattern: /^\/presales\/inquiries\/\d+\/edit$/, label: "编辑询价", perm: "page_presales", menuKey: "presales-inquiries", page: InquiryEditorPage, load: loadInquiryEditor },
   { key: "presales-inquiry-detail", path: "/presales/inquiries/:id", pattern: /^\/presales\/inquiries\/\d+$/, label: "询价详情", perm: "page_presales", menuKey: "presales-inquiries", page: InquiryDetailPage, load: loadInquiryDetail },
-  { key: "presales-task-process", path: "/presales/tasks/:id", pattern: /^\/presales\/tasks\/\d+$/, label: "处理询价", perm: "page_presales", menuKey: "presales-tasks", page: PresalesProcessPage, load: loadPresalesProcess },
+  { key: "presales-task-process", path: "/presales/tasks/:id", pattern: /^\/presales\/tasks\/\d+$/, label: "报价工作台", perm: "page_presales", menuKey: "presales-workbench", page: PresalesRedirectPage, load: loadPresalesRedirect },
   {
     // 项目面板：从项目卡「进入面板」进来，不占导航项（菜单只挂主页 + 需求单与同步）
     key: "maintenance-project-panel",
@@ -351,6 +351,7 @@ export function matchDetailRoute(pathname: string): DetailRoute | undefined {
  */
 export interface NavRedirect { from: string; to: string; perm?: string }
 export const NAV_REDIRECTS: NavRedirect[] = [
+  { from: "/presales/tasks", to: "/presales/workbench", perm: "page_presales" },
   // 采购拆分：旧 /purchases 收藏跳到默认采购子页（采购分析）
   { from: "/purchases", to: "/purchases/analysis", perm: "page_purchases" },
   // 补库申请迁维保组（2026-08-17）：旧销售组路径的收藏/外链自动跳新址

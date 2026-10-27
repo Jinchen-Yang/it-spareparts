@@ -198,7 +198,8 @@ export const presales = {
   async suppliers(q = "", signal?: AbortSignal) {
     return (await api.get<PresalesCandidate[]>(`${root}/suppliers`, { params: { q, limit: 20 }, signal })).data;
   },
-  async listInquiries(params: { kind?: Inquiry["kind"]; scope?: "mine" | "all"; status?: Inquiry["status"]; page?: number; page_size?: number } = {}) {
+  async listInquiries(params: { kind?: Inquiry["kind"]; scope?: "mine" | "all"; status?: Inquiry["status"]; page?: number; page_size?: number;
+    sort?: "inquiry_no" | "line_count" | "status" | "updated_at" | "created_at"; dir?: "asc" | "desc" } = {}) {
     return (await api.get<InquiryPage>(`${root}/inquiries`, { params })).data;
   },
   async getInquiry(id: number, signal?: AbortSignal) {

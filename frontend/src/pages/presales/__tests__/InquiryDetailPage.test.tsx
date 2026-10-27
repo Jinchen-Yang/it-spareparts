@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import { cleanup, render, screen, waitFor, within } from "../../../test/antdRender";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import type { Inquiry, Offer } from "../../../api/presales";
 import InquiryDetailPage from "../InquiryDetailPage";
 
@@ -65,16 +65,17 @@ describe("询价详情", () => {
       offer(5, { unit_price: "80.00", is_tax_inclusive: false }),
       offer(6, { unit_price: "10.00", valid_until: "2020-01-01T00:00:00Z" }),
     ] }));
-    const table = screen.getByRole("table", { name: "PN-8 比价" });
+    const table = within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-8/ });
     const lowest = within(table).getAllByText(/最低价/);
     expect(lowest).toHaveLength(2);
-    expect(lowest[0].closest("th")).toHaveTextContent("采购2");
-    expect(lowest[1].closest("th")).toHaveTextContent("采购5");
+    expect(lowest[0].closest("button")).toHaveAttribute("aria-label", "采纳 PN-8 报价 2");
+    expect(lowest[1].closest("button")).toHaveAttribute("aria-label", "采纳 PN-8 报价 5");
     expect(within(table).getByText("基于旧版本")).toBeInTheDocument();
     expect(within(table).getByText("已失效")).toBeInTheDocument();
     expect(within(table).queryByText("采购4")).toBeNull();
     expect(within(table).queryByText(/¥1\.00/)).toBeNull();
     expect(screen.getByText("整批交付")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "展开 PN-8" }));
     expect(screen.getByText("一年")).toBeInTheDocument();
     expect(screen.getByText("时间线 presales_inquiry 5")).toBeInTheDocument();
   });
@@ -98,9 +99,9 @@ describe("询价详情", () => {
     data.offers = [offer(1, { unit_price: "500.00" }), offer(2, { line_id: 12, unit_price: "10.00" }),
       offer(3, { line_id: 12, unit_price: null, no_stock: true })];
     await openPage(data);
-    expect(within(screen.getByRole("table", { name: "PN-8 比价" })).getByText("含税最低价").closest("th")).toHaveTextContent("采购1");
-    const second = screen.getByRole("table", { name: "PN-9 比价" });
-    expect(within(second).getByText("含税最低价").closest("th")).toHaveTextContent("采购2");
+    expect(within(within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-8/ })).getByText("含税最低价").closest("button")).toHaveAttribute("aria-label", "采纳 PN-8 报价 1");
+    const second = within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-9/ });
+    expect(within(second).getByText("含税最低价").closest("button")).toHaveAttribute("aria-label", "采纳 PN-9 报价 2");
     expect(within(second).getByText("无货")).toBeInTheDocument();
     expect(within(second).queryByText("已失效")).toBeNull();
   });
@@ -142,7 +143,7 @@ describe("询价详情", () => {
     mocks.closeInquiry.mockResolvedValue({ ...data, status: "closed", closed_outcome: "won", version: 5 });
     await openPage(data);
     expect(await screen.findByText("采购7")).toBeInTheDocument();
-    expect(screen.getByRole("table", { name: "PN-8 比价" })).toHaveTextContent("¥120.00");
+    expect(within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-8/ })).toHaveTextContent("¥120.00");
     expect(mocks.library).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "关单" }));
     const dialog = screen.getByRole("dialog");
@@ -163,7 +164,7 @@ describe("询价详情", () => {
     expect(screen.queryByText("采购7")).toBeNull();
     expect(screen.queryByText("采购备注")).toBeNull();
     expect(screen.queryByText("过期报价备注")).toBeNull();
-    expect(screen.queryByRole("table", { name: "PN-8 比价" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "采纳 PN-8 报价 7" })).toBeNull();
   });
 
   it.each([["未成交", "lost"], ["取消", "cancelled"]])("关单%s不携带采纳报价", async (label, outcome) => {
@@ -235,7 +236,7 @@ it("引用只展示行内钉住版本，当前报价不覆盖旧价格，续期�
     ref_offer: offer(7, { unit_price: "120.00", valid_until: "2020-01-01T00:00:00Z",
       latest: { unit_price: "999.00", is_tax_inclusive: false, revision_no: 3 } }) };
   await openPage(data);
-  const table = screen.getByRole("table", { name: "PN-8 比价" });
+  const table = within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-8/ });
   expect(within(table).getByText(/¥120.00/)).toBeInTheDocument();
   expect(within(table).getByText("已失效")).toBeInTheDocument();
   expect(within(table).getByText("该报价已更新为 ¥999 · 不含税")).toBeInTheDocument();
@@ -275,7 +276,22 @@ it("同一报价ID在不同询价行钉住不同版本时，逐行使用各自�
       linked_offers: [offer(7, { line_id: 12, unit_price: "200.00", revision_no: 2 })] },
   ];
   await openPage(data);
-  expect(screen.getByRole("table", { name: "PN-8 比价" })).toHaveTextContent("¥100.00");
-  expect(screen.getByRole("table", { name: "PN-9 比价" })).toHaveTextContent("¥200.00");
+  expect(within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-8/ })).toHaveTextContent("¥100.00");
+  expect(within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-9/ })).toHaveTextContent("¥200.00");
   expect(screen.queryByText(/¥999.00/)).not.toBeInTheDocument();
+});
+
+it("点矩阵报价选择成交采纳，过期与旧版本不可选择，时间线可以隐藏", async () => {
+  const user = userEvent.setup();
+  mocks.closeInquiry.mockResolvedValue(inquiry({ status: "closed", won_offer_id: 2 }));
+  await openPage(inquiry({ offers: [offer(1, { status: "stale" }), offer(2), offer(3, { valid_until: "2020-01-01T00:00:00Z" })] }));
+  expect(screen.getByRole("button", { name: "采纳 PN-8 报价 1" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "采纳 PN-8 报价 3" })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "采纳 PN-8 报价 2" }));
+  expect(screen.getByRole("button", { name: "采纳 PN-8 报价 2" })).toHaveAttribute("aria-pressed", "true");
+  await user.click(screen.getByRole("button", { name: "隐藏时间线" }));
+  expect(screen.queryByText("时间线 presales_inquiry 5")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "关单" }));
+  await user.click(screen.getByRole("button", { name: "确认关单" }));
+  await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 2 }));
 });

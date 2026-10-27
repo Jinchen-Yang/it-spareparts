@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -220,10 +220,31 @@ def list_inquiries(db: Db, ctx: Ctx,
     kind: Literal["sales_inquiry", "proactive_offer"] | None = None,
     scope: Literal["mine", "all"] = "mine",
     status: Literal["draft", "submitted", "revising", "closed"] | None = None,
-    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100)):
+    page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
+    sort: Literal["inquiry_no", "line_count", "status", "updated_at", "created_at"] = "updated_at",
+    dir: Literal["asc", "desc"] = "desc"):
     def read():
         user, _ = common.resolve_actor(db, ctx)
-        query = select(PresalesInquiry).order_by(PresalesInquiry.updated_at.desc(), PresalesInquiry.id.desc())
+        # 仅允许不依赖受众私密字段的排序键；先 SQL 排序，再沿用可见性过滤和分页。
+        line_count = select(func.count(PresalesInquiryLine.id)).where(
+            PresalesInquiryLine.inquiry_id == PresalesInquiry.id,
+            PresalesInquiryLine.status == "active",
+        ).correlate(PresalesInquiry).scalar_subquery()
+        columns = {
+            "inquiry_no": PresalesInquiry.inquiry_no,
+            "line_count": line_count,
+            "status": case(
+                (PresalesInquiry.status == "draft", 0),
+                (PresalesInquiry.status == "revising", 1),
+                (PresalesInquiry.status == "submitted", 2),
+                (PresalesInquiry.status == "closed", 3),
+            ),
+            "updated_at": PresalesInquiry.updated_at,
+            "created_at": PresalesInquiry.created_at,
+        }
+        column = columns[sort]
+        order = column.asc() if dir == "asc" else column.desc()
+        query = select(PresalesInquiry).order_by(order.nulls_last(), PresalesInquiry.id.desc())
         if kind:
             query = query.where(PresalesInquiry.kind == kind)
         if status:
