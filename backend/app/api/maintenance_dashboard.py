@@ -1063,6 +1063,8 @@ def _merge_project_orders(
 
     - 下单量只落单位相同的行；项目对比行没有该单位时追加一行（项目名称/
       编码/业务类型照填，其他数量列与金额列留空，不是 0）。
+    - 项目没有单位事实（空桶）且只有下单时：第一个下单单位直接填入该行，
+      不再多出空单位零行；其余下单单位照常追加。
     - 去重单数不可相加：每个项目只在首行写一次，其余行留空；无下单写 0。
     - 无制单日期下单不入期间（与 /orders 页面列同口径）。
     """
@@ -1070,14 +1072,23 @@ def _merge_project_orders(
         entry.get("unit"): entry
         for entry in (order or {}).get("unit_breakdown", [])
     }
+    order_units = dash.sorted_unit_keys(order_by_unit)
     covered = {unit for unit in unit_keys if unit is not _NO_UNIT}
+    # 空桶行（无领用/返件事实）且只有下单：首个下单单位直接落这一行。
+    empty_row = len(unit_keys) == 1 and unit_keys[0] is _NO_UNIT
+    first_unit = order_units[0] if empty_row and order_units else _NO_UNIT
     for item, unit in zip(items, unit_keys):
+        if unit is _NO_UNIT and first_unit is not _NO_UNIT:
+            unit = first_unit
+            item["_unit_label"] = unit or "待核"
         entry = order_by_unit.get(unit) if unit is not _NO_UNIT else None
         item["order_qty"] = (entry or {}).get("order_qty", "0.000")
         item["order_count"] = None
-    for unit in dash.sorted_unit_keys(
-        unit for unit in order_by_unit if unit not in covered
-    ):
+    if first_unit is not _NO_UNIT:
+        covered.add(first_unit)
+    for unit in order_units:
+        if unit in covered:
+            continue
         items.append({
             "project_id": project_row["project_id"],
             "project_code": project_row["project_code"],

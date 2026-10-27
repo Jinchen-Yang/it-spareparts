@@ -1109,6 +1109,86 @@ def test_project_export_orders_columns_without_amount_permission(db):
     assert row[header.index("期间下单单数")] == "1"
 
 
+def test_project_export_empty_row_single_order_unit(db):
+    """T17-M1：项目只有下单、无领用/返件时，首个下单单位直接填入空桶行。"""
+    project = _project(db, "MDCV-T17E")
+    part = _part(db, "MDCV-T17E-PN", unit="件")
+    _line(db, project, part, order_no="MDCV-T17E-O1",
+          order_date=date(2026, 10, 18), qty=Decimal("8"))
+    db.commit()
+    client = client_for(db, username="mdcv-t17e", role="admin")
+
+    export = client.get(
+        f"{BASE}/export", params={"kind": "projects", "format": "csv", **RANGE}
+    )
+    rows = _csv_rows(export.content)
+    header = rows[0]
+    code_col = header.index("项目编码")
+    unit_col = header.index("单位")
+    qty_col = header.index("期间下单量（原qty）")
+    count_col = header.index("期间下单单数")
+    rows_e = [row for row in rows[1:] if row[code_col] == "MDCV-T17E"]
+    assert len(rows_e) == 1
+    row = rows_e[0]
+    assert row[unit_col] == "件"
+    assert row[qty_col] == "8.000"
+    assert row[count_col] == "1"
+    # 空桶行原有项目对比数量列保持原值（0），不被下单流程改写。
+    assert row[header.index("返件实收合计")] == "0.000"
+
+
+def test_project_export_empty_row_two_order_units(db):
+    """T17-M1：空桶 + 两个下单单位 → 两行，单数只在首行。"""
+    project = _project(db, "MDCV-T17F")
+    part_j = _part(db, "MDCV-T17F-J", unit="件")
+    part_t = _part(db, "MDCV-T17F-T", unit="台")
+    _line(db, project, part_j, order_no="MDCV-T17F-O1",
+          order_date=date(2026, 10, 17), qty=Decimal("3"))
+    _line(db, project, part_t, order_no="MDCV-T17F-O2",
+          order_date=date(2026, 10, 18), qty=Decimal("4"))
+    db.commit()
+    client = client_for(db, username="mdcv-t17f", role="admin")
+
+    export = client.get(
+        f"{BASE}/export", params={"kind": "projects", "format": "csv", **RANGE}
+    )
+    rows = _csv_rows(export.content)
+    header = rows[0]
+    code_col = header.index("项目编码")
+    unit_col = header.index("单位")
+    qty_col = header.index("期间下单量（原qty）")
+    count_col = header.index("期间下单单数")
+    rows_f = [row for row in rows[1:] if row[code_col] == "MDCV-T17F"]
+    assert [row[unit_col] for row in rows_f] == ["件", "台"]
+    row_j, row_t = rows_f
+    assert row_j[qty_col] == "3.000"
+    assert row_t[qty_col] == "4.000"
+    assert row_j[count_col] == "2"
+    assert row_t[count_col] == ""
+
+
+def test_project_export_empty_row_unresolved_order_unit(db):
+    """T17-M1：空桶 + 下单单位为 None → 一行，单位列写「待核」。"""
+    project = _project(db, "MDCV-T17G")
+    part = _part(db, "MDCV-T17G-PN", unit=None)
+    _line(db, project, part, order_no="MDCV-T17G-O1",
+          order_date=date(2026, 10, 18), qty=Decimal("5"))
+    db.commit()
+    client = client_for(db, username="mdcv-t17g", role="admin")
+
+    export = client.get(
+        f"{BASE}/export", params={"kind": "projects", "format": "csv", **RANGE}
+    )
+    rows = _csv_rows(export.content)
+    header = rows[0]
+    code_col = header.index("项目编码")
+    rows_g = [row for row in rows[1:] if row[code_col] == "MDCV-T17G"]
+    assert len(rows_g) == 1
+    assert rows_g[0][header.index("单位")] == "待核"
+    assert rows_g[0][header.index("期间下单量（原qty）")] == "5.000"
+    assert rows_g[0][header.index("期间下单单数")] == "1"
+
+
 def test_b3_disjoint_known_rate_units_flat_null(db):
     """B3 独立验收 05:10（disjoint_known_rate_units）：只收件 2、只领台 3。
 
