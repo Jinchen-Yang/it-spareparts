@@ -26,6 +26,7 @@ import json
 import logging
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
@@ -3426,15 +3427,20 @@ def _merge_manual_cost_to_line(
                 existing.updated_by = operated_by
                 changed = True
         if line.cost_source in (None, "none", "manual"):
-            line_changed = (
-                line.unit_cost_ex_tax != refill.unit_cost_ex_tax
-                or line.unit_cost_inc_tax != refill.unit_cost_inc_tax
-                or line.cost_source != "manual"
+            cost_fields = (
+                "unit_cost_ex_tax", "unit_cost_inc_tax",
+                "cost_amount_ex_tax", "cost_amount_inc_tax",
+                "cost_source", "cost_tax_basis", "unit_cost", "cost_amount",
             )
+            before_cost = tuple(getattr(line, field) for field in cost_fields)
+            # 与 maintenance_cost.recompute 的人工路径使用同一持久化契约。
+            line.cost_source = "manual"
+            line.cost_tax_basis = "ex"
             _recompute_line_amounts(line, unit_cost_ex_tax=refill.unit_cost_ex_tax,
                                     unit_cost_inc_tax=refill.unit_cost_inc_tax)
-            line.cost_source = "manual"
-            changed = line_changed or changed
+            changed = before_cost != tuple(
+                getattr(line, field) for field in cost_fields
+            ) or changed
     elif refill.reason is not None:
         if existing is not None and existing.reason != refill.reason:
             existing.reason = refill.reason
@@ -3461,6 +3467,12 @@ def _recompute_line_amounts(line: FMaintenanceLine, *,
     if line.unit_cost_inc_tax is not None:
         line.cost_amount_inc_tax = (line.unit_cost_inc_tax * effective_qty).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP)
+    # 仅完整人工证据同步兼容金额；缺量、缺侧的历史残额不能升格为已知成本。
+    if (line.cost_source == "manual" and line.cost_tax_basis in ("ex", "inc")
+            and line.qty is not None
+            and line.unit_cost_ex_tax is not None and line.unit_cost_inc_tax is not None):
+        line.unit_cost = getattr(line, f"unit_cost_{line.cost_tax_basis}_tax")
+        line.cost_amount = getattr(line, f"cost_amount_{line.cost_tax_basis}_tax")
 
 
 def _write_audit(db: Session, *, project_id: str, entity_type: str,
@@ -6358,13 +6370,14 @@ def apply_project_master_v2(
     operated_by: str,
     import_batch_id: str,
     user_ctx: UserContext | None = None,
+    reauthorize: Callable[[], UserContext] | None = None,
 ) -> dict:
     # 本服务拥有整本事务及 commit；所有写入/flush（含下游原语与回执）
     # 的约束失败都必须回滚，不能把 failed Session 或数据库 500 留给调用方。
     try:
         return _apply_project_master_v2(
             db, plan, operated_by=operated_by, import_batch_id=import_batch_id,
-            user_ctx=user_ctx,
+            user_ctx=user_ctx, reauthorize=reauthorize,
         )
     except IntegrityError as exc:
         db.rollback()
@@ -6396,7 +6409,9 @@ def _apply_project_master_v2(
     operated_by: str,
     import_batch_id: str,
     user_ctx: UserContext | None = None,
+    reauthorize: Callable[[], UserContext] | None = None,
 ) -> dict:
+    # 可信内部调用可省略回调；HTTP 06 修改由调用者提供当前授权核验。
     # All mutations deliberately happen on this one Session transaction.
     apply_operation_key = _v2_apply_operation_key(plan, operated_by)
     if apply_operation_key is not None:
@@ -6571,6 +6586,8 @@ def _apply_project_master_v2(
                     "idempotency_conflict",
                     "工作簿应用回执与当前请求不一致，请重新下载",
                 )
+            if reauthorize is not None:
+                reauthorize()
             stored_result = _v2_stored_apply_result(db, receipt)
             db.commit()
             if stored_result is not None:
@@ -6645,6 +6662,9 @@ def _apply_project_master_v2(
     if current_merges != plan.site_issue_merges:
         raise WorkbookError("stale_site_issue_merge",
             "领用单合并对象、明细或单头已变化，本次未写入；请重新校验并核对合并计划后再应用")
+    if reauthorize is not None:
+        # 事实和合单锁已取得，在整本首次写入前重读当前资格。
+        user_ctx = reauthorize()
     if plan.project_note_change is not None:
         from app.services import maintenance_project_catalog as catalog
 
@@ -7505,5 +7525,8 @@ def _apply_project_master_v2(
             operated_by=operated_by,
             operated_at=receipt.created_at,
         ))
+    if reauthorize is not None:
+        # 混合工作簿可能在后续 sheet 等锁，提交前再次核验；拒绝则整本回滚。
+        reauthorize()
     db.commit()
     return result
