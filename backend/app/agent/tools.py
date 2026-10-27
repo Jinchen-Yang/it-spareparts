@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app import security
 from app.agent import skills
+from app.services.maintenance_movement_search import MovementSearchQuery, search_movements
 from app.services import (agent_files, inventory, maintenance_cost, part_overview,
                           part_resolver, profit, purchase_analysis, purchase_query)
 
@@ -433,6 +434,43 @@ TOOLS: list[dict] = [
 ]
 
 
+# 页面与工具使用同一个校验 schema；工具额外限制每页 50 条。
+
+_movement_parameters = MovementSearchQuery.model_json_schema()
+_movement_parameters["properties"]["page_size"]["maximum"] = 50
+TOOLS.append({
+    "type": "function",
+    "function": {
+        "name": "search_maintenance_movements",
+        "description": (
+            "在当前账号有权访问的维保项目内，按 PN、SN、凭证/快递单号或备注片段查询现场领用、返还实收、需求单快递和坏件返还，"
+            "返回所属项目、匹配证据与记录定位信息。无需提前知道项目名。只读；默认有效记录。"
+            "SN 分手工逐件 SN 与导入源 SN；同 PN/SN 可对应多项目，必须保留所有候选，"
+            "不得自动建立领用与返还配对或更改归属。仅展示当前页；has_more=true 时用 page+1 续查，"
+            "不能把当前页视为全部。无命中只表示当前权限和查询范围内未找到。金额/成本不在输出范围。"
+            "PN/SN/凭证 1–2 字符仅精确匹配，备注包含至少两字符。"
+        ),
+        "parameters": _movement_parameters,
+    },
+})
+
+
+def _search_maintenance_movements(db: Session, args: dict, ctx: security.UserContext) -> dict:
+    if not security.page_allowed(ctx, "page_maintenance"):
+        return {"error": "无权访问维保页面"}
+    from fastapi import HTTPException
+    from pydantic import ValidationError
+
+    try:
+        query = MovementSearchQuery.model_validate(args)
+        query.page_size = min(query.page_size, 50)
+        return search_movements(db, query, ctx)
+    except ValidationError:
+        return {"error": "维保流转搜索条件无效"}
+    except HTTPException as exc:
+        return {"error": exc.detail, "retriable": exc.status_code in (429, 503)}
+
+
 def _jsonable(data):
     """date/Decimal 等转 JSON 可序列化（工具结果要回灌给模型）。"""
     return json.loads(json.dumps(data, ensure_ascii=False, default=str))
@@ -680,6 +718,7 @@ def _get_skill(db: Session, args: dict, ctx: security.UserContext) -> dict:
 
 _REGISTRY = {
     "search_parts": _search_parts,
+    "search_maintenance_movements": _search_maintenance_movements,
     "get_part_overview": _get_part_overview,
     "get_profit_ranking": _get_profit_ranking,
     "list_recent_purchases": _list_recent_purchases,
