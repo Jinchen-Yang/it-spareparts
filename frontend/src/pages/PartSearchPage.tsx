@@ -11,6 +11,8 @@ import InlinePartEditModal from "../components/parts/InlinePartEditModal";
 import PartGalleryPanel from "../components/parts/PartGalleryPanel";
 import LivePartSearch from "../components/parts/LivePartSearch";
 import PartThumb from "../components/gallery/PartThumb";
+import GalleryPicker from "../components/gallery/GalleryPicker";
+import PriceRefBadge from "../components/pricing/PriceRefBadge";
 import api from "../api";
 import type { Overview, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { unifiedSearch, fetchOverview } from "../api/search";
@@ -97,7 +99,9 @@ export default function PartSearchPage() {
   const [loadingOv, setLoadingOv] = useState(false);
   const [subPn, setSubPn] = useState("");
   const [inlineEditPn, setInlineEditPn] = useState<string | null>(null);
+  const [galleryPickerOpen, setGalleryPickerOpen] = useState(false);
   useEffect(() => { setInlineEditPn(null); }, [urlPartId, urlPn]);
+  useEffect(() => { setGalleryPickerOpen(false); }, [urlPartId, urlPn]);
   // 替代料卡片折叠（记忆本机）
   const [subsOpen, setSubsOpen] = useState(() => localStorage.getItem("ps_subs_open") !== "0");
   const toggleSubs = () => setSubsOpen((o) => { localStorage.setItem("ps_subs_open", o ? "0" : "1"); return !o; });
@@ -478,6 +482,7 @@ export default function PartSearchPage() {
                 <small>近 {ov.sale_price_ref.ref_sale_samples} 单 / {ov.sale_price_ref.ref_window_days} 天加权</small>
                 {ov.sale_price_ref.ref_sale_samples < 3 && <Tag color="orange">成交少，仅供参考</Tag>}
               </> : <small>暂无成交参考价</small>}
+              <PriceRefBadge partId={ov.part.id} />
             </div>
             <div aria-label="动态可用库存" className="part-summary-metric">
               <span>动态可用库存</span>
@@ -530,6 +535,12 @@ export default function PartSearchPage() {
             </Descriptions>
           </section>
 
+          <Button onClick={() => setGalleryPickerOpen(true)} style={{ marginBottom: 8 }}>多选下载</Button>
+          {galleryPickerOpen && <GalleryPicker
+            items={[{ partId: ov.part.id, pn: ov.part.pn_std }]}
+            mode="modal"
+            onClose={() => setGalleryPickerOpen(false)}
+          />}
           <PartGalleryPanel
             key={ov.part.id}
             partId={ov.part.id}

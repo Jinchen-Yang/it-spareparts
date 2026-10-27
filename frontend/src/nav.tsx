@@ -25,6 +25,7 @@ import {
   WarningOutlined,
 } from "@ant-design/icons";
 import { readMaintenanceCapabilities } from "./components/maintenance/maintenancePermissions";
+import PresalesWorkLabel from "./components/workflow/PresalesWorkLabel";
 
 /** 读登录时写入的权限快照（与 App.tsx readPerms 同源），供 visibleWhen 判断动作键。 */
 export function readPermissionMap(): Record<string, boolean> {
@@ -48,6 +49,8 @@ export interface NavItem {
   /** 路由路径（可刷新、可收藏、可分享） */
   path: string;
   label: string;
+  /** 菜单内可附加动态角标，标题与面包屑仍使用 label。 */
+  menuLabel?: ReactNode;
   icon: ReactNode;
   /** 后端 page_* 权限键；缺省且无 anyPerm 表示仅管理员可见（如账号管理） */
   perm?: string;
@@ -100,6 +103,13 @@ const loadPoolManagement = () => import("./pages/PoolManagementPage");
 const loadChat = () => import("./pages/ChatPage");
 const loadAccounts = () => import("./pages/AccountsPage");
 const loadSystemSettings = () => import("./pages/SystemSettingsPage");
+const loadInquiryList = () => import("./pages/presales/InquiryListPage");
+const loadInquiryEditor = () => import("./pages/presales/InquiryEditorPage");
+const loadInquiryDetail = () => import("./pages/presales/InquiryDetailPage");
+const loadPresalesTasks = () => import("./pages/presales/TasksPage");
+const loadPresalesProcess = () => import("./pages/presales/ProcessPage");
+const loadOfferNew = () => import("./pages/presales/OfferNewPage");
+const loadPresalesLibrary = () => import("./pages/presales/LibraryPage");
 
 const BossBoardPage = lazy(loadBossBoard);
 const PoolsPage = lazy(loadPools);
@@ -133,6 +143,13 @@ const PoolManagementPage = lazy(loadPoolManagement);
 const ChatPage = lazy(loadChat);
 const AccountsPage = lazy(loadAccounts);
 const SystemSettingsPage = lazy(loadSystemSettings);
+const InquiryListPage = lazy(loadInquiryList);
+const InquiryEditorPage = lazy(loadInquiryEditor);
+const InquiryDetailPage = lazy(loadInquiryDetail);
+const PresalesTasksPage = lazy(loadPresalesTasks);
+const PresalesProcessPage = lazy(loadPresalesProcess);
+const OfferNewPage = lazy(loadOfferNew);
+const PresalesLibraryPage = lazy(loadPresalesLibrary);
 
 // 组 key 加 grp- 前缀与 item key 隔离命名空间（防止将来改用 SubMenu 时 keyPath 相撞）
 export const NAV_GROUPS: NavGroup[] = [
@@ -161,6 +178,10 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-sales",
     label: "销售管理",
     items: [
+      { key: "presales-inquiries", path: "/presales/inquiries", label: "询价单", icon: <FileSearchOutlined />, perm: "page_presales", page: InquiryListPage, load: loadInquiryList },
+      { key: "presales-tasks", path: "/presales/tasks", label: "采购待办", menuLabel: <PresalesWorkLabel />, icon: <ScheduleOutlined />, perm: "page_presales", page: PresalesTasksPage, load: loadPresalesTasks },
+      { key: "presales-offers-new", path: "/presales/offers/new", label: "主动报价", icon: <DollarOutlined />, perm: "page_presales", page: OfferNewPage, load: loadOfferNew },
+      { key: "presales-library", path: "/presales/library", label: "报价库", icon: <ProfileOutlined />, perm: "page_presales", page: PresalesLibraryPage, load: loadPresalesLibrary },
       // 销售分析（D-41）：页面权限键与采购侧不对称（page_sales_analysis），
       // 模板仅 admin/boss；后端另有角色硬门（purchaser/readonly/sales 即便授权也 403），
       // 菜单按角色过滤（§10.8）；数据面遮蔽（金额/对账/客户）由后端按 data_* 键处理
@@ -292,6 +313,10 @@ export interface DetailRoute {
 }
 
 export const DETAIL_ROUTES: DetailRoute[] = [
+  { key: "presales-inquiry-new", path: "/presales/inquiries/new", pattern: /^\/presales\/inquiries\/new$/, label: "新建询价", perm: "page_presales", menuKey: "presales-inquiries", page: InquiryEditorPage, load: loadInquiryEditor },
+  { key: "presales-inquiry-edit", path: "/presales/inquiries/:id/edit", pattern: /^\/presales\/inquiries\/\d+\/edit$/, label: "编辑询价", perm: "page_presales", menuKey: "presales-inquiries", page: InquiryEditorPage, load: loadInquiryEditor },
+  { key: "presales-inquiry-detail", path: "/presales/inquiries/:id", pattern: /^\/presales\/inquiries\/\d+$/, label: "询价详情", perm: "page_presales", menuKey: "presales-inquiries", page: InquiryDetailPage, load: loadInquiryDetail },
+  { key: "presales-task-process", path: "/presales/tasks/:id", pattern: /^\/presales\/tasks\/\d+$/, label: "处理询价", perm: "page_presales", menuKey: "presales-tasks", page: PresalesProcessPage, load: loadPresalesProcess },
   {
     // 项目面板：从项目卡「进入面板」进来，不占导航项（菜单只挂主页 + 需求单与同步）
     key: "maintenance-project-panel",

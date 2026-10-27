@@ -77,6 +77,17 @@ _KNOWN_DYNAMIC_SITES: dict[tuple[str, str], tuple[int, str]] = {
         "图库代理 _audit 包装；值域=GalleryAuditAction 的 10 个字面量（最长 "
         "gallery_upload_part_sign=24 < 64），由 test_dynamic_actions_fit_column_width 校验",
     ),
+    ("app/api/work_items.py", 'f"work_item_{action}"'): (
+        1,
+        "_act 包装的 7 个动作：claim/start/release/transfer/reassign/complete/decline；"
+        "加 work_item_ 前缀后最长 18，由 test_dynamic_actions_fit_column_width 校验",
+    ),
+    ("app/services/presales/common.py", "action"): (
+        1,
+        "audit 包装；值域=询价 _record 的 9 个 kind、建档 _apply 的 2 个 kind、"
+        "报价 common.audit 的 6 个字面量（最长 presales.offer.draft_saved=26），"
+        "由 test_dynamic_actions_fit_column_width 校验",
+    ),
 }
 
 
@@ -156,6 +167,22 @@ def _dynamic_values() -> list[str]:
     # 图库代理审计动作：Literal 枚举现值（_audit 包装的动态写入点）。
     from app.api.part_gallery import GalleryAuditAction
     values.extend(typing.get_args(GalleryAuditAction))
+    # 待办和售前包装的字面量调用点；沿转发链取活代码，新增动作同样受列宽约束。
+    for rel, callee, pos, prefix in (
+        ("app/api/work_items.py", "_act", 3, "work_item_"),
+        ("app/services/presales/inquiries.py", "_record", 3, ""),
+        ("app/services/presales/binding.py", "_apply", 6, ""),
+        ("app/services/presales/offers.py", "common.audit", 2, ""),
+    ):
+        tree = ast.parse((_BACKEND_ROOT / rel).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or ast.unparse(node.func) != callee:
+                continue
+            assert len(node.args) > pos, f"{rel}:{node.lineno} {callee} 动作实参须显式穷举"
+            arg = node.args[pos]
+            assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
+                f"{rel}:{node.lineno} {callee} 动态动作须同步穷举可能取值")
+            values.append(prefix + arg.value)
     return values
 
 

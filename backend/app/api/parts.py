@@ -5,7 +5,7 @@
 from datetime import date
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -19,7 +19,8 @@ from app.security import (
     UserContext, apply_field_visibility, get_current_user_context,
     record_access_log, require_page,
 )
-from app.services import batch_normalize, master_edit, part_overview, part_resolver, part_search, pool_price_analysis, standardize, taxonomy
+from app.services import batch_normalize, master_edit, part_overview, part_resolver, part_search, pool_price_analysis, price_reference, standardize, taxonomy
+from app.services.resale_price_reference import PriceReferenceUnavailable
 
 router = APIRouter(prefix="/parts", tags=["parts"])
 
@@ -125,6 +126,36 @@ def overview(
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             f"型号不存在: {pn_std if part_id is None else f'part_id={part_id}'}")
     return apply_field_visibility(data, ctx)
+
+
+class PriceRefsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    part_ids: list[int] = Field(min_length=1, max_length=200)
+    window_days: int = Field(30, ge=1, le=366)
+
+
+@router.post("/price-refs")
+def price_refs(
+    body: PriceRefsRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """批量参考价：销售均价全员可见，采购均价按 data_purchase_cost 字段组收敛。"""
+    unique_ids = list(dict.fromkeys(body.part_ids))
+    try:
+        items = price_reference.batch(
+            db, unique_ids, ctx, window_days=body.window_days
+        )
+    except PriceReferenceUnavailable as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "参考价暂不可用，请稍后重试",
+        ) from exc
+    record_access_log(ctx, "price_refs", "part", {"count": len(unique_ids)})
+    response.headers["Cache-Control"] = "no-store"
+    return {"items": {str(part_id): item for part_id, item in items.items()}}
 
 
 @router.get("/purchases")
