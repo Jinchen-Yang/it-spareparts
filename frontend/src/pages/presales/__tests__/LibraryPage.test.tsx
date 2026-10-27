@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "../../../test/antdRender";
+import { act, cleanup, fireEvent, render, screen, within } from "../../../test/antdRender";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import type { LibraryPart, Offer } from "../../../api/presales";
 import LibraryPage from "../LibraryPage";
@@ -57,7 +57,7 @@ it("微秒截止在浏览器可表示的最后一毫秒仍有效，跨到次日�
   await act(async () => { await vi.advanceTimersByTimeAsync(1); });
   expect(screen.getByRole("button", { name: "用这条报价建询价单" })).toBeDisabled();
   expect(screen.getByLabelText("报价 7")).toHaveAttribute("aria-disabled", "true");
-  expect(screen.getByText(/已失效/)).toBeInTheDocument();
+  expect(screen.getByLabelText("报价 7")).toHaveTextContent("已失效");
 });
 
 it("旧搜索的迟到结果不会覆盖新的查询", async () => {
@@ -128,4 +128,35 @@ it("钉版本角标只用已授权 latest 展示更新提示，并标出原报�
   expect(screen.getByText(/已失效 ¥100/)).toBeInTheDocument();
   expect(screen.getByText("该报价已更新为 ¥250 · 含税")).toBeInTheDocument();
   expect(screen.getByText("原报价已撤销")).toBeInTheDocument();
+});
+
+it("更多报价也能展开各自的可供数量与交期，不误用主报价的字段", async () => {
+  api.searchLibrary.mockResolvedValue([{ part_id: 1, pn_std: "PN-A", offer_count: 2, offers: [
+    offer({ id: 7, qty_available: 9, lead_time: "主报价交期", more: [
+      offer({ id: 8, unit_price: "80.00", qty_available: 42, lead_time: "三个工作日" }),
+    ] }),
+  ] }]);
+  await search();
+  fireEvent.click(screen.getByRole("button", { name: "展开更多（1 条）" }));
+  const nested = screen.getByRole("table", { name: "PN-A 更多报价" });
+  expect(within(nested).queryByText("可供数量：42")).not.toBeInTheDocument();
+  fireEvent.click(within(nested).getByRole("button", { name: "展开 PN-A" }));
+  expect(within(nested).getByText("可供数量：42")).toBeVisible();
+  expect(within(nested).getByText("交期：三个工作日")).toBeVisible();
+  expect(within(nested).queryByText("交期：主报价交期")).not.toBeInTheDocument();
+});
+
+it("主报价到期但同组旧报价仍有效时，主行提升为可引用的最新有效报价", async () => {
+  api.searchLibrary.mockResolvedValue([{ part_id: 1, pn_std: "PN-A", offer_count: 1, offers: [
+    offer({ more: [offer({ id: 8, unit_price: "80.00", valid_from: "2026-10-24T00:00:00Z",
+      valid_until: "2026-10-26T15:59:59.999999Z" })] }),
+  ] }]);
+  await search();
+  expect(screen.getByLabelText("报价 7")).toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(350); });
+  expect(screen.queryByLabelText("报价 7")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("报价 8")).toHaveTextContent("有效报价 ¥80");
+  expect(screen.getByRole("button", { name: "用这条报价建询价单" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "用这条报价建询价单" }));
+  expect(screen.getByLabelText("导航")).toHaveTextContent('"referenceOffer":{"id":8');
 });
