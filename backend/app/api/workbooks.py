@@ -77,7 +77,8 @@ def apply_workbook(operation_id: int, body: ApplyInput, db: Db, ctx: Ctx):
     except ApplyFailed as exc:
         # 业务已回滚到 savepoint；保留 failed 回执，不把业务写回去。
         db.commit()
-        raise HTTPException(exc.status_code, str(exc)) from exc
+        detail = {"message": str(exc), **exc.result} if exc.result else str(exc)
+        raise HTTPException(exc.status_code, detail) from exc
     except WorkbookError as exc:
         db.rollback()
         raise HTTPException(exc.status_code, str(exc)) from exc

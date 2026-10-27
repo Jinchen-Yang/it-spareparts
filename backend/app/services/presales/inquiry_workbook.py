@@ -16,6 +16,7 @@ from app.services.presales import common, inquiries, library, visibility
 from app.services.workbook.export import export_workbook
 from app.services.workbook.registry import Forbidden as WorkbookForbidden
 from app.services.workbook.schema import ColumnSpec, SheetSpec, WorkbookSchema, WorkbookError, json_value
+from app.services.workbook.validation import validate_by_applying
 from app.services.workflow.registry import Forbidden, InvalidTransition, WorkflowError
 
 
@@ -421,3 +422,7 @@ def apply_inquiry(db, plan, ctx):
             inquiry = inquiries.update_draft(db, inquiry.id, ctx, inquiry.version, lines=[*payload, *added])
     return {"inquiry_id": inquiry.id, "inquiry_no": inquiry.inquiry_no, "status": inquiry.status,
             "version": inquiry.version, "line_count": len(inquiries.lines_for(db, inquiry.id))}
+
+
+def validate_inquiry(db, plan, ctx):
+    return validate_by_applying(db, plan, ctx, apply_inquiry)

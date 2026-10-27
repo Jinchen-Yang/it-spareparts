@@ -38,6 +38,7 @@ export type WorkbookRowStatus = "added" | "modified" | "unchanged" | "deleted" |
 export interface WorkbookIssue {
   sheet?: string;
   row_number?: number | null;
+  row_key?: string | null;
   column?: string | null;
   message: string;
 }

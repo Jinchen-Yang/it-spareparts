@@ -11,9 +11,13 @@ export interface WorkbookImportProps {
   schemaName: string;
   onApplied?: (response: unknown) => void | Promise<void>;
   disabled?: boolean;
+  previewFile?: (file: File) => Promise<WorkbookPreviewResult>;
+  buttonLabel?: string;
+  successMessage?: string;
 }
 
-export function WorkbookImport({ schemaName, onApplied, disabled }: WorkbookImportProps) {
+export function WorkbookImport({ schemaName, onApplied, disabled, previewFile,
+  buttonLabel = "上传工作簿", successMessage = "工作簿已应用" }: WorkbookImportProps) {
   const [preview, setPreview] = useState<WorkbookPreviewResult | null>(null);
   const [receipt, setReceipt] = useState<WorkbookReceipt | null>(null);
   const [confirmDeletes, setConfirmDeletes] = useState<string[]>([]);
@@ -41,9 +45,13 @@ export function WorkbookImport({ schemaName, onApplied, disabled }: WorkbookImpo
     if (file.size > 10 * 1024 * 1024) { setError("工作簿不能超过 10 MB"); return; }
     setLoading(true);
     try {
-      const result = await previewWorkbook(schemaName, file);
+      const result = await (previewFile ? previewFile(file) : previewWorkbook(schemaName, file));
       if (!current()) return;
-      if (result.replayed) setReceipt({ operation_id: result.operation_id, replayed: true, response: result.response });
+      if (result.replayed) {
+        setReceipt({ operation_id: result.operation_id, replayed: true, response: result.response });
+        try { await onApplied?.(result.response); }
+        catch { if (current()) setRefreshWarning("工作簿已应用，但页面刷新失败，请手动刷新。"); }
+      }
       else {
         setPreview(result);
         if (result.status === "failed") setError("该次应用已失败，请修正文件后重新上传");
@@ -68,7 +76,13 @@ export function WorkbookImport({ schemaName, onApplied, disabled }: WorkbookImpo
       try { await onApplied?.(result.response); }
       catch { if (current()) setRefreshWarning("工作簿已应用，但页面刷新失败，请手动刷新。"); }
     } catch (applyError) {
-      if (current()) setError(workbookErrorMessage(applyError, "工作簿应用失败，请重新预览"));
+      if (current()) {
+        setError(workbookErrorMessage(applyError, "工作簿应用失败，请重新预览"));
+        const detail = (applyError as { response?: { data?: { detail?: Partial<WorkbookPreviewResult> } } })?.response?.data?.detail;
+        if (detail?.plan && Array.isArray(detail.plan.rows) && Array.isArray(detail.plan.errors)) {
+          setPreview({ ...preview, ...detail, plan: detail.plan, status: "failed" });
+        }
+      }
     } finally {
       if (current()) setApplying(false);
     }
@@ -79,7 +93,7 @@ export function WorkbookImport({ schemaName, onApplied, disabled }: WorkbookImpo
   return <Space direction="vertical" size={14} style={{ width: "100%" }}>
     <Upload accept=".xlsx" showUploadList={false} disabled={disabled || loading || applying}
       beforeUpload={(file) => { void upload(file); return Upload.LIST_IGNORE; }}>
-      <Button aria-label="上传工作簿" icon={<UploadOutlined aria-hidden />} loading={loading} disabled={disabled || applying}>上传工作簿</Button>
+      <Button aria-label={buttonLabel} icon={<UploadOutlined aria-hidden />} loading={loading} disabled={disabled || applying}>{buttonLabel}</Button>
     </Upload>
     {error && <Alert role="alert" type="error" showIcon message={error} />}
     {refreshWarning && <Alert type="warning" message={refreshWarning} />}
@@ -90,7 +104,7 @@ export function WorkbookImport({ schemaName, onApplied, disabled }: WorkbookImpo
     </>}
     {receipt && <>
       <Alert type={receipt.replayed ? "info" : "success"} showIcon
-        message={receipt.replayed ? "该文件已应用过，显示首次结果" : "工作簿已应用"} />
+        message={receipt.replayed ? "该文件已应用过，显示首次结果" : successMessage} />
       <Typography.Title level={5}>回执</Typography.Title>
       <pre aria-label="工作簿回执" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>
         {typeof receipt.response === "string" ? receipt.response : JSON.stringify(receipt.response, null, 2)}

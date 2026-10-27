@@ -28,6 +28,10 @@
 .data-grid-table th.data-grid-identity { z-index: 4; }
 .data-grid-table .data-grid-expand-cell { position: sticky; left: 0; width: 32px; padding: 0; z-index: 3; text-align: center; }
 .data-grid-table th.data-grid-expand-cell { z-index: 5; }
+.data-grid-table .data-grid-select-cell { position: sticky; left: 0; width: 32px; padding: 0; z-index: 3; text-align: center; }
+.data-grid-table th.data-grid-select-cell { z-index: 5; }
+.data-grid-select-cell input { margin: 0; vertical-align: middle; accent-color: var(--mb-presales-accent); }
+.data-grid-row[aria-selected="true"] > td { background: var(--mb-presales-hover); }
 .data-grid-expand-cell button { display: block; width: 100%; height: 30px; padding: 0; border: 0; color: var(--mb-presales-text-2); background: transparent; cursor: pointer; }
 .data-grid-sort-button { display: flex; align-items: center; gap: 5px; width: 100%; min-width: 0; padding: 0; border: 0; background: transparent; font: inherit; color: inherit; text-align: inherit; cursor: pointer; }
 .data-grid-sort-button .data-grid-header-text { flex: 1; }

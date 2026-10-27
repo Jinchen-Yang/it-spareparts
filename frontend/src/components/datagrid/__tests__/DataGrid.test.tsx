@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import DataGrid, { type DataGridColumn } from "../DataGrid";
 import { compareGridValues, sortGridRows } from "../sort";
 import { gridAccountId, gridStorageKey } from "../useGridView";
@@ -333,4 +334,58 @@ it("空、加载和错误状态分别展示，重试可调用", () => {
   expect(screen.getByRole("alert")).toHaveTextContent("读取失败");
   fireEvent.click(screen.getByRole("button", { name: "重试" }));
   expect(retry).toHaveBeenCalledOnce();
+});
+
+
+describe("行多选", () => {
+  it("受控选择只提交变更，全选保留其他页、排除禁止行并显示半选", () => {
+    const change = vi.fn();
+    const options = { selectable: true, selectedRowKeys: [99], onSelectedRowKeysChange: change,
+      isRowSelectable: (row: Row) => row.id !== 3 };
+    const { rerender } = render(grid(options));
+    expect(screen.getByRole("checkbox", { name: "选择 X1" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择 X10" }));
+    expect(change).toHaveBeenLastCalledWith([99, 1]);
+    expect(screen.getByRole("checkbox", { name: "选择 X10" })).not.toBeChecked();
+    rerender(grid({ ...options, selectedRowKeys: [99, 1] }));
+    const all = screen.getByRole("checkbox", { name: "选择当前页可选行" });
+    expect(all).toBePartiallyChecked();
+    expect(all).toHaveAttribute("aria-checked", "mixed");
+    fireEvent.click(all);
+    expect(change).toHaveBeenLastCalledWith([99, 1, 2]);
+    rerender(grid({ ...options, selectedRowKeys: [99, 1, 2] }));
+    expect(all).toBeChecked();
+    fireEvent.click(all);
+    expect(change).toHaveBeenLastCalledWith([99]);
+  });
+
+  it("原生复选框支持空格键，选择不触发排序/展开，列宽和固定偏移含选择列", async () => {
+    const sort = vi.fn();
+    const { container, rerender } = render(grid({ selectable: true, onSortChange: sort,
+      renderExpanded: (row) => <span>选择详情 {row.pn}</span> }));
+    const checkbox = screen.getByRole("checkbox", { name: "选择 X10" });
+    checkbox.focus();
+    expect(checkbox).toHaveFocus();
+    expect(checkbox).toHaveAttribute("type", "checkbox");
+    await userEvent.keyboard(" ");
+    expect(checkbox).toBeChecked();
+    expect(sort).not.toHaveBeenCalled();
+    expect(screen.queryByText("选择详情 X10")).not.toBeInTheDocument();
+    expect(container.querySelector<HTMLElement>(".data-grid-canvas")!.style.getPropertyValue("--dg-total-width")).toBe("424px");
+    expect(container.querySelector(".data-grid-identity")).toHaveStyle({ left: "64px" });
+    expect(container.querySelector(".data-grid-expand-cell")).toHaveStyle({ left: "32px" });
+    rerender(grid({ selectable: true, loading: true }));
+    expect(screen.getByRole("checkbox", { name: "选择当前页可选行" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "选择 X10" })).toBeDisabled();
+    rerender(grid({ selectable: true, accountId: "account-b" }));
+    expect(screen.getByRole("checkbox", { name: "选择 X10" })).not.toBeChecked();
+  });
+
+  it("选择列正确计入空态和展开行的跨列数", () => {
+    const { container, rerender } = render(grid({ selectable: true, rows: [], renderExpanded: () => "详情" }));
+    expect(container.querySelector(".data-grid-state")).toHaveAttribute("colspan", "5");
+    expect(screen.getByRole("checkbox", { name: "选择当前页可选行" })).toBeDisabled();
+    rerender(grid({ selectable: true, renderExpanded: () => "详情", defaultExpandedRowKeys: [1], expandedRowKeys: [1] }));
+    expect(container.querySelector(".data-grid-expanded td")).toHaveAttribute("colspan", "5");
+  });
 });

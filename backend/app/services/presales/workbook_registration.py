@@ -8,9 +8,11 @@ def register_workbooks():
 
     specs = [
         WorkbookSpec(inquiry_workbook.INQUIRY_SCHEMA, inquiry_workbook.load_current,
-                     inquiry_workbook.apply_inquiry, inquiry_workbook.can_access),
+                     inquiry_workbook.apply_inquiry, inquiry_workbook.can_access,
+                     inquiry_workbook.validate_inquiry),
         WorkbookSpec(quote_workbook.QUOTE_SCHEMA, quote_workbook.load_current,
-                     quote_workbook.apply_quotes, quote_workbook.can_access),
+                     quote_workbook.apply_quotes, quote_workbook.can_access,
+                     quote_workbook.validate_quotes),
         WorkbookSpec(sales_workbook.SUMMARY_SCHEMA, sales_workbook.reject_import,
                      sales_workbook.reject_import, sales_workbook.can_access),
     ]

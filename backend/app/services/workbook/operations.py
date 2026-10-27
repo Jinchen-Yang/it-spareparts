@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 import hmac
+import inspect
 import json
 
 from sqlalchemy import event, select, text
@@ -13,8 +14,9 @@ from app.models.workbook import WorkbookOperation
 from app.security import UserContext, record_access_log
 from app.services.workbook.parse import parse_workbook
 from app.services.workbook.plan import Plan, digest_plan, json_value, plan
-from app.services.workbook.registry import ApplyFailed, Conflict, Forbidden, NotFound, get_spec
+from app.services.workbook.registry import ApplyFailed, Conflict, Forbidden, NotFound, ValidationConflict, get_spec
 from app.services.workbook.schema import WorkbookError, column_allowed
+from app.services.workbook.validation import RowError, effective_plan, error_for_row
 from app.services.workflow.registry import WorkflowError
 from app.services.workflow.work_items import actor_context
 
@@ -51,6 +53,57 @@ def _check_plan_permissions(spec, data, ctx):
                 raise Forbidden("模板字段已变更，无法确认历史字段权限，请重新导出")
             if column is not None and not column_allowed(column, ctx):
                 raise Forbidden("字段权限已变更，请重新导出后编辑")
+
+
+def _validate(db, spec, comparison, ctx):
+    if spec.validate_fn is None:
+        return []
+    savepoint = db.begin_nested()
+    event.listen(db, "before_commit", _guard_commit)
+    try:
+        callback_plan = deepcopy(comparison)
+        signature = inspect.signature(spec.validate_fn)
+        try:
+            signature.bind(db, callback_plan, ctx)
+        except TypeError:
+            # 仅在调用前按签名选择协议，不能捕获业务 TypeError 后重复执行。
+            signature.bind(callback_plan, db)
+            errors = spec.validate_fn(callback_plan, db)
+        else:
+            errors = spec.validate_fn(db, callback_plan, ctx)
+        if not isinstance(errors, list) or any(not isinstance(error, RowError) for error in errors):
+            raise WorkbookError("校验回调必须返回 RowError 列表")
+        return [error.to_dict() for error in errors]
+    finally:
+        event.remove(db, "before_commit", _guard_commit)
+        savepoint.rollback()
+
+
+def _merge_errors(comparison, errors):
+    for error in errors:
+        comparison.errors.append(error)
+        for row in comparison.rows:
+            if row["sheet"] == error["sheet"] and (
+                error.get("row_key") == row["key"] or error.get("row_key") is None
+                and error.get("row_number") == row.get("row_number")
+            ):
+                row["errors"].append(error)
+
+
+def _failed(db, operation, ctx, comparison, errors, *, conflict=False, cause=None):
+    _merge_errors(comparison, errors)
+    operation.status = "failed"
+    operation.plan = comparison.to_dict()
+    operation.response = {"error": "应用失败，整份业务更改已回滚",
+                          "error_type": type(cause).__name__ if cause else "ValidationError",
+                          "row_errors": errors}
+    db.flush()
+    record_access_log(ctx, "workbook_apply_failed", "workbook_operation",
+                      {"operation_id": operation.id, "error_type": operation.response["error_type"]})
+    message = "预览后服务器记录已变更，请重新导出后编辑" if conflict else operation.response["error"]
+    exc_type = ValidationConflict if conflict else ApplyFailed
+    raise exc_type(message, result=_result(operation)) from (
+        cause or WorkbookError("；".join(error["message"] for error in errors)))
 
 
 def preview(db: Session, schema_name: str, file_bytes: bytes, *, ctx: UserContext,
@@ -103,6 +156,14 @@ def preview(db: Session, schema_name: str, file_bytes: bytes, *, ctx: UserContex
     comparison = plan(parsed, lambda sheet, ids: spec.load_current(db, sheet, ids, ctx))
     comparison.subject_type = subject_type
     comparison.subject_id = subject_id
+    valid_rows = [row for row in comparison.rows if row["status"] in ("added", "modified", "deleted")
+                  and not row["errors"]]
+    _merge_errors(comparison, _validate(db, spec, effective_plan(comparison, valid_rows), ctx))
+    # 冲突已经由状态阻止应用；逐行补充错误供预览红框显示，保留原有全局计数契约。
+    if spec.validate_fn is not None:
+        for row in comparison.rows:
+            if row["status"] == "conflict":
+                row["errors"].append(error_for_row(row, Conflict("服务器记录已变更或不可访问，请重新导出后编辑")).to_dict())
     operation = WorkbookOperation(
         schema_name=schema_name, subject_type=subject_type, subject_id=subject_id,
         export_id=parsed.export_id, file_sha256=parsed.file_sha256,
@@ -143,10 +204,18 @@ def apply(db: Session, operation_id: int, actor, expected_plan_digest: str,
     stored = Plan.from_dict(deepcopy(operation.plan))
     if stored.schema_version != str(spec.schema.version):
         raise Conflict("模板版本已更新，请重新导出后编辑")
-    if stored.errors or any(row["errors"] for row in stored.rows):
-        raise WorkbookError("工作簿存在错误，请修正后重新上传")
     if any(row["status"] == "conflict" for row in stored.rows):
         raise Conflict("工作簿存在版本冲突，请重新导出后编辑")
+    if stored.errors or any(row["errors"] for row in stored.rows):
+        business_errors = [error for error in stored.errors if error.get("kind") == "business"]
+        if business_errors:
+            # 失败回执沿用预览中的定位信息，不能绕过已知业务错误强行确认。
+            clean = deepcopy(stored)
+            clean.errors = [error for error in clean.errors if error.get("kind") != "business"]
+            for row in clean.rows:
+                row["errors"] = [error for error in row["errors"] if error.get("kind") != "business"]
+            _failed(db, operation, ctx, clean, business_errors)
+        raise WorkbookError("工作簿存在错误，请修正后重新上传")
     if not isinstance(confirm_deletes, (list, tuple, set)) or any(
         not isinstance(key, str) for key in confirm_deletes
     ):
@@ -161,12 +230,20 @@ def apply(db: Session, operation_id: int, actor, expected_plan_digest: str,
     for sheet in sorted({row["sheet"] for row in rows if row["status"] != "added"}):
         existing = [row for row in rows if row["sheet"] == sheet and row["status"] != "added"]
         current = spec.load_current(db, sheet, [row["entity_id"] for row in existing], ctx)
-        if any(row["entity_id"] not in current or current[row["entity_id"]][0] != row["base_version"]
-               for row in existing):
+        stale = [row for row in existing if row["entity_id"] not in current
+                 or current[row["entity_id"]][0] != row["base_version"]]
+        if stale:
+            if spec.validate_fn is not None:
+                errors = [error_for_row(row, Conflict("预览后服务器记录已变更，请重新导出后编辑")).to_dict()
+                          for row in stale]
+                _failed(db, operation, ctx, stored, errors, conflict=True)
             raise Conflict("预览后服务器记录已变更，请重新导出后编辑")
     effective = Plan(stored.schema_name, stored.export_id, rows,
                      dict(Counter(row["status"] for row in rows)), [], stored.warnings,
                      stored.schema_version, stored.subject_type, stored.subject_id)
+    errors = _validate(db, spec, effective, ctx)
+    if errors:
+        _failed(db, operation, ctx, stored, errors)
     try:
         with db.begin_nested():
             event.listen(db, "before_commit", _guard_commit)
@@ -180,12 +257,8 @@ def apply(db: Session, operation_id: int, actor, expected_plan_digest: str,
             json.dumps(response, allow_nan=False)
             db.flush()
     except Exception as exc:
-        operation.status = "failed"
-        operation.response = {"error": "应用失败，整份业务更改已回滚", "error_type": type(exc).__name__}
-        db.flush()
-        record_access_log(ctx, "workbook_apply_failed", "workbook_operation",
-                          {"operation_id": operation.id, "error_type": type(exc).__name__})
-        raise ApplyFailed("应用失败，整份业务更改已回滚") from exc
+        errors = [error_for_row(row, exc).to_dict() for row in effective.rows]
+        _failed(db, operation, ctx, stored, errors, cause=exc)
     operation.status = "applied"
     operation.response = response
     operation.applied_at = datetime.now(timezone.utc)

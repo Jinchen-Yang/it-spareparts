@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type Key, type ReactNode } from "react";
 import { Alert, App, Badge, Button, Input, List, Modal, Select, Space, Tabs, Tag } from "antd";
 import {
   claimWorkItem, completeWorkItem, declineWorkItem, listWorkCandidates, listWorkItems,
@@ -16,6 +16,8 @@ interface Props {
   beforeOpen?: (item: WorkItem) => boolean | Promise<boolean>;
   compact?: boolean;
   refreshKey?: number;
+  onSelectionChange?: (items: WorkItem[]) => void;
+  isRowSelectable?: (item: WorkItem) => boolean;
 }
 
 type ReasonAction = "release" | "transfer" | "reassign" | "decline";
@@ -32,7 +34,8 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-export default function WorkInbox({ subjectType, conflictMessage, renderRow, onOpen, beforeOpen, compact = false, refreshKey = 0 }: Props) {
+export default function WorkInbox({ subjectType, conflictMessage, renderRow, onOpen, beforeOpen, compact = false, refreshKey = 0,
+  onSelectionChange, isRowSelectable }: Props) {
   const { message } = App.useApp();
   const badge = useWorkBadge();
   const [query, setQuery] = useState("");
@@ -40,6 +43,7 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
   const [tab, setTab] = useState<WorkTab>("assigned");
   const [page, setPage] = useState(1);
   const [items, setItems] = useState<WorkItem[]>([]);
+  const [selected, setSelected] = useState<Key[]>([]);
   const [total, setTotal] = useState(0);
   const [canSupervise, setCanSupervise] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -62,6 +66,7 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
 
   useEffect(() => {
     const controller = new AbortController();
+    setSelected([]); onSelectionChange?.([]);
     setItems([]);
     setTotal(0);
     setLoading(true);
@@ -88,7 +93,7 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [tab, subjectType, page, reload, compact, refreshKey]);
+  }, [tab, subjectType, page, reload, compact, refreshKey, onSelectionChange]);
 
   useEffect(() => {
     ++contextVersion.current;
@@ -203,7 +208,9 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
           { value: "new", label: "最新在前" }, { value: "old", label: "最早在前" }, { value: "lines", label: "行数多在前" }, { value: "no", label: "单号 A→Z" },
         ]} /></div>}
       {compact ? <DataGrid id="presales-work-queue" ariaLabel="报价工作台队列" rows={queue} rowKey={(item) => item.id} loading={loading} error={loadError}
-        onRetry={() => setReload((value) => value + 1)} columns={[{ key: "inquiry", title: "待办队列", width: 265, identity: true,
+        selectable={!!onSelectionChange} selectedRowKeys={selected} isRowSelectable={isRowSelectable}
+        onSelectedRowKeysChange={(keys) => { setSelected(keys); onSelectionChange?.(items.filter((item) => keys.includes(item.id))); }}
+        onRetry={() => setReload((value) => value + 1)} columns={[{ key: "inquiry", title: "待办队列", width: onSelectionChange ? 233 : 265, identity: true,
           render: (item) => <div className="quote-queue-row">{renderRow(item)}<span><Tag>{statusLabels[item.status]}</Tag>{item.paused && <Tag>已暂停</Tag>}</span>{actions(item)}</div> }]}
         emptyText={loadError ? "未加载待办" : "暂无待办"} /> : <List
         rowKey="id"

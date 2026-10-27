@@ -25,6 +25,10 @@ export interface DataGridProps<T> {
   columns: DataGridColumn<T>[];
   rows: T[];
   rowKey: (row: T) => Key;
+  selectable?: boolean;
+  selectedRowKeys?: Key[];
+  onSelectedRowKeysChange?: (keys: Key[]) => void;
+  isRowSelectable?: (row: T) => boolean;
   loading?: boolean;
   error?: ReactNode;
   onRetry?: () => void;

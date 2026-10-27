@@ -58,3 +58,11 @@ describe("WorkbookExportButton", () => {
     expect(screen.getByRole("checkbox", { name: "备注" })).toBeChecked();
   });
 });
+
+
+it("业务可在紧凑工具栏使用明确的下载按钮文案", async () => {
+  const fetchSchema = vi.fn().mockResolvedValue(schema);
+  render(<WorkbookExportButton schemaName="demo" label="合并下载" fetchSchema={fetchSchema} onExport={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "合并下载" }));
+  expect(await screen.findByRole("checkbox", { name: "备注" })).toBeInTheDocument();
+});

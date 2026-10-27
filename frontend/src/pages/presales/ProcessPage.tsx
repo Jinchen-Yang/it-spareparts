@@ -14,6 +14,9 @@ import PartQuoteBadges from "./PartQuoteBadges";
 import { usePresalesError, isOfferActive, useNow, flattenOffers, expiryLabel } from "./shared";
 import QuoteGrid, { type QuoteGridRow } from "./QuoteGrid";
 import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
+import { WorkbookExportButton } from "../../components/workbook";
+import { presalesWorkbooks } from "../../api/presalesWorkbooks";
+import WorkbookDialog from "./WorkbookDialog";
 
 async function findOwnTask(inquiryId: number): Promise<WorkItem | undefined> {
   // 待办接口的这三个页签均按服务端当前账号过滤，不以显示名称推断身份。
@@ -123,6 +126,7 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
   const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [gallery, setGallery] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [values, setValues] = useState<Record<number, { key: string; value: OfferInput }>>({});
   const [expanded, setExpanded] = useState<Key[]>([]);
   const [validity, setValidity] = useState(1);
@@ -323,7 +327,10 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
           const next = days ?? 1; setValidity(next);
           for (const line of proactive ? lines : required) changeValue(line.id, { ...valueFor(line), validity_days: next });
         }} /><span role="status">{uniformDays === undefined ? "各行有效期不同；修改后统一应用" : expiryLabel(uniformDays, now)}</span></div>
-      <Button size="small" disabled title="报价工作簿将在第二批接入">下载报价表</Button><Button size="small" disabled title="报价工作簿将在第二批接入">上传报价表</Button>
+      {!proactive && <><WorkbookExportButton size="small" label="下载报价表" schemaName="presales_quote_sheet" disabled={busy || !editable || !active}
+        fetchSchema={() => presalesWorkbooks.getQuoteSheetSchema()} onExport={(visible) => presalesWorkbooks.exportQuoteSheet([inquiry.id], visible)}
+        filename={`${inquiry.inquiry_no}-报价表.xlsx`} />
+        <Button size="small" disabled={busy || !editable || !active} onClick={() => setImportOpen(true)}>上传报价表</Button></>}
       <Button size="small" onClick={() => setGallery(true)} disabled={!lines.some((line) => line.part_id)}>查看图片 / 多选下载</Button>
     </header>
     {inquiry.field_values?.map((field, index) => <div key={index}>{field.name ?? field.new_name}: {String(field.value ?? "")}</div>)}
@@ -354,5 +361,8 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
     </Modal>
     {timeline && <Timeline key={`timeline-${timelineVersion}`} subjectType="presales_inquiry" subjectId={inquiry.id} />}
     {gallery && <GalleryPicker mode="modal" items={lines.filter((line) => line.part_id).map((line) => ({ partId: line.part_id!, pn: line.pn_raw }))} onClose={() => setGallery(false)} />}
+    {importOpen && <WorkbookDialog mode="quote" inquiryId={inquiry.id} onClose={() => setImportOpen(false)} onApplied={() => {
+      message.success("已保存为草稿，请在页面确认后回复"); setImportOpen(false); setLoadVersion((version) => version + 1); onTaskChange?.();
+    }} />}
   </section>;
 }

@@ -10,6 +10,8 @@ export interface WorkbookExportButtonProps {
   fetchSchema: (schemaName: string) => Promise<WorkbookSchema>;
   onExport: (visibleColumns: WorkbookVisibleColumns) => Promise<Blob | { blob: Blob; filename: string } | void>;
   filename?: string;
+  label?: string;
+  size?: "small" | "middle" | "large";
   disabled?: boolean;
 }
 
@@ -30,7 +32,7 @@ function saveWorkbook(blob: Blob, filename: string) {
   globalThis.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
-export function WorkbookExportButton({ schemaName, fetchSchema, onExport, filename, disabled }: WorkbookExportButtonProps) {
+export function WorkbookExportButton({ schemaName, fetchSchema, onExport, filename, disabled, label = "导出工作簿", size }: WorkbookExportButtonProps) {
   const [open, setOpen] = useState(false);
   const [schema, setSchema] = useState<WorkbookSchema | null>(null);
   const [selected, setSelected] = useState<WorkbookVisibleColumns>({});
@@ -88,7 +90,7 @@ export function WorkbookExportButton({ schemaName, fetchSchema, onExport, filena
   };
 
   return <>
-    <Button aria-label="导出工作簿" icon={<DownloadOutlined aria-hidden />} disabled={disabled} onClick={() => void load()}>导出工作簿</Button>
+    <Button aria-label={label} size={size} icon={<DownloadOutlined aria-hidden />} disabled={disabled} onClick={() => void load()}>{label}</Button>
     <Modal open={open} title="选择导出列" okText="下载 Excel" cancelText="取消" confirmLoading={downloading}
       okButtonProps={{ disabled: loading || !schema }} onOk={() => void download()}
       onCancel={() => { if (!downloading) { ++epoch.current; setOpen(false); } }}>

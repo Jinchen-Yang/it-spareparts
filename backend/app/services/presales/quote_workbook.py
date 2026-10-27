@@ -22,6 +22,7 @@ from app.services.workbook.export import export_workbook
 from app.services.workbook.registry import Conflict as WorkbookConflict
 from app.services.workbook.registry import Forbidden as WorkbookForbidden
 from app.services.workbook.schema import ColumnSpec, SheetSpec, WorkbookError, WorkbookSchema, column_allowed
+from app.services.workbook.validation import validate_by_applying
 from app.services.workflow import work_items
 from app.services.workflow.registry import Forbidden, InvalidTransition, WorkflowError
 
@@ -516,3 +517,18 @@ def apply_quotes(db, plan, ctx):
                     updating.add(target)
             applied.append({"inquiry_id": line.inquiry_id, **result})
     return {"saved": applied, "replied": False}
+
+
+def _error_column(exc):
+    message = str(exc)
+    if "供应商" in message:
+        return "supplier"
+    if "沿用" in message or "不可见" in message:
+        return "ref_offer_id"
+    if "PN" in message and "一致" in message:
+        return "pn"
+    return None
+
+
+def validate_quotes(db, plan, ctx):
+    return validate_by_applying(db, plan, ctx, apply_quotes, _error_column)

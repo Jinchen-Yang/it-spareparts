@@ -140,6 +140,8 @@ export interface Inquiry {
   version: number;
   revision: number;
   customer_id?: number | null;
+  customer_name?: string | null;
+  is_owner?: boolean;
   notes?: string | null;
   offer_audience?: AudienceRuleRead;
   notes_audience?: AudienceRuleRead;
@@ -199,6 +201,7 @@ export const presales = {
     return (await api.get<PresalesCandidate[]>(`${root}/suppliers`, { params: { q, limit: 20 }, signal })).data;
   },
   async listInquiries(params: { kind?: Inquiry["kind"]; scope?: "mine" | "all"; status?: Inquiry["status"]; page?: number; page_size?: number;
+    q?: string; date_from?: string; date_to?: string;
     sort?: "inquiry_no" | "line_count" | "status" | "updated_at" | "created_at"; dir?: "asc" | "desc" } = {}) {
     return (await api.get<InquiryPage>(`${root}/inquiries`, { params })).data;
   },

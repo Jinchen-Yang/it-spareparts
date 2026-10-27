@@ -19,6 +19,9 @@ import CandidateSelect from "./CandidateSelect";
 import { changedAudience } from "../../components/audience/rules";
 import { readPermissionMap } from "../../nav";
 import DataGrid, { type DataGridColumn } from "../../components/datagrid/DataGrid";
+import { WorkbookExportButton } from "../../components/workbook";
+import { presalesWorkbooks } from "../../api/presalesWorkbooks";
+import WorkbookDialog from "./WorkbookDialog";
 import "./sales-pages.css";
 
 type ReadField = { field_def_id?: number; new_name?: string; name?: string; value: unknown; rule?: AudienceRuleRead };
@@ -112,6 +115,7 @@ function InquiryEditorContent() {
   const navigate = useNavigate();
   const location = useLocation();
   const { message } = App.useApp();
+  const [importOpen, setImportOpen] = useState(false);
   const customerVisible = localStorage.getItem("role") === "admin" || readPermissionMap().data_customer !== false;
   const [inquiry, setInquiry] = useState<Inquiry>();
   const [lines, setLines] = useState<DraftLine[]>([]);
@@ -301,7 +305,13 @@ function InquiryEditorContent() {
   return <div className="sales-page sales-editor">
     <header className="sales-heading"><Button size="small" onClick={() => navigate(inquiry ? `/presales/inquiries/${inquiry.id}` : "/presales/inquiries")}>返回</Button>
       <h1>{append ? "追加询价行" : inquiry ? `编辑询价 ${inquiry.inquiry_no}` : "新建询价"}</h1>
-      <span className="sales-muted">{inquiry?.status === "revising" ? "撤回修改中" : "草稿"}</span></header>
+      <span className="sales-muted">{inquiry?.status === "revising" ? "撤回修改中" : "草稿"}</span>
+      {!append && !blocked && <><WorkbookExportButton size="small" label="下载本单 Excel" schemaName="presales_inquiry_lines" disabled={busy}
+        fetchSchema={() => presalesWorkbooks.getInquirySchema()} filename={`${inquiry?.inquiry_no || "询价空模板"}.xlsx`}
+        onExport={(visible) => inquiry ? presalesWorkbooks.exportInquiry(inquiry.id, visible) : presalesWorkbooks.exportInquiryTemplate(visible)} />
+        <Button size="small" disabled={busy} onClick={() => setImportOpen(true)}>上传 Excel</Button>
+        <span className="sales-muted">下载使用已保存的数据</span></>}
+    </header>
     {blocked && <Alert type="warning" message="当前单据不可在此编辑；已提交的销售询价请先撤回修改，关单后请复制为新单。" />}
     {!append && <section className="sales-head-fields" aria-label="询价信息"><Form layout="vertical" size="small" disabled={busy || blocked}>
       <div className="sales-head-row">
@@ -358,5 +368,11 @@ function InquiryEditorContent() {
       addRawParts(pasteText.split(/[\n\r\t,，;；]+/)); setPasteText(""); setPasteOpen(false);
     }}><p>每行一个 PN，也支持逗号或分号分隔；按原文加入待建档行，相同 PN 不重复加入。</p>
       <Input.TextArea aria-label="批量 PN" rows={6} value={pasteText} onChange={(event) => setPasteText(event.target.value)} /></Modal>
+    {importOpen && !blocked && <WorkbookDialog mode="inquiry" inquiryId={inquiry?.id} onClose={() => setImportOpen(false)} onApplied={async (response) => {
+      const savedId = (response as { inquiry_id?: number })?.inquiry_id;
+      if (inquiry) { await refresh(); setImportOpen(false); }
+      else if (typeof savedId === "number" && savedId > 0) navigate(`/presales/inquiries/${savedId}/edit`);
+      else throw new Error("草稿编号未返回");
+    }} />}
   </div>;
 }

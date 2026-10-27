@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Key } from "react";
 import { useNavigate } from "react-router-dom";
 import { Alert, App, Button, DatePicker, Input, Pagination, Select, Tabs, Tag } from "antd";
 import type { Dayjs } from "dayjs";
 import { presales, type Inquiry, type InquiryLine, type Offer } from "../../api/presales";
 import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
-import { fetchPurchaseAnalyticsOptions } from "../../api/purchaseAnalytics";
+import { presalesWorkbooks } from "../../api/presalesWorkbooks";
+import { WorkbookExportButton } from "../../components/workbook";
+import WorkbookDialog from "./WorkbookDialog";
 import { readPermissionMap } from "../../nav";
 import DataGrid, { type DataGridColumn, type DataGridSort } from "../../components/datagrid/DataGrid";
 import { isOfferActive, useNow } from "./shared";
@@ -35,12 +37,14 @@ export default function InquiryListPage() {
   const [status, setStatus] = useState<Inquiry["status"]>();
   const [stage, setStage] = useState("");
   const [query, setQuery] = useState("");
+  const [search, setSearch] = useState("");
   const [range, setRange] = useState<[Dayjs | null, Dayjs | null] | null>(null);
   const [items, setItems] = useState<Inquiry[]>([]);
   const [mineIds, setMineIds] = useState<Set<number>>(new Set());
   const [details, setDetails] = useState<Record<number, Inquiry>>({});
   const [candidates, setCandidates] = useState<WorkCandidate[]>([]);
-  const [customers, setCustomers] = useState<Record<number, string>>({});
+  const [selected, setSelected] = useState<Key[]>([]);
+  const [importOpen, setImportOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [sort, setSort] = useState<DataGridSort | null>(defaultSort);
@@ -51,12 +55,19 @@ export default function InquiryListPage() {
   const conflictRetried = useRef(false);
   const now = useNow(Object.values(details).flatMap((detail) => (detail.lines || []).flatMap((line) => lineOffers(detail, line)
     .flatMap((offer) => [offer.valid_from, offer.valid_until]))));
-  useEffect(() => { conflictRetried.current = false; }, [scope, kind, status, page, sort]);
+  useEffect(() => {
+    const timer = setTimeout(() => { setSearch(query.trim()); setPage(1); }, 300);
+    return () => clearTimeout(timer);
+  }, [query]);
+  const dateFrom = range?.[0]?.format("YYYY-MM-DD");
+  const dateTo = range?.[1]?.format("YYYY-MM-DD");
+  useEffect(() => { conflictRetried.current = false; setSelected([]); }, [scope, kind, status, page, sort, search, dateFrom, dateTo]);
   useEffect(() => {
     let disposed = false;
     setLoading(true); setError(""); setItems([]); setDetails({}); setDetailError(false);
     const selected = sort && serverKeys.has(sort.key) ? sort : defaultSort;
     void presales.listInquiries({ scope: scope === "shared" ? "all" : scope, kind, status, page, page_size: 20,
+      q: search || undefined, date_from: dateFrom, date_to: dateTo,
       sort: selected.key as "updated_at", dir: selected.dir }).then(async (data) => {
       if (disposed) return;
       if (scope === "shared") {
@@ -90,22 +101,12 @@ export default function InquiryListPage() {
       }
     }).finally(() => { if (!disposed) setLoading(false); });
     return () => { disposed = true; };
-  }, [scope, kind, status, page, reload, message, sort]);
+  }, [scope, kind, status, page, reload, message, sort, search, dateFrom, dateTo]);
   useEffect(() => {
     let disposed = false;
     void listWorkCandidates("presales_inquiry").then((data) => { if (!disposed) setCandidates(data.items); }).catch(() => {});
     return () => { disposed = true; };
   }, []);
-  const customerIds = items.flatMap((item) => item.customer_id ? [item.customer_id] : []).join(",");
-  useEffect(() => {
-    let disposed = false;
-    if (!customerIds) return;
-    void fetchPurchaseAnalyticsOptions("", customerIds.split(",").map(Number)).then(({ data }) => {
-      if (!disposed) setCustomers(Object.fromEntries([...(data.customers || []), ...(data.selected_customers || [])]
-        .map((customer) => [customer.customer_id, customer.customer || String(customer.customer_id)])));
-    }).catch(() => {});
-    return () => { disposed = true; };
-  }, [customerIds]);
   const progress = useCallback((row: Inquiry) => {
     if (row.status !== "submitted") return statuses[row.status] || row.status;
     const detail = details[row.id];
@@ -118,18 +119,14 @@ export default function InquiryListPage() {
     return "待处理";
   }, [details]);
   const filtered = useMemo(() => items.filter((item) => {
-    const time = Date.parse(item.updated_at);
-    const detail = details[item.id];
-    const search = [item.inquiry_no, item.customer_id ? customers[item.customer_id] : "", ...(detail?.lines || []).flatMap((l) => [l.pn_raw, l.description])].join(" ").toLocaleLowerCase();
-    return (scope !== "shared" || !mineIds.has(item.id)) && (!stage || progress(item).startsWith(stage))
-      && (!query.trim() || search.includes(query.trim().toLocaleLowerCase()))
-      && (!range?.[0] || time >= range[0].startOf("day").valueOf()) && (!range?.[1] || time <= range[1].endOf("day").valueOf());
-  }), [items, range, query, details, customers, scope, mineIds, stage, progress]);
+    return (scope !== "shared" || !mineIds.has(item.id)) && (!stage || progress(item).startsWith(stage));
+  }), [items, scope, mineIds, stage, progress]);
+  const exportIds = filtered.filter((item) => scope === "mine" && item.is_owner && item.kind === "sales_inquiry" && selected.includes(item.id)).map((item) => item.id);
   const onSortChange = useCallback((value: DataGridSort | null) => { setSort(value); setPage(1); }, []);
   const columns: DataGridColumn<Inquiry>[] = [
     { key: "inquiry_no", title: "单号", width: 180, identity: true, type: "code", value: (r) => r.inquiry_no,
       render: (r) => <><button className="presales-cell-link presales-mono" onClick={() => navigate(`/presales/inquiries/${r.id}`)}>{r.inquiry_no}</button>{r.kind === "proactive_offer" && <span className="presales-pill presales-pill-purple">主动报价</span>}</> },
-    { key: "customer", title: "客户", width: 180, sortable: false, value: (r) => r.customer_id ? customers[r.customer_id] || `客户 #${r.customer_id}` : "" },
+    { key: "customer", title: "客户", width: 180, sortable: false, value: (r) => r.customer_name },
     { key: "pns", title: "PN（前 3 个）", width: 240, sortable: false, value: (r) => {
       const lines = details[r.id]?.lines || [];
       return lines.slice(0, 3).map((l) => l.pn_raw).join(" · ") + (lines.length > 3 ? ` +${lines.length - 3}` : "");
@@ -158,6 +155,7 @@ export default function InquiryListPage() {
       ]} /><span className="presales-spacer" />
       <Input size="small" className="presales-search" aria-label="搜索单号、客户或 PN" placeholder="单号 / 客户 / PN / 描述" allowClear value={query} onChange={(e) => setQuery(e.target.value)} />
       <Button size="small" onClick={() => setReload((v) => v + 1)}>刷新</Button>
+      <Button size="small" onClick={() => setImportOpen(true)}>从 Excel 新建</Button>
       <Button size="small" type="primary" onClick={() => navigate("/presales/inquiries/new")}>新建询价</Button>
     </div>
     <div className="presales-filters">
@@ -167,11 +165,15 @@ export default function InquiryListPage() {
         options={[{ value: "sales_inquiry", label: "销售询价" }, { value: "proactive_offer", label: "主动报价" }]} onChange={(value) => { setKind(value); setPage(1); }} />
       <Select size="small" aria-label="询价状态" allowClear placeholder="单据状态" style={{ width: 115 }} value={status}
         options={Object.entries(statuses).map(([value, label]) => ({ value, label }))} onChange={(value) => { setStatus(value); setStage(""); setPage(1); }} />
-      <DatePicker.RangePicker size="small" aria-label="最近动态日期" value={range} onChange={setRange} />
+      <DatePicker.RangePicker size="small" aria-label="最近动态日期" value={range} onChange={(value) => { setRange(value); setPage(1); }} />
     </div>
-    <div className="presales-filter-note">日期筛选作用于当前页最近动态时间。搜索、处理进度及共享范围同样筛选当前页；单号、行数、单据阶段和最近动态按服务端全局排序。</div>
+    <div className="presales-filters"><WorkbookExportButton size="small" label="合并下载" schemaName="presales_sales_summary"
+      disabled={!exportIds.length || loading} fetchSchema={() => presalesWorkbooks.getSalesSummarySchema()}
+      onExport={(visible) => presalesWorkbooks.exportSalesSummary(exportIds, visible)} filename="销售询价汇总.xlsx" />
+      <span className="presales-filter-note">在「我的询价」选择销售询价后按 PN 汇总下载。处理进度与共享范围筛选当前页；搜索、日期和排序由服务端处理。</span></div>
     {detailError && <Alert type="warning" message="部分处理人状态加载失败，请刷新后查看。" />}
     <DataGrid id="presales-inquiries" rows={filtered} columns={columns} rowKey={(r) => r.id} loading={loading} error={error}
+      selectable={scope === "mine"} selectedRowKeys={selected} onSelectedRowKeysChange={setSelected} isRowSelectable={(row) => !!row.is_owner && row.kind === "sales_inquiry"}
       onRetry={() => setReload((v) => v + 1)} defaultSort={defaultSort} serverSort onSortChange={onSortChange} ariaLabel="询价单列表"
       renderExpanded={(row) => <DataGrid id="presales-inquiry-summary" rows={details[row.id]?.lines || []} rowKey={(l) => l.id} ariaLabel="PN 报价状态" columns={[
         { key: "pn", title: "PN", identity: true, type: "code", width: 180, value: (l) => l.pn_raw },
@@ -187,5 +189,10 @@ export default function InquiryListPage() {
       ]} />} />
     <div className="presales-list-footer"><span>本页显示 {filtered.length} / {items.length} 张 · 范围内共 {total} 张</span>
       <Pagination size="small" current={page} pageSize={20} total={total} showSizeChanger={false} onChange={setPage} /></div>
+    {importOpen && <WorkbookDialog mode="inquiry" onClose={() => setImportOpen(false)} onApplied={(response) => {
+      const id = (response as { inquiry_id?: number })?.inquiry_id;
+      if (typeof id === "number" && id > 0) navigate(`/presales/inquiries/${id}/edit`);
+      else throw new Error("草稿编号未返回");
+    }} />}
   </section>;
 }

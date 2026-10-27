@@ -20,6 +20,16 @@ class Conflict(WorkbookError):
 class ApplyFailed(WorkbookError):
     status_code = 422
 
+    def __init__(self, message, *, result=None):
+        super().__init__(message)
+        self.result = result
+
+
+class ValidationConflict(ApplyFailed, Conflict):
+    """保留版本冲突的 409 语义，同时携带可持久化的失败回执。"""
+
+    status_code = 409
+
 
 @dataclass(frozen=True)
 class WorkbookSpec:
@@ -27,6 +37,7 @@ class WorkbookSpec:
     load_current: Callable
     apply_fn: Callable
     can_access: Callable
+    validate_fn: Callable | None = None
 
 
 _specs: dict[str, WorkbookSpec] = {}
@@ -39,6 +50,8 @@ def register(name: str, spec: WorkbookSpec) -> None:
         raise ValueError(f"工作簿 schema 已注册: {name}")
     if not all(callable(fn) for fn in (spec.load_current, spec.apply_fn, spec.can_access)):
         raise ValueError("必须提供读取、应用和权限回调")
+    if spec.validate_fn is not None and not callable(spec.validate_fn):
+        raise ValueError("校验回调必须可调用")
     _specs[name] = spec
 
 

@@ -12,7 +12,7 @@ vi.mock("../../../nav", () => ({ readPermissionMap: () => JSON.parse(localStorag
 import InquiryListPage from "../InquiryListPage";
 
 const row: Inquiry = { id: 1, inquiry_no: "XJ001", kind: "sales_inquiry", status: "submitted", version: 1, revision: 1,
-  customer_id: 5, line_count: 2, progress: { quoted_lines: 2, line_count: 2 },
+  customer_id: 5, customer_name: "客户甲", line_count: 2, progress: { quoted_lines: 2, line_count: 2 },
   updated_at: "2026-01-01T10:00:00Z", created_at: "2026-01-01T00:00:00Z" };
 beforeEach(() => {
   vi.clearAllMocks(); localStorage.clear();
@@ -32,7 +32,9 @@ it("列表按处理人回复显示 1/2 进度与标签，主管可切换全部",
   expect(await screen.findByText("处理中「已回复 1/2」")).toBeVisible();
   expect(screen.getByText("采购甲 · 已回复")).toBeVisible();
   expect(screen.getByText("采购乙 · 待处理")).toBeVisible();
+  // 客户名来自售前列表项 customer_name（T18），不再借用需采购分析权限的 options 接口。
   expect(await screen.findByText("客户甲")).toBeVisible();
+  expect(mocks.fetchPurchaseAnalyticsOptions).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("tab", { name: "全部" }));
   await waitFor(() => expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ scope: "all" })));
 });
@@ -52,7 +54,8 @@ it("普通用户无全部入口；类型/状态使用服务端支持的筛选键
   fireEvent.mouseDown(screen.getByRole("combobox", { name: "询价状态" }));
   fireEvent.click(screen.getByText("草稿", { selector: ".ant-select-item-option-content" }));
   await waitFor(() => expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ status: "draft" })));
-  expect(screen.getByText(/日期筛选作用于当前页最近动态时间/)).toBeVisible();
+  // T18 起日期与搜索走服务端，不再有"仅作用于当前页"的提示。
+  expect(screen.queryByText(/作用于当前页/)).not.toBeInTheDocument();
 });
 
 it("表头三态排序调用服务端并回到第一页，取消时恢复最近动态默认序", async () => {

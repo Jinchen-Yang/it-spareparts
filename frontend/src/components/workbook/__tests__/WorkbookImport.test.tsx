@@ -210,3 +210,37 @@ describe("WorkbookImport", () => {
     if (oldToken == null) localStorage.removeItem("token"); else localStorage.setItem("token", oldToken);
   });
 });
+
+
+it("支持业务预览回调和草稿提示，重放成功同样通知业务跳转", async () => {
+  const previewFile = vi.fn().mockResolvedValue(preview([row("a", "modified")]));
+  const onApplied = vi.fn();
+  const { container } = render(<WorkbookImport schemaName="demo" previewFile={previewFile}
+    buttonLabel="上传报价表" successMessage="已保存为草稿，请在页面确认后回复" onApplied={onApplied} />);
+  expect(screen.getByRole("button", { name: "上传报价表" })).toBeInTheDocument();
+  upload(container);
+  fireEvent.click(await screen.findByRole("button", { name: "确认应用" }));
+  expect(await screen.findByText("已保存为草稿，请在页面确认后回复")).toBeInTheDocument();
+  expect(previewFile).toHaveBeenCalledWith(expect.any(File));
+  expect(mocks.previewWorkbook).not.toHaveBeenCalled();
+  expect(onApplied).toHaveBeenCalledWith({ updated: 1 });
+  previewFile.mockResolvedValue({ ...preview([]), replayed: true, response: { inquiry_id: 7 } });
+  upload(container);
+  await waitFor(() => expect(onApplied).toHaveBeenCalledWith({ inquiry_id: 7 }));
+  expect(screen.getByText("该文件已应用过，显示首次结果")).toBeInTheDocument();
+});
+
+it("应用后业务变更失败返回的新计划逐格显示错误并禁止重试应用", async () => {
+  const bad = row("first", "modified", { errors: [{ sheet: "示例明细", row_number: 2, row_key: "first", column: "qty", message: "数量已被其他人修改" }] });
+  mocks.applyWorkbook.mockRejectedValue({ response: { data: { detail: {
+    message: "业务数据已变化，请修正后重新上传", operation_id: "op-1", plan_digest: "digest-2", status: "failed", plan: plan([bad]),
+    response: { row_errors: bad.errors },
+  } } } });
+  const { container } = render(<WorkbookImport schemaName="demo" />);
+  upload(container);
+  fireEvent.click(await screen.findByRole("button", { name: "确认应用" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("业务数据已变化，请修正后重新上传");
+  expect(screen.getByRole("button", { name: "确认应用" })).toBeDisabled();
+  expect(container.querySelector('[data-field="qty"]')).toHaveAttribute("data-invalid", "true");
+  expect(screen.getByText("示例明细 · 第 2 行 · qty · 数量已被其他人修改")).toBeInTheDocument();
+});

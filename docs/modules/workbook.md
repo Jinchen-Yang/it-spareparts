@@ -47,7 +47,7 @@
 
 ## 回调与两步提交
 
-通过 `registry.register(schema.name, WorkbookSpec(schema, load_current, apply_fn, can_access))` 注册。注册名必须等于 schema 名称，重复注册拒绝；测试结束可调用 `unregister(name)`。声明 schema 的最小示例：
+通过 `registry.register(schema.name, WorkbookSpec(schema, load_current, apply_fn, can_access, validate_fn=None))` 注册。注册名必须等于 schema 名称，重复注册拒绝；测试结束可调用 `unregister(name)`。声明 schema 的最小示例：
 
 ```python
 schema = WorkbookSchema("demo", 1, [
@@ -70,6 +70,9 @@ schema = WorkbookSchema("demo", 1, [
 - `load_current(db, sheet, ids, ctx) -> dict[id, (version, values)]`：只返回当前用户可访问的实体；应用阶段须在当前事务中通过 `SELECT FOR UPDATE` 锁定对应记录，持续到外层提交，封住版本复查与实际写入之间的竞态。
 - `apply_fn(db, plan, ctx) -> dict`：只接收 `added`、`modified`、已确认的 `deleted` 行；`unchanged` 不传入。行的 `values` 只包含实际上传且获授权的可编辑字段，`custom_fields` 单独返回；业务不得把缺列当作清空。
 - `can_access(db, ctx, subject_type, subject_id) -> bool`：预览、应用和重放均调用，业务自行判断可见性及操作权限。可选业务标识只能成对传入，保存在 `Plan.subject_type` / `Plan.subject_id` 并参与摘要；`apply_fn` 必须验证所有实体属于该业务对象，新增行也据此确定目标。
+- `validate_fn(plan, session) -> list[RowError]`（可选）：也支持沿用现有回调顺序的 `(db, plan, ctx)`，引擎在调用前检查签名，不会在业务抛出 TypeError 后重复调用。`RowError(sheet, message, row_key=None, row_number=None, column=None)` 通过签名行的 `key` 或 Excel 行号定位，`column` 使用 schema 列键。引擎在独立 SAVEPOINT 内调用，结束时立即回滚，禁止回调提交；可以复用应用服务试运行。错误合并到 `Plan.errors` 和对应行的 `errors`，前端沿用红框并禁用应用。冲突行保留原有 conflict 计数，并补充行内错误。
+
+应用前再次执行相同业务校验，并重新锁定和检查版本。失败时 `response.row_errors` 保留同样的定位结构；HTTP `detail` 包含 `message`、完整操作结果（`plan`、`plan_digest`、`status=failed`）和失败回执。版本变化维持 HTTP 409，其余应用错误为 422。调用方可以直接使用返回的 `plan` 更新预览。未提供校验回调的 schema 保持原有契约。
 
 低层 `plan(parse_result, load_current)` 采用 `(sheet, ids)` 形式的只读回调；注册服务负责把 `db` 和 `ctx` 绑定进去。`export_workbook` 的 `data` 为 `{sheet_key: [{entity_id, base_version, values, custom_fields?}]}`，`custom_fields={sheet_key: [字段名]}` 选择自定义列；身份不是从展示行号推断。
 

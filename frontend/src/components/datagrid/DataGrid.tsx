@@ -9,6 +9,7 @@ import "./DataGrid.css";
 export type { DataGridColumn, DataGridProps, DataGridSort, DataGridSortType } from "./types";
 
 const EXPAND_WIDTH = 32;
+const SELECT_WIDTH = 32;
 interface ResizeSession {
   key: string;
   index: number;
@@ -24,6 +25,7 @@ export default function DataGrid<T>({
   emptyText = "暂无数据", renderExpanded, expandedRowKeys, defaultExpandedRowKeys = [],
   onExpandedRowKeysChange, defaultSort = null, sort: controlledSort, onSortChange,
   serverSort = false, toolbarExtra, className = "", ariaLabel = "数据表格",
+  selectable = false, selectedRowKeys, onSelectedRowKeysChange, isRowSelectable,
 }: DataGridProps<T>) {
   const { view, update, reset, storageKey } = useGridView(id, accountId, columns, defaultSort);
   const sort = controlledSort === undefined ? view.sort : controlledSort;
@@ -31,6 +33,8 @@ export default function DataGrid<T>({
   const identity = columns.find((column) => column.identity)?.key ?? columns[0]?.key;
   const [ownExpanded, setOwnExpanded] = useState<Key[]>(defaultExpandedRowKeys);
   const expanded = expandedRowKeys ?? ownExpanded;
+  const [ownSelected, setOwnSelected] = useState<Key[]>([]);
+  const selected = selectedRowKeys ?? ownSelected;
   const [columnsOpen, setColumnsOpen] = useState(false);
   const canvas = useRef<HTMLDivElement>(null);
   const scroll = useRef<HTMLDivElement>(null);
@@ -40,8 +44,21 @@ export default function DataGrid<T>({
   const sortCallback = useRef(onSortChange);
   sortCallback.current = onSortChange;
   const width = (column: DataGridColumn<T>) => view.widths[column.key] ?? clampColumnWidth(column, column.width ?? 160);
-  const totalWidth = visible.reduce((total, column) => total + width(column), renderExpanded ? EXPAND_WIDTH : 0);
+  const fixedWidth = (selectable ? SELECT_WIDTH : 0) + (renderExpanded ? EXPAND_WIDTH : 0);
+  const totalWidth = visible.reduce((total, column) => total + width(column), fixedWidth);
+  const columnCount = visible.length + (selectable ? 1 : 0) + (renderExpanded ? 1 : 0);
   const ordered = useMemo(() => serverSort ? rows : sortGridRows(rows, columns, sort), [rows, columns, sort, serverSort]);
+  const selectableKeys = ordered.filter((row) => isRowSelectable?.(row) !== false).map(rowKey);
+  const selectedOnPage = selectableKeys.filter((key) => selected.includes(key)).length;
+  const allSelected = selectableKeys.length > 0 && selectedOnPage === selectableKeys.length;
+  const someSelected = selectedOnPage > 0 && !allSelected;
+  const setSelected = (keys: Key[]) => {
+    if (selectedRowKeys === undefined) setOwnSelected(keys);
+    onSelectedRowKeysChange?.(keys);
+  };
+  const toggleSelection = () => setSelected(allSelected
+    ? selected.filter((key) => !selectableKeys.includes(key))
+    : [...new Set([...selected, ...selectableKeys])]);
   const allExpanded = ordered.length > 0 && ordered.every((row) => expanded.includes(rowKey(row)));
   const currentSortColumn = sort && columns.find((column) => column.key === sort.key);
 
@@ -49,6 +66,7 @@ export default function DataGrid<T>({
     // 服务端列表必须在初次挂载时收到持久化排序，不能只排列当前页。
     if (serverSort && controlledSort === undefined) sortCallback.current?.(view.sort);
   }, [storageKey, serverSort]);
+  useEffect(() => { setOwnSelected([]); }, [storageKey]);
   useEffect(() => () => { if (frame.current != null) cancelAnimationFrame(frame.current); }, []);
 
   const setExpanded = (keys: Key[]) => {
@@ -71,9 +89,9 @@ export default function DataGrid<T>({
     canvas.current.style.setProperty("--dg-total-width", `${totalWidth + session.width - width(columns[session.index])}px`);
     session.handle.setAttribute("aria-valuenow", String(session.width));
     const naturalBefore = visible.slice(0, visible.findIndex((column) => column.key === session.key))
-      .reduce((total, column) => total + width(column), renderExpanded ? EXPAND_WIDTH : 0);
+      .reduce((total, column) => total + width(column), fixedWidth);
     const before = session.key === identity
-      ? Math.max(naturalBefore, (scroll.current?.scrollLeft ?? 0) + (renderExpanded ? EXPAND_WIDTH : 0)) : naturalBefore;
+      ? Math.max(naturalBefore, (scroll.current?.scrollLeft ?? 0) + fixedWidth) : naturalBefore;
     if (guide.current) guide.current.style.left = `${before + session.width - 1}px`;
   };
   const endResize = (event: ReactPointerEvent<HTMLSpanElement>, cancelled = false) => {
@@ -125,7 +143,8 @@ export default function DataGrid<T>({
     ...Object.fromEntries(columns.map((column, index) => [`--dg-column-${index}`, `${width(column)}px`])),
   } as CSSProperties;
   const stickyStyle = (column: DataGridColumn<T>): CSSProperties | undefined => column.key === identity
-    ? { left: renderExpanded ? EXPAND_WIDTH : 0 } : undefined;
+    ? { left: fixedWidth } : undefined;
+  const expandStyle = { left: selectable ? SELECT_WIDTH : 0 };
 
   return <section className={`data-grid ${className}`} data-grid-id={id} aria-label={ariaLabel}>
     <div className="data-grid-toolbar">
@@ -149,11 +168,16 @@ export default function DataGrid<T>({
       <div className="data-grid-canvas" ref={canvas} style={canvasStyle}>
         <table className="data-grid-table" aria-label={ariaLabel} aria-busy={loading}>
           <colgroup>
+            {selectable && <col style={{ width: SELECT_WIDTH }} />}
             {renderExpanded && <col style={{ width: EXPAND_WIDTH }} />}
             {visible.map((column) => <col key={column.key} style={{ width: `var(--dg-column-${columns.indexOf(column)})` }} />)}
           </colgroup>
           <thead><tr>
-            {renderExpanded && <th className="data-grid-expand-cell"><button type="button" aria-label={allExpanded ? "折叠全部行" : "展开全部行"} aria-expanded={allExpanded} onClick={toggleAll}>{allExpanded ? "▾" : "▸"}</button></th>}
+            {selectable && <th className="data-grid-select-cell"><input type="checkbox" aria-label="选择当前页可选行"
+              checked={allSelected} aria-checked={someSelected ? "mixed" : allSelected}
+              ref={(input) => { if (input) input.indeterminate = someSelected; }}
+              disabled={loading || !selectableKeys.length} onChange={toggleSelection} /></th>}
+            {renderExpanded && <th className="data-grid-expand-cell" style={expandStyle}><button type="button" aria-label={allExpanded ? "折叠全部行" : "展开全部行"} aria-expanded={allExpanded} onClick={toggleAll}>{allExpanded ? "▾" : "▸"}</button></th>}
             {visible.map((column) => {
               const sortable = column.sortable ?? !!column.type;
               return <th key={column.key} className={column.key === identity ? "data-grid-identity" : undefined} style={{ ...stickyStyle(column), textAlign: column.align }}
@@ -196,14 +220,18 @@ export default function DataGrid<T>({
             })}
           </tr></thead>
           <tbody>
-            {error ? <tr><td colSpan={visible.length + (renderExpanded ? 1 : 0)} className="data-grid-state"><div role="alert">{error} {onRetry && <button type="button" onClick={onRetry}>重试</button>}</div></td></tr>
-              : loading && !ordered.length ? <tr><td colSpan={visible.length + (renderExpanded ? 1 : 0)} className="data-grid-state"><span role="status">加载中…</span></td></tr>
-                : !ordered.length ? <tr><td colSpan={visible.length + (renderExpanded ? 1 : 0)} className="data-grid-state">{emptyText}</td></tr>
+            {error ? <tr><td colSpan={columnCount} className="data-grid-state"><div role="alert">{error} {onRetry && <button type="button" onClick={onRetry}>重试</button>}</div></td></tr>
+              : loading && !ordered.length ? <tr><td colSpan={columnCount} className="data-grid-state"><span role="status">加载中…</span></td></tr>
+                : !ordered.length ? <tr><td colSpan={columnCount} className="data-grid-state">{emptyText}</td></tr>
                   : ordered.map((row) => {
                     const key = rowKey(row);
                     const open = expanded.includes(key);
-                    return <Fragment key={key}><tr className="data-grid-row" data-row-key={key}>
-                      {renderExpanded && <td className="data-grid-expand-cell"><button type="button" aria-label={`${open ? "折叠" : "展开"} ${String(columnValue(columns.find((column) => column.key === identity)!, row) ?? key)}`} aria-expanded={open}
+                    return <Fragment key={key}><tr className="data-grid-row" data-row-key={key} aria-selected={selectable ? selected.includes(key) : undefined}>
+                      {selectable && <td className="data-grid-select-cell"><input type="checkbox"
+                        aria-label={`选择 ${String(columnValue(columns.find((column) => column.key === identity)!, row) ?? key)}`}
+                        checked={selected.includes(key)} disabled={loading || isRowSelectable?.(row) === false}
+                        onChange={(event) => setSelected(event.target.checked ? [...selected, key] : selected.filter((item) => item !== key))} /></td>}
+                      {renderExpanded && <td className="data-grid-expand-cell" style={expandStyle}><button type="button" aria-label={`${open ? "折叠" : "展开"} ${String(columnValue(columns.find((column) => column.key === identity)!, row) ?? key)}`} aria-expanded={open}
                         onClick={() => setExpanded(open ? expanded.filter((item) => item !== key) : [...expanded, key])}>{open ? "▾" : "▸"}</button></td>}
                       {visible.map((column) => {
                         const value = columnValue(column, row);
@@ -212,7 +240,7 @@ export default function DataGrid<T>({
                           <div className="data-grid-cell-content" data-grid-measure={column.key} title={title}>{column.render ? column.render(row) : value == null ? "—" : String(value)}</div>
                         </td>;
                       })}
-                    </tr>{open && renderExpanded && <tr className="data-grid-expanded"><td colSpan={visible.length + 1}>{renderExpanded(row)}</td></tr>}</Fragment>;
+                    </tr>{open && renderExpanded && <tr className="data-grid-expanded"><td colSpan={columnCount}>{renderExpanded(row)}</td></tr>}</Fragment>;
                   })}
           </tbody>
         </table>
