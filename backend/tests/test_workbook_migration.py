@@ -12,7 +12,10 @@ from tests.conftest import _alembic_cfg
 def test_workbook_migration_extends_current_head():
     scripts = ScriptDirectory.from_config(_alembic_cfg())
     assert scripts.get_revision("c4e6f8a0b2d5").down_revision == "b2d4f6a8c0e1"
-    assert scripts.get_heads() == ["c4e6f8a0b2d5"]
+    # 后续迁移会接在本迁移之后：只要求迁移链单 head 且包含本迁移。
+    heads = scripts.get_heads()
+    assert len(heads) == 1
+    assert "c4e6f8a0b2d5" in {r.revision for r in scripts.walk_revisions('base', heads[0])}
 
 
 def test_workbook_upgrade_downgrade_and_zero_drift(db):

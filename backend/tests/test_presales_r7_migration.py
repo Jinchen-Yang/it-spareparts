@@ -18,7 +18,10 @@ _COLUMNS = {
 def test_pinned_revision_migration_roundtrip_and_zero_drift(db):
     cfg = _alembic_cfg()
     scripts = ScriptDirectory.from_config(cfg)
-    assert scripts.get_heads() == [_REVISION]
+    # 后续迁移会接在本迁移之后：只要求迁移链单 head 且包含本迁移。
+    heads = scripts.get_heads()
+    assert len(heads) == 1
+    assert _REVISION in {r.revision for r in scripts.walk_revisions('base', heads[0])}
     assert scripts.get_revision(_REVISION).down_revision == _PREVIOUS
     engine = db.get_bind()
     db.close()

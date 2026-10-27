@@ -235,6 +235,14 @@ def save_draft(db, inquiry_id, line_id, actor, data, *, expected_version,
     else:
         offer.version += 1
     _apply(db, offer, data, ctx)
+    # 页面重新编辑草稿后，旧 Excel 的发布选择须重新确认。
+    offer.workbook_choice = {}
+    previous = db.scalar(select(PresalesLineResponse).where(
+        PresalesLineResponse.line_id == line.id, PresalesLineResponse.created_by == user.id,
+        PresalesLineResponse.is_draft.is_(True)))
+    if previous is not None:
+        # 页面改为填写报价后，不能在回复时继续沿用 Excel 暂存的沿用或不报选择。
+        db.delete(previous)
     offer.part_id = line.part_id
     offer.work_item_id = task.id if task else None
     offer.updated_at = common.now()
@@ -251,6 +259,7 @@ def _publish(db, offer, actor, published_at, reason="发布报价"):
     offer.valid_until = offer_valid_until(published_at, offer.validity_days)
     offer.version += 1
     offer.updated_at = published_at
+    offer.workbook_choice = {}
     append_revision(db, offer, actor, list(PresalesOffer.__table__.columns.keys()), reason)
 
 
@@ -263,7 +272,7 @@ def _copy_quote(target, source):
 
 
 def _response(db, line, user_id, task_id, mode, *, ref_offer_id=None, reason=None,
-              ref_offer_revision_no=None):
+              ref_offer_revision_no=None, is_draft=False):
     row = db.scalar(select(PresalesLineResponse).where(
         PresalesLineResponse.line_id == line.id, PresalesLineResponse.created_by == user_id))
     if row is None:
@@ -272,6 +281,7 @@ def _response(db, line, user_id, task_id, mode, *, ref_offer_id=None, reason=Non
     row.line_version, row.work_item_id = line.version, task_id
     row.mode, row.ref_offer_id, row.reason = mode, ref_offer_id, reason
     row.ref_offer_revision_no = ref_offer_revision_no
+    row.is_draft = is_draft
     return row
 
 
@@ -289,6 +299,68 @@ def _valid_reference(db, line, offer_id, ctx, owner_id=None):
             or visibility.pinned_offer_view(db, offer.id, offer.revision_no, owner_ctx) is None):
         raise InvalidTransition("沿用报价已失效、不可见或与本行 PN 不同")
     return offer
+
+
+def save_line_decision(db, inquiry_id, line_id, actor, *, expected_version, mode,
+                       data=None, ref_offer_id=None, reason=None, on_existing=None,
+                       existing_offer_id=None, work_item_id=None):
+    """保存采购逐行草稿选择；共享回复校验，但不发布报价或完成待办。"""
+    user, ctx = common.resolve_actor(db, actor)
+    common.require(ctx, "page_presales")
+    common.require(ctx, "action_presales_quote")
+    inquiry = common.lock_inquiry(db, inquiry_id, expected_version)
+    if inquiry.kind != "sales_inquiry" or inquiry.status != "submitted":
+        raise InvalidTransition("只能处理已提交的销售询价")
+    task = _task(db, inquiry, actor, user.id, work_item_id)
+    line = _line(db, inquiry.id, line_id)
+    drafts = list(db.scalars(select(PresalesOffer).where(
+        PresalesOffer.inquiry_id == inquiry.id, PresalesOffer.line_id == line.id,
+        PresalesOffer.created_by == user.id, PresalesOffer.status == "draft",
+    ).order_by(PresalesOffer.id).with_for_update().execution_options(populate_existing=True)))
+    if mode == "quote":
+        if ref_offer_id is not None or reason:
+            raise InvalidTransition("报新价不能同时选择沿用或不报")
+        if len(drafts) > 1:
+            raise Conflict("该行有多个货源草稿，请在页面逐条处理")
+        old = drafts[0] if drafts else None
+        draft = save_draft(db, inquiry.id, line.id, actor, data or {},
+            expected_version=old.version if old else inquiry.version,
+            offer_id=old.id if old else None, work_item_id=task.id)
+        if draft.no_stock or draft.unit_price is None:
+            raise InvalidTransition("报价必须填写单价；无货请选择不报并填写原因")
+        targets = _publication_plans(db, [draft], inquiry, ctx, on_existing, existing_offer_id, None)
+        target = targets[0][1]
+        draft.workbook_choice = ({"on_existing": "update", "existing_offer_id": target.id,
+                                  "existing_version": target.version} if target else
+                                 {"on_existing": "new"} if on_existing == "new" else {})
+        response = db.scalar(select(PresalesLineResponse).where(
+            PresalesLineResponse.line_id == line.id, PresalesLineResponse.created_by == user.id))
+        if response is not None:
+            db.delete(response)
+        db.flush()
+        return {"line_id": line.id, "mode": "quote", "offer_id": draft.id}
+    if mode == "reuse":
+        if reason:
+            raise InvalidTransition("沿用报价不能同时填写不报原因")
+        if type(ref_offer_id) is not int:
+            raise InvalidTransition("沿用必须填写报价编号")
+        db.scalar(select(PresalesOffer).where(PresalesOffer.id == ref_offer_id).with_for_update()
+                  .execution_options(populate_existing=True))
+        reference = _valid_reference(db, line, ref_offer_id, ctx, inquiry.created_by)
+        _response(db, line, user.id, task.id, mode, ref_offer_id=reference.id,
+                  ref_offer_revision_no=reference.revision_no, is_draft=True)
+    elif mode == "skip":
+        if ref_offer_id is not None or not isinstance(reason, str) or not reason.strip():
+            raise InvalidTransition("无货或不报必须填写原因，不能同时沿用报价")
+        _response(db, line, user.id, task.id, mode, reason=reason.strip(), is_draft=True)
+    else:
+        raise InvalidTransition("请选择报价、沿用或不报")
+    for draft in drafts:
+        db.delete(draft)
+    db.flush()
+    common.event(db, inquiry, actor, "offer.decision_saved", {"line_id": line.id, "mode": mode})
+    common.audit(db, actor, "presales.offer.decision_saved", line.id)
+    return {"line_id": line.id, "mode": mode}
 
 
 def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
@@ -318,9 +390,21 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
     previous_by_line = {row.line_id: row for row in previous}
     def unchanged_reuse(line_id, data):
         row = previous_by_line.get(line_id)
-        return (row is not None and row.line_version == by_line[line_id].version
+        return (row is not None and not row.is_draft and row.line_version == by_line[line_id].version
                 and row.mode == data["mode"] == "reuse" and row.ref_offer_id == data.get("ref_offer_id")
                 and row.ref_offer_revision_no is not None)
+    def validate_reuse(line, data):
+        if unchanged_reuse(line.id, data):
+            return
+        # Excel 只保存待回复选择；正式回复前重新检查有效期、受众和版本。
+        reference = db.scalar(select(PresalesOffer).where(PresalesOffer.id == data.get("ref_offer_id"))
+                              .with_for_update().execution_options(populate_existing=True))
+        reference = _valid_reference(db, line, data.get("ref_offer_id"), ctx, inquiry.created_by)
+        previous_response = previous_by_line.get(line.id)
+        if (previous_response is not None and previous_response.is_draft
+                and previous_response.ref_offer_id == reference.id
+                and previous_response.ref_offer_revision_no != reference.revision_no):
+            raise Conflict("Excel 选择的沿用报价已更新，请重新选择")
     decisions = {}
     for data in line_responses or []:
         if (not isinstance(data, dict) or data.get("line_id") not in by_line
@@ -331,8 +415,7 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
         if mode == "reuse":
             if data.get("reason"):
                 raise InvalidTransition("沿用报价不能同时填写不报原因")
-            if not unchanged_reuse(line.id, data):
-                _valid_reference(db, line, data.get("ref_offer_id"), ctx, inquiry.created_by)
+            validate_reuse(line, data)
         elif mode == "skip":
             if data.get("ref_offer_id") is not None or not isinstance(data.get("reason"), str) or not data["reason"].strip():
                 raise InvalidTransition("无货或不报必须填写原因")
@@ -345,6 +428,8 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
             if row.mode == "reuse" and row.ref_offer_revision_no is None:
                 continue
             decisions[row.line_id] = {"mode": row.mode, "ref_offer_id": row.ref_offer_id, "reason": row.reason}
+            if row.mode == "reuse":
+                validate_reuse(by_line[row.line_id], decisions[row.line_id])
     quoted = {offer.line_id for offer in own}
     if any(line.id not in quoted and decisions.get(line.id, {}).get("mode", "quote") == "quote"
            for line in lines):
@@ -465,8 +550,10 @@ def _notice_targets(db, inquiry, user_ids):
 
 def _lock_merge_inquiry(db, inquiry_id):
     # 发布者已经持有新单和 PN 锁；旧单用 NOWAIT 防止与关单、直接更新形成反向锁序。
+    # 显式刷新后使用同连接保存点，避免释放内部保存点触发 M4 的 Session 提交保护。
+    db.flush()
     try:
-        with db.begin_nested():
+        with db.connection().begin_nested():
             return db.scalar(select(PresalesInquiry).where(PresalesInquiry.id == inquiry_id)
                 .with_for_update(nowait=True).execution_options(populate_existing=True))
     except OperationalError as exc:
@@ -492,6 +579,10 @@ def _publication_plans(db, drafts, inquiry, ctx, on_existing, existing_offer_id,
             raise InvalidTransition("重复报价选择无效")
         action = choice.get("on_existing", on_existing)
         target_id = choice.get("existing_offer_id", existing_offer_id)
+        saved = draft.workbook_choice or {}
+        use_saved = not choice and on_existing is None and existing_offer_id is None
+        if use_saved:
+            action, target_id = saved.get("on_existing"), saved.get("existing_offer_id")
         if action not in {None, "update", "new"}:
             raise InvalidTransition("重复报价必须选择更新或另报一条")
         candidates = [row for row in library._active(db, [draft.part_id])
@@ -519,8 +610,12 @@ def _publication_plans(db, drafts, inquiry, ctx, on_existing, existing_offer_id,
         target = db.scalar(select(PresalesOffer).where(PresalesOffer.id == target.id)
                            .with_for_update().execution_options(populate_existing=True))
         # 旧单锁取得后重新核验，避免等待时旧单撤回使报价变更失效。
-        if target.inquiry_id != origin.id or target.status != "published":
+        if (target.inquiry_id != origin.id or target.status != "published" or target.no_stock
+                or target.valid_from is None or target.valid_from > common.now()
+                or target.valid_until is None or target.valid_until <= common.now()):
             raise Conflict("原报价已变化，请刷新后重试")
+        if use_saved and saved.get("existing_version") is not None and target.version != saved["existing_version"]:
+            raise Conflict("Excel 选择的原报价已更新，请重新选择更新或另报")
         updating.add(target.id)
         plans.append((draft, target))
     return plans
