@@ -1,4 +1,14 @@
 :root {
+  --mb-presales-page: #F5F6F8;
+  --mb-presales-surface: #FFFFFF;
+  --mb-presales-text: #1F2328;
+  --mb-presales-text-2: #5B6470;
+  --mb-presales-border: #E3E6EA;
+  --mb-presales-accent: #1D4ED8;
+  --mb-presales-hover: #EEF3FE;
+  --mb-presales-warning: #9A3412;
+  --mb-presales-success: #14532D;
+  --mb-presales-purple: #5B21B6;
   --mb-page: #F4F1EC;
   --mb-surface: #FFFFFF;
   --mb-inset: #F6F3EE;

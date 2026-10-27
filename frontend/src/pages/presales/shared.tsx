@@ -77,6 +77,19 @@ export function flattenOffers(offers: Offer[]): Offer[] {
   return offers.flatMap((offer) => [offer, ...(offer.more ?? [])]);
 }
 
+/** 主报价先过期时，仍有效的历史报价继续作为该报价人的候选。 */
+export function activeOfferGroups(offers: Offer[], now: number): Offer[] {
+  return offers.flatMap((group) => {
+    const active = flattenOffers([group]).filter((offer) => isOfferActive(offer, now));
+    if (!active.length) return [];
+    const latest = isOfferActive(group, now) ? group : active.reduce((current, offer) => {
+      const delta = Date.parse(offer.valid_from!) - Date.parse(current.valid_from!);
+      return delta > 0 || (delta === 0 && offer.id > current.id) ? offer : current;
+    });
+    return [{ ...latest, more: active.filter((offer) => offer.id !== latest.id) }];
+  });
+}
+
 export function usePresalesError() {
   const { message } = App.useApp();
   return useCallback(async (error: unknown, refresh?: () => void | Promise<unknown>) => {

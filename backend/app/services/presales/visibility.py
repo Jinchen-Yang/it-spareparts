@@ -73,7 +73,7 @@ def _offer_batch(db, offers, ctx, *, fields):
     participation = work_items.participation_batch(db, "presales_inquiry", needed, ctx) if needed else {}
     flat, rules, candidates = {}, {}, []
     omitted = {"created_by", "work_item_id", "supplier_audience_rule_id",
-               "reporter_audience_rule_id", "notes_audience_rule_id"}
+               "reporter_audience_rule_id", "notes_audience_rule_id", "workbook_choice"}
     for index, offer in enumerate(offers):
         inquiry = inquiry_for(offer)
         if inquiry is None:
@@ -204,6 +204,8 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
     ).order_by(PresalesInquiryLine.seq, PresalesInquiryLine.id)))
     responses = list(db.scalars(select(PresalesLineResponse).where(
         PresalesLineResponse.line_id.in_([line.id for line in lines]))))
+    responses = [row for row in responses
+                 if not row.is_draft or row.created_by == user.id or bypass(ctx)]
     links = list(db.scalars(select(PresalesOfferLineLink).where(
         PresalesOfferLineLink.line_id.in_([line.id for line in lines]))))
     references = {line.ref_offer_id for line in lines if line.ref_offer_id is not None} | {
@@ -227,7 +229,9 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
     link_references = {(link.line_id, link.offer_id): read_pin(link.offer_id, link.offer_revision_no)
                        for link in links}
     views_by_id = {view["id"]: view for view in offers}
-    for view in [*line_references.values(), *response_references.values(), *link_references.values()]:
+    for view in [*line_references.values(),
+                 *(response_references[row.id] for row in responses if not row.is_draft and row.id in response_references),
+                 *link_references.values()]:
         if view is not None and view["id"] not in views_by_id:
             offers.append(view)
             views_by_id[view["id"]] = view
@@ -241,7 +245,7 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
                if offer["status"] == "published" and offer["line_id"] in line_versions}
     handled.update(line_id for line_id, view in line_references.items() if view is not None)
     handled.update(row.line_id for row in responses
-                   if row.line_version == line_versions[row.line_id]
+                   if not row.is_draft and row.line_version == line_versions[row.line_id]
                    and (owner or bypass(ctx) or row.created_by == user.id))
     handled.update(line_id for (line_id, _), view in link_references.items() if view is not None)
     result["progress"] = {"quoted_lines": len(handled), "line_count": len(lines)}
@@ -266,7 +270,10 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
                 field_rules={"notes": (line.notes_audience_rule_id, author)}, bypass=bypass)[0]
             if line.id in line_rules:
                 row["notes_audience"] = line_rules[line.id]
-            row["field_values"] = values.get(f"line:{line.id}", [])
+            from app.services.presales.inquiries import delivery_value
+            visible_fields = values.get(f"line:{line.id}", [])
+            row["expected_delivery"] = delivery_value(line, visible_fields)
+            row["field_values"] = [field for field in visible_fields if field["name"] != "期望交期"]
             if line.id in line_references:
                 ref = line_references[line.id]
                 row["ref_offer"] = ref
@@ -279,7 +286,7 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
             row["field_template"] = [{"id": f.id, "name": f.name, "value_type": f.value_type,
                                        "choices": f.choices} for f in field_pool.template_for(
                 db, "presales_inquiry", "line", ctx,
-                anchor=f"part:{line.part_id}" if line.part_id else None)]
+                anchor=f"part:{line.part_id}" if line.part_id else None) if f.name != "期望交期"]
             result["lines"].append(row)
         result["offers"] = offers
         if inquiry.won_offer_id is not None:
@@ -290,6 +297,8 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
                 continue
             row = {key: getattr(response, key) for key in (
                 "line_id", "mode", "created_by", "work_item_id", "reason", "ref_offer_id", "ref_offer_revision_no")}
+            if response.is_draft:
+                row["is_draft"] = True
             offer = response_references.get(response.id)
             row["expired"] = response.mode == "reuse" and (offer is None or offer["expired"])
             row["original_withdrawn"] = bool(offer and offer["original_withdrawn"])

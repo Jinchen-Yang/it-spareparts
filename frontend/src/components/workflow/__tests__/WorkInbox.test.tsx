@@ -203,3 +203,35 @@ it("开始处理的响应晚到时，切换业务类型后不会打开旧业务�
     expect.objectContaining({ subject_type: "other_demo" }), expect.any(AbortSignal),
   );
 });
+
+it("紧凑队列读完所有分页后再筛选和按行数排序，领取沿用版本检查", async () => {
+  const rows = [
+    { ...poolItem, summary: { inquiry_no: "XJ-10", line_count: 2 }, created_at: "2026-01-02T00:00:00Z" },
+    { ...poolItem, id: 12, summary: { inquiry_no: "XJ-2", line_count: 8 }, created_at: "2026-01-01T00:00:00Z" },
+  ];
+  vi.mocked(listWorkItems).mockImplementation(async (params) => ({ items: params.page === 2 ? [rows[1]] : [rows[0]], total: 101,
+    page: params.page ?? 1, page_size: 100, can_supervise: false }));
+  render(<WorkInbox compact subjectType="demo" renderRow={(item) => <span>{String(item.summary.inquiry_no)}</span>} onOpen={vi.fn()} />);
+  await screen.findByText("XJ-2");
+  expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ page: 2, page_size: 100 }), expect.any(AbortSignal));
+  const grid = screen.getByRole("table", { name: "报价工作台队列" });
+  expect(within(grid).getAllByRole("row")[1]).toHaveTextContent("XJ-10");
+  fireEvent.mouseDown(screen.getByRole("combobox", { name: "队列排序" }));
+  fireEvent.click(await screen.findByText("行数多在前", { selector: ".ant-select-item-option-content" }));
+  expect(within(grid).getAllByRole("row")[1]).toHaveTextContent("XJ-2");
+  fireEvent.change(screen.getByLabelText("筛选待办"), { target: { value: "XJ-10" } });
+  expect(within(grid).queryByText("XJ-2")).not.toBeInTheDocument();
+  fireEvent.click(within(grid).getByRole("button", { name: /领\s*取/ }));
+  await waitFor(() => expect(claimWorkItem).toHaveBeenCalledWith(11, { expected_version: 3 }));
+});
+
+it("紧凑队列切单守卫拒绝后不会提前开始新待办", async () => {
+  vi.mocked(listWorkItems).mockResolvedValue(page([{ ...poolItem, assignee_id: 7, allowed_actions: ["start"] }]));
+  const onOpen = vi.fn();
+  const beforeOpen = vi.fn(async () => false);
+  render(<WorkInbox compact subjectType="demo" beforeOpen={beforeOpen} renderRow={() => <span>待开始询价</span>} onOpen={onOpen} />);
+  fireEvent.click(await screen.findByRole("button", { name: /打\s*开/ }));
+  await waitFor(() => expect(beforeOpen).toHaveBeenCalled());
+  expect(startWorkItem).not.toHaveBeenCalled();
+  expect(onOpen).not.toHaveBeenCalled();
+});

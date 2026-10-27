@@ -96,6 +96,7 @@ def _filter_notice_items(db, rows, ctx):
         PresalesInquiryLine.inquiry_id, PresalesLineResponse.ref_offer_id,
     ).join(PresalesLineResponse, PresalesLineResponse.line_id == PresalesInquiryLine.id)
       .where(PresalesInquiryLine.inquiry_id.in_(inquiry_ids),
+             PresalesLineResponse.is_draft.is_(False),
              PresalesLineResponse.ref_offer_id.is_not(None))))
     references.extend(db.execute(select(
         PresalesInquiryLine.inquiry_id, PresalesOfferLineLink.offer_id,
@@ -141,7 +142,8 @@ def _validate_complete(db, item, ctx):
         PresalesOffer.status == "published")))
     from app.services.presales.visibility import pinned_offer_view
     for response in db.scalars(select(PresalesLineResponse).where(
-        PresalesLineResponse.line_id.in_(needed), PresalesLineResponse.created_by == item.assignee_id)):
+        PresalesLineResponse.line_id.in_(needed), PresalesLineResponse.created_by == item.assignee_id,
+        PresalesLineResponse.is_draft.is_(False))):
         line = db.get(PresalesInquiryLine, response.line_id)
         if response.line_version != line.version:
             continue

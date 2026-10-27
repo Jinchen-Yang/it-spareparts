@@ -13,6 +13,21 @@ from app.db import Base
 from app.models._types import Money, Qty, TZDateTime
 
 
+class PresalesWorkbookExport(Base):
+    """只存导出授权范围，不保存备注、价格或自定义字段原值。"""
+
+    __tablename__ = "presales_workbook_export"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    schema_name: Mapped[str] = mapped_column(String(64))
+    export_id: Mapped[str] = mapped_column(String(128), unique=True)
+    actor: Mapped[str] = mapped_column(String(64), ForeignKey("sys_user.username"))
+    scope: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+
+    __table_args__ = (Index("ix_presales_workbook_export_actor_schema", "actor", "schema_name"),)
+
+
 class PresalesInquiry(Base):
     __tablename__ = "presales_inquiry"
 
@@ -62,6 +77,7 @@ class PresalesInquiryLine(Base):
     description: Mapped[str | None] = mapped_column(Text)
     qty: Mapped[Decimal] = mapped_column(Qty)
     require_exact_pn: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    expected_delivery: Mapped[date | None] = mapped_column(Date)
     ref_offer_id: Mapped[int | None] = mapped_column(ForeignKey(
         "presales_offer.id", use_alter=True, name="fk_presales_line_ref_offer",
     ))
@@ -98,6 +114,8 @@ class PresalesOffer(Base):
     source_key: Mapped[str] = mapped_column(String(128), default="", server_default="")
     supplier_id: Mapped[int | None] = mapped_column(ForeignKey("dim_supplier.id"))
     validity_days: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    # Excel 草稿保留采购明确选择；发布时清空，业务可见性出口不返回此内部数据。
+    workbook_choice: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
     valid_from: Mapped[datetime | None] = mapped_column(TZDateTime)
     valid_until: Mapped[datetime | None] = mapped_column(TZDateTime)
     status: Mapped[str] = mapped_column(String(16), default="draft", server_default="draft")
@@ -141,6 +159,7 @@ class PresalesLineResponse(Base):
     work_item_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("work_item.id"))
     line_version: Mapped[int] = mapped_column(Integer)
     mode: Mapped[str] = mapped_column(String(8))
+    is_draft: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     ref_offer_id: Mapped[int | None] = mapped_column(ForeignKey("presales_offer.id"))
     ref_offer_revision_no: Mapped[int | None] = mapped_column(Integer)
     reason: Mapped[str | None] = mapped_column(Text)
