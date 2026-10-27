@@ -2129,3 +2129,37 @@ export const getReturnReceiptAudit = (receiptId: string) =>
   api.get<{ receipt_id: string; items: ReturnReceiptAuditEntry[] }>(
     `/maintenance/return-receipts/${encodeURIComponent(receiptId)}/audit`,
   );
+
+export type MovementEntity = "issue" | "receipt" | "demand_order" | "bad_return";
+export interface MaintenanceMovementQuery {
+  q: string;
+  field?: "auto" | "pn" | "sn" | "evidence" | "remark";
+  entity?: "all" | MovementEntity;
+  match_mode?: "literal" | "exact";
+  page?: number;
+  page_size?: number;
+}
+export interface MaintenanceMovement {
+  entity_type: MovementEntity;
+  record_id: string;
+  project: { id: string; code: string; name: string };
+  document: { id: string; number: string; display_number: string | null; date: string | null; status: string; source: string };
+  pn: string | null;
+  serials: string[];
+  source_serial_number: string | null;
+  quantity: string | null;
+  matched_fields: string[];
+  match_kind: "exact" | "compact" | "literal";
+  excerpt: string;
+  truncated: boolean;
+  record_ref: { project_id: string; tab: "site" | "parts-orders" };
+}
+export interface MaintenanceMovementResult {
+  items: MaintenanceMovement[];
+  has_more: boolean;
+  page: number;
+  page_size: number;
+  unavailable_entities: string[];
+}
+export const searchMaintenanceMovements = (input: MaintenanceMovementQuery) =>
+  api.post<MaintenanceMovementResult>("/maintenance/movements/search", input);
