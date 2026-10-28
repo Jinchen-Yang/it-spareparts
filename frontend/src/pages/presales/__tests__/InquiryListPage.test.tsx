@@ -1,3 +1,4 @@
+import { openLine, closeLine } from "./nativeUi";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -61,11 +62,11 @@ it("普通用户无全部入口；类型/状态使用服务端支持的筛选键
 it("表头三态排序调用服务端并回到第一页，取消时恢复最近动态默认序", async () => {
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
   await screen.findByText("XJ001");
-  fireEvent.click(screen.getByRole("button", { name: "行数排序" }));
+  fireEvent.click(screen.getByRole("columnheader", { name: /行数/ }));
   await waitFor(() => expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ page: 1, sort: "line_count", dir: "asc" })));
-  fireEvent.click(screen.getByRole("button", { name: "行数排序" }));
+  fireEvent.click(screen.getByRole("columnheader", { name: /行数/ }));
   await waitFor(() => expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ sort: "line_count", dir: "desc" })));
-  fireEvent.click(screen.getByRole("button", { name: "行数排序" }));
+  fireEvent.click(screen.getByRole("columnheader", { name: /行数/ }));
   await waitFor(() => expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ sort: "updated_at", dir: "desc" })));
 });
 
@@ -80,7 +81,7 @@ it("共享页复用可见范围并排除我的单据，不推断被过滤的客�
   await waitFor(() => expect(screen.queryByText("XJ001")).not.toBeInTheDocument());
 });
 
-it("共享页 shared 请求持续 409 时只自动重试一次，随后保留错误供手动重试", async () => {
+it("共享页 shared 持续版本冲突时只自动重试一次，随后保留错误供手动重试", async () => {
   const pending: Array<(reason: unknown) => void> = [];
   mocks.listInquiries.mockImplementation(({ scope }: { scope: string }) => scope === "shared"
     ? new Promise((_, reject) => { pending.push(reject); })
@@ -89,13 +90,14 @@ it("共享页 shared 请求持续 409 时只自动重试一次，随后保留错
   await screen.findByText("XJ001");
   fireEvent.click(screen.getByRole("tab", { name: "共享给我" }));
   await waitFor(() => expect(pending).toHaveLength(1));
-  await act(async () => { pending[0]({ response: { status: 409 } }); });
+  const conflict = { response: { status: 409, data: { detail: { code: "version_conflict", message: "记录版本已更新" } } } };
+  await act(async () => { pending[0](conflict); });
   await waitFor(() => expect(pending).toHaveLength(2));
-  await act(async () => { pending[1]({ response: { status: 409 } }); });
+  await act(async () => { pending[1](conflict); });
   expect(pending).toHaveLength(2);
-  expect(screen.getByText("已被他人修改/领取，请刷新")).toBeVisible();
-  expect(screen.getByRole("table", { name: "询价单列表" })).toHaveAttribute("aria-busy", "false");
-  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  expect(screen.getByText("记录版本已更新")).toBeVisible();
+  expect(screen.queryByText("加载中")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /重\s*试/ }));
   await waitFor(() => expect(pending).toHaveLength(3));
 });
 
@@ -113,11 +115,11 @@ it("PN 状态按报价和版本去重，采购明确不报的行显示原因而�
   ], work_items: [{ id: 11, assignee_id: 2, status: "done", paused: false, version: 1 }] });
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
   await screen.findByText("PN-QUOTED · PN-SKIPPED");
-  fireEvent.click(screen.getByRole("button", { name: "展开 XJ001" }));
+  fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
   expect(screen.getByText("已引用 · 1 条有效报价")).toBeVisible();
   expect(screen.queryByText(/2 条有效报价|3 条有效报价|4 条有效报价/)).not.toBeInTheDocument();
   expect(screen.getByText(/不报.*已停产，无法供货/)).toBeVisible();
-  expect(screen.queryByText("待报价", { selector: ".presales-pill" })).not.toBeInTheDocument();
+  expect(screen.queryByText("待报价", { exact: true })).not.toBeInTheDocument();
 });
 
 it("列表摘要使用本行钉住版本，报价更新不能续期已过期的引用", async () => {
@@ -131,9 +133,9 @@ it("列表摘要使用本行钉住版本，报价更新不能续期已过期的�
   ] });
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
   await screen.findByText("PN-PINNED");
-  fireEvent.click(screen.getByRole("button", { name: "展开 XJ001" }));
+  fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
   expect(screen.queryByText(/条有效报价/)).not.toBeInTheDocument();
-  expect(screen.getByText("待报价", { selector: ".presales-pill" })).toBeVisible();
+  expect(screen.getByText("待报价", { exact: true })).toBeVisible();
 });
 
 it("引用快照在毫秒截止边界刷新摘要，不等待当前报价的续期截止", async () => {
@@ -149,12 +151,12 @@ it("引用快照在毫秒截止边界刷新摘要，不等待当前报价的续�
   const view = render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
   try {
     await act(async () => {});
-    fireEvent.click(screen.getByRole("button", { name: "展开 XJ001" }));
+    fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(499); });
     expect(screen.getByText("已引用 · 1 条有效报价")).toBeVisible();
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
     expect(screen.queryByText(/条有效报价/)).not.toBeInTheDocument();
-    expect(screen.getByText("待报价", { selector: ".presales-pill" })).toBeVisible();
+    expect(screen.getByText("待报价", { exact: true })).toBeVisible();
   } finally {
     view.unmount();
     vi.useRealTimers();
@@ -180,7 +182,7 @@ it("草稿沿用和不报标为未回复，不显示为有效报价或正式不�
       { line_id: 12, mode: "skip", reason: "草稿无货", is_draft: true, created_by: 2 }] });
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
   await screen.findByText("DRAFT-11 · DRAFT-12");
-  fireEvent.click(screen.getByRole("button", { name: "展开 XJ001" }));
+  fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
   expect(screen.getAllByText("草稿（未回复）")).toHaveLength(2);
   expect(screen.queryByText(/条有效报价/)).not.toBeInTheDocument();
   expect(screen.queryByText(/不报 · 草稿无货/)).not.toBeInTheDocument();

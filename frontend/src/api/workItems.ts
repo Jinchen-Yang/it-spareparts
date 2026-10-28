@@ -51,6 +51,7 @@ export interface SubjectEvent {
   subject_id: number;
   work_item_id: number | null;
   kind: string;
+  kind_label?: string;
   actor: number | null;
   actor_name?: string | null;
   payload: Record<string, unknown>;

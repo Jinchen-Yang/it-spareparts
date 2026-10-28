@@ -4,6 +4,8 @@ import { Alert, Button, Empty, Input, Space, Spin, Tag } from "antd";
 import type { InputProps } from "antd";
 import { suggestParts } from "../../api/search";
 import type { PartSuggestion } from "../../api/search";
+import { ApiErrorFeedback } from "../ApiErrorFeedback";
+import { parseApiError, type ApiErrorInfo } from "../../utils/apiError";
 import "./LivePartSearch.css";
 
 export interface LivePartSearchProps {
@@ -16,6 +18,7 @@ export interface LivePartSearchProps {
   limit?: number;
   minChars?: number;
   onAddRaw?: (text: string) => void;
+  onCreate?: (text: string) => void;
   renderThumb?: (item: PartSuggestion) => ReactNode;
   renderBadges?: (item: PartSuggestion) => ReactNode;
 }
@@ -67,7 +70,7 @@ function highlightedPn(pn: string, terms: string[]) {
 /** 独立联想组件，不接触现有 PartPicker 的身份与匹配契约。 */
 export default function LivePartSearch({
   mode = "single", value, onChange, inputValue, onInputChange, inputProps,
-  limit = 10, minChars = 1, onAddRaw, renderThumb, renderBadges,
+  limit = 10, minChars = 1, onAddRaw, onCreate, renderThumb, renderBadges,
 }: LivePartSearchProps) {
   const [text, setText] = useState(inputValue ?? "");
   const [picked, setPicked] = useState<PartSuggestion[]>([]);
@@ -75,7 +78,8 @@ export default function LivePartSearch({
   const query = inputValue ?? text;
   const [items, setItems] = useState<PartSuggestion[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<ApiErrorInfo | null>(null);
+  const [searched, setSearched] = useState(false);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
   const listId = useId();
@@ -100,6 +104,7 @@ export default function LivePartSearch({
       currentText.current = query;
       cancel();
       setItems([]);
+      setSearched(false);
       setLoading(false);
       setOpen(false);
     }
@@ -115,7 +120,8 @@ export default function LivePartSearch({
     cancel();
     setItems([]);
     setActive(-1);
-    setError(false);
+    setError(null);
+    setSearched(false);
     setLoading(false);
     const length = Array.from(next.trim()).length;
     if (!length || length < minChars || composing.current) { setOpen(false); return; }
@@ -132,8 +138,9 @@ export default function LivePartSearch({
         const data = await suggestParts(next, limit, abort.signal);
         if (seq !== generation.current || abort.signal.aborted) return;
         setItems(data);
-      } catch {
-        if (seq === generation.current && !abort.signal.aborted) setError(true);
+        setSearched(true);
+      } catch (error) {
+        if (seq === generation.current && !abort.signal.aborted) setError(parseApiError(error, "联想加载失败，请重试"));
       } finally {
         if (seq === generation.current) setLoading(false);
       }
@@ -148,6 +155,7 @@ export default function LivePartSearch({
   };
 
   const choose = (item: PartSuggestion) => {
+    if (inputProps?.disabled) return;
     cancel();
     setLoading(false);
     setOpen(false);
@@ -158,7 +166,9 @@ export default function LivePartSearch({
       : [item]);
   };
 
-  const shown = open && !!query.trim();
+  const shown = open && !!query.trim() && !inputProps?.disabled;
+  const canCreate = onCreate && searched && !loading && !error
+    && !items.some((item) => item.pn_std.trim().toUpperCase() === query.trim().toUpperCase());
   return (
     <div className="live-part-search" onBlur={(event) => {
       if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
@@ -176,7 +186,7 @@ export default function LivePartSearch({
         aria-expanded={shown} aria-activedescendant={shown && active >= 0 ? `${listId}-${active}` : undefined}
         onFocus={(event) => {
           inputProps?.onFocus?.(event);
-          if (query.trim() && (items.length || error || loading)) setOpen(true);
+          if (query.trim() && (items.length || error || loading || searched)) setOpen(true);
         }}
         onChange={(event) => {
           const next = event.target.value;
@@ -222,7 +232,7 @@ export default function LivePartSearch({
         <div id={listId} role="listbox" aria-label="型号联想" aria-multiselectable={mode === "multiple" || undefined}
           className="live-part-search-options">
           {loading ? <div role="status" className="live-part-search-state"><Spin size="small" /> 搜索中…</div>
-            : error ? <Alert type="error" showIcon message="联想加载失败，请重新输入后重试" />
+            : error ? <div role="alert"><ApiErrorFeedback info={error} /><Button onClick={() => request(query, true)}>重试检索</Button></div>
             : !items.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无匹配型号" />
             : items.map((item, index) => <div
               id={`${listId}-${index}`} key={item.part_id} role="option"
@@ -243,17 +253,21 @@ export default function LivePartSearch({
                 </div>
                 {(item.summary || item.description) && <div className="live-part-search-summary"
                   title={item.summary || item.description || undefined}>{item.summary || item.description}</div>}
-                {(Boolean(item.key_specs?.length) || item.stock_qty != null) && <div className="live-part-search-specs">
+                {(item.category_major || item.category_minor || Boolean(item.key_specs?.length) || item.stock_qty != null) && <div className="live-part-search-specs">
+                  {(item.category_major || item.category_minor) && <Tag>{[item.category_major, item.category_minor].filter(Boolean).join(" / ")}</Tag>}
                   {item.key_specs?.map((spec, i) => <Tag key={i}>{spec.label} {spec.value}</Tag>)}
                   {item.stock_qty != null && <Tag>库存 {item.stock_qty}</Tag>}
                 </div>}
               </div>
             </div>)}
         </div>
-        {onAddRaw && <div className="live-part-search-add">
-          <Button type="text" block onMouseDown={(event) => event.preventDefault()} onClick={() => {
+        {(onAddRaw || canCreate) && <div className="live-part-search-add">
+          {canCreate && <Button type="link" block onMouseDown={(event) => event.preventDefault()} onClick={() => {
+            cancel(); setOpen(false); setLoading(false); onCreate(query.trim());
+          }}>新建 PN「{query.trim()}」</Button>}
+          {onAddRaw && <Button type="text" block onMouseDown={(event) => event.preventDefault()} onClick={() => {
             cancel(); setOpen(false); setLoading(false); onAddRaw(query);
-          }}>没找到？按原文添加「{query}」（待建档）</Button>
+          }}>没找到？按原文添加「{query}」（待建档）</Button>}
         </div>}
       </div>}
     </div>

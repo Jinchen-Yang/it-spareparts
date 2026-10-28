@@ -3,6 +3,7 @@
 只做高频且语义规整的三类：机械盘 / SSD / 内存（实测约 6900+1500 个型号可抽）。
 GPU/电源/网卡等没有"容量/接口"统一语义，不强行抽取。
 规则与键定义必须同步演进，故 SPEC_KEYS 作为常量放本模块，不建字典表。
+人工维护允许 custom: 命名空间的自由文本参数，不参与自动抽取或标准数值口径。
 
 抽取结果 source='auto'，只补缺不覆盖（人工维护的 source='manual' 行优先）。
 """
@@ -29,6 +30,15 @@ SPEC_KEYS = {
     "frequency": ("内存频率", "MHz"),
     "rank": ("Rank/位宽", None),           # 2Rx4 / 1Rx8
 }
+
+CUSTOM_SPEC_PREFIX = "custom:"
+
+
+def spec_label(key: str) -> str:
+    """自由参数只携带展示名，不参与标准规格的数值口径。"""
+    if key.startswith(CUSTOM_SPEC_PREFIX):
+        return key[len(CUSTOM_SPEC_PREFIX):]
+    return SPEC_KEYS.get(key, (key, None))[0]
 
 # ---- 信号与守卫 ----
 _DISK_SIGNAL = re.compile(r"(SAS|SATA|NVME|SSD|HDD|硬盘|SOLID STATE|FLASH DRIVE)", re.I)
@@ -252,12 +262,18 @@ def refresh_part_specs(db: Session, part_id: int, description: str | None) -> No
 
 
 def validate_manual_specs(updates: dict) -> dict:
-    """逐键 set/remove；数值使用规范单位，拒绝未知键或有损 Numeric 舍入。"""
+    """逐键 set/remove；标准规格严格校验，自由参数只能使用显式文本命名空间。"""
     if not isinstance(updates, dict):
         raise ValueError("规格必须按键提交")
     clean = {}
     for key, spec in updates.items():
-        if key not in SPEC_KEYS:
+        custom = isinstance(key, str) and key.startswith(CUSTOM_SPEC_PREFIX)
+        if custom:
+            name = key[len(CUSTOM_SPEC_PREFIX):]
+            if (not name or name != name.strip() or len(key) > 32
+                    or any(ord(char) < 32 or ord(char) == 127 for char in name)):
+                raise ValueError("自定义参数名不能为空、带首尾空白或超过 25 个字符")
+        elif key not in SPEC_KEYS:
             raise ValueError(f"未知规格键: {key}")
         if spec is None:
             clean[key] = None
@@ -266,9 +282,11 @@ def validate_manual_specs(updates: dict) -> dict:
                 or not isinstance(spec["value"], str) or not spec["value"].strip()
                 or len(spec["value"].strip()) > 128):
             raise ValueError(f"规格值非法: {key}")
-        if spec["unit"] != SPEC_KEYS[key][1]:
+        if spec["unit"] != (None if custom else SPEC_KEYS[key][1]):
             raise ValueError(f"规格单位非法: {key}")
         number = spec["numeric_value"]
+        if custom and number is not None:
+            raise ValueError(f"自定义参数只能填写文本值: {name}")
         if number is not None:
             try:
                 if not isinstance(number, str):

@@ -82,6 +82,7 @@ from app.db import engine
 from app.http_controls import MigrationHttpControlsMiddleware
 from app.maintenance_beta import require_maintenance_beta
 from app.maintenance_boss import require_maintenance_boss
+from app.request_diagnostics import RequestDiagnosticsMiddleware
 
 _log = logging.getLogger("startup")
 settings = get_settings()
@@ -99,11 +100,19 @@ if _sec_warns:
 app = FastAPI(title=settings.app_name)
 
 app.add_middleware(
+    RequestDiagnosticsMiddleware,
+    path_prefixes=(
+        f"{settings.api_prefix}/presales", f"{settings.api_prefix}/parts/master",
+        f"{settings.api_prefix}/parts/suggest", f"{settings.api_prefix}/work-items",
+    ),
+)
+app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
 app.add_middleware(
     MigrationHttpControlsMiddleware,

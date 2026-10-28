@@ -1255,7 +1255,7 @@ def _user_display_names(db: Session, usernames: set[str]) -> dict[str, str]:
 def registrant_rows(db: Session, filters: _Filters) -> tuple[list[dict], bool]:
     """期间内返件实收按登记人（created_by）聚合，返件实收降序。
 
-    登记人 = 行的 created_by：手工登记为登记账号，RKD 导入为执行导入的账号。
+    登记人 = 行的 created_by：手工登记为登记账号；RKD 导入不写 created_by，落占位账号 rkd_import（D-0025）。
     数量按单位分桶（同项目排行，不跨单位求和）；坏件判定同总览卡片。
     """
     rows = db.execute(

@@ -153,12 +153,12 @@ describe("T18 采购 Excel 页面接线", () => {
     expect(mocks.saveOffer).not.toHaveBeenCalled();
   });
 
-  it("合并下载只接受可操作本人待办，合并导入应用刷新队列和当前单据并保留草稿提示", async () => {
+  it("合并下载只接受可操作本人待办，合并导入应用刷新队列并保留草稿提示", async () => {
     mocks.getInquiry.mockResolvedValue(inquiry("submitted"));
-    render(<MemoryRouter initialEntries={[{ pathname: "/presales/workbench", search: "?id=1", state: { workItem: ownTask } }]}>
+    render(<MemoryRouter initialEntries={[{ pathname: "/presales/workbench", state: { workItem: ownTask } }]}>
       <QuoteWorkbenchPage />
     </MemoryRouter>);
-    await screen.findByRole("button", { name: "下载报价表" });
+    await screen.findByRole("button", { name: "合并下载" });
     expect(screen.getByRole("button", { name: "合并下载" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "选择其他人待办" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "选择未领公共池" })).toBeDisabled();
@@ -173,7 +173,7 @@ describe("T18 采购 Excel 页面接线", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "确认工作簿草稿" }));
     expect(await screen.findByText("已保存为草稿，请在页面确认后回复")).toBeInTheDocument();
     expect(screen.getByText("队列刷新 1")).toBeInTheDocument();
-    await waitFor(() => expect(mocks.getInquiry).toHaveBeenCalledTimes(2));
+    expect(mocks.getInquiry).not.toHaveBeenCalled();
     expect(mocks.replyInquiry).not.toHaveBeenCalled();
     expect(mocks.publishInquiry).not.toHaveBeenCalled();
   });

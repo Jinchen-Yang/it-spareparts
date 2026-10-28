@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState, type Key } from "react";
-import { Button } from "antd";
+import { useEffect, useRef, useState } from "react";
+import { Alert, Button, Descriptions, Drawer, Space, Table, Tag } from "antd";
 import { useNavigate } from "react-router-dom";
 import { presales, type Inquiry, type LibraryPart, type Offer } from "../../api/presales";
 import LivePartSearch from "../../components/parts/LivePartSearch";
 import PartThumb from "../../components/gallery/PartThumb";
 import PriceRefBadge from "../../components/pricing/PriceRefBadge";
 import { usePresalesError, isOfferActive, OfferBadge, useNow, flattenOffers, offerDeadline, activeOfferGroups } from "./shared";
-import DataGrid, { type DataGridColumn } from "../../components/datagrid/DataGrid";
+import PageHeader from "../../components/PageHeader";
+import { formatBusinessDateTime } from "../../utils/date";
 import "./presales.css";
 
 interface LibraryRow { part: LibraryPart; offer: Offer }
@@ -16,7 +17,7 @@ export default function LibraryPage() {
   const handlePresalesError = usePresalesError();
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
-  const [expanded, setExpanded] = useState<Key[]>([]);
+  const [selected, setSelected] = useState<LibraryRow>();
   const [items, setItems] = useState<LibraryPart[]>([]);
   const [sources, setSources] = useState<Record<number, Inquiry["kind"]>>({});
   const [loading, setLoading] = useState(false);
@@ -28,7 +29,7 @@ export default function LibraryPage() {
   useEffect(() => {
     const controller = new AbortController();
     setItems([]);
-    setExpanded([]);
+    setSelected(undefined);
     setSources({});
     setError(false);
     if (!query.trim()) { setLoading(false); return; }
@@ -70,53 +71,35 @@ export default function LibraryPage() {
     navigate("/presales/inquiries/new", { state: { referenceOffer: offer, part } });
   };
 
-  const columns: DataGridColumn<LibraryRow>[] = [
-    { key: "pn", title: "PN", width: 190, type: "code", identity: true, value: ({ part }) => part.pn_std,
-      render: ({ part }) => <span className="presales-inline"><PartThumb partId={part.part_id} pn={part.pn_std} size={24} /><span className="presales-mono">{part.pn_std}</span></span> },
-    { key: "description", title: "描述", width: 220, type: "zh", value: ({ part }) => part.description },
-    { key: "price", title: "有效报价 / 税口径", width: 310, type: "money", value: ({ offer }) => offer.unit_price,
-      render: ({ offer }) => <div className="presales-library-row" aria-label={`报价 ${offer.id}`} aria-disabled={!isOfferActive(offer, now)}><OfferBadge offer={offer} /></div> },
-    { key: "reporter", title: "报价人", width: 110, type: "zh", value: ({ offer }) => offer.reporter?.name },
-    { key: "location", title: "货源", width: 140, type: "zh", value: ({ offer }) => offer.stock_location,
-      render: ({ offer }) => "stock_location" in offer ? `所在地：${offer.stock_location || ""}` : null },
-    { key: "days", title: "剩余天数", width: 90, type: "number", value: ({ offer }) => Math.max(0, Math.ceil((offerDeadline(offer.valid_until) - now) / 86400000)),
-      render: ({ offer }) => <span className={`presales-pill ${isOfferActive(offer, now) ? "presales-pill-success" : "presales-pill-warning"}`}>
-        {isOfferActive(offer, now) ? `${Math.max(1, Math.ceil((offerDeadline(offer.valid_until) - now) / 86400000))} 天` : "已失效"}</span> },
-    { key: "time", title: "报价时间", width: 165, type: "time", value: ({ offer }) => offer.valid_from,
-      render: ({ offer }) => offer.valid_from ? new Date(offer.valid_from).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) : "" },
-    { key: "source", title: "来源", width: 130, type: "zh", value: ({ offer }) => sources[offer.inquiry_id],
-      render: ({ offer }) => sources[offer.inquiry_id] ? `来源：${sources[offer.inquiry_id] === "proactive_offer" ? "主动报价" : "询价回复"}` : null },
-    { key: "actions", title: "操作", width: 330, render: ({ part, offer }) => <span className="presales-inline">
-      <Button size="small" disabled={!isOfferActive(offer, now)} onClick={() => reference(part, offer)}>用这条报价建询价单</Button>
-      <Button size="small" type="link" onClick={() => navigate(`/presales/inquiries/${offer.inquiry_id}`)}>查看来源单</Button>
-      {!!offer.more?.length && <button className="presales-cell-link" aria-expanded={expanded.includes(offer.id)} onClick={() => setExpanded((ids) => ids.includes(offer.id) ? ids.filter((id) => id !== offer.id) : [...ids, offer.id])}>
-        {expanded.includes(offer.id) ? "收起更多" : "展开更多"}（{offer.more.length} 条）</button>}
-    </span> },
-  ];
-  // 页面中已到期的整组继续置灰；仍有有效报价的组则显示最新有效项。
   const rows = items.flatMap((part) => part.offers.map((offer) => ({ part, offer: activeOfferGroups([offer], now)[0] ?? offer })));
+  const detailOffers = selected ? flattenOffers([selected.offer]) : [];
   return <section className="presales-page">
-    <div className="presales-heading"><h1>报价库</h1><span className="presales-filter-note">每个 PN 每位报价人显示最新一条，其余报价展开查看</span></div>
-    <LivePartSearch inputValue={query} onInputChange={setQuery}
-      onChange={(parts) => { if (parts[0]) setQuery(parts[0].pn_std); }}
-      inputProps={{ placeholder: "搜索 PN、品牌、参数或描述", "aria-label": "报价库搜索", size: "small" }}
-      renderThumb={(part) => <PartThumb partId={part.part_id} pn={part.pn_std} size={24} />}
-      renderBadges={(part) => <PartQuoteBadges partId={part.part_id} />} />
-    <DataGrid id="presales-library" ariaLabel="有效报价库" rows={rows} rowKey={({ offer }) => offer.id} columns={columns}
-      defaultSort={{ key: "price", dir: "asc" }} loading={loading} error={error ? "报价库加载失败" : undefined} onRetry={() => setReload((v) => v + 1)}
-      emptyText={query.trim() ? "没有可见的有效报价" : "输入 PN 搜索有效报价"} expandedRowKeys={expanded} onExpandedRowKeysChange={setExpanded}
-      renderExpanded={({ part, offer }) => <>
-        <div className="presales-details"><strong>{part.pn_std}</strong><span>{part.description}</span><PriceRefBadge partId={part.part_id} />
-          {"qty_available" in offer && <span>可供数量：{offer.qty_available}</span>}{"lead_time" in offer && <span>交期：{offer.lead_time}</span>}
-        </div>
-        {!!offer.more?.length && <DataGrid id="presales-library-more" ariaLabel={`${part.pn_std} 更多报价`} rows={offer.more.map((other) => ({ part, offer: other }))}
-          columns={columns} rowKey={({ offer: other }) => other.id} defaultSort={{ key: "price", dir: "asc" }}
-          renderExpanded={({ offer: other }) => <div className="presales-details">
-            {"qty_available" in other && <span>可供数量：{other.qty_available}</span>}
-            {"lead_time" in other && <span>交期：{other.lead_time}</span>}
-            {"notes" in other && <span>{other.notes}</span>}
-          </div>} />}
-      </>} />
-    <span className="presales-filter-note">共 {rows.length} 条主报价 · 价格保留原税口径 · 有效期到点自动失效</span>
+    <PageHeader title="报价库" subtitle="按型号查询有效报价，引用报价创建询价单" />
+    <div className="presales-panel">
+      <div className="presales-toolbar"><LivePartSearch inputValue={query} onInputChange={setQuery} onChange={(parts) => { if (parts[0]) setQuery(parts[0].pn_std); }}
+        inputProps={{ placeholder: "搜索 PN、品牌、参数或描述", "aria-label": "报价库搜索" }} renderThumb={(part) => <PartThumb partId={part.part_id} pn={part.pn_std} size={24} />} renderBadges={(part) => <PartQuoteBadges partId={part.part_id} />} /></div>
+      {error && <Alert type="error" message="报价库加载失败" action={<Button onClick={() => setReload((value) => value + 1)}>重试</Button>} />}
+      <Table aria-label="有效报价库" rowKey={({ offer }) => offer.id} dataSource={rows} loading={loading} tableLayout="fixed" pagination={{ defaultPageSize: 20 }} columns={[
+        { title: "PN / 描述", key: "pn", sorter: (a, b) => a.part.pn_std.localeCompare(b.part.pn_std), render: (_, { part }) => <><Space><PartThumb partId={part.part_id} pn={part.pn_std} size={24} />{part.pn_std}</Space><div className="presales-muted">{part.description}</div></> },
+        { title: "有效报价 / 税口径", key: "price", defaultSortOrder: "ascend", sorter: (a, b) => Number(a.offer.unit_price) - Number(b.offer.unit_price), render: (_, { offer }) => <div aria-label={`报价 ${offer.id}`} aria-disabled={!isOfferActive(offer, now)}><OfferBadge offer={offer} />{offer.reporter && <div className="presales-muted">{offer.reporter.name}</div>}</div> },
+        { title: "供货 / 来源", key: "source", width: 180, render: (_, { offer }) => <>{"stock_location" in offer && <div>所在地：{offer.stock_location || ""}</div>}{sources[offer.inquiry_id] && <div>来源：{sources[offer.inquiry_id] === "proactive_offer" ? "主动报价" : "询价回复"}</div>}</> },
+        { title: "报价时间 / 剩余天数", key: "time", sorter: (a, b) => (a.offer.valid_from ?? "").localeCompare(b.offer.valid_from ?? ""), width: 180, render: (_, { offer }) => <>{offer.valid_from && <div>{formatBusinessDateTime(offer.valid_from)}</div>}<Tag>{isOfferActive(offer, now) ? `${Math.max(1, Math.ceil((offerDeadline(offer.valid_until) - now) / 86400000))} 天` : "已失效"}</Tag></> },
+        { title: "操作", key: "actions", width: 190, render: (_, item) => <Space direction="vertical"><Button type="link" disabled={!isOfferActive(item.offer, now)} onClick={() => reference(item.part, item.offer)}>用这条报价建询价单</Button>
+          <Button type="link" onClick={() => navigate(`/presales/inquiries/${item.offer.inquiry_id}`)}>查看来源单</Button><Button type="link" onClick={() => setSelected(item)}>报价详情{item.offer.more?.length ? `（更多 ${item.offer.more.length} 条）` : ""}</Button></Space> },
+      ]} locale={{ emptyText: query.trim() ? "没有可见的有效报价" : "输入 PN 搜索有效报价" }} />
+      <p className="presales-muted">共 {rows.length} 条主报价 · 价格保留原税口径 · 有效期到点自动失效</p>
+    </div>
+    <Drawer title={selected ? `${selected.part.pn_std} · 报价详情` : "报价详情"} open={!!selected} onClose={() => setSelected(undefined)} width={680} destroyOnHidden>
+      {selected && <><p>{selected.part.description}</p><PriceRefBadge partId={selected.part.part_id} />
+        <Table aria-label={`${selected.part.pn_std} 更多报价`} rowKey="id" dataSource={detailOffers} tableLayout="fixed" pagination={{ pageSize: 5 }} columns={[
+          { title: "报价", key: "offer", defaultSortOrder: "ascend", sorter: (a, b) => Number(a.unit_price) - Number(b.unit_price), render: (_, offer) => <div aria-label={`报价 ${offer.id}`}><OfferBadge offer={offer} />{offer.reporter?.name}<Button type="link" disabled={!isOfferActive(offer, now)} onClick={() => reference(selected.part, offer)}>用这条报价建询价单</Button></div> },
+          { title: "详情", key: "details", render: (_, offer) => <Descriptions column={1} size="small" items={[
+            ...("qty_available" in offer ? [{ key: "qty", label: "可供数量", children: offer.qty_available }] : []),
+            ...("lead_time" in offer ? [{ key: "lead", label: "交期", children: offer.lead_time }] : []),
+            ...("notes" in offer ? [{ key: "notes", label: "采购备注", children: offer.notes }] : []),
+          ]} /> },
+        ]} />
+      </>}
+    </Drawer>
   </section>;
 }
