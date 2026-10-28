@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.41.0";
+export const APP_VERSION = "1.42.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,17 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.42.0",
+    date: "2026-10-28",
+    items: [
+      "售前询价、报价工作台改为系统统一的表格样式，报价改成单独一页，填价在右侧抽屉里完成",
+      "采购报价界面只显示询价人，不再显示询价单号",
+      "型号查询新增「询价记录」页签，可看到这个型号被谁询过价、报过什么价，点开直接进询价单",
+      "报价时遇到还没建档的型号，报价人可以直接查重并新建或绑定 PN",
+      "维保看板登记人说明更正：RKD 导入的行未记录操作人，统一显示为「导入（未记录操作人）」",
+    ],
+  },
   {
     version: "1.41.0",
     date: "2026-10-28",

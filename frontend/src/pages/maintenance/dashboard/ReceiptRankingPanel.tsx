@@ -242,7 +242,7 @@ export default function ReceiptRankingPanel({
           ? "按返件实收降序；点击项目名查看该项目返件明细（与当前筛选求交）。"
           : (
             <>
-              登记人 = 返件行的登记账号（手工登记为登记人，RKD 导入为执行导入的账号）；
+              登记人 = 返件行的登记账号（手工登记为登记人；RKD 导入未记录操作人，统一显示为「导入（未记录操作人）」）；
               检索在全部登记人中匹配，不受前 {RANKING_TOP_N} 限制；点击姓名查看其登记的返件明细。
               {summary?.registrants_truncated ? (
                 <Tooltip title="登记人超过 500 人，仅返回返件实收最多的 500 人">
