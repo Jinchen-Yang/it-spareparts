@@ -176,29 +176,36 @@ export default function WorkInbox({ subjectType, renderRow, onOpen, beforeOpen, 
       else await onOpen(item);
     } catch (error) { await handleError(error); }
   };
-  const actions = (item: WorkItem) => <Space size={4} wrap>
+  const actions = (item: WorkItem) => <div className="presales-actions">
     <Button size="small" disabled={busy !== null} onClick={() => void openItem(item)}>打开</Button>
     {item.allowed_actions.filter((action) => action !== "start").map((action) => <Button key={action}
       size="small" loading={busy === item.id} disabled={busy !== null} onClick={() => {
         if (["release", "transfer", "reassign", "decline"].includes(action)) openDialog(item, action as ReasonAction);
         else void perform(item, action, { expected_version: item.version });
       }}>{actionLabels[action]}</Button>)}
-  </Space>;
+  </div>;
   const queue = items.filter((item) => String(item.summary.created_by_name ?? "").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
   return <>
       <Tabs activeKey={tab} items={tabs} onChange={(key) => { setTab(key as WorkTab); setPage(1); }} />
       <Input aria-label="筛选待办" placeholder="筛选询价人（当前页）" value={query} onChange={(event) => setQuery(event.target.value)} style={{ width: 260, marginBottom: 16 }} />
       {loadError && <Alert type="error" showIcon message="待办加载失败" description={<ApiErrorFeedback info={loadError} />} action={<Button onClick={() => setReload((value) => value + 1)}>重试</Button>} />}
-      <Table aria-label="报价工作台队列" rowKey="id" dataSource={queue} loading={loading} tableLayout="fixed"
+      <Table className="presales-inquiry-list" aria-label="报价工作台队列" rowKey="id" dataSource={queue} loading={loading} tableLayout="fixed"
         pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }}
         rowSelection={onSelectionChange ? { selectedRowKeys: selected, getCheckboxProps: (item) => ({ disabled: isRowSelectable ? !isRowSelectable(item) : false }),
           onChange: (keys) => { setSelected(keys); onSelectionChange(items.filter((item) => keys.includes(item.id))); } } : undefined}
         locale={{ emptyText: loadError ? "未加载待办" : "暂无待办" }} columns={[
           { title: "询价人", key: "inquirer", render: (_, item) => renderRow(item) },
-          { title: "行数", key: "lines", width: 90, sorter: (a, b) => Number(a.summary.line_count ?? 0) - Number(b.summary.line_count ?? 0), render: (_, item) => String(item.summary.line_count ?? "—") },
-          { title: "状态", key: "status", width: 130, render: (_, item) => <><Tag>{statusLabels[item.status]}</Tag>{item.paused && <Tag>已暂停</Tag>}</> },
-          { title: "最近动态", key: "updated", width: 180, sorter: (a, b) => Date.parse(a.updated_at) - Date.parse(b.updated_at), render: (_, item) => formatBusinessDateTime(item.updated_at) },
-          { title: "操作", key: "actions", width: 300, render: (_, item) => actions(item) },
+          { title: "PN", key: "pn", render: (_, item) => {
+            const pns = Array.isArray(item.summary.pns) ? item.summary.pns.map(String).filter(Boolean) : [];
+            return pns.length ? pns.join(" · ") : "—";
+          } },
+          { title: "行数", key: "lines", sorter: (a, b) => Number(a.summary.line_count ?? 0) - Number(b.summary.line_count ?? 0), render: (_, item) => String(item.summary.line_count ?? "—") },
+          { title: "状态", key: "status", render: (_, item) => <><Tag>{statusLabels[item.status]}</Tag>{item.paused && <Tag>已暂停</Tag>}</> },
+          { title: "最近动态", key: "updated", sorter: (a, b) => Date.parse(a.updated_at) - Date.parse(b.updated_at), render: (_, item) => {
+            const [date, time = ""] = formatBusinessDateTime(item.updated_at).split(/\s+/);
+            return <span className="presales-stamp"><span>{date}</span>{time && <span>{time}</span>}</span>;
+          } },
+          { title: "操作", key: "actions", width: 148, render: (_, item) => actions(item) },
         ]} />
       <Modal
         open={!!dialog}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Alert, App, Button, Checkbox, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popover, Select, Space, Spin, Table, Tag } from "antd";
+import { MinusOutlined } from "@ant-design/icons";
 import { presales, type Inquiry, type InquiryLine, type Offer } from "../../api/presales";
 import type { AudienceRule, AudienceRuleRead } from "../../api/audience";
 import { type CustomFieldValue } from "../../api/fields";
@@ -123,11 +124,11 @@ function InquiryEditorContent() {
   useEffect(() => {
     if (id) return;
     const state = location.state as { referenceOffer?: Offer; part?: PartSuggestion } | null;
-    if (!state?.referenceOffer || !state.part) return;
+    if (!state?.part) return;
     const part = state.part;
     setLines([{ key: `new-${++nextKey.current}`, part_id: part.part_id, pn_raw: part.pn_std,
       description: part.summary || part.description, brand: part.brand, qty: 1, require_exact_pn: false,
-      ref_offer_id: state.referenceOffer.id, notesVisible: true, field_values: [], originalFields: [], expectedDelivery: "" }]);
+      ref_offer_id: state.referenceOffer?.id, notesVisible: true, field_values: [], originalFields: [], expectedDelivery: "" }]);
   }, [id, location.state]);
 
   const blocked = !!inquiry && (inquiry.kind !== "sales_inquiry" || (append ? inquiry.status !== "submitted" : !["draft", "revising"].includes(inquiry.status)));
@@ -257,13 +258,13 @@ function InquiryEditorContent() {
           <Button disabled={busy} onClick={() => setImportOpen(true)}>上传 Excel</Button><span className="presales-muted">下载使用已保存的数据</span></>}
       </div>
       <Table aria-label="询价行" rowKey="key" dataSource={lines} tableLayout="fixed" scroll={{ x: 920 }} pagination={{ defaultPageSize: 20 }} columns={[
+        ...(!blocked ? [{ title: "", key: "remove", width: 56, fixed: "left" as const, render: (_: unknown, item: DraftLine) => <Button type="primary" danger shape="circle" size="small" icon={<MinusOutlined />} disabled={busy} aria-label={`移除${item.pn_raw}`} onClick={() => setLines((previous) => previous.filter((other) => other.key !== item.key))} /> }] : []),
         { title: "PN / 描述", key: "pn", render: (_, item) => <><Space>{item.part_id && <PartThumb partId={item.part_id} pn={item.pn_raw} size={24} />}{item.pn_raw}{!item.part_id && <span>待建档</span>}</Space><div className="presales-muted">{item.description}</div></> },
         { title: "数量", dataIndex: "qty", width: 90 },
         { title: "期望交期", key: "delivery", width: 130, render: (_, item) => item.expectedDelivery || "—" },
         { title: "PN 一致", key: "exact", width: 100, render: (_, item) => item.require_exact_pn ? "一致" : "—" },
         { title: "报价引用", key: "reference", width: 200, render: (_, item) => item.ref_offer_id ? <>{`已引用报价 #${item.ref_offer_id} · 本行不再派单`}{(!referencedOffer(item) || !activeOffer(referencedOffer(item)!, now)) && <Tag>引用已失效</Tag>}</> : item.part_id ? `${flattenOffers(library[item.part_id] ?? []).filter((offer) => activeOffer(offer, now)).length} 条有效报价` : "—" },
-        { title: "操作", key: "actions", width: 150, render: (_, item) => <Space><Button type="link" aria-label={`编辑 ${item.pn_raw}`} onClick={() => setEditing(item.key)}>{blocked ? "查看" : "编辑"}</Button>
-          {!blocked && <Button type="link" disabled={busy} aria-label={`移除${item.pn_raw}`} onClick={() => setLines((previous) => previous.filter((other) => other.key !== item.key))}>删除</Button>}</Space> },
+        { title: "操作", key: "actions", width: 90, render: (_, item) => <Button type="link" aria-label={`编辑 ${item.pn_raw}`} onClick={() => setEditing(item.key)}>{blocked ? "查看" : "编辑"}</Button> },
       ]} locale={{ emptyText: "搜索加入多个 PN，或按原文添加待建档行" }} />
     </div>
     <footer className="presales-footer"><span>{lines.length} 行 · {lines.filter((item) => item.ref_offer_id).length} 行引用报价 · {lines.filter((item) => !item.part_id).length} 行待建档</span>

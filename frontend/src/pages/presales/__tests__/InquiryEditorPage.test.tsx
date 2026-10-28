@@ -151,6 +151,15 @@ describe("销售询价编辑", () => {
     await waitFor(() => expect(pathname).toBe("/presales/inquiries/9"));
   });
 
+  it("行首红色圆按钮直接移除该行，不经过确认", async () => {
+    mount();
+    await addPart("PN-A");
+    expect(screen.getByRole("button", { name: "编辑 PN-A" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "移除PN-A" }));
+    expect(screen.queryByRole("button", { name: "编辑 PN-A" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   it("处理人留空进公共池，保存草稿不提交", async () => {
     mount(); await addPart("PN-B");
     fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
