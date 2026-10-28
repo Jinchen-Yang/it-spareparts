@@ -4,7 +4,7 @@ from sqlalchemy import select
 
 from app.models.dimensions import DimPart
 from app.models.presales import PresalesInquiryLine
-from app.services import field_pool, master_edit
+from app.services import field_pool, manual_part_input, master_edit
 from app.services.presales import common, inquiries
 from app.services.workflow import work_items
 from app.services.workflow.registry import Conflict, Forbidden, InvalidTransition, NotFound
@@ -48,7 +48,8 @@ def check(db, line_id, actor, pn_std=None):
 
 def _unbound(line):
     if line.part_id is not None:
-        raise Conflict("该询价行已经绑定主数据，请刷新", part_id=line.part_id, version=line.version)
+        raise Conflict("该询价行已经绑定主数据，请刷新", code="already_bound",
+                       part_id=line.part_id, version=line.version)
 
 
 def _apply(db, inquiry, line, part, user, ctx, kind):
@@ -86,21 +87,36 @@ def bind(db, line_id, actor, expected_version, *, part_id):
     return _apply(db, inquiry, line, part, user, ctx, "inquiry.part_bound")
 
 
-def create_and_bind(db, line_id, actor, expected_version, *, pn_std=None, **master_fields):
+def create_and_bind(db, line_id, actor, expected_version, *, pn_std=None, spec_updates=None,
+                    **master_fields):
     inquiry, line, user, ctx = _access(db, line_id, actor, lock=True, expected_version=expected_version)
     _unbound(line)
     if set(master_fields) - set(master_edit.EDITABLE_FIELDS):
         raise InvalidTransition("建档包含未知字段；不允许跳过查重")
-    pn = pn_std or line.pn_raw
+    pn = line.pn_raw if pn_std is None else pn_std
+    if not isinstance(pn, str) or not pn.strip():
+        raise InvalidTransition("PN 不能为空")
+    if len(pn.strip()) > 128:
+        raise InvalidTransition("PN 不能超过 128 个字符")
+    try:
+        manual_part_input.validate_categories(master_fields.get("category_major"),
+                                              master_fields.get("category_minor"))
+    except ValueError as exc:
+        raise InvalidTransition(str(exc)) from exc
     duplicates = master_edit.find_near_duplicates(db, pn)
     if duplicates:
-        raise Conflict("已有相同或近似型号，请绑定已有 PN", near_duplicates=duplicates)
+        raise Conflict("已有相同或近似型号，请绑定已有 PN", code="near_duplicates",
+                       near_duplicates=duplicates)
     try:
         result = master_edit.create_part_in_transaction(db, pn_std=pn, operated_by=user.username,
-                                                        force=False, **master_fields)
+                                                        force=False, spec_updates=spec_updates,
+                                                        **master_fields)
     except master_edit.MasterEditError as exc:
+        if str(exc).startswith("型号已存在:"):
+            raise Conflict(str(exc), code="duplicate_pn") from exc
         raise InvalidTransition(str(exc)) from exc
     if not result.get("created"):
-        raise Conflict("已有相同或近似型号，请绑定已有 PN", near_duplicates=result.get("near_duplicates", []))
+        raise Conflict("已有相同或近似型号，请绑定已有 PN", code="near_duplicates",
+                       near_duplicates=result.get("near_duplicates", []))
     part = db.get(DimPart, result["id"])
     return _apply(db, inquiry, line, part, user, ctx, "inquiry.part_created")

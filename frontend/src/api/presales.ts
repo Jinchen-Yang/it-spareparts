@@ -199,6 +199,7 @@ export interface CreatePartInput extends VersionInput {
   category_minor?: string | null;
   machine_or_part?: string | null;
   unit?: string | null;
+  spec_updates?: Record<string, import("../api").ManualSpecInput>;
 }
 
 const root = "/presales";

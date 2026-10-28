@@ -10,6 +10,10 @@ const mocks = vi.hoisted(() => ({
     resubmitInquiry: vi.fn(), appendLines: vi.fn(), library: vi.fn(), customers: vi.fn() },
   suggestParts: vi.fn(), getFieldTemplate: vi.fn(), listFieldDefinitions: vi.fn(),
   listWorkCandidates: vi.fn(),
+  masterCategories: vi.fn(), masterCheck: vi.fn(), masterCreate: vi.fn(),
+}));
+vi.mock("../../../api", async (importOriginal) => ({ ...await importOriginal<typeof import("../../../api")>(),
+  masterCategories: mocks.masterCategories, masterCheck: mocks.masterCheck, masterCreate: mocks.masterCreate,
 }));
 vi.mock("../../../api/presales", () => ({ presales: mocks.presales }));
 vi.mock("../../../api/search", () => ({ suggestParts: mocks.suggestParts }));
@@ -60,6 +64,9 @@ beforeEach(() => {
   mocks.suggestParts.mockImplementation(async (q: string) => q === "PN-A" ? [partA] : q === "PN-B" ? [partB] : []);
   mocks.presales.library.mockResolvedValue({ 10: [validOffer], 11: [] });
   mocks.listWorkCandidates.mockResolvedValue({ items: [{ id: 2, display_name: "采购甲" }, { id: 3, display_name: "采购乙" }] });
+  mocks.masterCategories.mockResolvedValue({ data: { categories: [], spec_fields: [] } });
+  mocks.masterCheck.mockResolvedValue({ data: { near_duplicates: [] } });
+  mocks.masterCreate.mockResolvedValue({ data: { created: true, id: 71, pn_std: "NEW-CPU" } });
   mocks.presales.customers.mockResolvedValue([{ id: 5, name: "客户甲" }]);
   mocks.getFieldTemplate.mockImplementation(async (_subject, level) => level === "line" ? [field] : []);
   mocks.listFieldDefinitions.mockImplementation(async (_subject, level) => level === "line" ? [field] : []);
@@ -79,6 +86,32 @@ beforeEach(() => {
 afterEach(cleanupAntd);
 
 describe("销售询价编辑", () => {
+  it("输入未建档PN可就地建档并加入询价，建档本身不提交询价", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ page_master_data: true }));
+    mount();
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索并批量加入 PN" }), { target: { value: "NEW-CPU" } });
+    fireEvent.click(await screen.findByRole("button", { name: "新建 PN「NEW-CPU」" }));
+    fireEvent.change(screen.getByLabelText("NEW-CPU建档描述"), { target: { value: "处理器描述" } });
+    fireEvent.click(screen.getByRole("button", { name: /查\s*重/ }));
+    const createButton = await screen.findByRole("button", { name: "新建并加入当前单据" });
+    await waitFor(() => expect(createButton).toBeEnabled());
+    fireEvent.click(createButton);
+    await screen.findByRole("button", { name: "编辑 NEW-CPU" });
+    expect(mocks.presales.createInquiry).not.toHaveBeenCalled();
+    expect(mocks.presales.submitInquiry).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
+    await waitFor(() => expect(mocks.presales.createInquiry).toHaveBeenCalledWith(expect.objectContaining({ lines: [expect.objectContaining({ part_id: 71, pn_raw: "NEW-CPU", description: "处理器描述" })] })));
+  });
+
+  it("无主数据权限时保留原文待建档路径，不展示新建入口", async () => {
+    mount();
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索并批量加入 PN" }), { target: { value: "NEW-CPU" } });
+    await screen.findByText("暂无匹配型号");
+    expect(screen.queryByRole("button", { name: "新建 PN「NEW-CPU」" })).toBeNull();
+    expect(screen.getByRole("button", { name: /按原文添加「NEW-CPU」/ })).toBeEnabled();
+    expect(mocks.masterCategories).not.toHaveBeenCalled();
+  });
+
   it("多选加入、直接引用、按原文待建档、列存储交期与多人指派组成正确提交体", async () => {
     mount();
     await addPart("PN-A");
@@ -206,20 +239,22 @@ describe("销售询价编辑", () => {
     expect(mocks.presales.appendLines.mock.calls[0][1].lines[0]).not.toHaveProperty("line_key");
   });
 
-  it("409 提示后读取最新版本；服务端未返回的字段不显示也不覆盖", async () => {
+  it("版本冲突保留未保存数量；服务端未返回的字段不显示也不覆盖", async () => {
     const hidden = inquiry({ version: 3 });
     delete hidden.customer_id; delete hidden.assignee_ids; delete hidden.notes;
     delete hidden.lines![0].notes;
-    mocks.presales.getInquiry.mockResolvedValueOnce(hidden).mockResolvedValueOnce({ ...hidden, version: 4 });
-    mocks.presales.updateInquiry.mockRejectedValueOnce({ response: { status: 409 } });
+    mocks.presales.getInquiry.mockResolvedValueOnce(hidden);
+    mocks.presales.updateInquiry.mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: "version_conflict", message: "记录版本已变化" } } } });
     mount("/presales/inquiries/1/edit");
     await openLine("PN-A");
     await screen.findByRole("spinbutton", { name: "PN-A 数量" });
     expect(screen.queryByRole("combobox", { name: "客户" })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "客户要求" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "PN-A 数量" }), { target: { value: "7" } });
     fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
-    await screen.findByText("已被他人修改/领取，已自动刷新");
-    await waitFor(() => expect(mocks.presales.getInquiry).toHaveBeenCalledTimes(2));
+    await screen.findByText("记录版本已变化");
+    expect(mocks.presales.getInquiry).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("spinbutton", { name: "PN-A 数量" })).toHaveValue("7.000");
     const body = mocks.presales.updateInquiry.mock.calls[0][1];
     expect(body).not.toHaveProperty("customer_id");
     expect(body).not.toHaveProperty("assignee_ids");
@@ -241,12 +276,12 @@ describe("销售询价编辑", () => {
   });
 
   it("报价库带入引用后建单；提交失败保留草稿身份，重试不会重复创建", async () => {
-    mocks.presales.submitInquiry.mockRejectedValueOnce(new Error("network"));
+    mocks.presales.submitInquiry.mockRejectedValueOnce({ code: "ERR_NETWORK", request: {} });
     mount("/presales/inquiries/new", { referenceOffer: validOffer, part: partA });
     await screen.findByText("已引用报价 #70 · 本行不再派单");
     await waitFor(() => expect(mocks.presales.library).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "提交" }));
-    await screen.findByText("保存失败，请重试");
+    await screen.findByText("未收到服务器响应");
     fireEvent.click(screen.getByRole("button", { name: "提交" }));
     await waitFor(() => expect(mocks.presales.submitInquiry).toHaveBeenCalledTimes(2));
     expect(mocks.presales.createInquiry).toHaveBeenCalledTimes(1);

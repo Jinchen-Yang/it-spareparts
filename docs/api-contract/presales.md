@@ -35,7 +35,18 @@
 
 建档两种写动作以及查重均要求 `action_presales_bind_part` 和 `page_master_data`，且必须为处理人、
 主动报价发起人或主管。公共池先领单。主数据字段包括 description、brand、manufacturer、summary、
-category_major、category_minor、machine_or_part、unit；主数据不随询价自动合并。
+category_major、category_minor、machine_or_part、unit，以及 `spec_updates`；主数据不随询价自动合并。
+
+按 [D-0045](../decisions/0025-售前PN建档与操作诊断.md)，询价/主动报价编辑器还可从 PN 联想入口显式打开主数据建档。
+该入口复用 `GET /parts/master/check`、`GET /parts/master/categories` 和 `POST /parts/master`，不依赖已保存的询价行；
+要求主数据权限及实名身份。建档回执的 `id` 与 `pn_std` 加入当前草稿，保存/提交单据仍是后续独立动作。
+已提交询价行继续使用本节的原子建档/绑定入口，要求原有售前动作权限及处理人身份。
+
+`spec_updates` 为 `{参数键: {value: 字符串, unit: 字符串或null, numeric_value: 十进制字符串或null}}`。
+标准参数键、标签、单位来自 `/parts/master/categories` 的 `spec_fields` 数组；数值遵守原规格单位校验。
+自由文本参数以 `custom:<名称>` 存储（名称最多25字符，值最多128字符，unit/numeric_value均为null），
+在候选中显示参数名称，不展示内部前缀。两入口都将规格、主数据及审计原子提交；失败不留下半份档案。
+新建类别须属于主数据字典，二级类别须属于所选一级类别。
 
 客户、供应商候选都直接返回 `[{id, name}]`（无分页包装），id 为维度表整数主键，
 name 优先使用非空归一化名称、回退原始名称；limit 默认 20、范围 1–100，q 最长 256 字符。
@@ -63,7 +74,11 @@ validity_days 为 1–36500 的自然日数；截止时刻为上海发布日期�
 调用方使用该 offer_id 和报价版本编辑，避免旧询价版本覆盖已保存草稿。
 reply 可附 work_item_id、expected_work_item_version，未提供时服务读取并锁定当前本人待办。
 报价草稿与独立回复不递增询价 version，避免互不相关的采购回复互相冲突。询价行、报价各自递增版本。
-版本冲突返回 409，响应 detail 含 message 与当前 version；业务状态非法 422，无权 403，不存在 404。
+版本冲突返回 409，响应 detail 含 code=version_conflict、message 与当前 version；业务状态非法 422，无权 403，不存在 404。
+售前服务错误的 `detail` 保留既有数据并补充稳定 `code`；近似 PN 为 `near_duplicates`，已绑定为 `already_bound`，
+已有报价草稿为 `existing_draft`，权限为 `permission_denied`。客户端不将所有409解释为版本冲突。
+售前、主数据建档、PN 联想及待办相关 HTTP 响应带服务端生成的 `X-Request-ID`，失败日志使用同一标识。
+前端可复制错误码、HTTP状态、方法、路径和请求标识；诊断内容不含查询参数、请求体、凭据和原始响应。
 
 发布和回复支持 `on_existing=new|update`、`existing_offer_id`，或按草稿 ID 指定的
 `existing_choices={draft_offer_id: {on_existing, existing_offer_id?}}`。同采购对同 PN 已有有效报价时，

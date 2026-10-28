@@ -33,7 +33,7 @@ export default function QuoteWorkbenchPage() {
           onExport={(visible) => presalesWorkbooks.exportQuoteSheet([...new Set(selected.map((item) => item.subject_id))], visible)} />
         <Button onClick={() => setImportOpen(true)}>上传合并表</Button>
       </Space>}
-      <WorkInbox key={subjectType} subjectType={subjectType} refreshKey={refreshKey} conflictMessage="已被他人修改/领取"
+      <WorkInbox key={subjectType} subjectType={subjectType} refreshKey={refreshKey}
         onSelectionChange={subjectType === "presales_inquiry" ? setSelected : undefined}
         isRowSelectable={(item) => !item.paused && ["pending", "in_progress"].includes(item.status)
           && (item.assignee_id != null || item.claimed_by != null) && item.allowed_actions.some((action) => ["start", "release", "complete"].includes(action))}

@@ -72,7 +72,7 @@ it("旧搜索的迟到结果不会覆盖新的查询", async () => {
   expect(screen.getByText("没有可见的有效报价")).toBeInTheDocument();
 });
 
-it("409 显示统一提示并执行刷新，非冲突显示服务端错误", async () => {
+it("普通 409 保留业务原因不刷新，字段错误显示服务端原因", async () => {
   const refresh = vi.fn();
   function Feedback({ status }: { status: number }) {
     const handleError = usePresalesError();
@@ -81,13 +81,13 @@ it("409 显示统一提示并执行刷新，非冲突显示服务端错误", asy
   const view = render(<Feedback status={409} />);
   fireEvent.click(screen.getByRole("button", { name: "触发错误" }));
   await act(async () => {});
-  expect(screen.getByText("已被他人修改/领取")).toBeInTheDocument();
-  expect(refresh).toHaveBeenCalledOnce();
+  expect(screen.getByText("未完成逐行报价")).toBeInTheDocument();
+  expect(refresh).not.toHaveBeenCalled();
   view.rerender(<Feedback status={422} />);
   fireEvent.click(screen.getByRole("button", { name: "触发错误" }));
   await act(async () => {});
-  expect(screen.getByText("未完成逐行报价")).toBeInTheDocument();
-  expect(refresh).toHaveBeenCalledOnce();
+  expect(screen.getAllByText("未完成逐行报价")).toHaveLength(2);
+  expect(refresh).not.toHaveBeenCalled();
 });
 
 it("报价角标只展示服务端返回的报价人，并在边界刷新", async () => {

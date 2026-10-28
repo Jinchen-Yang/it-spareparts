@@ -7,12 +7,13 @@ import { type CustomFieldValue } from "../../api/fields";
 import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
 import type { PartSuggestion } from "../../api/search";
 import LivePartSearch from "../../components/parts/LivePartSearch";
+import CreatePartModal from "../../components/parts/CreatePartModal";
 import PartThumb from "../../components/gallery/PartThumb";
 import PriceRefBadge from "../../components/pricing/PriceRefBadge";
 import AudiencePicker, { PUBLIC_AUDIENCE } from "../../components/audience/AudiencePicker";
 import AudienceLock from "../../components/audience/AudienceLock";
 import PartQuoteBadges from "./PartQuoteBadges";
-import { isOfferActive as activeOffer, OfferBadge, useNow, flattenOffers } from "./shared";
+import { isOfferActive as activeOffer, OfferBadge, useNow, flattenOffers, usePresalesError } from "./shared";
 import { formatMoney } from "../../utils/format";
 import CandidateSelect from "./CandidateSelect";
 import { changedAudience } from "../../components/audience/rules";
@@ -23,6 +24,7 @@ import { WorkbookExportButton } from "../../components/workbook";
 import { presalesWorkbooks } from "../../api/presalesWorkbooks";
 import WorkbookDialog from "./WorkbookDialog";
 import "./presales.css";
+import { parseApiError } from "../../utils/apiError";
 
 function fromLine(line: InquiryLine): DraftLine {
   const fields = (line.field_values || []) as ReadField[];
@@ -44,8 +46,12 @@ function InquiryEditorContent() {
   const append = params.get("append") === "1";
   const navigate = useNavigate();
   const location = useLocation();
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
+  const handleError = usePresalesError();
   const [importOpen, setImportOpen] = useState(false);
+  const [creatingPart, setCreatingPart] = useState<{ pn: string; lineKey?: string; description?: string | null }>();
+  const [versionConflict, setVersionConflict] = useState(false);
+  const canCreatePart = localStorage.getItem("role") === "admin" || readPermissionMap().page_master_data === true;
   const customerVisible = localStorage.getItem("role") === "admin" || readPermissionMap().data_customer !== false;
   const [inquiry, setInquiry] = useState<Inquiry>();
   const [lines, setLines] = useState<DraftLine[]>([]);
@@ -78,6 +84,7 @@ function InquiryEditorContent() {
     return () => { mounted.current = false; refreshGeneration.current += 1; };
   }, []);
   const apply = useCallback((data: Inquiry) => {
+    setVersionConflict(false);
     currentInquiry.current = data;
     const next = append ? [] : (data.lines || []).map(fromLine);
     setInquiry(data); setLines(next);
@@ -195,12 +202,9 @@ function InquiryEditorContent() {
       if (!submit && !append) apply(saved);
     } catch (error) {
       if (!mounted.current) return;
-      if ((error as { response?: { status?: number } })?.response?.status === 409) {
-        void message.warning("已被他人修改/领取，已自动刷新");
-        const saved = currentInquiry.current;
-        if (id) await refresh();
-        else if (saved) { try { apply(await presales.getInquiry(saved.id)); } catch { /* 保留已保存草稿身份 */ } }
-      } else void message.error(errorText(error, "保存失败，请重试"));
+      // 冲突时保留草稿，不用服务端内容覆盖尚未保存的行与字段。
+      if (parseApiError(error).kind === "version_conflict") setVersionConflict(true);
+      await handleError(error);
     } finally { if (mounted.current) setBusy(false); }
   };
 
@@ -210,6 +214,16 @@ function InquiryEditorContent() {
   return <section className="presales-page">
     <PageHeader title={append ? "追加询价行" : inquiry ? `编辑询价 ${inquiry.inquiry_no}` : "新建询价"} subtitle="选择型号并填写需求，提交后进入采购待办" extra={<Button onClick={() => navigate(inquiry ? `/presales/inquiries/${inquiry.id}` : "/presales/inquiries")}>返回</Button>} />
     <div className="presales-panel">
+      {versionConflict && <Alert type="warning" showIcon message="记录版本已变化，当前填写内容仍保留。"
+        description="请先复制需要保留的修改，再重新加载最新单据。"
+        action={<Button onClick={() => modal.confirm({ title: "放弃当前未保存修改并重新加载？", okText: "重新加载", cancelText: "继续保留",
+          onOk: async () => {
+            if (id) await refresh();
+            else if (currentInquiry.current) {
+              try { apply(await presales.getInquiry(currentInquiry.current.id)); }
+              catch (error) { await handleError(error); }
+            }
+          } })}>重新加载最新单据</Button>} />}
       {blocked && <Alert type="warning" message="当前单据不可在此编辑；已提交的销售询价请先撤回修改，关单后请复制为新单。" />}
       {!append && (blocked ? <Descriptions column={1} items={[
         ...("customer_id" in (inquiry ?? {}) ? [{ key: "customer", label: "客户", children: customerId ?? "—" }] : []),
@@ -233,15 +247,16 @@ function InquiryEditorContent() {
       </Form>)}
       <div className="presales-toolbar">
         {append && <span className="presales-muted">新增行（原有行不变）</span>}
-        {!blocked && <LivePartSearch mode="multiple" value={[]} onChange={addParts} inputProps={{ "aria-label": "搜索并批量加入 PN", placeholder: "PN / 品牌 / 参数 / 描述，支持多选" }}
-          renderThumb={(part) => <PartThumb partId={part.part_id} pn={part.pn_std} size={24} />} renderBadges={(part) => <PartQuoteBadges partId={part.part_id} />} onAddRaw={(text) => addRawParts([text])} />}
+        {!blocked && <LivePartSearch mode="multiple" value={[]} onChange={addParts} inputProps={{ "aria-label": "搜索并批量加入 PN", placeholder: "PN / 品牌 / 参数 / 描述，支持多选", disabled: busy }}
+          renderThumb={(part) => <PartThumb partId={part.part_id} pn={part.pn_std} size={24} />} renderBadges={(part) => <PartQuoteBadges partId={part.part_id} />} onAddRaw={(text) => addRawParts([text])}
+          onCreate={canCreatePart ? (pn) => setCreatingPart({ pn }) : undefined} />}
         <Button disabled={busy || blocked} onClick={() => setPasteOpen(true)}>批量粘贴 PN</Button>
         {!append && !blocked && <><WorkbookExportButton label="下载本单 Excel" schemaName="presales_inquiry_lines" disabled={busy}
           fetchSchema={() => presalesWorkbooks.getInquirySchema(undefined, inquiry?.id)} filename={`${inquiry?.inquiry_no || "询价空模板"}.xlsx`}
           onExport={(visible) => inquiry ? presalesWorkbooks.exportInquiry(inquiry.id, visible) : presalesWorkbooks.exportInquiryTemplate(visible)} />
           <Button disabled={busy} onClick={() => setImportOpen(true)}>上传 Excel</Button><span className="presales-muted">下载使用已保存的数据</span></>}
       </div>
-      <Table aria-label="询价行" rowKey="key" dataSource={lines} tableLayout="fixed" pagination={{ defaultPageSize: 20 }} columns={[
+      <Table aria-label="询价行" rowKey="key" dataSource={lines} tableLayout="fixed" scroll={{ x: 920 }} pagination={{ defaultPageSize: 20 }} columns={[
         { title: "PN / 描述", key: "pn", render: (_, item) => <><Space>{item.part_id && <PartThumb partId={item.part_id} pn={item.pn_raw} size={24} />}{item.pn_raw}{!item.part_id && <span>待建档</span>}</Space><div className="presales-muted">{item.description}</div></> },
         { title: "数量", dataIndex: "qty", width: 90 },
         { title: "期望交期", key: "delivery", width: 130, render: (_, item) => item.expectedDelivery || "—" },
@@ -260,6 +275,7 @@ function InquiryEditorContent() {
         { key: "delivery", label: "期望交期", children: line.expectedDelivery }, ...(line.notesVisible ? [{ key: "notes", label: "行备注", children: line.notes }] : []),
         ...line.originalFields.map((field, index) => ({ key: `field-${index}`, label: field.name ?? field.new_name, children: String(field.value ?? "") })),
       ]} /> : <Form layout="vertical" disabled={busy}>
+        {!line.part_id && canCreatePart && <Button style={{ marginBottom: 16 }} onClick={() => setCreatingPart({ pn: line.pn_raw, lineKey: line.key, description: line.description })}>为此 PN 建档</Button>}
         <Form.Item label="完整描述">{line.part_id ? <p>{line.description || "—"}</p> : <Input.TextArea aria-label={`${line.pn_raw} 描述`} value={line.description ?? ""} onChange={(event) => updateLine(line.key, { description: event.target.value })} />}</Form.Item>
         <div className="presales-form"><Form.Item label="数量" required><InputNumber aria-label={`${line.pn_raw} 数量`} min={0.001} max={99999999999.999} precision={3} value={line.qty} onChange={(qty) => updateLine(line.key, { qty: qty ?? 0 })} /></Form.Item>
           <Form.Item label="期望交期"><Input type="date" aria-label={`${line.pn_raw} 期望交期`} value={line.expectedDelivery} onChange={(event) => updateLine(line.key, { expectedDelivery: event.target.value })} /></Form.Item>
@@ -271,6 +287,12 @@ function InquiryEditorContent() {
           : <EffectiveOffers offers={library[line.part_id] ?? []} now={now} onReference={(offer) => updateLine(line.key, { ref_offer_id: offer.id })} />}</>}
       </Form>)}
     </Drawer>
+    {creatingPart && canCreatePart && <CreatePartModal pn={creatingPart.pn} description={creatingPart.description}
+      onClose={() => setCreatingPart(undefined)} onSelected={(part) => {
+        if (creatingPart.lineKey) updateLine(creatingPart.lineKey, { part_id: part.part_id, pn_raw: part.pn_std,
+          description: part.description ?? part.summary, brand: part.brand });
+        else addParts([part]);
+      }} />}
     <Modal open={pasteOpen} title="批量粘贴 PN" okText="按原文加入" onCancel={() => setPasteOpen(false)} onOk={() => { addRawParts(pasteText.split(/[\n\r\t,，;；]+/)); setPasteText(""); setPasteOpen(false); }}>
       <p>每行一个 PN，也支持逗号或分号分隔；相同 PN 不重复加入。</p><Input.TextArea aria-label="批量 PN" rows={6} value={pasteText} onChange={(event) => setPasteText(event.target.value)} />
     </Modal>

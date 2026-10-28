@@ -81,7 +81,7 @@ it("共享页复用可见范围并排除我的单据，不推断被过滤的客�
   await waitFor(() => expect(screen.queryByText("XJ001")).not.toBeInTheDocument());
 });
 
-it("共享页 shared 请求持续 409 时只自动重试一次，随后保留错误供手动重试", async () => {
+it("共享页 shared 持续版本冲突时只自动重试一次，随后保留错误供手动重试", async () => {
   const pending: Array<(reason: unknown) => void> = [];
   mocks.listInquiries.mockImplementation(({ scope }: { scope: string }) => scope === "shared"
     ? new Promise((_, reject) => { pending.push(reject); })
@@ -90,11 +90,12 @@ it("共享页 shared 请求持续 409 时只自动重试一次，随后保留错
   await screen.findByText("XJ001");
   fireEvent.click(screen.getByRole("tab", { name: "共享给我" }));
   await waitFor(() => expect(pending).toHaveLength(1));
-  await act(async () => { pending[0]({ response: { status: 409 } }); });
+  const conflict = { response: { status: 409, data: { detail: { code: "version_conflict", message: "记录版本已更新" } } } };
+  await act(async () => { pending[0](conflict); });
   await waitFor(() => expect(pending).toHaveLength(2));
-  await act(async () => { pending[1]({ response: { status: 409 } }); });
+  await act(async () => { pending[1](conflict); });
   expect(pending).toHaveLength(2);
-  expect(screen.getByText("已被他人修改/领取，请刷新")).toBeVisible();
+  expect(screen.getByText("记录版本已更新")).toBeVisible();
   expect(screen.queryByText("加载中")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: /重\s*试/ }));
   await waitFor(() => expect(pending).toHaveLength(3));

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.services.part_resolver import preprocess
 from app.services.part_search_normalize import compact, normalize
-from app.services.spec_extract import SPEC_KEYS
+from app.services.spec_extract import spec_label
 
 __all__ = ["search"]
 
@@ -425,6 +425,5 @@ def search(db: Session, q: str, *, limit: int = 10, filters: dict | None = None)
                      "WHERE part_id = ANY(:ids) ORDER BY spec_key").bindparams(bindparam("ids", type_=ARRAY(Integer)))
     specs: dict[int, list[dict]] = {}
     for pid, key, value in db.execute(spec_stmt, {"ids": ids}):
-        label, unit = SPEC_KEYS.get(key, (key, None))
-        specs.setdefault(pid, []).append({"label": label, "value": value})
+        specs.setdefault(pid, []).append({"label": spec_label(key), "value": value})
     return _decorate(rows, terms, specs)

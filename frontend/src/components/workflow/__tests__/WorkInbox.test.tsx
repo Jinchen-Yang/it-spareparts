@@ -108,17 +108,57 @@ it("领取冲突显示当前领取人，并重新获取待办", async () => {
   await waitFor(() => expect(vi.mocked(listWorkItems).mock.calls.length).toBeGreaterThan(listCalls));
 });
 
-it("售前可指定统一冲突文案并保留自动刷新", async () => {
+it("售前显示具体领取冲突并保留自动刷新", async () => {
   vi.mocked(claimWorkItem).mockRejectedValue({ response: { status: 409, data: {
     detail: { message: "记录已变化", claimed_by_name: "王工" },
   } } });
-  render(<WorkInbox subjectType="presales_inquiry" conflictMessage="已被他人修改/领取"
+  render(<WorkInbox subjectType="presales_inquiry"
     renderRow={() => <span>售前待办</span>} onOpen={vi.fn()} />);
   await screen.findByText("售前待办");
   const listCalls = vi.mocked(listWorkItems).mock.calls.length;
   fireEvent.click(screen.getByRole("button", { name: /领\s*取/ }));
-  expect(await screen.findByText("已被他人修改/领取")).toBeInTheDocument();
+  expect(await screen.findByText("已被 王工 领取")).toBeInTheDocument();
   await waitFor(() => expect(vi.mocked(listWorkItems).mock.calls.length).toBeGreaterThan(listCalls));
+});
+
+it("非版本 409 保留原因输入，不刷新待办或关闭对话框", async () => {
+  vi.mocked(listWorkItems).mockResolvedValue(page([claimedItem]));
+  vi.mocked(releaseWorkItem).mockRejectedValue({ response: { status: 409, data: { detail: { code: "invalid_state", message: "待办已暂停" } } } });
+  inbox();
+  fireEvent.click(await screen.findByRole("button", { name: /退\s*回/ }));
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.change(within(dialog).getByLabelText("原因"), { target: { value: "需要其他同事接手" } });
+  const calls = vi.mocked(listWorkItems).mock.calls.length;
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认退回" }));
+  expect(await screen.findByText("待办已暂停")).toBeVisible();
+  expect(within(dialog).getByLabelText("原因")).toHaveValue("需要其他同事接手");
+  expect(listWorkItems).toHaveBeenCalledTimes(calls);
+});
+
+it("版本冲突后保留原因，用户再次确认时使用最新待办版本", async () => {
+  vi.mocked(listWorkItems).mockResolvedValue(page([claimedItem]));
+  vi.mocked(releaseWorkItem).mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: "version_conflict" } } } });
+  inbox();
+  fireEvent.click(await screen.findByRole("button", { name: /退\s*回/ }));
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.change(within(dialog).getByLabelText("原因"), { target: { value: "保留的交接原因" } });
+  vi.mocked(listWorkItems).mockResolvedValue(page([{ ...claimedItem, version: 4 }]));
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认退回" }));
+  await screen.findByText("记录版本已变化");
+  await waitFor(() => expect(listWorkItems).toHaveBeenCalledTimes(2));
+  expect(within(dialog).getByLabelText("原因")).toHaveValue("保留的交接原因");
+  expect(releaseWorkItem).toHaveBeenCalledOnce();
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认退回" }));
+  await waitFor(() => expect(releaseWorkItem).toHaveBeenLastCalledWith(11, { expected_version: 4, reason: "保留的交接原因" }));
+});
+
+it("开始处理已成功但打开详情失败时不会误报待办操作失败", async () => {
+  vi.mocked(listWorkItems).mockResolvedValue(page([{ ...poolItem, assignee_id: 7, allowed_actions: ["start"] }]));
+  const onOpen = vi.fn().mockRejectedValue({ response: { status: 503 } });
+  inbox(onOpen);
+  fireEvent.click(await screen.findByRole("button", { name: /打\s*开/ }));
+  expect(await screen.findByText(/开始处理待办已成功，但页面刷新失败/)).toBeVisible();
+  expect(startWorkItem).toHaveBeenCalledOnce();
 });
 
 it("退回公共池必须填写原因，提交当前版本与原因", async () => {
@@ -236,11 +276,11 @@ it("待办打开守卫拒绝后不会提前开始新待办", async () => {
 
 it("开始处理失败不进入报价页，重试成功才传递最新待办身份", async () => {
   vi.mocked(listWorkItems).mockResolvedValue(page([{ ...poolItem, assignee_id: 7, allowed_actions: ["start"] }]));
-  vi.mocked(startWorkItem).mockRejectedValueOnce(new Error("offline"));
+  vi.mocked(startWorkItem).mockRejectedValueOnce({ code: "ERR_NETWORK" });
   const onOpen = vi.fn();
   inbox(onOpen);
   fireEvent.click(await screen.findByRole("button", { name: /打\s*开/ }));
-  await screen.findByText("打开失败，请重试");
+  await screen.findByText("未收到服务器响应");
   expect(onOpen).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: /打\s*开/ }));
   await waitFor(() => expect(onOpen).toHaveBeenCalledWith(claimedItem));

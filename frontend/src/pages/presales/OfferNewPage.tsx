@@ -6,6 +6,9 @@ import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
 import { getFieldTemplate, type CustomFieldValue, type FieldDefinition, type FieldLevel } from "../../api/fields";
 import type { PartSuggestion } from "../../api/search";
 import LivePartSearch from "../../components/parts/LivePartSearch";
+import CreatePartModal from "../../components/parts/CreatePartModal";
+import { readPermissionMap } from "../../nav";
+import { parseApiError } from "../../utils/apiError";
 import PartThumb from "../../components/gallery/PartThumb";
 import CustomFieldsEditor from "../../components/fields/CustomFieldsEditor";
 import AudiencePicker, { PUBLIC_AUDIENCE } from "../../components/audience/AudiencePicker";
@@ -49,10 +52,13 @@ export default function OfferNewPage() {
 function OfferNewContent({ draftId }: { draftId: number }) {
   const handlePresalesError = usePresalesError();
   const { choose, dialog } = useExistingOfferChoice();
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [validity, setValidity] = useState(1);
   const [extra, setExtra] = useState(false);
   const [selected, setSelected] = useState<PartSuggestion[]>([]);
+  const [creatingPn, setCreatingPn] = useState<string>();
+  const [versionConflict, setVersionConflict] = useState(false);
+  const canCreatePart = localStorage.getItem("role") === "admin" || readPermissionMap().page_master_data === true;
   const [notes, setNotes] = useState("");
   const [audience, setAudience] = useState<AudienceRule>(PUBLIC_AUDIENCE);
   const [notesAudience, setNotesAudience] = useState<AudienceRule>(PUBLIC_AUDIENCE);
@@ -133,6 +139,11 @@ function OfferNewContent({ draftId }: { draftId: number }) {
     setValues(Object.fromEntries((latest.lines ?? []).map((line) => [line.id,
       offerInput(offers.find((offer) => offer.line_id === line.id))])));
     if (latest.status === "submitted") setPublished(true);
+    setVersionConflict(false);
+  };
+  const operationError = async (error: unknown) => {
+    if (parseApiError(error).kind === "version_conflict") setVersionConflict(true);
+    await handlePresalesError(error);
   };
   const saveDraft = async () => {
     if (!inquiry) return;
@@ -146,7 +157,7 @@ function OfferNewContent({ draftId }: { draftId: number }) {
         setSaved((previous) => ({ ...previous, [line.id]: offer }));
       }
       message.success("报价草稿已保存");
-    } catch (error) { await handlePresalesError(error, refresh); }
+    } catch (error) { await operationError(error); }
     finally { setBusy(false); }
   };
   const publish = async () => {
@@ -174,7 +185,7 @@ function OfferNewContent({ draftId }: { draftId: number }) {
         }
       }
       setPublished(true); refreshWorkBadges(); message.success("主动报价已发布");
-    } catch (error) { await handlePresalesError(error, refresh); }
+    } catch (error) { await operationError(error); }
     finally { setBusy(false); }
   };
   const complete = !!inquiry?.lines?.length && inquiry.lines.every((line) => quoteComplete(values[line.id] ?? {}));
@@ -196,6 +207,11 @@ function OfferNewContent({ draftId }: { draftId: number }) {
   return <section className="presales-page">
     <PageHeader title="主动报价" subtitle="选择型号并逐行填写报价，发布后进入报价库" extra={<Link to="/presales/workbench">报价工作台</Link>} />
     <div className="presales-panel">
+    {versionConflict && <Alert type="warning" showIcon message="报价版本已变化，当前填写内容仍保留。"
+      description="请先复制需要保留的修改，再重新加载最新报价。"
+      action={<Button onClick={() => modal.confirm({ title: "放弃当前未保存修改并重新加载？", okText: "重新加载", cancelText: "继续保留",
+        onOk: async () => { try { await refresh(); } catch (error) { await handlePresalesError(error); } },
+      })}>重新加载最新报价</Button>} />}
     <div className="presales-toolbar">
       <div className="presales-toolbar"><span>统一有效期</span><InputNumber size="small" aria-label="统一有效期" min={1} max={36500} precision={0}
         value={uniformDays ?? null} placeholder="多值" title="修改后应用到所有报价行" disabled={busy} onChange={(days) => {
@@ -206,7 +222,8 @@ function OfferNewContent({ draftId }: { draftId: number }) {
       <Button size="small" onClick={() => setExtra(!extra)}>{extra ? "收起单头信息" : "单头备注 / 自定义字段"}</Button>
     </div>
     {!inquiry && <div className="presales-toolbar"><LivePartSearch mode="multiple" value={selected}
-      onChange={(parts) => { setSelected(parts); }} inputProps={{ "aria-label": "主动报价检索 PN" }}
+      onChange={(parts) => { setSelected(parts); }} inputProps={{ "aria-label": "主动报价检索 PN", disabled: busy }}
+      onCreate={canCreatePart ? setCreatingPn : undefined}
       renderThumb={(part) => <PartThumb partId={part.part_id} pn={part.pn_std} size={24} />}
       renderBadges={(part) => <PartQuoteBadges partId={part.part_id} />} />
       <div><span className="presales-muted">本单报价可见性</span><AudiencePicker value={audience} onChange={setAudience} /></div>
@@ -234,5 +251,7 @@ function OfferNewContent({ draftId }: { draftId: number }) {
         : <><Button loading={busy} disabled={!lines.some((line) => quoteComplete(values[line.id] ?? {}))} onClick={() => void saveDraft()}>保存草稿</Button>
           <Button type="primary" loading={busy} disabled={!complete} onClick={() => void publish()}>发布主动报价</Button></>}</div>
     </footer>{dialog}
+    {creatingPn && canCreatePart && <CreatePartModal pn={creatingPn} onClose={() => setCreatingPn(undefined)}
+      onSelected={(part) => setSelected((previous) => previous.some((item) => item.part_id === part.part_id) ? previous : [...previous, part])} />}
   </section>;
 }

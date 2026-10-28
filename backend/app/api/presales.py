@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.api.audience import audience_user
 from app.db import get_db
 from app.models.dimensions import DimCustomer, DimPart
-from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer
+from app.models.presales import PresalesInquiry, PresalesInquiryLine
 from app.security import UserContext
 from app.services import price_reference
 from app.services.presales import binding, candidates, common, inquiries, library, offers, visibility, part_history
@@ -31,7 +31,7 @@ def presales_user(viewer: UserContext = Depends(audience_user)):
     try:
         common.require(viewer, "page_presales")
     except WorkflowError as exc:
-        raise HTTPException(exc.status_code, str(exc)) from exc
+        raise HTTPException(exc.status_code, _error_detail(exc, exc.status_code)) from exc
     return viewer
 
 
@@ -175,11 +175,31 @@ class CreatePartInput(VersionInput):
     summary: str | None = None
     machine_or_part: str | None = None
     unit: str | None = None
+    spec_updates: dict | None = None
 
 
 class ReferenceInput(Input):
     part_ids: list[int] = Field(default_factory=list, max_length=200)
     inquiry_id: int | None = Field(default=None, gt=0)
+
+
+def _error_detail(exc, status_code):
+    """只在售前边界扩充错误，不改变跨模块共享异常或丢弃旧字段。"""
+    original = getattr(exc, "detail", str(exc))
+    detail = dict(original) if isinstance(original, dict) else {"message": str(original)}
+    detail.setdefault("message", str(exc))
+    if "code" not in detail:
+        if "near_duplicates" in detail:
+            code = "near_duplicates"
+        elif "offer_id" in detail and status_code == 409:
+            code = "existing_draft"
+        elif "version" in detail and set(detail) <= {"message", "version"}:
+            code = "version_conflict"
+        else:
+            code = {403: "permission_denied", 404: "not_found", 409: "conflict"}.get(
+                status_code, "validation_error")
+        detail["code"] = code
+    return jsonable_encoder(detail)
 
 
 def _call(db, fn, *, write=False):
@@ -190,17 +210,19 @@ def _call(db, fn, *, write=False):
         return result
     except WorkflowError as exc:
         db.rollback()
-        raise HTTPException(exc.status_code, jsonable_encoder(getattr(exc, "detail", str(exc)))) from exc
+        raise HTTPException(exc.status_code, _error_detail(exc, exc.status_code)) from exc
     except (ValueError, PermissionError) as exc:
         db.rollback()
-        raise HTTPException(getattr(exc, "status_code", 403 if isinstance(exc, PermissionError) else 422),
-                            str(exc)) from exc
+        status_code = getattr(exc, "status_code", 403 if isinstance(exc, PermissionError) else 422)
+        raise HTTPException(status_code, _error_detail(exc, status_code)) from exc
     except IntegrityError as exc:
         db.rollback()
-        raise HTTPException(409, "记录已变化或关联数据不可用，请刷新后重试") from exc
+        raise HTTPException(409, {"code": "integrity_conflict",
+                                 "message": "记录存在冲突或关联数据不可用，请刷新后核对"}) from exc
     except PriceReferenceUnavailable as exc:
         db.rollback()
-        raise HTTPException(503, "参考价暂不可用") from exc
+        raise HTTPException(503, {"code": "reference_unavailable",
+                                 "message": "参考价暂不可用，请稍后重试"}) from exc
 
 
 def _inquiry_action(db, ctx, fn):

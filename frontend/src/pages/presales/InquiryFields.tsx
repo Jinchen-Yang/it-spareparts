@@ -6,6 +6,8 @@ import { getFieldTemplate, listFieldDefinitions, type CustomFieldValue, type Fie
 import CustomFieldsEditor from "../../components/fields/CustomFieldsEditor";
 import { isOfferActive as activeOffer, OfferBadge, flattenOffers } from "./shared";
 import { formatMoney } from "../../utils/format";
+import { parseApiError } from "../../utils/apiError";
+import { ApiErrorFeedback } from "../../components/ApiErrorFeedback";
 
 export type ReadField = { field_def_id?: number; new_name?: string; name?: string; value: unknown; rule?: AudienceRuleRead };
 export type DraftLine = {
@@ -24,8 +26,7 @@ export const editableFields = (values: ReadField[] = [], excludeDelivery = false
 });
 
 export function errorText(error: unknown, fallback: string) {
-  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-  return typeof detail === "string" ? detail : detail && typeof detail === "object" && "message" in detail ? String(detail.message) : fallback;
+  return parseApiError(error, fallback).message;
 }
 
 /** 字段池只负责编辑；模板按 PN anchor 拉取，不携带上一张单据的值。 */
@@ -36,23 +37,25 @@ export function Fields({ level, partId, value, savedValues, onChange, disabled =
 }) {
   const [template, setTemplate] = useState<FieldDefinition[]>([]);
   const [definitions, setDefinitions] = useState<FieldDefinition[]>([]);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<ReturnType<typeof parseApiError>>();
+  const [reload, setReload] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
-    setError(false);
+    setError(undefined);
     void Promise.all([getFieldTemplate("presales_inquiry", level, partId ? `part:${partId}` : undefined, controller.signal),
       listFieldDefinitions("presales_inquiry", level, controller.signal)]).then(([rows, pool]) => {
       if (!controller.signal.aborted) {
         setTemplate(rows.filter((field) => field.name !== DELIVERY_FIELD || level !== "line"));
         setDefinitions(pool.filter((field) => field.name !== DELIVERY_FIELD || level !== "line"));
       }
-    }).catch(() => { if (!controller.signal.aborted) setError(true); });
+    }).catch((cause) => { if (!controller.signal.aborted) setError(parseApiError(cause, "字段池加载失败")); });
     return () => controller.abort();
-  }, [level, partId]);
+  }, [level, partId, reload]);
   return <>
-    {error && <Alert type="warning" message="字段池加载失败，请刷新后重试；已有填写内容仍会保留。" />}
+    {error && <Alert type="warning" message="字段池加载失败，已有填写内容仍会保留。" description={<ApiErrorFeedback info={error} />}
+      action={<Button onClick={() => setReload((value) => value + 1)}>重新加载字段</Button>} />}
     <CustomFieldsEditor subjectType="presales_inquiry" level={level} template={template} definitions={definitions}
-      value={value} savedValues={savedValues} onChange={onChange} disabled={disabled || error} />
+      value={value} savedValues={savedValues} onChange={onChange} disabled={disabled || !!error} />
   </>;
 }
 
@@ -68,4 +71,3 @@ export function EffectiveOffers({ offers, now, onReference }: { offers: Offer[];
     ]} />
   </Space>;
 }
-

@@ -308,3 +308,31 @@ describe("LivePartSearch", () => {
     expect(onChange).toHaveBeenCalledWith([]);
   });
 });
+
+describe("PN 就地建档入口", () => {
+  it("无匹配后才提供显式建档，点击前不触发创建，保留原文入口", async () => {
+    suggestParts.mockResolvedValue([]);
+    const onCreate = vi.fn(); const onAddRaw = vi.fn();
+    render(<LivePartSearch onCreate={onCreate} onAddRaw={onAddRaw} />);
+    type("NEW-GPU");
+    expect(screen.queryByRole("button", { name: /新建 PN/ })).toBeNull();
+    await tick();
+    expect(onCreate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "新建 PN「NEW-GPU」" }));
+    expect(onCreate).toHaveBeenCalledExactlyOnceWith("NEW-GPU");
+    expect(onAddRaw).not.toHaveBeenCalled();
+  });
+  it("已存在同名PN或检索失败时不展示建档按钮，候选显示类别", async () => {
+    suggestParts.mockResolvedValueOnce([{ ...item(1, "GPU-123"), category_major: "板卡", category_minor: "显卡GPU" }]).mockRejectedValueOnce(new Error("offline"));
+    render(<LivePartSearch onCreate={vi.fn()} />);
+    type("gpu-123"); await tick();
+    expect(screen.getByRole("option")).toHaveTextContent("板卡 / 显卡GPU");
+    expect(screen.queryByRole("button", { name: /新建 PN/ })).toBeNull();
+    type("new"); await tick();
+    expect(screen.getByRole("alert")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /新建 PN/ })).toBeNull();
+    suggestParts.mockResolvedValue([]);
+    fireEvent.click(screen.getByRole("button", { name: "重试检索" })); await tick();
+    expect(screen.getByRole("button", { name: "新建 PN「new」" })).toBeVisible();
+  });
+});

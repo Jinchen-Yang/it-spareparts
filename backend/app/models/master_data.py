@@ -4,8 +4,8 @@
 - brands 唯一键建在 normalized_name（归一后写法漂移收敛于此），brand_name 仅展示。
 - product_categories 扁平两级（实测 33 大类 + 154 小类，邻接树是过度设计）；
   唯一约束用 PG15 NULLS NOT DISTINCT 防止 minor 为空的大类重复。
-- product_specs 不配 spec_key 字典表：键定义与抽取正则必须同步演进，
-  作为常量放 services/spec_extract.py；numeric_value 支撑容量/频率范围查询。
+- product_specs 不配 spec_key 字典表：标准键与抽取正则在 services/spec_extract.py
+  同步演进；custom: 命名空间存人工自由文本参数，不参与 numeric_value 范围查询。
 - 候选/问题表的幂等锚点是部分唯一索引（WHERE status='pending'/'open'），
   回填重跑用 on_conflict 防重，已审核行绝不被刷回。
 - 质量问题以 (entity_type, entity_id) 定位：part 级问题 entity_id=dim_part.id，
@@ -64,7 +64,7 @@ class ProductCategory(Base):
 
 
 class ProductSpec(Base):
-    """结构化规格（EAV）。spec_key 合法值由 services/spec_extract.SPEC_KEYS 约束。"""
+    """规格（EAV）：标准 SPEC_KEYS 或 custom: 人工文本键，统一经 validate_manual_specs 校验。"""
 
     __tablename__ = "product_specs"
 

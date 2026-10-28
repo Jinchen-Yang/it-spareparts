@@ -19,7 +19,7 @@ from app.security import (
     UserContext, apply_field_visibility, get_current_user_context,
     record_access_log, require_page,
 )
-from app.services import batch_normalize, master_edit, part_overview, part_resolver, part_search, pool_price_analysis, price_reference, standardize, taxonomy
+from app.services import batch_normalize, manual_part_input, master_edit, part_overview, part_resolver, part_search, pool_price_analysis, price_reference, spec_extract, standardize, taxonomy
 from app.services.resale_price_reference import PriceReferenceUnavailable
 
 router = APIRouter(prefix="/parts", tags=["parts"])
@@ -250,6 +250,7 @@ class PartCreate(BaseModel):
     category_minor: str | None = None
     machine_or_part: str | None = "备件"
     unit: str | None = None
+    spec_updates: dict | None = None
     force: bool = False   # 确认无重复后强制新建（跳过近似提示）
 
 
@@ -332,16 +333,21 @@ def master_create(
     """采购手工新建型号。near_duplicates 非空且未 force → 不建、返回候选待确认。"""
     operated_by = _real_operator(db, ident)
     try:
+        manual_part_input.validate_categories(body.category_major, body.category_minor)
         res = master_edit.create_part(
             db, pn_std=body.pn_std, description=body.description, brand=body.brand,
             manufacturer=body.manufacturer, summary=body.summary,
             category_major=body.category_major, category_minor=body.category_minor,
             machine_or_part=body.machine_or_part, unit=body.unit,
-            force=body.force, operated_by=operated_by)
+            force=body.force, operated_by=operated_by, spec_updates=body.spec_updates)
     except master_edit.MasterEditConflict as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, exc.detail) from exc
     except master_edit.MasterEditError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        code = "duplicate_pn" if str(exc).startswith("型号已存在:") else "validation_error"
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, {"code": code, "message": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            {"code": "validation_error", "message": str(exc)}) from exc
     return res
 
 
@@ -421,7 +427,9 @@ def master_categories(
         for code, name in taxonomy.CATEGORY_NAMES.items() if len(code) == 2
     ]
     return {"categories": tree, "battery_subtypes": taxonomy.BATTERY_SUBTYPES,
-            "cooling_types": taxonomy.COOLING_TYPES}
+            "cooling_types": taxonomy.COOLING_TYPES,
+            "spec_fields": [{"key": key, "label": label, "unit": unit}
+                            for key, (label, unit) in spec_extract.SPEC_KEYS.items()]}
 
 
 @router.get("/master/suggest")

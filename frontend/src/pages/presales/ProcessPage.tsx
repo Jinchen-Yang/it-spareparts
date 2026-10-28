@@ -36,6 +36,7 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [refreshRequired, setRefreshRequired] = useState(false);
   const [gallery, setGallery] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [values, setValues] = useState<Record<number, { key: string; value: OfferInput }>>({});
@@ -67,7 +68,7 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
   const partKey = (inquiry?.lines ?? []).filter((line) => line.part_id).map((line) => line.part_id).join(",");
   const refresh = useCallback(async () => {
     const latest = await loadInquiry(inquiryId);
-    setInquiry(latest); setTimelineVersion((value) => value + 1);
+    setInquiry(latest); setRefreshRequired(false); setTimelineVersion((value) => value + 1);
   }, [inquiryId]);
   useEffect(() => {
     let cancelled = false;
@@ -123,10 +124,15 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
     return !dirty[line.id] && ownOffers.some((offer) => offer.line_id === line.id && ["draft", "published"].includes(offer.status)
       && quoteComplete(offer) && !offer.no_stock && !!line.part_id);
   });
-  const editable = inquiry.status === "submitted" && (proactive || (!!task && actorId != null)) && !paused;
+  const editable = inquiry.status === "submitted" && (proactive || (!!task && actorId != null)) && !paused && !refreshRequired;
+  const refreshAfterSuccess = (error: unknown, action: string) => {
+    setRefreshRequired(true);
+    handlePresalesError.afterSuccess(error, action);
+  };
   const reply = async () => {
     if (!complete || !task) return;
     setBusy(true);
+    let completed = false;
     try {
       const lineResponses = required.map((line) => {
         const row = responseFor(line.id);
@@ -148,8 +154,12 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
           choices[conflict.draft_offer_id] = choice;
         }
       }
+      completed = true;
       message.success("已回复给销售"); setResponses({}); setDirty({}); refreshWorkBadges(); onTaskChange?.(); await refresh();
-    } catch (error) { handlePresalesError(error, refresh); }
+    } catch (error) {
+      if (completed) refreshAfterSuccess(error, "回复销售");
+      else await handlePresalesError(error, refresh);
+    }
     finally { setBusy(false); }
   };
 
@@ -161,7 +171,8 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
   };
   const valueKey = (line: InquiryLine) => `${currentFor(line)?.id ?? "new"}:${currentFor(line)?.version ?? 0}`;
   const valueFor = (line: InquiryLine) => {
-    if (values[line.id]?.key === valueKey(line)) return values[line.id].value;
+    // 冲突刷新可更新版本，但不能静默丢弃该行尚未保存的填写内容。
+    if (values[line.id] && (dirty[line.id] || values[line.id].key === valueKey(line))) return values[line.id].value;
     const current = currentFor(line);
     return offerInput(!proactive && (current?.status === "stale" || current?.status === "withdrawn") ? undefined : current);
   };
@@ -182,30 +193,45 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
   };
   const save = async (line?: InquiryLine) => {
     setBusy(true);
+    let completed = false;
     try {
       const selected = line ? [line] : required.filter((item) => responseFor(item.id).mode === "quote" && quoteComplete(valueFor(item)) && !!item.part_id);
       for (const item of selected) await saveLine(item);
+      completed = true;
       message.success(line && currentFor(line)?.status === "published" ? "报价已更新，已保存历史版本" : "报价草稿已保存；沿用与不报将在回复时提交");
       await refresh();
-    } catch (error) { await handlePresalesError(error, refresh); }
+    } catch (error) {
+      if (completed) refreshAfterSuccess(error, "保存报价");
+      else await handlePresalesError(error, refresh);
+    }
     finally { setBusy(false); }
   };
   const withdraw = async () => {
     if (!withdrawOffer || !reason.trim()) return;
     setBusy(true);
+    let completed = false;
     try {
       await presales.withdrawOffer(withdrawOffer.id, { expected_version: withdrawOffer.version, reason: reason.trim() });
+      completed = true;
       setWithdrawOffer(undefined); setReason(""); message.success("报价已撤销"); await refresh();
-    } catch (error) { await handlePresalesError(error, refresh); }
+    } catch (error) {
+      if (completed) refreshAfterSuccess(error, "撤销报价");
+      else await handlePresalesError(error, refresh);
+    }
     finally { setBusy(false); }
   };
   const release = async () => {
     if (!task || !reason.trim()) return;
     setBusy(true);
+    let completed = false;
     try {
       await releaseWorkItem(task.id, { expected_version: liveTask?.version ?? task.version, reason: reason.trim() });
+      completed = true;
       setReleaseOpen(false); setTask(undefined); refreshWorkBadges(); onTaskChange?.(); await refresh();
-    } catch (error) { await handlePresalesError(error, refresh); }
+    } catch (error) {
+      if (completed) refreshAfterSuccess(error, "退回待办");
+      else await handlePresalesError(error, refresh);
+    }
     finally { setBusy(false); }
   };
   const rows: QuoteGridRow[] = lines.map((line) => {
@@ -219,7 +245,7 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
       existing: library[line.part_id!] ?? [],
       disabled: !canEdit || busy, responseDisabled: !editable || !active || busy,
       referenced: !!line.ref_offer_id && !proactive,
-      binding: !line.part_id && editable && active ? <PartBinding line={line} onBound={setInquiry} refresh={refresh} /> : undefined,
+      binding: !line.part_id && editable && active ? <PartBinding line={line} onBound={setInquiry} refresh={refresh} disabled={busy} /> : undefined,
       details: <>
         {proactive && (!current || current.status !== "published") && <Alert type="info" message="当前报价不可更新，可新建主动报价"
           action={<Link to="/presales/offers/new">新建主动报价</Link>} />}
@@ -261,6 +287,12 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
     {inquiry.field_values?.map((field, index) => <div key={index}>{field.name ?? field.new_name}: {String(field.value ?? "")}</div>)}
     {!task && !proactive && <Alert type="info" message="请从自己的采购待办打开本单，领取或接受后即可处理" />}
     {paused && <Alert type="warning" message="询价已撤回，待办暂停" />}
+    {refreshRequired && <Alert type="warning" message="操作已成功，页面尚未更新，请刷新确认后继续。"
+      action={<Button loading={busy} onClick={async () => {
+        setBusy(true);
+        try { await refresh(); } catch (error) { refreshAfterSuccess(error, "之前的操作"); }
+        finally { setBusy(false); }
+      }}>刷新结果</Button>} />}
     {libraryError && <Alert type="warning" message="已有有效报价加载失败，请刷新后重试；仍可报新价或不报" />}
     <QuoteGrid id="presales-workbench-lines" rows={rows} now={now} proactive={proactive} onChange={changeValue}
       onResponse={(lineId, patch) => {

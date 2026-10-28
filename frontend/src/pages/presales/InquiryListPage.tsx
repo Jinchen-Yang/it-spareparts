@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Key } from "react";
 import { useNavigate } from "react-router-dom";
-import { Alert, App, Button, DatePicker, Input, Drawer, Select, Segmented, Space, Table, Tabs, Tag } from "antd";
+import { Alert, Button, DatePicker, Input, Drawer, Select, Segmented, Space, Table, Tabs, Tag } from "antd";
 import type { Dayjs } from "dayjs";
 import { presales, type Inquiry, type InquiryLine, type Offer } from "../../api/presales";
 import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
@@ -13,6 +13,8 @@ import PageHeader from "../../components/PageHeader";
 type InquirySort = { key: string; dir: "asc" | "desc" };
 import { isOfferActive, useNow } from "./shared";
 import { moneyExact } from "../../utils/format";
+import { parseApiError, type ApiErrorInfo } from "../../utils/apiError";
+import { ApiErrorFeedback } from "../../components/ApiErrorFeedback";
 import "./presales.css";
 
 const statuses: Record<string, string> = { draft: "草稿", submitted: "已提交", revising: "撤回修改中", closed: "已结束" };
@@ -31,7 +33,6 @@ function lineOffers(detail: Inquiry | undefined, line: InquiryLine): Offer[] {
 
 export default function InquiryListPage() {
   const navigate = useNavigate();
-  const { message } = App.useApp();
   const permissions = readPermissionMap();
   const supervisor = !!permissions.action_presales_supervise || ["admin", "boss"].includes(localStorage.getItem("role") || "");
   const [scope, setScope] = useState<"mine" | "shared" | "all">("mine");
@@ -51,7 +52,7 @@ export default function InquiryListPage() {
   const [total, setTotal] = useState(0);
   const [sort, setSort] = useState<InquirySort | null>(defaultSort);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<ApiErrorInfo>();
   const [detailError, setDetailError] = useState(false);
   const [reload, setReload] = useState(0);
   const conflictRetried = useRef(false);
@@ -66,7 +67,7 @@ export default function InquiryListPage() {
   useEffect(() => { conflictRetried.current = false; setSelected([]); }, [scope, kind, status, page, sort, search, dateFrom, dateTo]);
   useEffect(() => {
     let disposed = false;
-    setLoading(true); setError(""); setItems([]); setDetails({}); setDetailError(false);
+    setLoading(true); setError(undefined); setItems([]); setDetails({}); setDetailError(false);
     const selected = sort && serverKeys.has(sort.key) ? sort : defaultSort;
     void presales.listInquiries({ scope, kind, status, page, page_size: 20,
       q: search || undefined, date_from: dateFrom, date_to: dateTo,
@@ -81,15 +82,15 @@ export default function InquiryListPage() {
       setDetails(result); setDetailError(rows.some((row) => row.status === "rejected"));
     }).catch((cause) => {
       if (disposed) return;
-      const conflict = cause?.response?.status === 409;
-      setError(conflict ? "已被他人修改/领取，请刷新" : "询价单列表加载失败");
-      if (conflict && !conflictRetried.current) {
+      const info = parseApiError(cause, "询价单列表加载失败");
+      setError(info);
+      if (info.kind === "version_conflict" && !conflictRetried.current) {
         conflictRetried.current = true;
-        void message.warning("已被他人修改/领取，已自动刷新"); setReload((value) => value + 1);
+        setReload((value) => value + 1);
       }
     }).finally(() => { if (!disposed) setLoading(false); });
     return () => { disposed = true; };
-  }, [scope, kind, status, page, reload, message, sort, search, dateFrom, dateTo]);
+  }, [scope, kind, status, page, reload, sort, search, dateFrom, dateTo]);
   useEffect(() => {
     let disposed = false;
     void listWorkCandidates("presales_inquiry").then((data) => { if (!disposed) setCandidates(data.items); }).catch(() => {});
@@ -142,7 +143,7 @@ export default function InquiryListPage() {
       <div className="presales-toolbar"><WorkbookExportButton label="合并下载" schemaName="presales_sales_summary" disabled={!exportIds.length || loading}
         fetchSchema={() => presalesWorkbooks.getSalesSummarySchema()} onExport={(visible) => presalesWorkbooks.exportSalesSummary(exportIds, visible)} filename="销售询价汇总.xlsx" />
         <span className="presales-muted">选择本人销售询价后按 PN 汇总下载。处理进度筛选当前页。</span></div>
-      {error && <Alert type="error" message={error} action={<Button onClick={() => setReload((value) => value + 1)}>重试</Button>} />}
+      {error && <Alert type="error" message="询价单列表加载失败" description={<ApiErrorFeedback info={error} />} action={<Button onClick={() => setReload((value) => value + 1)}>重试</Button>} />}
       {detailError && <Alert type="warning" message="部分处理人状态加载失败，请刷新后查看。" />}
       <Table aria-label="询价单列表" rowKey="id" columns={columns} dataSource={filtered} loading={loading} tableLayout="fixed"
         rowSelection={scope === "mine" ? { selectedRowKeys: selected, onChange: setSelected, getCheckboxProps: (row) => ({ "aria-label": `选择 ${row.inquiry_no}`, disabled: !row.is_owner || row.kind !== "sales_inquiry" }) } : undefined}
