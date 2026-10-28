@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.40.1";
+export const APP_VERSION = "1.41.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.41.0",
+    date: "2026-10-28",
+    items: [
+      "维保：新增领用与返还跨项目搜索（PN/SN/快递单号/备注），AI 助手可直接查询",
+      "维保数据看板：项目对比导出补上期间下单量、期间下单单数",
+      "维保工作簿：手工补价后成本不再显示为未知；上传领用工作簿时，排队期间权限变化会被重新核验",
+    ],
+  },
   {
     version: "1.40.1",
     date: "2026-10-26",
