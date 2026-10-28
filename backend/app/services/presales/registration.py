@@ -30,6 +30,18 @@ def _summarize(db, inquiry_ids, ctx):
             result[inquiry_id] = {key: view[key] for key in (
                 "inquiry_no", "kind", "status", "customer_id", "line_count", "progress", "created_by_name", "created_at"
             ) if key in view}
+    if result:
+        grouped: dict[int, list[str]] = {}
+        rows = db.execute(select(
+            PresalesInquiryLine.inquiry_id, PresalesInquiryLine.pn_raw,
+        ).where(PresalesInquiryLine.inquiry_id.in_(result), PresalesInquiryLine.status == "active")
+          .order_by(PresalesInquiryLine.seq, PresalesInquiryLine.id))
+        for inquiry_id, pn_raw in rows:
+            bucket = grouped.setdefault(inquiry_id, [])
+            if len(bucket) < 3 and pn_raw:
+                bucket.append(pn_raw)
+        for inquiry_id, summary in result.items():
+            summary["pns"] = grouped.get(inquiry_id, [])
     return result
 
 

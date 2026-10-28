@@ -354,7 +354,7 @@ export default function AppShell({
           )}
         </Header>
 
-        <Content style={{ padding: "var(--mb-shell-content-padding)", background: COLORS.page }}>
+        <Content style={{ padding: "var(--mb-shell-content-padding)", background: COLORS.page, minWidth: 0 }}>
           {showWhatsNew && (
             <Alert
               type="success"
