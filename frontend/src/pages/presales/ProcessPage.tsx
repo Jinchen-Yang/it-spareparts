@@ -1,112 +1,22 @@
-import { useCallback, useEffect, useState, type Key } from "react";
-import { Alert, App, Button, Input, InputNumber, Modal, Space, Spin, Tag, Typography } from "antd";
-import { Link, useLocation, useParams } from "react-router-dom";
-import { presales, type ExistingChoice, type Inquiry, type InquiryLine, type LineResponseInput, type NearDuplicate, type Offer, type OfferInput } from "../../api/presales";
-import { listWorkItems, releaseWorkItem, type WorkItem, type WorkTab } from "../../api/workItems";
-import type { PartSuggestion } from "../../api/search";
-import LivePartSearch from "../../components/parts/LivePartSearch";
-import PartThumb from "../../components/gallery/PartThumb";
+import { useCallback, useEffect, useState } from "react";
+import { Alert, App, Button, Drawer, Input, InputNumber, Modal, Space, Spin, Tag, Typography } from "antd";
+import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
+import { presales, type ExistingChoice, type Inquiry, type InquiryLine, type LineResponseInput, type Offer, type OfferInput } from "../../api/presales";
+import { releaseWorkItem, type WorkItem } from "../../api/workItems";
 import GalleryPicker from "../../components/gallery/GalleryPicker";
 import Timeline from "../../components/workflow/Timeline";
 import { refreshWorkBadges } from "../../components/workflow/useWorkBadge";
 import { offerInput, quoteComplete } from "./QuoteEditor";
-import PartQuoteBadges from "./PartQuoteBadges";
 import { usePresalesError, isOfferActive, useNow, flattenOffers, expiryLabel } from "./shared";
 import QuoteGrid, { type QuoteGridRow } from "./QuoteGrid";
 import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
 import { WorkbookExportButton } from "../../components/workbook";
 import { presalesWorkbooks } from "../../api/presalesWorkbooks";
 import WorkbookDialog from "./WorkbookDialog";
-
-async function findOwnTask(inquiryId: number): Promise<WorkItem | undefined> {
-  // 待办接口的这三个页签均按服务端当前账号过滤，不以显示名称推断身份。
-  for (const tab of ["assigned", "claimed", "done"] as WorkTab[]) {
-    for (let page = 1; ; page += 1) {
-      const result = await listWorkItems({ tab, subject_type: "presales_inquiry", page, page_size: 100 });
-      const found = result.items.find((item) => item.subject_id === inquiryId);
-      if (found) return found;
-      if (page * 100 >= result.total) break;
-    }
-  }
-  return undefined;
-}
-
-async function loadInquiry(inquiryId: number) {
-  const inquiry = await presales.getInquiry(inquiryId);
-  const references = (inquiry.lines ?? []).flatMap((line) => [...new Set([
-    ...(line.ref_offer_id ? [line.ref_offer_id] : []), ...(line.linked_offer_ids ?? []), ...(line.linked_offers ?? []).map((offer) => offer.id),
-    ...(inquiry.line_responses ?? []).filter((row) => row.line_id === line.id && row.mode === "reuse" && row.ref_offer_id)
-      .map((row) => row.ref_offer_id!),
-  ])].map((ref_offer_id) => ({ ref_offer_id, part_id: line.part_id })));
-  if (inquiry.kind !== "proactive_offer" || !references.length) return inquiry;
-  const library = await presales.library([...new Set(references.flatMap((row) => row.part_id ? [row.part_id] : []))]);
-  // 处理页编辑当前报价；原单关联中的钉版本只在销售详情显示，不能当作并发更新版本。
-  const offers = new Map((inquiry.offers ?? []).filter((offer) => !references.some((row) => row.ref_offer_id === offer.id))
-    .map((offer) => [offer.id, offer]));
-  for (const offer of Object.values(library).flatMap(flattenOffers)) {
-    if (references.some((line) => line.ref_offer_id === offer.id)) offers.set(offer.id, offer);
-  }
-  // 过期报价已从报价库移除。历史只用于定位原单，再读当前记录获取最新并发版本。
-  await Promise.allSettled(references.filter((line) => !offers.has(line.ref_offer_id!)).map(async (line) => {
-    const revisions = await presales.revisions(line.ref_offer_id!);
-    const originId = revisions[revisions.length - 1]?.snapshot.inquiry_id;
-    if (!originId) return;
-    const origin = await presales.getInquiry(originId);
-    const current = origin.offers?.find((offer) => offer.id === line.ref_offer_id);
-    if (current) offers.set(current.id, current);
-  }));
-  return { ...inquiry, offers: Array.from(offers.values()) };
-}
-
-function PartBinding({ line, onBound, refresh }: { line: InquiryLine; onBound: (inquiry: Inquiry) => void; refresh: () => Promise<void> }) {
-  const handlePresalesError = usePresalesError();
-  const [pn, setPn] = useState(line.pn_raw);
-  const [description, setDescription] = useState(line.description ?? "");
-  const [brand, setBrand] = useState("");
-  const [duplicates, setDuplicates] = useState<NearDuplicate[]>();
-  const [selected, setSelected] = useState<PartSuggestion[]>([]);
-  const [busy, setBusy] = useState(false);
-  const check = async () => {
-    setBusy(true);
-    try { setDuplicates((await presales.partCheck(line.id, pn)).near_duplicates); }
-    catch (error) { handlePresalesError(error, refresh); }
-    finally { setBusy(false); }
-  };
-  const bind = async (create: boolean) => {
-    if (!duplicates || (!create && !selected[0])) return;
-    setBusy(true);
-    try {
-      onBound(create
-        ? await presales.createPart(line.id, { expected_version: line.version, pn_std: pn,
-          description: description || null, brand: brand || null })
-        : await presales.bindPart(line.id, { expected_version: line.version, part_id: selected[0].part_id }));
-    } catch (error) { setDuplicates(undefined); handlePresalesError(error, refresh); }
-    finally { setBusy(false); }
-  };
-  return <Space direction="vertical" style={{ width: "100%" }}>
-    <Tag color="warning">待建档：先查重，再绑定已有 PN 或新建</Tag>
-    <Space wrap>
-      <Input aria-label={`${line.pn_raw}建档 PN`} value={pn} disabled={busy} maxLength={256}
-        onChange={(event) => { setPn(event.target.value); setDuplicates(undefined); setSelected([]); }} />
-      <Button loading={busy} disabled={!pn.trim()} onClick={() => void check()}>查重</Button>
-    </Space>
-    {duplicates && (duplicates.length ? <>
-      <Alert type="info" message="发现已有或近似型号，请在实时检索中选定后绑定" />
-      {duplicates.map((item) => <Typography.Text key={item.pn_std}>{item.pn_std} · {item.reason}</Typography.Text>)}
-      <LivePartSearch inputProps={{ "aria-label": `${line.pn_raw}绑定已有 PN` }} value={selected} onChange={setSelected}
-        renderThumb={(item) => <PartThumb partId={item.part_id} pn={item.pn_std} />}
-        renderBadges={(item) => <PartQuoteBadges partId={item.part_id} />} />
-      <Button disabled={!selected.length || busy} onClick={() => void bind(false)}>绑定已有 PN</Button>
-    </> : <>
-      <Typography.Text>查重无命中，可新建主数据。</Typography.Text>
-      <Input aria-label={`${line.pn_raw}建档描述`} placeholder="产品描述" value={description} disabled={busy}
-        onChange={(event) => setDescription(event.target.value)} />
-      <Input aria-label={`${line.pn_raw}建档品牌`} placeholder="品牌（可选）" value={brand} disabled={busy}
-        onChange={(event) => setBrand(event.target.value)} />
-      <Button loading={busy} onClick={() => void bind(true)}>新建并绑定 PN</Button>
-    </>)}
-  </Space>;
-}
+import PartBinding from "./PartBinding";
+import PageHeader from "../../components/PageHeader";
+import { findOwnTask, loadInquiry } from "./quoteData";
+import "./presales.css";
 
 export default function ProcessPage() {
   const { id } = useParams();
@@ -114,21 +24,29 @@ export default function ProcessPage() {
 }
 
 export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inquiryId: number; onTaskChange?: () => void; onDirtyChange?: (dirty: boolean) => void }) {
+  const location = useLocation();
+  const navigationTask = (location.state as { workItem?: WorkItem } | null)?.workItem;
+  if (navigationTask?.subject_type === "presales_offer_notice") return <Navigate replace to={`/presales/inquiries/${inquiryId}`} state={location.state} />;
+  return <QuoteProcessContent inquiryId={inquiryId} onTaskChange={onTaskChange} onDirtyChange={onDirtyChange} />;
+}
+
+function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inquiryId: number; onTaskChange?: () => void; onDirtyChange?: (dirty: boolean) => void }) {
   const handlePresalesError = usePresalesError();
   const { choose, dialog } = useExistingOfferChoice();
   const location = useLocation();
   const navigationTask = (location.state as { workItem?: WorkItem } | null)?.workItem;
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
+  const navigate = useNavigate();
   const [inquiry, setInquiry] = useState<Inquiry>();
   const [task, setTask] = useState<WorkItem | undefined>(navigationTask?.subject_id === inquiryId ? navigationTask : undefined);
   const [loadVersion, setLoadVersion] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [refreshRequired, setRefreshRequired] = useState(false);
   const [gallery, setGallery] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [values, setValues] = useState<Record<number, { key: string; value: OfferInput }>>({});
-  const [expanded, setExpanded] = useState<Key[]>([]);
   const [validity, setValidity] = useState(1);
   const [withdrawOffer, setWithdrawOffer] = useState<Offer>();
   const [releaseOpen, setReleaseOpen] = useState(false);
@@ -139,13 +57,25 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
   const [library, setLibrary] = useState<Record<number, Offer[]>>({});
   const [libraryError, setLibraryError] = useState(false);
   const [responses, setResponses] = useState<Record<number, LineResponseInput>>({});
+  const hasChanges = Object.values(dirty).some(Boolean) || Object.keys(responses).length > 0;
+  useEffect(() => {
+    if (!hasChanges) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [hasChanges]);
+  const back = () => {
+    if (!hasChanges) { navigate("/presales/workbench"); return; }
+    modal.confirm({ title: "当前单据有未保存的修改", content: "返回列表会放弃尚未保存的报价、沿用选择和不报原因。",
+      okText: "放弃修改并返回", cancelText: "继续填写", onOk: () => navigate("/presales/workbench") });
+  };
   useEffect(() => { onDirtyChange?.(Object.values(dirty).some(Boolean) || Object.keys(responses).length > 0); }, [dirty, responses, onDirtyChange]);
   const now = useNow([...Object.values(library).flatMap(flattenOffers), ...(inquiry?.line_responses ?? []).flatMap((row) => row.offer ? [row.offer] : [])]
     .flatMap((offer) => [offer.valid_from, offer.valid_until]));
   const partKey = (inquiry?.lines ?? []).filter((line) => line.part_id).map((line) => line.part_id).join(",");
   const refresh = useCallback(async () => {
     const latest = await loadInquiry(inquiryId);
-    setInquiry(latest); setTimelineVersion((value) => value + 1);
+    setInquiry(latest); setRefreshRequired(false); setTimelineVersion((value) => value + 1);
   }, [inquiryId]);
   useEffect(() => {
     let cancelled = false;
@@ -163,7 +93,7 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
     setTask(currentTask);
     loadInquiry(inquiryId).then(async (data) => {
       const ownTask = currentTask ?? (data.kind === "proactive_offer" ? undefined : await findOwnTask(inquiryId));
-      if (!cancelled) { setInquiry(data); setTask(ownTask); setValidity(data.offers?.[0]?.validity_days ?? 1); setExpanded((data.lines ?? []).filter((line) => !line.part_id).map((line) => line.id)); }
+      if (!cancelled) { setInquiry(data); setTask(ownTask); setValidity(data.offers?.[0]?.validity_days ?? 1); }
     })
       .catch((error) => { if (!cancelled) { setLoadError(true); handlePresalesError(error); } })
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -201,10 +131,16 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
     return !dirty[line.id] && ownOffers.some((offer) => offer.line_id === line.id && ["draft", "published"].includes(offer.status)
       && quoteComplete(offer) && !offer.no_stock && !!line.part_id);
   });
-  const editable = inquiry.status === "submitted" && (proactive || (!!task && actorId != null)) && !paused;
+  const canProcess = inquiry.status === "submitted" && (proactive || (!!task && actorId != null)) && !paused;
+  const editable = canProcess && !refreshRequired;
+  const refreshAfterSuccess = (error: unknown, action: string) => {
+    setRefreshRequired(true);
+    handlePresalesError.afterSuccess(error, action);
+  };
   const reply = async () => {
     if (!complete || !task) return;
     setBusy(true);
+    let completed = false;
     try {
       const lineResponses = required.map((line) => {
         const row = responseFor(line.id);
@@ -226,8 +162,12 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
           choices[conflict.draft_offer_id] = choice;
         }
       }
+      completed = true;
       message.success("已回复给销售"); setResponses({}); setDirty({}); refreshWorkBadges(); onTaskChange?.(); await refresh();
-    } catch (error) { handlePresalesError(error, refresh); }
+    } catch (error) {
+      if (completed) refreshAfterSuccess(error, "回复销售");
+      else await handlePresalesError(error, refresh);
+    }
     finally { setBusy(false); }
   };
 
@@ -239,7 +179,8 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
   };
   const valueKey = (line: InquiryLine) => `${currentFor(line)?.id ?? "new"}:${currentFor(line)?.version ?? 0}`;
   const valueFor = (line: InquiryLine) => {
-    if (values[line.id]?.key === valueKey(line)) return values[line.id].value;
+    // 冲突刷新可更新版本，但不能静默丢弃该行尚未保存的填写内容。
+    if (values[line.id] && (dirty[line.id] || values[line.id].key === valueKey(line))) return values[line.id].value;
     const current = currentFor(line);
     return offerInput(!proactive && (current?.status === "stale" || current?.status === "withdrawn") ? undefined : current);
   };
@@ -260,30 +201,45 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
   };
   const save = async (line?: InquiryLine) => {
     setBusy(true);
+    let completed = false;
     try {
       const selected = line ? [line] : required.filter((item) => responseFor(item.id).mode === "quote" && quoteComplete(valueFor(item)) && !!item.part_id);
       for (const item of selected) await saveLine(item);
+      completed = true;
       message.success(line && currentFor(line)?.status === "published" ? "报价已更新，已保存历史版本" : "报价草稿已保存；沿用与不报将在回复时提交");
       await refresh();
-    } catch (error) { await handlePresalesError(error, refresh); }
+    } catch (error) {
+      if (completed) refreshAfterSuccess(error, "保存报价");
+      else await handlePresalesError(error, refresh);
+    }
     finally { setBusy(false); }
   };
   const withdraw = async () => {
     if (!withdrawOffer || !reason.trim()) return;
     setBusy(true);
+    let completed = false;
     try {
       await presales.withdrawOffer(withdrawOffer.id, { expected_version: withdrawOffer.version, reason: reason.trim() });
+      completed = true;
       setWithdrawOffer(undefined); setReason(""); message.success("报价已撤销"); await refresh();
-    } catch (error) { await handlePresalesError(error, refresh); }
+    } catch (error) {
+      if (completed) refreshAfterSuccess(error, "撤销报价");
+      else await handlePresalesError(error, refresh);
+    }
     finally { setBusy(false); }
   };
   const release = async () => {
     if (!task || !reason.trim()) return;
     setBusy(true);
+    let completed = false;
     try {
       await releaseWorkItem(task.id, { expected_version: liveTask?.version ?? task.version, reason: reason.trim() });
+      completed = true;
       setReleaseOpen(false); setTask(undefined); refreshWorkBadges(); onTaskChange?.(); await refresh();
-    } catch (error) { await handlePresalesError(error, refresh); }
+    } catch (error) {
+      if (completed) refreshAfterSuccess(error, "退回待办");
+      else await handlePresalesError(error, refresh);
+    }
     finally { setBusy(false); }
   };
   const rows: QuoteGridRow[] = lines.map((line) => {
@@ -297,12 +253,12 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
       existing: library[line.part_id!] ?? [],
       disabled: !canEdit || busy, responseDisabled: !editable || !active || busy,
       referenced: !!line.ref_offer_id && !proactive,
+      binding: !line.part_id && canProcess && active ? <PartBinding line={line} onBound={setInquiry} refresh={refresh} disabled={busy || refreshRequired} /> : undefined,
       details: <>
-        {!line.part_id && editable && active && <PartBinding line={line} onBound={setInquiry} refresh={refresh} />}
         {proactive && (!current || current.status !== "published") && <Alert type="info" message="当前报价不可更新，可新建主动报价"
           action={<Link to="/presales/offers/new">新建主动报价</Link>} />}
       </>,
-      actions: canEdit && (proactive || response.mode === "quote") && <span className="quote-row-actions">
+      actions: canEdit && (proactive || response.mode === "quote") && <span className="presales-toolbar">
         <Button size="small" loading={busy} disabled={!quoteComplete(valueFor(line)) || (!line.part_id && !valueFor(line).no_stock)}
           onClick={() => void save(line)}>{current?.status === "published" ? "更新报价" : "保存该行报价"}</Button>
         {current?.status === "published" && <Button size="small" danger disabled={busy} onClick={() => { setReason(""); setWithdrawOffer(current); }}>撤销报价</Button>}
@@ -320,37 +276,45 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
   const dayValues = (proactive ? lines : required).map((line) => valueFor(line).validity_days ?? 1);
   const uniformDays = dayValues.length ? dayValues.every((days) => days === dayValues[0]) ? dayValues[0] : undefined : validity;
 
-  return <section className="quote-document">
-    <header className="quote-heading"><span className="quote-number">{inquiry.inquiry_no}</span>
-      {"notes" in inquiry && <span className="quote-header-note" title={inquiry.notes ?? undefined}>{inquiry.notes || "无客户补充要求"}</span>}
-      <div className="quote-validity"><span>统一有效期</span><InputNumber size="small" aria-label="统一有效期" min={1} max={36500} precision={0}
+  return <section className="presales-page">
+    <PageHeader title={`询价人：${inquiry.created_by_name ?? "业务人员"}`} subtitle="逐行填写报价，保存草稿后回复给销售" extra={<Button onClick={back}>返回列表</Button>} />
+    <div className="presales-panel">
+    <div className="presales-toolbar">
+      {"notes" in inquiry && <span className="presales-muted" title={inquiry.notes ?? undefined}>{inquiry.notes || "无客户补充要求"}</span>}
+      <div className="presales-toolbar"><span>统一有效期</span>{!editable ? <span>{uniformDays ?? "各行不同"} 天</span> : <InputNumber aria-label="统一有效期" min={1} max={36500} precision={0}
         value={uniformDays ?? null} placeholder="多值" title="修改后应用到本单所有待处理报价行" disabled={!editable || busy} onChange={(days) => {
           const next = days ?? 1; setValidity(next);
           for (const line of proactive ? lines : required) changeValue(line.id, { ...valueFor(line), validity_days: next });
-        }} /><span role="status">{uniformDays === undefined ? "各行有效期不同；修改后统一应用" : expiryLabel(uniformDays, now)}</span></div>
+        }} />}<span role="status">{uniformDays === undefined ? "各行有效期不同；修改后统一应用" : expiryLabel(uniformDays, now)}</span></div>
       {!proactive && <><WorkbookExportButton size="small" label="下载报价表" schemaName="presales_quote_sheet" disabled={busy || !editable || !active}
         fetchSchema={() => presalesWorkbooks.getQuoteSheetSchema()} onExport={(visible) => presalesWorkbooks.exportQuoteSheet([inquiry.id], visible)}
-        filename={`${inquiry.inquiry_no}-报价表.xlsx`} />
+        filename="采购报价表.xlsx" />
         <Button size="small" disabled={busy || !editable || !active} onClick={() => setImportOpen(true)}>上传报价表</Button></>}
       <Button size="small" onClick={() => setGallery(true)} disabled={!lines.some((line) => line.part_id)}>查看图片 / 多选下载</Button>
-    </header>
+    </div>
     {inquiry.field_values?.map((field, index) => <div key={index}>{field.name ?? field.new_name}: {String(field.value ?? "")}</div>)}
     {!task && !proactive && <Alert type="info" message="请从自己的采购待办打开本单，领取或接受后即可处理" />}
     {paused && <Alert type="warning" message="询价已撤回，待办暂停" />}
+    {refreshRequired && <Alert type="warning" message="操作已成功，页面尚未更新，请刷新确认后继续。"
+      action={<Button loading={busy} onClick={async () => {
+        setBusy(true);
+        try { await refresh(); } catch (error) { refreshAfterSuccess(error, "之前的操作"); }
+        finally { setBusy(false); }
+      }}>刷新结果</Button>} />}
     {libraryError && <Alert type="warning" message="已有有效报价加载失败，请刷新后重试；仍可报新价或不报" />}
     <QuoteGrid id="presales-workbench-lines" rows={rows} now={now} proactive={proactive} onChange={changeValue}
-      expandedRowKeys={expanded} onExpandedRowKeysChange={setExpanded} onResponse={(lineId, patch) => {
+      onResponse={(lineId, patch) => {
         setResponses((previous) => ({ ...previous, [lineId]: { ...responseFor(lineId), ...patch } }));
-        if (patch.mode === "reuse") setExpanded((previous) => [...new Set([...previous, lineId])]);
       }} />
-    <footer className="quote-footer"><span>填写完成 <b>{handledRows.length}</b> / {required.length} 行（报价 {count("quote")} · 沿用 {count("reuse")} · 不报 {count("skip")}）</span>
-      <div className="quote-footer-actions"><Button size="small" onClick={() => setTimeline(!timeline)}>{timeline ? "隐藏动态" : "查看动态"}</Button>
+    </div>
+    <footer className="presales-footer"><span>填写完成 <b>{handledRows.length}</b> / {required.length} 行（报价 {count("quote")} · 沿用 {count("reuse")} · 不报 {count("skip")}）</span>
+      <div className="presales-toolbar"><Button size="small" onClick={() => setTimeline(!timeline)}>{timeline ? "隐藏动态" : "查看动态"}</Button>
         {active && <><Button disabled={busy || !editable || !task?.allowed_actions.includes("release")} onClick={() => { setReason(""); setReleaseOpen(true); }}>退回公共池</Button>
           <Button loading={busy} disabled={!editable || !required.some((line) => responseFor(line.id).mode === "quote" && quoteComplete(valueFor(line)) && !!line.part_id)} onClick={() => void save()}>保存草稿</Button>
           <Button type="primary" loading={busy} disabled={!complete || !editable} onClick={() => void reply()}>回复给销售</Button></>}
       </div>
     </footer>
-    {active && !complete && <div className="quote-muted">每行保存新报价、沿用有效报价或填写不报原因后，才能回复给销售。</div>}
+    {active && !complete && <div className="presales-muted">每行保存新报价、沿用有效报价或填写不报原因后，才能回复给销售。</div>}
     {dialog}
     <Modal title="撤销报价" open={!!withdrawOffer} okText="确认撤销" cancelText="取消" confirmLoading={busy}
       okButtonProps={{ disabled: !reason.trim() }} onCancel={() => setWithdrawOffer(undefined)} onOk={() => void withdraw()}>
@@ -360,7 +324,9 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
       okButtonProps={{ disabled: !reason.trim() }} onCancel={() => setReleaseOpen(false)} onOk={() => void release()}>
       <Input.TextArea aria-label="退回原因" placeholder="必须填写退回原因" value={reason} onChange={(event) => setReason(event.target.value)} />
     </Modal>
-    {timeline && <Timeline key={`timeline-${timelineVersion}`} subjectType="presales_inquiry" subjectId={inquiry.id} />}
+    <Drawer title="询价动态" open={timeline} onClose={() => setTimeline(false)} width={480} destroyOnHidden>
+      {timeline && <Timeline key={`timeline-${timelineVersion}`} subjectType="presales_inquiry" subjectId={inquiry.id} />}
+    </Drawer>
     {gallery && <GalleryPicker mode="modal" items={lines.filter((line) => line.part_id).map((line) => ({ partId: line.part_id!, pn: line.pn_raw }))} onClose={() => setGallery(false)} />}
     {importOpen && <WorkbookDialog mode="quote" inquiryId={inquiry.id} onClose={() => setImportOpen(false)} onApplied={() => {
       message.success("已保存为草稿，请在页面确认后回复"); setImportOpen(false); setLoadVersion((version) => version + 1); onTaskChange?.();

@@ -239,6 +239,10 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
         if offer.id in views_by_id and "reporter" not in views_by_id[offer.id]}
     if hidden_reporters and not owner:
         result.pop("assignee_ids", None)
+    # 销售询价的发起人是采购处理需求所需的标识；主动报价仍遵守报价人的受众规则。
+    if inquiry.kind == "sales_inquiry" or owner or bypass(ctx) or inquiry.created_by not in hidden_reporters:
+        creator = db.get(SysUser, inquiry.created_by)
+        result["created_by_name"] = creator.display_name or creator.username if creator else None
     result["line_count"] = len(lines)
     line_versions = {line.id: line.version for line in lines}
     handled = {offer["line_id"] for offer in offers

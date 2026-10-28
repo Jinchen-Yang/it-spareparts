@@ -1,96 +1,30 @@
-import { useCallback, useEffect, useRef, useState, type Key } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Alert, App, Button, Checkbox, Form, Input, InputNumber, Modal, Popover, Select, Space, Spin, Tag } from "antd";
+import { Alert, App, Button, Checkbox, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popover, Select, Space, Spin, Table, Tag } from "antd";
 import { presales, type Inquiry, type InquiryLine, type Offer } from "../../api/presales";
 import type { AudienceRule, AudienceRuleRead } from "../../api/audience";
-import { getFieldTemplate, listFieldDefinitions, type CustomFieldValue, type FieldDefinition, type FieldLevel } from "../../api/fields";
+import { type CustomFieldValue } from "../../api/fields";
 import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
 import type { PartSuggestion } from "../../api/search";
 import LivePartSearch from "../../components/parts/LivePartSearch";
+import CreatePartModal from "../../components/parts/CreatePartModal";
 import PartThumb from "../../components/gallery/PartThumb";
 import PriceRefBadge from "../../components/pricing/PriceRefBadge";
 import AudiencePicker, { PUBLIC_AUDIENCE } from "../../components/audience/AudiencePicker";
 import AudienceLock from "../../components/audience/AudienceLock";
-import CustomFieldsEditor from "../../components/fields/CustomFieldsEditor";
 import PartQuoteBadges from "./PartQuoteBadges";
-import { isOfferActive as activeOffer, OfferBadge, useNow, flattenOffers } from "./shared";
+import { isOfferActive as activeOffer, OfferBadge, useNow, flattenOffers, usePresalesError } from "./shared";
 import { formatMoney } from "../../utils/format";
 import CandidateSelect from "./CandidateSelect";
 import { changedAudience } from "../../components/audience/rules";
 import { readPermissionMap } from "../../nav";
-import DataGrid, { type DataGridColumn } from "../../components/datagrid/DataGrid";
+import PageHeader from "../../components/PageHeader";
+import { type DraftLine, type ReadField, editableFields, fieldKey, DELIVERY_FIELD, errorText, Fields, EffectiveOffers } from "./InquiryFields";
 import { WorkbookExportButton } from "../../components/workbook";
 import { presalesWorkbooks } from "../../api/presalesWorkbooks";
 import WorkbookDialog from "./WorkbookDialog";
-import "./sales-pages.css";
-
-type ReadField = { field_def_id?: number; new_name?: string; name?: string; value: unknown; rule?: AudienceRuleRead };
-type DraftLine = {
-  key: string; line_key?: string; part_id: number | null; pn_raw: string; description?: string | null;
-  brand?: string | null; qty: number; require_exact_pn: boolean; ref_offer_id?: number | null;
-  ref_offer_revision_no?: number | null; ref_offer?: Offer;
-  notes?: string | null; notes_audience?: AudienceRule; notesVisible: boolean; field_values: CustomFieldValue[];
-  savedNotesAudience?: AudienceRuleRead;
-  originalFields: ReadField[]; expectedDelivery: string;
-};
-const DELIVERY_FIELD = "期望交期";
-const fieldKey = (value: { field_def_id?: number; new_name?: string }) => value.field_def_id ? `id:${value.field_def_id}` : `new:${value.new_name}`;
-const editableFields = (values: ReadField[] = [], excludeDelivery = false): CustomFieldValue[] => values.flatMap((value) => {
-  if ((excludeDelivery && value.name === DELIVERY_FIELD) || value.value == null) return [];
-  return [{ ...(value.field_def_id ? { field_def_id: value.field_def_id } : { new_name: value.new_name || value.name || "" }), value: String(value.value) } as CustomFieldValue];
-});
-
-function errorText(error: unknown, fallback: string) {
-  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-  return typeof detail === "string" ? detail : detail && typeof detail === "object" && "message" in detail ? String(detail.message) : fallback;
-}
-
-/** 字段池只负责编辑；模板按 PN anchor 拉取，不携带上一张单据的值。 */
-function Fields({ level, partId, value, savedValues, onChange, disabled = false }: {
-  level: FieldLevel; partId?: number | null; value: CustomFieldValue[];
-  savedValues?: ReadField[];
-  onChange: (values: CustomFieldValue[]) => void; disabled?: boolean;
-}) {
-  const [template, setTemplate] = useState<FieldDefinition[]>([]);
-  const [definitions, setDefinitions] = useState<FieldDefinition[]>([]);
-  const [error, setError] = useState(false);
-  useEffect(() => {
-    const controller = new AbortController();
-    setError(false);
-    void Promise.all([getFieldTemplate("presales_inquiry", level, partId ? `part:${partId}` : undefined, controller.signal),
-      listFieldDefinitions("presales_inquiry", level, controller.signal)]).then(([rows, pool]) => {
-      if (!controller.signal.aborted) {
-        setTemplate(rows.filter((field) => field.name !== DELIVERY_FIELD || level !== "line"));
-        setDefinitions(pool.filter((field) => field.name !== DELIVERY_FIELD || level !== "line"));
-      }
-    }).catch(() => { if (!controller.signal.aborted) setError(true); });
-    return () => controller.abort();
-  }, [level, partId]);
-  return <>
-    {error && <Alert type="warning" message="字段池加载失败，请刷新后重试；已有填写内容仍会保留。" />}
-    <CustomFieldsEditor subjectType="presales_inquiry" level={level} template={template} definitions={definitions}
-      value={value} savedValues={savedValues} onChange={onChange} disabled={disabled || error} />
-  </>;
-}
-
-function EffectiveOffers({ offers, now, onReference }: { offers: Offer[]; now: number; onReference?: (offer: Offer) => void }) {
-  const active = flattenOffers(offers).filter((offer) => activeOffer(offer, now));
-  if (!active.length) return <span className="sales-muted">无有效报价</span>;
-  const first = active[0];
-  const columns: DataGridColumn<Offer>[] = [
-    { key: "id", title: "报价", type: "code", width: 96, identity: true, value: (offer) => offer.id },
-    { key: "price", title: "单价", type: "money", width: 120, value: (offer) => offer.unit_price,
-      render: (offer) => formatMoney(offer.unit_price, { prefix: "¥" }) },
-    { key: "summary", title: "有效报价", width: 320, render: (offer) => <OfferBadge offer={offer} /> },
-    { key: "reference", title: "操作", width: 100, render: (offer) => onReference && <Button size="small" onClick={() => onReference(offer)}>引用报价 #{offer.id}</Button> },
-  ];
-  return <span className="sales-inline"><span title={`共 ${active.length} 条有效报价`}>{formatMoney(first.unit_price, { prefix: "¥" })}</span>
-    {onReference && <Button size="small" onClick={() => onReference(first)}>直接引用</Button>}
-    <Popover trigger="click" placement="bottomRight" content={<div className="sales-offer-popover"><DataGrid id="presales-reference-offers"
-      ariaLabel="可引用报价" rows={active} columns={columns} rowKey={(offer) => offer.id} /></div>}>
-      <Button size="small" type="link">查看 {active.length} 条</Button>
-    </Popover></span>;
-}
+import "./presales.css";
+import { parseApiError } from "../../utils/apiError";
 
 function fromLine(line: InquiryLine): DraftLine {
   const fields = (line.field_values || []) as ReadField[];
@@ -112,12 +46,16 @@ function InquiryEditorContent() {
   const append = params.get("append") === "1";
   const navigate = useNavigate();
   const location = useLocation();
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
+  const handleError = usePresalesError();
   const [importOpen, setImportOpen] = useState(false);
+  const [creatingPart, setCreatingPart] = useState<{ pn: string; lineKey?: string; description?: string | null }>();
+  const [versionConflict, setVersionConflict] = useState(false);
+  const canCreatePart = localStorage.getItem("role") === "admin" || readPermissionMap().page_master_data === true;
   const customerVisible = localStorage.getItem("role") === "admin" || readPermissionMap().data_customer !== false;
   const [inquiry, setInquiry] = useState<Inquiry>();
   const [lines, setLines] = useState<DraftLine[]>([]);
-  const [expanded, setExpanded] = useState<Key[]>([]);
+  const [editing, setEditing] = useState<string>();
   const [headOpen, setHeadOpen] = useState(false);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
@@ -146,10 +84,10 @@ function InquiryEditorContent() {
     return () => { mounted.current = false; refreshGeneration.current += 1; };
   }, []);
   const apply = useCallback((data: Inquiry) => {
+    setVersionConflict(false);
     currentInquiry.current = data;
     const next = append ? [] : (data.lines || []).map(fromLine);
     setInquiry(data); setLines(next);
-    setExpanded(next.filter((line) => next.length === 1 || (!line.part_id && !line.description)).map((line) => line.key));
     setCustomerId(data.customer_id ?? undefined); setNotes(data.notes || "");
     setFields(editableFields((data.field_values || []) as ReadField[])); setAssigneeIds(data.assignee_ids || []);
     // 回读规则只用于显示；编辑草稿另存，未调整时不重复提交。
@@ -204,8 +142,7 @@ function InquiryEditorContent() {
       notesVisible: true, field_values: [], originalFields: [], expectedDelivery: "" }));
     if (!added.length) return;
     setLines((previous) => [...previous, ...added]);
-    setExpanded([...lines, ...added].filter((line) => lines.length + added.length === 1 || (!line.part_id && !line.description?.trim()))
-      .map((line) => line.key));
+
   };
   const addRawParts = (texts: string[]) => {
     const seen = new Set(lines.map((line) => line.pn_raw.toLocaleUpperCase()));
@@ -216,7 +153,7 @@ function InquiryEditorContent() {
       qty: 1, require_exact_pn: false, notesVisible: true, field_values: [], originalFields: [], expectedDelivery: "" }));
     if (!added.length) return;
     setLines((previous) => [...previous, ...added]);
-    setExpanded([...lines, ...added].filter((line) => !line.part_id && !line.description?.trim()).map((line) => line.key));
+
   };
   const serializeFields = (values: CustomFieldValue[], original: ReadField[] = [], excludeDelivery = false) => {
     const retained = new Set(values.map(fieldKey));
@@ -265,111 +202,105 @@ function InquiryEditorContent() {
       if (!submit && !append) apply(saved);
     } catch (error) {
       if (!mounted.current) return;
-      if ((error as { response?: { status?: number } })?.response?.status === 409) {
-        void message.warning("已被他人修改/领取，已自动刷新");
-        const saved = currentInquiry.current;
-        if (id) await refresh();
-        else if (saved) { try { apply(await presales.getInquiry(saved.id)); } catch { /* 保留已保存草稿身份 */ } }
-      } else void message.error(errorText(error, "保存失败，请重试"));
+      // 冲突时保留草稿，不用服务端内容覆盖尚未保存的行与字段。
+      if (parseApiError(error).kind === "version_conflict") setVersionConflict(true);
+      await handleError(error);
     } finally { if (mounted.current) setBusy(false); }
   };
 
   if (loading) return <Spin aria-label="加载询价单" />;
   if (loadError) return <Alert type="error" message={loadError} action={<Button onClick={() => void refresh()}>重试</Button>} />;
-  const referenceCell = (line: DraftLine) => line.part_id ? line.ref_offer_id ? <span className="sales-inline">
-    <span className="sales-success" title={`已引用报价 #${line.ref_offer_id} · 本行不再派单`}>已引用报价 #{line.ref_offer_id} · 本行不再派单</span>
-    {(!referencedOffer(line) || !activeOffer(referencedOffer(line)!, now)) && <span className="sales-warning">引用已失效</span>}
-    <Popover content={referencedOffer(line) && <OfferBadge offer={referencedOffer(line)!} />}><Button size="small" disabled={busy || blocked}
-      onClick={() => updateLine(line.key, { ref_offer_id: null, ref_offer_revision_no: null, ref_offer: undefined })}>取消引用</Button></Popover>
-  </span> : <EffectiveOffers offers={library[line.part_id] || []} now={now}
-    onReference={busy || blocked ? undefined : (offer) => updateLine(line.key, { ref_offer_id: offer.id })} /> : "—";
-  const columns: DataGridColumn<DraftLine>[] = [
-    { key: "thumb", title: "图片", width: 40, minWidth: 36, render: (line) => line.part_id ? <PartThumb partId={line.part_id} pn={line.pn_raw} size={24} /> : "—" },
-    { key: "pn", title: "PN", width: 150, type: "code", identity: true, value: (line) => line.pn_raw,
-      render: (line) => <span className="sales-inline"><span className="sales-mono">{line.pn_raw}</span>{!line.part_id && <span className="sales-warning">待建档</span>}</span> },
-    { key: "description", title: "描述 / 规格", width: 240, type: "zh", value: (line) => line.description },
-    { key: "qty", title: "数量", width: 84, type: "number", value: (line) => line.qty, render: (line) => <InputNumber size="small"
-      aria-label={`${line.pn_raw} 数量`} min={0.001} max={99999999999.999} precision={3} value={line.qty} disabled={busy || blocked}
-      onChange={(qty) => updateLine(line.key, { qty: qty ?? 0 })} style={{ width: "100%" }} /> },
-    { key: "expected_delivery", title: "期望交期", width: 150, value: (line) => line.expectedDelivery,
-      render: (line) => <Input size="small" aria-label={`${line.pn_raw} 期望交期`} type="date" value={line.expectedDelivery}
-        disabled={busy || blocked} onChange={(event) => updateLine(line.key, { expectedDelivery: event.target.value })} /> },
-    { key: "exact", title: "PN 一致", width: 88, render: (line) => <Checkbox aria-label="要求 PN 一致" checked={line.require_exact_pn}
-      disabled={busy || blocked} onChange={(event) => updateLine(line.key, { require_exact_pn: event.target.checked })}>一致</Checkbox> },
-    { key: "reference", title: "参考价（30 天）", width: 180, render: (line) => line.part_id ? <span className="sales-price-ref"><PriceRefBadge partId={line.part_id} /></span> : "—" },
-    { key: "offers", title: "有效报价", width: 250, render: referenceCell },
-    { key: "remove", title: "操作", width: 64, minWidth: 56, render: (line) => <Button size="small" disabled={busy || blocked} type="text"
-      aria-label={`移除${line.pn_raw}`} onClick={() => { setLines((previous) => previous.filter((item) => item.key !== line.key));
-        setExpanded((previous) => previous.filter((key) => key !== line.key)); }}>删除</Button> },
-  ];
-  return <div className="sales-page sales-editor">
-    <header className="sales-heading"><Button size="small" onClick={() => navigate(inquiry ? `/presales/inquiries/${inquiry.id}` : "/presales/inquiries")}>返回</Button>
-      <h1>{append ? "追加询价行" : inquiry ? `编辑询价 ${inquiry.inquiry_no}` : "新建询价"}</h1>
-      <span className="sales-muted">{inquiry?.status === "revising" ? "撤回修改中" : "草稿"}</span>
-      {!append && !blocked && <><WorkbookExportButton size="small" label="下载本单 Excel" schemaName="presales_inquiry_lines" disabled={busy}
-        fetchSchema={() => presalesWorkbooks.getInquirySchema(undefined, inquiry?.id)} filename={`${inquiry?.inquiry_no || "询价空模板"}.xlsx`}
-        onExport={(visible) => inquiry ? presalesWorkbooks.exportInquiry(inquiry.id, visible) : presalesWorkbooks.exportInquiryTemplate(visible)} />
-        <Button size="small" disabled={busy} onClick={() => setImportOpen(true)}>上传 Excel</Button>
-        <span className="sales-muted">下载使用已保存的数据</span></>}
-    </header>
-    {blocked && <Alert type="warning" message="当前单据不可在此编辑；已提交的销售询价请先撤回修改，关单后请复制为新单。" />}
-    {!append && <section className="sales-head-fields" aria-label="询价信息"><Form layout="vertical" size="small" disabled={busy || blocked}>
-      <div className="sales-head-row">
-        {customerVisible && (!inquiry || "customer_id" in inquiry) && <Form.Item label="客户（可选）">
-          <CandidateSelect label="客户" load={presales.customers} value={customerId} onChange={setCustomerId} disabled={busy || blocked} />
-        </Form.Item>}
-        {(!inquiry || "assignee_ids" in inquiry) && <Form.Item label="处理人（留空进公共池）">
-          <Select aria-label="处理人" mode="multiple" maxTagCount="responsive" value={assigneeIds} onChange={setAssigneeIds}
-            options={candidates.map((candidate) => ({ value: candidate.id, label: candidate.display_name }))} />
-        </Form.Item>}
-        {(!inquiry || inquiry.offer_audience) && <Form.Item label="本单报价可见范围"><Popover trigger="click" placement="bottomRight"
-          content={<AudiencePicker key={inquiry?.version ?? "new"} savedRule={inquiry?.offer_audience} value={offerAudience} onChange={setOfferAudience} disabled={busy || blocked} />}>
-          <Button disabled={busy || blocked} aria-label="设置本单报价可见范围">{({ public: "公开（全体销售）", private: "私密", include: "部分可见", exclude: "不给谁看" })[offerAudience?.mode ?? inquiry?.offer_audience?.mode ?? "public"]}</Button>
-        </Popover></Form.Item>}
+  const line = lines.find((item) => item.key === editing);
+  return <section className="presales-page">
+    <PageHeader title={append ? "追加询价行" : inquiry ? `编辑询价 ${inquiry.inquiry_no}` : "新建询价"} subtitle="选择型号并填写需求，提交后进入采购待办" extra={<Button onClick={() => navigate(inquiry ? `/presales/inquiries/${inquiry.id}` : "/presales/inquiries")}>返回</Button>} />
+    <div className="presales-panel">
+      {versionConflict && <Alert type="warning" showIcon message="记录版本已变化，当前填写内容仍保留。"
+        description="请先复制需要保留的修改，再重新加载最新单据。"
+        action={<Button onClick={() => modal.confirm({ title: "放弃当前未保存修改并重新加载？", okText: "重新加载", cancelText: "继续保留",
+          onOk: async () => {
+            if (id) await refresh();
+            else if (currentInquiry.current) {
+              try { apply(await presales.getInquiry(currentInquiry.current.id)); }
+              catch (error) { await handleError(error); }
+            }
+          } })}>重新加载最新单据</Button>} />}
+      {blocked && <Alert type="warning" message="当前单据不可在此编辑；已提交的销售询价请先撤回修改，关单后请复制为新单。" />}
+      {!append && (blocked ? <Descriptions column={1} items={[
+        ...("customer_id" in (inquiry ?? {}) ? [{ key: "customer", label: "客户", children: inquiry?.customer_name ?? customerId ?? "—" }] : []),
+        ...("notes" in (inquiry ?? {}) ? [{ key: "notes", label: "客户要求", children: notes }] : []),
+      ]} /> : <Form layout="vertical" disabled={busy}>
+        <div className="presales-form">
+          {customerVisible && (!inquiry || "customer_id" in inquiry) && <Form.Item label="客户（可选）"><CandidateSelect label="客户" load={presales.customers} value={customerId} onChange={setCustomerId} disabled={busy} /></Form.Item>}
+          {(!inquiry || "assignee_ids" in inquiry) && <Form.Item label="处理人（留空进公共池）"><Select aria-label="处理人" mode="multiple" value={assigneeIds} onChange={setAssigneeIds}
+            options={candidates.map((candidate) => ({ value: candidate.id, label: candidate.display_name }))} /></Form.Item>}
+          {(!inquiry || inquiry.offer_audience) && <Form.Item label="本单报价可见范围"><Popover trigger="click" content={<AudiencePicker key={inquiry?.version ?? "new"} savedRule={inquiry?.offer_audience} value={offerAudience} onChange={setOfferAudience} disabled={busy} />}>
+            <Button aria-label="设置本单报价可见范围">{({ public: "公开（全体销售）", private: "私密", include: "部分可见", exclude: "不给谁看" })[offerAudience?.mode ?? inquiry?.offer_audience?.mode ?? "public"]}</Button>
+          </Popover></Form.Item>}
+        </div>
         <Button type="link" aria-expanded={headOpen} onClick={() => setHeadOpen(!headOpen)}>{headOpen ? "收起客户要求 / 自定义字段" : "客户要求 / 自定义字段"}</Button>
+        {candidateError && <Alert type="warning" message="处理人候选加载失败，请刷新后再指定；留空仍表示公共池。" />}
+        {headOpen && <>
+          {(!inquiry || "notes" in inquiry) && <Form.Item label={<Space>客户要求{(!inquiry || inquiry.notes_audience) && <AudienceLock key={inquiry?.version ?? "new"} label="客户要求" savedRule={inquiry?.notes_audience} value={notesAudience} onChange={setNotesAudience} />}</Space>}>
+            <Input.TextArea aria-label="客户要求" value={notes} onChange={(event) => setNotes(event.target.value)} /></Form.Item>}
+          <Form.Item label="单头自定义字段"><Fields key={inquiry?.version ?? "new"} level="header" savedValues={inquiry?.field_values} value={fields} onChange={setFields} disabled={busy} /></Form.Item>
+        </>}
+      </Form>)}
+      <div className="presales-toolbar">
+        {append && <span className="presales-muted">新增行（原有行不变）</span>}
+        {!blocked && <LivePartSearch mode="multiple" value={[]} onChange={addParts} inputProps={{ "aria-label": "搜索并批量加入 PN", placeholder: "PN / 品牌 / 参数 / 描述，支持多选", disabled: busy }}
+          renderThumb={(part) => <PartThumb partId={part.part_id} pn={part.pn_std} size={24} />} renderBadges={(part) => <PartQuoteBadges partId={part.part_id} />} onAddRaw={(text) => addRawParts([text])}
+          onCreate={canCreatePart ? (pn) => setCreatingPart({ pn }) : undefined} />}
+        <Button disabled={busy || blocked} onClick={() => setPasteOpen(true)}>批量粘贴 PN</Button>
+        {!append && !blocked && <><WorkbookExportButton label="下载本单 Excel" schemaName="presales_inquiry_lines" disabled={busy}
+          fetchSchema={() => presalesWorkbooks.getInquirySchema(undefined, inquiry?.id)} filename={`${inquiry?.inquiry_no || "询价空模板"}.xlsx`}
+          onExport={(visible) => inquiry ? presalesWorkbooks.exportInquiry(inquiry.id, visible) : presalesWorkbooks.exportInquiryTemplate(visible)} />
+          <Button disabled={busy} onClick={() => setImportOpen(true)}>上传 Excel</Button><span className="presales-muted">下载使用已保存的数据</span></>}
       </div>
-      {candidateError && <Alert type="warning" message="处理人候选加载失败，请刷新后再指定；留空仍表示公共池。" />}
-      {headOpen && <div className="sales-expanded-fields">
-        {(!inquiry || "notes" in inquiry) && <Form.Item label={<Space>客户要求{(!inquiry || inquiry.notes_audience) && <AudienceLock key={inquiry?.version ?? "new"} label="客户要求" savedRule={inquiry?.notes_audience} value={notesAudience} onChange={setNotesAudience} />}</Space>}>
-          <Input.TextArea aria-label="客户要求" rows={2} value={notes} onChange={(event) => setNotes(event.target.value)} />
-        </Form.Item>}
-        <Form.Item label="单头自定义字段"><Fields key={inquiry?.version ?? "new"} level="header" savedValues={inquiry?.field_values} value={fields} onChange={setFields} disabled={busy || blocked} /></Form.Item>
-      </div>}
-    </Form></section>}
-    <div className="sales-search-row">
-      {!blocked && !busy && <LivePartSearch mode="multiple" value={[]} onChange={addParts}
-        inputProps={{ "aria-label": "搜索并批量加入 PN", placeholder: "输入即搜：PN / 品牌 / 参数 / 描述，支持多选" }}
-        renderThumb={(part) => <PartThumb partId={part.part_id} pn={part.pn_std} size={24} />}
-        renderBadges={(part) => <PartQuoteBadges partId={part.part_id} />} onAddRaw={(text) => addRawParts([text])} />}
-      <Button disabled={busy || blocked} onClick={() => setPasteOpen(true)}>批量粘贴 PN</Button>
-      <span className="sales-muted">{append ? "新增行（原有行不变）" : "多于 1 行时详情自动折叠"}</span>
+      <Table aria-label="询价行" rowKey="key" dataSource={lines} tableLayout="fixed" scroll={{ x: 920 }} pagination={{ defaultPageSize: 20 }} columns={[
+        { title: "PN / 描述", key: "pn", render: (_, item) => <><Space>{item.part_id && <PartThumb partId={item.part_id} pn={item.pn_raw} size={24} />}{item.pn_raw}{!item.part_id && <span>待建档</span>}</Space><div className="presales-muted">{item.description}</div></> },
+        { title: "数量", dataIndex: "qty", width: 90 },
+        { title: "期望交期", key: "delivery", width: 130, render: (_, item) => item.expectedDelivery || "—" },
+        { title: "PN 一致", key: "exact", width: 100, render: (_, item) => item.require_exact_pn ? "一致" : "—" },
+        { title: "报价引用", key: "reference", width: 200, render: (_, item) => item.ref_offer_id ? <>{`已引用报价 #${item.ref_offer_id} · 本行不再派单`}{(!referencedOffer(item) || !activeOffer(referencedOffer(item)!, now)) && <Tag>引用已失效</Tag>}</> : item.part_id ? `${flattenOffers(library[item.part_id] ?? []).filter((offer) => activeOffer(offer, now)).length} 条有效报价` : "—" },
+        { title: "操作", key: "actions", width: 150, render: (_, item) => <Space><Button type="link" aria-label={`编辑 ${item.pn_raw}`} onClick={() => setEditing(item.key)}>{blocked ? "查看" : "编辑"}</Button>
+          {!blocked && <Button type="link" disabled={busy} aria-label={`移除${item.pn_raw}`} onClick={() => setLines((previous) => previous.filter((other) => other.key !== item.key))}>删除</Button>}</Space> },
+      ]} locale={{ emptyText: "搜索加入多个 PN，或按原文添加待建档行" }} />
     </div>
-    <DataGrid id="presales-inquiry-editor" ariaLabel="询价行" rows={lines} columns={columns} rowKey={(line) => line.key}
-      expandedRowKeys={expanded} onExpandedRowKeysChange={setExpanded} emptyText="搜索加入多个 PN，或按原文添加待建档行"
-      renderExpanded={(line) => <Form className="sales-line-details" layout="vertical" size="small" disabled={busy || blocked}>
-        <Form.Item className="sales-full-width" label="完整描述">{line.part_id ? <div className="sales-full-description">{line.description || "—"}</div>
-          : <Input.TextArea rows={2} aria-label={`${line.pn_raw} 描述`} value={line.description || ""}
-            placeholder="补充规格、品牌或其他描述，便于采购建档" onChange={(event) => updateLine(line.key, { description: event.target.value })} />}</Form.Item>
-        {line.notesVisible && <Form.Item label={<Space>行备注{(!line.line_key || line.savedNotesAudience) && <AudienceLock label={`${line.pn_raw} 行备注`} savedRule={line.savedNotesAudience} value={line.notes_audience}
-          onChange={(rule) => updateLine(line.key, { notes_audience: rule })} />}</Space>}><Input.TextArea rows={1} aria-label={`${line.pn_raw} 行备注`} value={line.notes || ""} onChange={(event) => updateLine(line.key, { notes: event.target.value })} /></Form.Item>}
-        <Form.Item className="sales-full-width sales-compact-fields" label="行自定义字段"><Fields key={`${line.key}:${inquiry?.version ?? "new"}`} level="line" partId={line.part_id} savedValues={line.originalFields}
-          value={line.field_values} onChange={(values) => updateLine(line.key, { field_values: values })} disabled={busy || blocked} /></Form.Item>
-      </Form>} />
-    <footer className="sales-footer"><span><b>{lines.length}</b> 行 · <b>{lines.filter((line) => line.ref_offer_id).length}</b> 行引用报价 · <b className="sales-warning">{lines.filter((line) => !line.part_id).length}</b> 行待建档</span>
-      <div className="sales-spacer" />
-      {!append && <Button loading={busy} disabled={blocked} onClick={() => void save(false)}>存草稿</Button>}
-      <Button type="primary" aria-label={append ? "提交追加行" : inquiry?.status === "revising" ? "重新提交" : "提交"}
-        loading={busy} disabled={blocked} onClick={() => void save(true)}>{append ? "提交追加行" : inquiry?.status === "revising" ? "重新提交" : "提交"}</Button>
+    <footer className="presales-footer"><span>{lines.length} 行 · {lines.filter((item) => item.ref_offer_id).length} 行引用报价 · {lines.filter((item) => !item.part_id).length} 行待建档</span>
+      {!blocked && <Space>{!append && <Button loading={busy} onClick={() => void save(false)}>存草稿</Button>}<Button type="primary" aria-label={append ? "提交追加行" : inquiry?.status === "revising" ? "重新提交" : "提交"}
+        loading={busy} onClick={() => void save(true)}>{append ? "提交追加行" : inquiry?.status === "revising" ? "重新提交" : "提交"}</Button></Space>}
     </footer>
-    <Modal open={pasteOpen} title="批量粘贴 PN" okText="按原文加入" onCancel={() => setPasteOpen(false)} onOk={() => {
-      addRawParts(pasteText.split(/[\n\r\t,，;；]+/)); setPasteText(""); setPasteOpen(false);
-    }}><p>每行一个 PN，也支持逗号或分号分隔；按原文加入待建档行，相同 PN 不重复加入。</p>
-      <Input.TextArea aria-label="批量 PN" rows={6} value={pasteText} onChange={(event) => setPasteText(event.target.value)} /></Modal>
+    <Drawer title={line ? `${line.pn_raw} · 询价需求` : "询价需求"} open={!!line} width={640} onClose={() => setEditing(undefined)} destroyOnHidden>
+      {line && (blocked ? <Descriptions column={1} items={[{ key: "description", label: "描述", children: line.description }, { key: "qty", label: "数量", children: line.qty },
+        { key: "delivery", label: "期望交期", children: line.expectedDelivery }, ...(line.notesVisible ? [{ key: "notes", label: "行备注", children: line.notes }] : []),
+        ...line.originalFields.map((field, index) => ({ key: `field-${index}`, label: field.name ?? field.new_name, children: String(field.value ?? "") })),
+      ]} /> : <Form layout="vertical" disabled={busy}>
+        {!line.part_id && canCreatePart && <Button style={{ marginBottom: 16 }} onClick={() => setCreatingPart({ pn: line.pn_raw, lineKey: line.key, description: line.description })}>为此 PN 建档</Button>}
+        <Form.Item label="完整描述">{line.part_id ? <p>{line.description || "—"}</p> : <Input.TextArea aria-label={`${line.pn_raw} 描述`} value={line.description ?? ""} onChange={(event) => updateLine(line.key, { description: event.target.value })} />}</Form.Item>
+        <div className="presales-form"><Form.Item label="数量" required><InputNumber aria-label={`${line.pn_raw} 数量`} min={0.001} max={99999999999.999} precision={3} value={line.qty} onChange={(qty) => updateLine(line.key, { qty: qty ?? 0 })} /></Form.Item>
+          <Form.Item label="期望交期"><Input type="date" aria-label={`${line.pn_raw} 期望交期`} value={line.expectedDelivery} onChange={(event) => updateLine(line.key, { expectedDelivery: event.target.value })} /></Form.Item>
+          <Form.Item><Checkbox aria-label="要求 PN 一致" checked={line.require_exact_pn} onChange={(event) => updateLine(line.key, { require_exact_pn: event.target.checked })}>要求 PN 一致</Checkbox></Form.Item></div>
+        {line.notesVisible && <Form.Item label={<Space>行备注{(!line.line_key || line.savedNotesAudience) && <AudienceLock label={`${line.pn_raw} 行备注`} savedRule={line.savedNotesAudience} value={line.notes_audience} onChange={(rule) => updateLine(line.key, { notes_audience: rule })} />}</Space>}>
+          <Input.TextArea aria-label={`${line.pn_raw} 行备注`} value={line.notes ?? ""} onChange={(event) => updateLine(line.key, { notes: event.target.value })} /></Form.Item>}
+        <Form.Item label="行自定义字段"><Fields key={`${line.key}:${inquiry?.version ?? "new"}`} level="line" partId={line.part_id} savedValues={line.originalFields} value={line.field_values} onChange={(values) => updateLine(line.key, { field_values: values })} disabled={busy} /></Form.Item>
+        {line.part_id && <><h3>参考价（30 天）</h3><PriceRefBadge partId={line.part_id} /><h3>有效报价</h3>{line.ref_offer_id ? <><p>已引用报价 #{line.ref_offer_id}</p>{referencedOffer(line) && <OfferBadge offer={referencedOffer(line)!} />}<Button onClick={() => updateLine(line.key, { ref_offer_id: null, ref_offer_revision_no: null, ref_offer: undefined })}>取消引用</Button></>
+          : <EffectiveOffers offers={library[line.part_id] ?? []} now={now} onReference={(offer) => updateLine(line.key, { ref_offer_id: offer.id })} />}</>}
+      </Form>)}
+    </Drawer>
+    {creatingPart && canCreatePart && <CreatePartModal pn={creatingPart.pn} description={creatingPart.description}
+      onClose={() => setCreatingPart(undefined)} onSelected={(part) => {
+        if (creatingPart.lineKey) updateLine(creatingPart.lineKey, { part_id: part.part_id, pn_raw: part.pn_std,
+          description: part.description ?? part.summary, brand: part.brand });
+        else addParts([part]);
+      }} />}
+    <Modal open={pasteOpen} title="批量粘贴 PN" okText="按原文加入" onCancel={() => setPasteOpen(false)} onOk={() => { addRawParts(pasteText.split(/[\n\r\t,，;；]+/)); setPasteText(""); setPasteOpen(false); }}>
+      <p>每行一个 PN，也支持逗号或分号分隔；相同 PN 不重复加入。</p><Input.TextArea aria-label="批量 PN" rows={6} value={pasteText} onChange={(event) => setPasteText(event.target.value)} />
+    </Modal>
     {importOpen && !blocked && <WorkbookDialog mode="inquiry" inquiryId={inquiry?.id} onClose={() => setImportOpen(false)} onApplied={async (response) => {
       const savedId = (response as { inquiry_id?: number })?.inquiry_id;
       if (inquiry) { await refresh(); setImportOpen(false); }
       else if (typeof savedId === "number" && savedId > 0) navigate(`/presales/inquiries/${savedId}/edit`);
       else throw new Error("草稿编号未返回");
     }} />}
-  </div>;
+  </section>;
 }

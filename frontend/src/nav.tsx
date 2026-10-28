@@ -107,6 +107,8 @@ const loadInquiryList = () => import("./pages/presales/InquiryListPage");
 const loadInquiryEditor = () => import("./pages/presales/InquiryEditorPage");
 const loadInquiryDetail = () => import("./pages/presales/InquiryDetailPage");
 const loadPresalesWorkbench = () => import("./pages/presales/QuoteWorkbenchPage");
+const loadPresalesQuote = () => import("./pages/presales/ProcessPage");
+const PresalesQuotePage = lazy(loadPresalesQuote);
 const loadPresalesRedirect = () => import("./pages/presales/TaskRedirect");
 const loadOfferNew = () => import("./pages/presales/OfferNewPage");
 const loadPresalesLibrary = () => import("./pages/presales/LibraryPage");
@@ -316,6 +318,7 @@ export const DETAIL_ROUTES: DetailRoute[] = [
   { key: "presales-inquiry-new", path: "/presales/inquiries/new", pattern: /^\/presales\/inquiries\/new$/, label: "新建询价", perm: "page_presales", menuKey: "presales-inquiries", page: InquiryEditorPage, load: loadInquiryEditor },
   { key: "presales-inquiry-edit", path: "/presales/inquiries/:id/edit", pattern: /^\/presales\/inquiries\/\d+\/edit$/, label: "编辑询价", perm: "page_presales", menuKey: "presales-inquiries", page: InquiryEditorPage, load: loadInquiryEditor },
   { key: "presales-inquiry-detail", path: "/presales/inquiries/:id", pattern: /^\/presales\/inquiries\/\d+$/, label: "询价详情", perm: "page_presales", menuKey: "presales-inquiries", page: InquiryDetailPage, load: loadInquiryDetail },
+  { key: "presales-quote", path: "/presales/workbench/:id", pattern: /^\/presales\/workbench\/\d+$/, label: "填写报价", perm: "page_presales", menuKey: "presales-workbench", page: PresalesQuotePage, load: loadPresalesQuote },
   { key: "presales-task-process", path: "/presales/tasks/:id", pattern: /^\/presales\/tasks\/\d+$/, label: "报价工作台", perm: "page_presales", menuKey: "presales-workbench", page: PresalesRedirectPage, load: loadPresalesRedirect },
   {
     // 项目面板：从项目卡「进入面板」进来，不占导航项（菜单只挂主页 + 需求单与同步）

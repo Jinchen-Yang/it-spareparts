@@ -7,6 +7,7 @@ vi.mock("../../../api", () => ({ getBetaFeatures: () => Promise.resolve({ data: 
 vi.mock("../../../context/TaxBasis", () => ({ TaxBasisProvider: ({ children }: { children: ReactNode }) => children }));
 vi.mock("../../../pages/PartSearchPage", () => ({ default: () => <div>型号页面</div> }));
 vi.mock("../InquiryListPage", () => ({ default: () => <div>询价列表内容</div> }));
+vi.mock("../ProcessPage", () => ({ default: () => <div>独立报价内容</div> }));
 vi.mock("../QuoteWorkbenchPage", () => ({ default: () => <div>报价工作台内容</div> }));
 vi.mock("../InquiryDetailPage", () => ({ default: () => <div>询价详情内容</div> }));
 vi.mock("../../../AppShell", async () => {
@@ -34,7 +35,7 @@ it("售前菜单按销售采购归位，菜单与深链复用 page_presales 权�
   expect(purchase.every((item) => item.perm === "page_presales")).toBe(true);
   expect(menus.every((item) => item.perm === "page_presales" && typeof item.load === "function")).toBe(true);
   const details = DETAIL_ROUTES.filter((item) => item.key.startsWith("presales-"));
-  expect(details).toHaveLength(4);
+  expect(details).toHaveLength(5);
   expect(details.every((item) => item.perm === "page_presales" && typeof item.load === "function")).toBe(true);
   expect(NAV_ITEMS.find((item) => item.key === "presales-workbench")?.menuLabel).toBeTruthy();
 });
@@ -62,7 +63,7 @@ it.each(["/presales/tasks", "/presales/tasks/12"])("旧链接 %s 重定向工作
   localStorage.setItem("permissions", JSON.stringify({ page_presales: true }));
   window.history.replaceState({}, "", path);
   render(<App />);
-  expect(await screen.findByText("报价工作台内容")).toBeInTheDocument();
-  expect(window.location.pathname).toBe("/presales/workbench");
-  expect(window.location.search).toBe(path.endsWith("/12") ? "?id=12" : "");
+  expect(await screen.findByText(path.endsWith("/12") ? "独立报价内容" : "报价工作台内容")).toBeInTheDocument();
+  expect(window.location.pathname).toBe(path.endsWith("/12") ? "/presales/workbench/12" : "/presales/workbench");
+  expect(window.location.search).toBe("");
 });

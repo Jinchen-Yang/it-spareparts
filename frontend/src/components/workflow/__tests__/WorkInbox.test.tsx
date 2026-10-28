@@ -108,17 +108,57 @@ it("领取冲突显示当前领取人，并重新获取待办", async () => {
   await waitFor(() => expect(vi.mocked(listWorkItems).mock.calls.length).toBeGreaterThan(listCalls));
 });
 
-it("售前可指定统一冲突文案并保留自动刷新", async () => {
+it("售前显示具体领取冲突并保留自动刷新", async () => {
   vi.mocked(claimWorkItem).mockRejectedValue({ response: { status: 409, data: {
     detail: { message: "记录已变化", claimed_by_name: "王工" },
   } } });
-  render(<WorkInbox subjectType="presales_inquiry" conflictMessage="已被他人修改/领取"
+  render(<WorkInbox subjectType="presales_inquiry"
     renderRow={() => <span>售前待办</span>} onOpen={vi.fn()} />);
   await screen.findByText("售前待办");
   const listCalls = vi.mocked(listWorkItems).mock.calls.length;
   fireEvent.click(screen.getByRole("button", { name: /领\s*取/ }));
-  expect(await screen.findByText("已被他人修改/领取")).toBeInTheDocument();
+  expect(await screen.findByText("已被 王工 领取")).toBeInTheDocument();
   await waitFor(() => expect(vi.mocked(listWorkItems).mock.calls.length).toBeGreaterThan(listCalls));
+});
+
+it("非版本 409 保留原因输入，不刷新待办或关闭对话框", async () => {
+  vi.mocked(listWorkItems).mockResolvedValue(page([claimedItem]));
+  vi.mocked(releaseWorkItem).mockRejectedValue({ response: { status: 409, data: { detail: { code: "invalid_state", message: "待办已暂停" } } } });
+  inbox();
+  fireEvent.click(await screen.findByRole("button", { name: /退\s*回/ }));
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.change(within(dialog).getByLabelText("原因"), { target: { value: "需要其他同事接手" } });
+  const calls = vi.mocked(listWorkItems).mock.calls.length;
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认退回" }));
+  expect(await screen.findByText("待办已暂停")).toBeVisible();
+  expect(within(dialog).getByLabelText("原因")).toHaveValue("需要其他同事接手");
+  expect(listWorkItems).toHaveBeenCalledTimes(calls);
+});
+
+it("版本冲突后保留原因，用户再次确认时使用最新待办版本", async () => {
+  vi.mocked(listWorkItems).mockResolvedValue(page([claimedItem]));
+  vi.mocked(releaseWorkItem).mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: "version_conflict" } } } });
+  inbox();
+  fireEvent.click(await screen.findByRole("button", { name: /退\s*回/ }));
+  const dialog = await screen.findByRole("dialog");
+  fireEvent.change(within(dialog).getByLabelText("原因"), { target: { value: "保留的交接原因" } });
+  vi.mocked(listWorkItems).mockResolvedValue(page([{ ...claimedItem, version: 4 }]));
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认退回" }));
+  await screen.findByText("记录版本已变化");
+  await waitFor(() => expect(listWorkItems).toHaveBeenCalledTimes(2));
+  expect(within(dialog).getByLabelText("原因")).toHaveValue("保留的交接原因");
+  expect(releaseWorkItem).toHaveBeenCalledOnce();
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认退回" }));
+  await waitFor(() => expect(releaseWorkItem).toHaveBeenLastCalledWith(11, { expected_version: 4, reason: "保留的交接原因" }));
+});
+
+it("开始处理已成功但打开详情失败时不会误报待办操作失败", async () => {
+  vi.mocked(listWorkItems).mockResolvedValue(page([{ ...poolItem, assignee_id: 7, allowed_actions: ["start"] }]));
+  const onOpen = vi.fn().mockRejectedValue({ response: { status: 503 } });
+  inbox(onOpen);
+  fireEvent.click(await screen.findByRole("button", { name: /打\s*开/ }));
+  expect(await screen.findByText(/开始处理待办已成功，但页面刷新失败/)).toBeVisible();
+  expect(startWorkItem).toHaveBeenCalledOnce();
 });
 
 it("退回公共池必须填写原因，提交当前版本与原因", async () => {
@@ -204,34 +244,45 @@ it("开始处理的响应晚到时，切换业务类型后不会打开旧业务�
   );
 });
 
-it("紧凑队列读完所有分页后再筛选和按行数排序，领取沿用版本检查", async () => {
+it("原生表格分页筛选与按行数排序，领取沿用版本检查", async () => {
   const rows = [
-    { ...poolItem, summary: { inquiry_no: "XJ-10", line_count: 2 }, created_at: "2026-01-02T00:00:00Z" },
-    { ...poolItem, id: 12, summary: { inquiry_no: "XJ-2", line_count: 8 }, created_at: "2026-01-01T00:00:00Z" },
+    { ...poolItem, summary: { created_by_name: "销售甲", line_count: 2 } },
+    { ...poolItem, id: 12, summary: { created_by_name: "销售乙", line_count: 8 } },
   ];
-  vi.mocked(listWorkItems).mockImplementation(async (params) => ({ items: params.page === 2 ? [rows[1]] : [rows[0]], total: 101,
-    page: params.page ?? 1, page_size: 100, can_supervise: false }));
-  render(<WorkInbox compact subjectType="demo" renderRow={(item) => <span>{String(item.summary.inquiry_no)}</span>} onOpen={vi.fn()} />);
-  await screen.findByText("XJ-2");
-  expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ page: 2, page_size: 100 }), expect.any(AbortSignal));
+  vi.mocked(listWorkItems).mockResolvedValue(page(rows));
+  render(<WorkInbox subjectType="demo" renderRow={(item) => <span>{String(item.summary.created_by_name)}</span>} onOpen={vi.fn()} />);
+  await screen.findByText("销售乙");
+  expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ page: 1, page_size: 20 }), expect.any(AbortSignal));
   const grid = screen.getByRole("table", { name: "报价工作台队列" });
-  expect(within(grid).getAllByRole("row")[1]).toHaveTextContent("XJ-10");
-  fireEvent.mouseDown(screen.getByRole("combobox", { name: "队列排序" }));
-  fireEvent.click(await screen.findByText("行数多在前", { selector: ".ant-select-item-option-content" }));
-  expect(within(grid).getAllByRole("row")[1]).toHaveTextContent("XJ-2");
-  fireEvent.change(screen.getByLabelText("筛选待办"), { target: { value: "XJ-10" } });
-  expect(within(grid).queryByText("XJ-2")).not.toBeInTheDocument();
+  fireEvent.click(within(grid).getByRole("columnheader", { name: /行数/ }));
+  fireEvent.click(within(grid).getByRole("columnheader", { name: /行数/ }));
+  expect(within(grid).getAllByRole("row")[1]).toHaveTextContent("销售乙");
+  fireEvent.change(screen.getByLabelText("筛选待办"), { target: { value: "销售甲" } });
+  expect(within(grid).queryByText("销售乙")).not.toBeInTheDocument();
   fireEvent.click(within(grid).getByRole("button", { name: /领\s*取/ }));
   await waitFor(() => expect(claimWorkItem).toHaveBeenCalledWith(11, { expected_version: 3 }));
 });
 
-it("紧凑队列切单守卫拒绝后不会提前开始新待办", async () => {
+it("待办打开守卫拒绝后不会提前开始新待办", async () => {
   vi.mocked(listWorkItems).mockResolvedValue(page([{ ...poolItem, assignee_id: 7, allowed_actions: ["start"] }]));
   const onOpen = vi.fn();
   const beforeOpen = vi.fn(async () => false);
-  render(<WorkInbox compact subjectType="demo" beforeOpen={beforeOpen} renderRow={() => <span>待开始询价</span>} onOpen={onOpen} />);
+  render(<WorkInbox subjectType="demo" beforeOpen={beforeOpen} renderRow={() => <span>待开始询价</span>} onOpen={onOpen} />);
   fireEvent.click(await screen.findByRole("button", { name: /打\s*开/ }));
   await waitFor(() => expect(beforeOpen).toHaveBeenCalled());
   expect(startWorkItem).not.toHaveBeenCalled();
   expect(onOpen).not.toHaveBeenCalled();
+});
+
+it("开始处理失败不进入报价页，重试成功才传递最新待办身份", async () => {
+  vi.mocked(listWorkItems).mockResolvedValue(page([{ ...poolItem, assignee_id: 7, allowed_actions: ["start"] }]));
+  vi.mocked(startWorkItem).mockRejectedValueOnce({ code: "ERR_NETWORK" });
+  const onOpen = vi.fn();
+  inbox(onOpen);
+  fireEvent.click(await screen.findByRole("button", { name: /打\s*开/ }));
+  await screen.findByText("未收到服务器响应");
+  expect(onOpen).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: /打\s*开/ }));
+  await waitFor(() => expect(onOpen).toHaveBeenCalledWith(claimedItem));
+  expect(startWorkItem).toHaveBeenCalledTimes(2);
 });

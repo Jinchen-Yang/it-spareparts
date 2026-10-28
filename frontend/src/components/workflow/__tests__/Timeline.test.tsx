@@ -10,11 +10,11 @@ vi.mock("../../../api/workItems", () => ({ listSubjectEvents: vi.fn() }));
 
 const oldEvent = {
   id: 1, subject_type: "demo", subject_id: 101, work_item_id: 11,
-  kind: "claim", actor: 7, actor_name: "张工", payload: {},
+  kind: "claim", kind_label: "领取了待办", actor: 7, actor_name: "张工", payload: {},
   created_at: "2026-01-01T09:00:00Z",
 };
 const newEvent = {
-  ...oldEvent, id: 2, kind: "complete", created_at: "2026-01-01T10:00:00Z",
+  ...oldEvent, id: 2, kind: "complete", kind_label: "完成了待办", created_at: "2026-01-01T10:00:00Z",
 };
 
 function page(items = [oldEvent, newEvent], total = items.length, pageNumber = 1) {
@@ -76,4 +76,15 @@ it("切换单据时清空上一单的事件并从第一页重新加载", async (
   expect(listSubjectEvents).toHaveBeenLastCalledWith(
     "demo", 102, expect.objectContaining({ page: 1 }), expect.any(AbortSignal),
   );
+});
+
+it("使用服务端中文名称，未知事件不会泄露内部码", async () => {
+  vi.mocked(listSubjectEvents).mockResolvedValue({ ...page(), items: [
+    { ...oldEvent, kind: "inquiry.submitted", kind_label: "提交询价" },
+    { ...newEvent, kind: "future.internal.code", kind_label: undefined },
+  ] });
+  render(<Timeline subjectType="presales_inquiry" subjectId={101} />);
+  expect(await screen.findByText(/张工.*提交询价/)).toBeInTheDocument();
+  expect(screen.getByText(/张工.*业务动态/)).toBeInTheDocument();
+  expect(screen.queryByText(/future.internal.code|inquiry.submitted/)).not.toBeInTheDocument();
 });

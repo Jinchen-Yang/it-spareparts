@@ -237,7 +237,7 @@ export interface SummaryResponse {
   notes: string[];
 }
 
-/** 登记人排行行：手工登记 = 登记账号；RKD 导入 = 执行导入的账号。
+/** 登记人排行行：手工登记 = 登记账号；RKD 导入未记录操作人，落占位账号 rkd_import（D-0025）。
  * created_by_name 为账号显示名（无则 null，不臆造）。数量按单位分桶。 */
 export interface RegistrantRow {
   created_by: string;

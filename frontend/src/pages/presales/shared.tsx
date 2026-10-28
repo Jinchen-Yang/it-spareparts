@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
-import { App, Space, Tag, Typography } from "antd";
+import { useEffect, useState } from "react";
+import { Space, Tag, Typography } from "antd";
 import type { Offer } from "../../api/presales";
 import { moneyExact } from "../../utils/format";
+import { useApiError } from "../../components/ApiErrorFeedback";
 
 /** 服务端截止可带微秒；浏览器以毫秒为单位，向上对齐才不会提前失效。 */
 export function offerDeadline(value: string | null | undefined): number {
@@ -91,18 +92,5 @@ export function activeOfferGroups(offers: Offer[], now: number): Offer[] {
 }
 
 export function usePresalesError() {
-  const { message } = App.useApp();
-  return useCallback(async (error: unknown, refresh?: () => void | Promise<unknown>) => {
-    const response = (error as { response?: { status?: number; data?: { detail?: unknown } } })?.response;
-    if (response?.status === 409) {
-      message.warning("已被他人修改/领取");
-      await refresh?.();
-      return;
-    }
-    const detail = response?.data?.detail;
-    const text = typeof detail === "string" ? detail
-      : detail && typeof detail === "object" && "message" in detail && typeof detail.message === "string" ? detail.message
-      : "操作失败，请重试";
-    message.error(text);
-  }, [message]);
+  return useApiError();
 }

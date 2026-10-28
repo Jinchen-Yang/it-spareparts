@@ -12,6 +12,7 @@ from app.db import get_db
 from app.models.system import SysUser
 from app.security import UserContext, record_access_log
 from app.services.workflow import events, work_items
+from app.services.workflow.event_labels import event_label
 from app.services.workflow.registry import Subject, WorkflowError
 
 router = APIRouter(tags=["workflow"])
@@ -149,5 +150,5 @@ def subject_events(
     names = {user.id: user.display_name or user.username for user in db.scalars(
         select(SysUser).where(SysUser.id.in_(actor_ids))).all()} if actor_ids else {}
     return {"items": [{**{col.name: getattr(event, col.name) for col in event.__table__.columns},
-                        "actor_name": names.get(event.actor)} for event in rows],
+                        "actor_name": names.get(event.actor), "kind_label": event_label(event.kind)} for event in rows],
             "total": total, "page": page, "page_size": page_size}

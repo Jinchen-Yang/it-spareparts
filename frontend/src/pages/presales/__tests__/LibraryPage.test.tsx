@@ -72,7 +72,7 @@ it("旧搜索的迟到结果不会覆盖新的查询", async () => {
   expect(screen.getByText("没有可见的有效报价")).toBeInTheDocument();
 });
 
-it("409 显示统一提示并执行刷新，非冲突显示服务端错误", async () => {
+it("普通 409 保留业务原因不刷新，字段错误显示服务端原因", async () => {
   const refresh = vi.fn();
   function Feedback({ status }: { status: number }) {
     const handleError = usePresalesError();
@@ -81,13 +81,13 @@ it("409 显示统一提示并执行刷新，非冲突显示服务端错误", asy
   const view = render(<Feedback status={409} />);
   fireEvent.click(screen.getByRole("button", { name: "触发错误" }));
   await act(async () => {});
-  expect(screen.getByText("已被他人修改/领取")).toBeInTheDocument();
-  expect(refresh).toHaveBeenCalledOnce();
+  expect(screen.getByText("未完成逐行报价")).toBeInTheDocument();
+  expect(refresh).not.toHaveBeenCalled();
   view.rerender(<Feedback status={422} />);
   fireEvent.click(screen.getByRole("button", { name: "触发错误" }));
   await act(async () => {});
-  expect(screen.getByText("未完成逐行报价")).toBeInTheDocument();
-  expect(refresh).toHaveBeenCalledOnce();
+  expect(screen.getAllByText("未完成逐行报价")).toHaveLength(2);
+  expect(refresh).not.toHaveBeenCalled();
 });
 
 it("报价角标只展示服务端返回的报价人，并在边界刷新", async () => {
@@ -116,9 +116,9 @@ it("每位报价人保留主报价，展开后才显示服务端 more 中的其�
   await search();
   expect(screen.getAllByRole("button", { name: "用这条报价建询价单" })).toHaveLength(2);
   expect(screen.queryByLabelText("报价 8")).not.toBeInTheDocument();
-  fireEvent.click(screen.getAllByRole("button", { name: "展开更多（1 条）" })[0]);
+  fireEvent.click(screen.getAllByRole("button", { name: "报价详情（更多 1 条）" })[0]);
   expect(screen.getByLabelText("报价 8")).toHaveTextContent("¥80");
-  expect(screen.getAllByRole("button", { name: "用这条报价建询价单" })).toHaveLength(3);
+  expect(within(screen.getByRole("dialog")).getAllByRole("button", { name: "用这条报价建询价单" })).toHaveLength(2);
   expect(screen.queryByLabelText("报价 10")).not.toBeInTheDocument();
 });
 
@@ -137,13 +137,12 @@ it("更多报价也能展开各自的可供数量与交期，不误用主报价�
     ] }),
   ] }]);
   await search();
-  fireEvent.click(screen.getByRole("button", { name: "展开更多（1 条）" }));
+  fireEvent.click(screen.getByRole("button", { name: "报价详情（更多 1 条）" }));
   const nested = screen.getByRole("table", { name: "PN-A 更多报价" });
-  expect(within(nested).queryByText("可供数量：42")).not.toBeInTheDocument();
-  fireEvent.click(within(nested).getByRole("button", { name: "展开 PN-A" }));
-  expect(within(nested).getByText("可供数量：42")).toBeVisible();
-  expect(within(nested).getByText("交期：三个工作日")).toBeVisible();
-  expect(within(nested).queryByText("交期：主报价交期")).not.toBeInTheDocument();
+  const row = within(nested).getByLabelText("报价 8").closest("tr")!;
+  expect(row).toHaveTextContent("可供数量42");
+  expect(row).toHaveTextContent("交期三个工作日");
+  expect(row).not.toHaveTextContent("主报价交期");
 });
 
 it("主报价到期但同组旧报价仍有效时，主行提升为可引用的最新有效报价", async () => {

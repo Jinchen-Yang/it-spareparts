@@ -16,6 +16,8 @@ import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-rou
 import type { Location, NavigateFunction } from "react-router-dom";
 import type { Overview } from "../../api";
 
+const partInquiries = vi.fn();
+vi.mock("../../api/presales", () => ({ presales: { partInquiries: (...args: unknown[]) => partInquiries(...args) } }));
 const unifiedSearch = vi.fn();
 const fetchOverview = vi.fn();
 const fetchMasterEditState = vi.fn();
@@ -130,6 +132,7 @@ beforeEach(() => {
   localStorage.clear();
   localStorage.setItem("token", "admin-token");
   localStorage.setItem("role", "admin");
+  partInquiries.mockResolvedValue({ items: [], total: 0 });
   unifiedSearch.mockResolvedValue(emptyResp);
   fetchOverview.mockResolvedValue(ovFix());
   fetchMasterEditState.mockImplementation(async (id: number) => editorState({
@@ -820,5 +823,29 @@ describe("通用号 PN 查看与详情编辑", () => {
 
     expect(curLoc.search).toBe("");
     expect(screen.queryByText("型号全景：")).toBeNull();
+  });
+});
+
+
+describe("型号全景询价记录", () => {
+  it("有售前权限时按 part_id 加载，显示可见人名和分税最低价，并链接原单", async () => {
+    partInquiries.mockResolvedValue({ items: [{ line_id: 11, inquiry_id: 9, created_at: "2026-10-25T00:00:00Z",
+      created_by_name: "销售甲", qty: "2", status: "submitted", has_quote: true,
+      lowest_valid_quotes: [{ unit_price: "120", is_tax_inclusive: true }, { unit_price: "100", is_tax_inclusive: false }] }], total: 1 });
+    renderAt("/parts?part_id=42");
+    fireEvent.click(await screen.findByRole("tab", { name: "询价记录" }));
+    expect(await screen.findByText("销售甲")).toBeInTheDocument();
+    expect(partInquiries).toHaveBeenCalledWith(42, 1, expect.any(AbortSignal));
+    expect(screen.getByText(/120.00.*含税/)).toBeInTheDocument();
+    expect(screen.getByText(/100.00.*不含税/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "打开询价单" })).toHaveAttribute("href", "/presales/inquiries/9");
+  });
+  it("无售前权限时不显示页签也不请求询价", async () => {
+    localStorage.setItem("role", "purchaser");
+    localStorage.setItem("permissions", JSON.stringify({ page_presales: false }));
+    renderAt("/parts?part_id=42");
+    await screen.findByRole("tab", { name: /采购/ });
+    expect(screen.queryByRole("tab", { name: "询价记录" })).not.toBeInTheDocument();
+    expect(partInquiries).not.toHaveBeenCalled();
   });
 });

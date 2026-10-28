@@ -238,7 +238,8 @@ def test_deadlock_at_final_commit_returns_conflict_and_rolls_back_everything(db,
 def test_create_reports_pn_length_limit(db):
     result = client.post("/api/parts/master", headers=headers(), json={"pn_std": "X" * 129})
     assert result.status_code == 400, result.text
-    assert result.json()["detail"] == "PN 不能超过 128 个字符"
+    assert result.json()["detail"] == {
+        "code": "validation_error", "message": "PN 不能超过 128 个字符"}
 
 
 def test_create_rejects_unknown_fields(db):

@@ -374,6 +374,9 @@ export const agentFileBlobUrl = async (fileId: string): Promise<string> => {
 // ===== 备件主数据自治（采购可编辑/新建 PN，WP1 + 轻量 C）=====
 export interface NearDup { pn_std: string; description: string | null; reason: string }
 export interface CategoryNode { code: string; name: string; children: { code: string; name: string }[] }
+export interface MasterSpecField { key: string; label: string; unit: string | null }
+export interface ManualSpecInput { value: string; unit: string | null; numeric_value: string | null }
+export type MasterCreateInput = MasterFields & { pn_std: string; spec_updates?: Record<string, ManualSpecInput>; force?: boolean };
 /** 单字段证据：值 + 来源（原文明写/确定性推导/型号字典）+ 证据片段。 */
 export interface SpecField { value: string; source: string; evidence: string }
 export interface ClassifySuggestion {
@@ -433,15 +436,15 @@ export const searchParts = (q: string, page = 1, page_size = 20, browse = false)
   api.get<{ items: PartHit[]; total: number }>("/parts/search",
     { params: { q, page, page_size, ...(browse ? { browse: true } : {}) } });
 export const masterCategories = () =>
-  api.get<{ categories: CategoryNode[]; battery_subtypes: string[]; cooling_types: string[] }>(
+  api.get<{ categories: CategoryNode[]; battery_subtypes: string[]; cooling_types: string[]; spec_fields?: MasterSpecField[] }>(
     "/parts/master/categories");
 export const masterSuggest = (description: string, pn = "", brand = "") =>
   api.get<{ suggestion: ClassifySuggestion | null }>("/parts/master/suggest",
     { params: { description, pn, brand } });
 export const masterCheck = (pn_std: string) =>
   api.get<{ near_duplicates: NearDup[] }>("/parts/master/check", { params: { pn_std } });
-export const masterCreate = (body: MasterFields & { pn_std: string; force?: boolean }) =>
-  api.post<{ created: boolean; id?: number; pn_std?: string; near_duplicates?: NearDup[]; message?: string }>(
+export const masterCreate = (body: MasterCreateInput) =>
+  api.post<{ created: boolean; id?: number; pn_std?: string; near_duplicates?: NearDup[]; message?: string; edit_state?: MasterEditSnapshot }>(
     "/parts/master", body);
 export const masterEdit = (body: MasterEditPayload, token?: string) =>
   api.patch<{ id: number; pn_std: string; updated: string[]; locked_fields: string[];

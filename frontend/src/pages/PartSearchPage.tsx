@@ -6,6 +6,7 @@ import { EditOutlined, RightOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
+import PartInquiryHistory from "./presales/PartInquiryHistory";
 import PoolReferencePanel from "../components/pools/PoolReferencePanel";
 import InlinePartEditModal from "../components/parts/InlinePartEditModal";
 import PartGalleryPanel from "../components/parts/PartGalleryPanel";
@@ -82,12 +83,13 @@ export default function PartSearchPage() {
   const returnToPool = poolAnalysisReturnPath(sp);
   // 权限快照绑定当前登录周期；App 在 token 变化时重挂 Router/页面。
   // 组件存活期间不重读可变 localStorage，避免 DevTools 改值后借无关重渲染点亮入口。
-  const [{ canEditSubstitutes, canEditPartDetails }] = useState(() => {
+  const [{ canEditSubstitutes, canEditPartDetails, canSeePresales }] = useState(() => {
     const role = localStorage.getItem("role") || "";
     return {
       canEditSubstitutes: ["admin", "purchaser"].includes(role),
       // 详情页轻量编辑与「备件主数据」共用权限；后端 /parts/master 仍做最终准入。
       canEditPartDetails: canSee("page_master_data"),
+      canSeePresales: canSee("page_presales"),
     };
   });
 
@@ -590,7 +592,8 @@ export default function PartSearchPage() {
 
           <div role="group" aria-label="型号订单历史" className="part-section">
             <h3>订单历史</h3>
-            <Tabs items={[
+            <Tabs defaultActiveKey="purchase" items={[
+              ...(canSeePresales ? [{ key: "presales", label: "询价记录", children: <PartInquiryHistory key={ov.part.id} partId={ov.part.id} /> }] : []),
               { key: "purchase", label: "采购历史(近20)", children: (
                 <section aria-label="采购订单历史">
                   <ResizableTable storageKey="search-ov-pur" rowKey={(r) => r.order_no + r.order_date} size="small" columns={purCols} dataSource={ov.purchases_recent} pagination={false} scroll={{ x: 600, y: 280 }} />

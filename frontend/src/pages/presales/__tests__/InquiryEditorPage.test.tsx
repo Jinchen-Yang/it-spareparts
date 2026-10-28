@@ -1,3 +1,4 @@
+import { openLine, closeLine } from "./nativeUi";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
@@ -9,6 +10,10 @@ const mocks = vi.hoisted(() => ({
     resubmitInquiry: vi.fn(), appendLines: vi.fn(), library: vi.fn(), customers: vi.fn() },
   suggestParts: vi.fn(), getFieldTemplate: vi.fn(), listFieldDefinitions: vi.fn(),
   listWorkCandidates: vi.fn(),
+  masterCategories: vi.fn(), masterCheck: vi.fn(), masterCreate: vi.fn(),
+}));
+vi.mock("../../../api", async (importOriginal) => ({ ...await importOriginal<typeof import("../../../api")>(),
+  masterCategories: mocks.masterCategories, masterCheck: mocks.masterCheck, masterCreate: mocks.masterCreate,
 }));
 vi.mock("../../../api/presales", () => ({ presales: mocks.presales }));
 vi.mock("../../../api/search", () => ({ suggestParts: mocks.suggestParts }));
@@ -48,8 +53,10 @@ function mount(path = "/presales/inquiries/new", state?: unknown) {
   </MemoryRouter>);
 }
 async function addPart(pn: string) {
+  await closeLine();
   fireEvent.change(screen.getByRole("textbox", { name: "搜索并批量加入 PN" }), { target: { value: pn } });
   fireEvent.click(await screen.findByRole("option", { name: new RegExp(pn) }));
+  await openLine(pn);
   await screen.findByRole("spinbutton", { name: `${pn} 数量` });
 }
 beforeEach(() => {
@@ -57,6 +64,9 @@ beforeEach(() => {
   mocks.suggestParts.mockImplementation(async (q: string) => q === "PN-A" ? [partA] : q === "PN-B" ? [partB] : []);
   mocks.presales.library.mockResolvedValue({ 10: [validOffer], 11: [] });
   mocks.listWorkCandidates.mockResolvedValue({ items: [{ id: 2, display_name: "采购甲" }, { id: 3, display_name: "采购乙" }] });
+  mocks.masterCategories.mockResolvedValue({ data: { categories: [], spec_fields: [] } });
+  mocks.masterCheck.mockResolvedValue({ data: { near_duplicates: [] } });
+  mocks.masterCreate.mockResolvedValue({ data: { created: true, id: 71, pn_std: "NEW-CPU" } });
   mocks.presales.customers.mockResolvedValue([{ id: 5, name: "客户甲" }]);
   mocks.getFieldTemplate.mockImplementation(async (_subject, level) => level === "line" ? [field] : []);
   mocks.listFieldDefinitions.mockImplementation(async (_subject, level) => level === "line" ? [field] : []);
@@ -76,6 +86,38 @@ beforeEach(() => {
 afterEach(cleanupAntd);
 
 describe("销售询价编辑", () => {
+  it("只读编辑页优先显示客户名称", async () => {
+    mocks.presales.getInquiry.mockResolvedValue(inquiry({ status: "submitted", customer_name: "客户名称而非编号" }));
+    mount("/presales/inquiries/1/edit");
+    expect(await screen.findByText("客户名称而非编号")).toBeVisible();
+    expect(screen.queryByText("5", { selector: ".ant-descriptions-item-content" })).not.toBeInTheDocument();
+  });
+  it("输入未建档PN可就地建档并加入询价，建档本身不提交询价", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ page_master_data: true }));
+    mount();
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索并批量加入 PN" }), { target: { value: "NEW-CPU" } });
+    fireEvent.click(await screen.findByRole("button", { name: "新建 PN「NEW-CPU」" }));
+    fireEvent.change(screen.getByLabelText("NEW-CPU建档描述"), { target: { value: "处理器描述" } });
+    fireEvent.click(screen.getByRole("button", { name: /查\s*重/ }));
+    const createButton = await screen.findByRole("button", { name: "新建并加入当前单据" });
+    await waitFor(() => expect(createButton).toBeEnabled());
+    fireEvent.click(createButton);
+    await screen.findByRole("button", { name: "编辑 NEW-CPU" });
+    expect(mocks.presales.createInquiry).not.toHaveBeenCalled();
+    expect(mocks.presales.submitInquiry).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
+    await waitFor(() => expect(mocks.presales.createInquiry).toHaveBeenCalledWith(expect.objectContaining({ lines: [expect.objectContaining({ part_id: 71, pn_raw: "NEW-CPU", description: "处理器描述" })] })));
+  });
+
+  it("无主数据权限时保留原文待建档路径，不展示新建入口", async () => {
+    mount();
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索并批量加入 PN" }), { target: { value: "NEW-CPU" } });
+    await screen.findByText("暂无匹配型号");
+    expect(screen.queryByRole("button", { name: "新建 PN「NEW-CPU」" })).toBeNull();
+    expect(screen.getByRole("button", { name: /按原文添加「NEW-CPU」/ })).toBeEnabled();
+    expect(mocks.masterCategories).not.toHaveBeenCalled();
+  });
+
   it("多选加入、直接引用、按原文待建档、列存储交期与多人指派组成正确提交体", async () => {
     mount();
     await addPart("PN-A");
@@ -84,7 +126,7 @@ describe("销售询价编辑", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "搜索并批量加入 PN" }), { target: { value: "RAW-NEW" } });
     fireEvent.click(await screen.findByRole("button", { name: /按原文添加「RAW-NEW」/ }));
     expect(screen.getByText("待建档", { exact: true })).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "展开 PN-A" }));
+    await openLine("PN-A");
     fireEvent.click(screen.getByRole("button", { name: "客户要求 / 自定义字段" }));
     fireEvent.change(screen.getByRole("spinbutton", { name: "PN-A 数量" }), { target: { value: "4" } });
     fireEvent.click(screen.getAllByRole("checkbox", { name: "要求 PN 一致" })[0]);
@@ -126,6 +168,7 @@ describe("销售询价编辑", () => {
   it("客户字段权限关闭时不展示选择器、不查询或覆盖客户", async () => {
     localStorage.setItem("permissions", JSON.stringify({ data_customer: false }));
     mount("/presales/inquiries/1/edit");
+    await openLine("PN-A");
     await screen.findByRole("spinbutton", { name: "PN-A 数量" });
     expect(screen.queryByRole("combobox", { name: "客户" })).not.toBeInTheDocument();
     expect(mocks.presales.customers).not.toHaveBeenCalled();
@@ -148,6 +191,7 @@ describe("销售询价编辑", () => {
     mocks.listFieldDefinitions.mockImplementation(mocks.getFieldTemplate.getMockImplementation()!);
     mocks.presales.getInquiry.mockResolvedValue(data);
     mount("/presales/inquiries/1/edit");
+    await openLine("PN-A");
     const warranty = await screen.findByRole("textbox", { name: "质保要求字段值" });
     fireEvent.click(screen.getByRole("button", { name: "客户要求 / 自定义字段" }));
     fireEvent.click(screen.getByRole("button", { name: "设置本单报价可见范围" }));
@@ -175,6 +219,7 @@ describe("销售询价编辑", () => {
     mocks.presales.getInquiry.mockResolvedValue(inquiry({ status: "revising", version: 5 }));
     mocks.presales.updateInquiry.mockResolvedValueOnce(inquiry({ status: "revising", version: 6 }));
     mount("/presales/inquiries/1/edit");
+    await openLine("PN-A");
     fireEvent.change(await screen.findByRole("spinbutton", { name: "PN-A 数量" }), { target: { value: "7" } });
     fireEvent.click(screen.getByRole("button", { name: "重新提交" }));
     await waitFor(() => expect(mocks.presales.resubmitInquiry).toHaveBeenCalledWith(1, { expected_version: 6 }));
@@ -200,19 +245,22 @@ describe("销售询价编辑", () => {
     expect(mocks.presales.appendLines.mock.calls[0][1].lines[0]).not.toHaveProperty("line_key");
   });
 
-  it("409 提示后读取最新版本；服务端未返回的字段不显示也不覆盖", async () => {
+  it("版本冲突保留未保存数量；服务端未返回的字段不显示也不覆盖", async () => {
     const hidden = inquiry({ version: 3 });
     delete hidden.customer_id; delete hidden.assignee_ids; delete hidden.notes;
     delete hidden.lines![0].notes;
-    mocks.presales.getInquiry.mockResolvedValueOnce(hidden).mockResolvedValueOnce({ ...hidden, version: 4 });
-    mocks.presales.updateInquiry.mockRejectedValueOnce({ response: { status: 409 } });
+    mocks.presales.getInquiry.mockResolvedValueOnce(hidden);
+    mocks.presales.updateInquiry.mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: "version_conflict", message: "记录版本已变化" } } } });
     mount("/presales/inquiries/1/edit");
+    await openLine("PN-A");
     await screen.findByRole("spinbutton", { name: "PN-A 数量" });
     expect(screen.queryByRole("combobox", { name: "客户" })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "客户要求" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "PN-A 数量" }), { target: { value: "7" } });
     fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
-    await screen.findByText("已被他人修改/领取，已自动刷新");
-    await waitFor(() => expect(mocks.presales.getInquiry).toHaveBeenCalledTimes(2));
+    await screen.findByText("记录版本已变化");
+    expect(mocks.presales.getInquiry).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("spinbutton", { name: "PN-A 数量" })).toHaveValue("7.000");
     const body = mocks.presales.updateInquiry.mock.calls[0][1];
     expect(body).not.toHaveProperty("customer_id");
     expect(body).not.toHaveProperty("assignee_ids");
@@ -225,6 +273,7 @@ describe("销售询价编辑", () => {
     data.lines![0].field_values = [{ field_def_id: 31, name: "质保要求", value: "一年" }];
     mocks.presales.getInquiry.mockResolvedValue(data);
     mount("/presales/inquiries/1/edit");
+    await openLine("PN-A");
     const input = await screen.findByRole("textbox", { name: "质保要求字段值" });
     fireEvent.change(input, { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
@@ -233,12 +282,12 @@ describe("销售询价编辑", () => {
   });
 
   it("报价库带入引用后建单；提交失败保留草稿身份，重试不会重复创建", async () => {
-    mocks.presales.submitInquiry.mockRejectedValueOnce(new Error("network"));
+    mocks.presales.submitInquiry.mockRejectedValueOnce({ code: "ERR_NETWORK", request: {} });
     mount("/presales/inquiries/new", { referenceOffer: validOffer, part: partA });
     await screen.findByText("已引用报价 #70 · 本行不再派单");
     await waitFor(() => expect(mocks.presales.library).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "提交" }));
-    await screen.findByText("保存失败，请重试");
+    await screen.findByText("未收到服务器响应");
     fireEvent.click(screen.getByRole("button", { name: "提交" }));
     await waitFor(() => expect(mocks.presales.submitInquiry).toHaveBeenCalledTimes(2));
     expect(mocks.presales.createInquiry).toHaveBeenCalledTimes(1);
@@ -256,6 +305,7 @@ describe("销售询价编辑", () => {
       <Switch /><Routes><Route path="/presales/inquiries/:id/edit" element={<InquiryEditorPage />} /></Routes>
     </MemoryRouter>);
     fireEvent.click(screen.getByRole("button", { name: "切到 B" }));
+    await openLine("PN-B");
     await screen.findByRole("spinbutton", { name: "PN-B 数量" });
     await act(async () => { resolveA(inquiry()); });
     expect(screen.queryByRole("spinbutton", { name: "PN-A 数量" })).not.toBeInTheDocument();
@@ -270,6 +320,7 @@ it("已保存引用按钉住快照判断失效，当前续期不能让旧引用�
     ref_offer: { ...validOffer, valid_until: "2020-01-02T00:00:00Z" } };
   mocks.presales.getInquiry.mockResolvedValue(data);
   mount("/presales/inquiries/1/edit");
+    await openLine("PN-A");
   expect(await screen.findByText("引用已失效")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
   expect(await screen.findByText("引用报价已失效，请重新选择有效报价或取消引用")).toBeInTheDocument();
@@ -287,40 +338,33 @@ it("从报价库展开报价带入的新引用可在 more 中校验并建单", a
   })));
 });
 
-it("新增第二个 PN 收起已有详情，必需补充描述的原文行单独展开，支持全部展开折叠", async () => {
+it("多行通过独立 Drawer 编辑，批量粘贴去重且不丢行", async () => {
   mount();
   expect(screen.queryByRole("textbox", { name: "客户要求" })).not.toBeInTheDocument();
-  await addPart("PN-A");
-  expect(screen.getByLabelText("PN-A 期望交期")).toBeInTheDocument();
-  await addPart("PN-B");
-  expect(screen.getByLabelText("PN-A 期望交期")).toBeVisible();
-  expect(screen.getByLabelText("PN-B 期望交期")).toBeVisible();
+  await addPart("PN-A"); await addPart("PN-B"); await closeLine();
+  expect(screen.queryByLabelText("PN-A 期望交期")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "批量粘贴 PN" }));
   fireEvent.change(screen.getByRole("textbox", { name: "批量 PN" }), { target: { value: "RAW-A\nRAW-B;RAW-A;PN-A" } });
   fireEvent.click(screen.getByRole("button", { name: "按原文加入" }));
+  await openLine("RAW-A");
   expect(screen.getByRole("textbox", { name: "RAW-A 描述" })).toBeInTheDocument();
+  fireEvent.change(screen.getByRole("textbox", { name: "RAW-A 描述" }), { target: { value: "新增规格" } });
+  await openLine("RAW-B");
   expect(screen.getByRole("textbox", { name: "RAW-B 描述" })).toBeInTheDocument();
-  expect(screen.getAllByRole("spinbutton")).toHaveLength(4);
-  expect(screen.getByLabelText("PN-A 期望交期")).toBeVisible();
-  fireEvent.click(screen.getByRole("button", { name: "全部展开" }));
-  expect(screen.getByLabelText("PN-A 期望交期")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "全部折叠" }));
-  expect(screen.queryByRole("textbox", { name: "RAW-A 描述" })).not.toBeInTheDocument();
+  await closeLine();
   fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
   await waitFor(() => expect(mocks.presales.createInquiry).toHaveBeenCalled());
   expect(mocks.presales.createInquiry.mock.calls[0][0].lines.map((line: { pn_raw: string }) => line.pn_raw)).toEqual(["PN-A", "PN-B", "RAW-A", "RAW-B"]);
+  expect(mocks.presales.createInquiry.mock.calls[0][0].lines[2].description).toBe("新增规格");
 });
 
-it("继续加入 PN 时保留缺描述的原文行展开，已补齐的行恢复折叠", async () => {
+it("待建档行的描述在关闭 Drawer 和继续加入 PN 后保留", async () => {
   mount();
   fireEvent.change(screen.getByRole("textbox", { name: "搜索并批量加入 PN" }), { target: { value: "RAW-A" } });
   fireEvent.click(await screen.findByRole("button", { name: /按原文添加「RAW-A」/ }));
-  await addPart("PN-A");
-  expect(screen.getByRole("textbox", { name: "RAW-A 描述" })).toBeVisible();
-  expect(screen.getByLabelText("PN-A 期望交期")).toBeVisible();
+  await openLine("RAW-A");
   fireEvent.change(screen.getByRole("textbox", { name: "RAW-A 描述" }), { target: { value: "已补齐规格说明" } });
-  await addPart("PN-B");
-  expect(screen.queryByRole("textbox", { name: "RAW-A 描述" })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "展开 RAW-A" }));
+  await addPart("PN-A"); await addPart("PN-B");
+  await openLine("RAW-A");
   expect(screen.getByRole("textbox", { name: "RAW-A 描述" })).toHaveValue("已补齐规格说明");
 });

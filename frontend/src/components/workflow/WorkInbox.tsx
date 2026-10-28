@@ -1,20 +1,20 @@
 import { useEffect, useRef, useState, type Key, type ReactNode } from "react";
-import { Alert, App, Badge, Button, Input, List, Modal, Select, Space, Tabs, Tag } from "antd";
+import { Alert, App, Badge, Button, Input, Modal, Table, Select, Space, Tabs, Tag } from "antd";
 import {
   claimWorkItem, completeWorkItem, declineWorkItem, listWorkCandidates, listWorkItems,
   reassignWorkItem, releaseWorkItem, startWorkItem, transferWorkItem,
   type WorkAction, type WorkActionBody, type WorkCandidate, type WorkItem, type WorkTab,
 } from "../../api/workItems";
-import DataGrid from "../datagrid/DataGrid";
+import { formatBusinessDateTime } from "../../utils/date";
 import { refreshWorkBadges, useWorkBadge } from "./useWorkBadge";
+import { parseApiError, type ApiErrorInfo } from "../../utils/apiError";
+import { ApiErrorFeedback, useApiError } from "../ApiErrorFeedback";
 
 interface Props {
   subjectType?: string;
-  conflictMessage?: string;
   renderRow: (item: WorkItem) => ReactNode;
   onOpen: (item: WorkItem) => void | Promise<void>;
   beforeOpen?: (item: WorkItem) => boolean | Promise<boolean>;
-  compact?: boolean;
   refreshKey?: number;
   onSelectionChange?: (items: WorkItem[]) => void;
   isRowSelectable?: (item: WorkItem) => boolean;
@@ -27,19 +27,12 @@ const actionLabels: Record<WorkAction, string> = {
 };
 const statusLabels = { pending: "待处理", in_progress: "处理中", done: "已完成", declined: "已拒绝", cancelled: "已取消" };
 
-function errorMessage(error: unknown, fallback: string): string {
-  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-  if (typeof detail === "string") return detail;
-  if (detail && typeof detail === "object" && "message" in detail && typeof detail.message === "string") return detail.message;
-  return fallback;
-}
-
-export default function WorkInbox({ subjectType, conflictMessage, renderRow, onOpen, beforeOpen, compact = false, refreshKey = 0,
+export default function WorkInbox({ subjectType, renderRow, onOpen, beforeOpen, refreshKey = 0,
   onSelectionChange, isRowSelectable }: Props) {
   const { message } = App.useApp();
+  const handleError = useApiError();
   const badge = useWorkBadge();
   const [query, setQuery] = useState("");
-  const [queueSort, setQueueSort] = useState("new");
   const [tab, setTab] = useState<WorkTab>("assigned");
   const [page, setPage] = useState(1);
   const [items, setItems] = useState<WorkItem[]>([]);
@@ -47,7 +40,7 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
   const [total, setTotal] = useState(0);
   const [canSupervise, setCanSupervise] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState<string>();
+  const [loadError, setLoadError] = useState<ApiErrorInfo>();
   const [reload, setReload] = useState(0);
   const [busy, setBusy] = useState<number | null>(null);
   const [dialog, setDialog] = useState<{ action: ReasonAction; item: WorkItem }>();
@@ -55,7 +48,7 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
   const [target, setTarget] = useState<number>();
   const [candidates, setCandidates] = useState<WorkCandidate[]>([]);
   const [candidatesLoading, setCandidatesLoading] = useState(false);
-  const [candidateError, setCandidateError] = useState<string>();
+  const [candidateError, setCandidateError] = useState<ApiErrorInfo>();
   const mounted = useRef(true);
   const contextVersion = useRef(0);
 
@@ -71,29 +64,26 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
     setTotal(0);
     setLoading(true);
     setLoadError(undefined);
-    void listWorkItems({ tab, subject_type: subjectType, page: compact ? 1 : page, page_size: compact ? 100 : 20 }, controller.signal)
+    void listWorkItems({ tab, subject_type: subjectType, page, page_size: 20 }, controller.signal)
       .then(async (data) => {
-        if (compact) {
-          const all = [...data.items];
-          for (let nextPage = 2; (nextPage - 1) * 100 < data.total; nextPage += 1) {
-            if (controller.signal.aborted) return;
-            const next = await listWorkItems({ tab, subject_type: subjectType, page: nextPage, page_size: 100 }, controller.signal);
-            all.push(...next.items);
-          }
-          data = { ...data, items: all };
-        }
         if (controller.signal.aborted) return;
         setItems(data.items);
         setTotal(data.total);
         setCanSupervise(data.can_supervise);
+        setDialog((current) => {
+          if (!current) return current;
+          const latest = data.items.find((item) => item.id === current.item.id);
+          // 保留原因与接收人，但下次由用户确认时必须携带刷新后的版本。
+          return { ...current, item: latest ?? { ...current.item, allowed_actions: [] } };
+        });
         if (tab === "all" && !data.can_supervise) { setTab("assigned"); setPage(1); }
       })
       .catch((error) => {
-        if (!controller.signal.aborted) setLoadError(errorMessage(error, "待办加载失败，请重试"));
+        if (!controller.signal.aborted) setLoadError(parseApiError(error, "待办加载失败，请重试"));
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [tab, subjectType, page, reload, compact, refreshKey, onSelectionChange]);
+  }, [tab, subjectType, page, reload, refreshKey, onSelectionChange]);
 
   useEffect(() => {
     ++contextVersion.current;
@@ -113,7 +103,7 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
     void listWorkCandidates(dialog.item.pool_key, controller.signal)
       .then((data) => { if (!controller.signal.aborted) setCandidates(data.items); })
       .catch((error) => {
-        if (!controller.signal.aborted) setCandidateError(errorMessage(error, "候选人加载失败，请重试"));
+        if (!controller.signal.aborted) setCandidateError(parseApiError(error, "候选人加载失败，请重试"));
       })
       .finally(() => { if (!controller.signal.aborted) setCandidatesLoading(false); });
     return () => controller.abort();
@@ -134,8 +124,10 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
     const actionContext = contextVersion.current;
     const isCurrent = () => mounted.current && actionContext === contextVersion.current;
     setBusy(item.id);
+    let completed = false;
     try {
       const changed = await handlers[action](item.id, body);
+      completed = true;
       if (!isCurrent()) { refreshWorkBadges(); return; }
       setDialog(undefined);
       refresh();
@@ -143,13 +135,8 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
       else message.success(`待办已${actionLabels[action]}`);
     } catch (error: unknown) {
       if (!isCurrent()) return;
-      const response = (error as { response?: { status?: number; data?: { detail?: { claimed_by_name?: string } } } })?.response;
-      if (response?.status === 409) {
-        const name = response.data?.detail?.claimed_by_name;
-        message.warning(conflictMessage ?? (action === "claim" && name ? `已被 ${name} 领取` : errorMessage(error, "待办已变化，请刷新后重试")));
-        setDialog(undefined);
-        refresh();
-      } else message.error(errorMessage(error, `${actionLabels[action]}失败，请重试`));
+      if (completed) handleError.afterSuccess(error, action === "start" ? "开始处理待办" : `待办${actionLabels[action]}`);
+      else await handleError(error, refresh);
     } finally {
       if (isCurrent()) setBusy(null);
     }
@@ -164,7 +151,7 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
   };
 
   const submitDialog = () => {
-    if (!dialog || !reason.trim()) return;
+    if (!dialog || !reason.trim() || !dialog.item.allowed_actions.includes(dialog.action)) return;
     const needsTarget = dialog.action === "transfer" || dialog.action === "reassign";
     if (needsTarget && target === undefined) return;
     void perform(dialog.item, dialog.action, {
@@ -180,61 +167,39 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
     { key: "claimed", label: <Space>我已领取<Badge count={badge.claimed} /></Space> },
     { key: "done", label: "已处理" },
   ];
-  if (canSupervise && !compact) tabs.push({ key: "all", label: "全部" });
+  if (canSupervise) tabs.push({ key: "all", label: "全部" });
 
   const openItem = async (item: WorkItem) => {
-    if (beforeOpen && !await beforeOpen(item)) return;
-    if (item.allowed_actions.includes("start")) await perform(item, "start", { expected_version: item.version });
-    else await onOpen(item);
+    try {
+      if (beforeOpen && !await beforeOpen(item)) return;
+      if (item.allowed_actions.includes("start")) await perform(item, "start", { expected_version: item.version });
+      else await onOpen(item);
+    } catch (error) { await handleError(error); }
   };
   const actions = (item: WorkItem) => <Space size={4} wrap>
-    <Button size={compact ? "small" : "middle"} disabled={busy !== null} onClick={() => void openItem(item)}>打开</Button>
+    <Button size="small" disabled={busy !== null} onClick={() => void openItem(item)}>打开</Button>
     {item.allowed_actions.filter((action) => action !== "start").map((action) => <Button key={action}
-      size={compact ? "small" : "middle"} loading={busy === item.id} disabled={busy !== null} onClick={() => {
+      size="small" loading={busy === item.id} disabled={busy !== null} onClick={() => {
         if (["release", "transfer", "reassign", "decline"].includes(action)) openDialog(item, action as ReasonAction);
         else void perform(item, action, { expected_version: item.version });
       }}>{actionLabels[action]}</Button>)}
   </Space>;
-  const queue = compact ? items.filter((item) => JSON.stringify(item.summary).toLowerCase().includes(query.trim().toLowerCase())).sort((a, b) =>
-    queueSort === "lines" ? Number(b.summary.line_count ?? 0) - Number(a.summary.line_count ?? 0)
-      : queueSort === "no" ? new Intl.Collator("en", { numeric: true }).compare(String(a.summary.inquiry_no ?? ""), String(b.summary.inquiry_no ?? ""))
-        : (Date.parse(b.created_at) - Date.parse(a.created_at)) * (queueSort === "old" ? -1 : 1)) : items;
-  return (
-    <>
+  const queue = items.filter((item) => String(item.summary.created_by_name ?? "").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  return <>
       <Tabs activeKey={tab} items={tabs} onChange={(key) => { setTab(key as WorkTab); setPage(1); }} />
-      {loadError && <Alert type="error" showIcon message={loadError} action={<Button onClick={() => setReload((value) => value + 1)}>重试</Button>} />}
-      {compact && <div className="quote-queue-filters"><Input size="small" aria-label="筛选待办" placeholder="筛选单号" value={query} onChange={(event) => setQuery(event.target.value)} />
-        <Select size="small" aria-label="队列排序" value={queueSort} onChange={setQueueSort} options={[
-          { value: "new", label: "最新在前" }, { value: "old", label: "最早在前" }, { value: "lines", label: "行数多在前" }, { value: "no", label: "单号 A→Z" },
-        ]} /></div>}
-      {compact ? <DataGrid id="presales-work-queue" ariaLabel="报价工作台队列" rows={queue} rowKey={(item) => item.id} loading={loading} error={loadError}
-        selectable={!!onSelectionChange} selectedRowKeys={selected} isRowSelectable={isRowSelectable}
-        onSelectedRowKeysChange={(keys) => { setSelected(keys); onSelectionChange?.(items.filter((item) => keys.includes(item.id))); }}
-        onRetry={() => setReload((value) => value + 1)} columns={[{ key: "inquiry", title: "待办队列", width: onSelectionChange ? 233 : 265, identity: true,
-          render: (item) => <div className="quote-queue-row">{renderRow(item)}<span><Tag>{statusLabels[item.status]}</Tag>{item.paused && <Tag>已暂停</Tag>}</span>{actions(item)}</div> }]}
-        emptyText={loadError ? "未加载待办" : "暂无待办"} /> : <List
-        rowKey="id"
-        loading={loading}
-        dataSource={items}
-        locale={{ emptyText: loadError ? "未加载待办" : "暂无待办" }}
+      <Input aria-label="筛选待办" placeholder="筛选询价人（当前页）" value={query} onChange={(event) => setQuery(event.target.value)} style={{ width: 260, marginBottom: 16 }} />
+      {loadError && <Alert type="error" showIcon message="待办加载失败" description={<ApiErrorFeedback info={loadError} />} action={<Button onClick={() => setReload((value) => value + 1)}>重试</Button>} />}
+      <Table aria-label="报价工作台队列" rowKey="id" dataSource={queue} loading={loading} tableLayout="fixed"
         pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: setPage }}
-        renderItem={(item) => (
-          <List.Item actions={[
-            <Button key="open" disabled={busy !== null} onClick={() => void openItem(item)}>打开</Button>,
-            ...item.allowed_actions.filter((action) => action !== "start").map((action) => (
-              <Button key={action} loading={busy === item.id} disabled={busy !== null} onClick={() => {
-                if (["release", "transfer", "reassign", "decline"].includes(action)) openDialog(item, action as ReasonAction);
-                else void perform(item, action, { expected_version: item.version });
-              }}>{actionLabels[action]}</Button>
-            )),
-          ]}>
-            <Space direction="vertical">
-              {renderRow(item)}
-              <Space><Tag>{statusLabels[item.status]}</Tag>{item.paused && <Tag color="orange">已暂停</Tag>}</Space>
-            </Space>
-          </List.Item>
-        )}
-      />}
+        rowSelection={onSelectionChange ? { selectedRowKeys: selected, getCheckboxProps: (item) => ({ disabled: isRowSelectable ? !isRowSelectable(item) : false }),
+          onChange: (keys) => { setSelected(keys); onSelectionChange(items.filter((item) => keys.includes(item.id))); } } : undefined}
+        locale={{ emptyText: loadError ? "未加载待办" : "暂无待办" }} columns={[
+          { title: "询价人", key: "inquirer", render: (_, item) => renderRow(item) },
+          { title: "行数", key: "lines", width: 90, sorter: (a, b) => Number(a.summary.line_count ?? 0) - Number(b.summary.line_count ?? 0), render: (_, item) => String(item.summary.line_count ?? "—") },
+          { title: "状态", key: "status", width: 130, render: (_, item) => <><Tag>{statusLabels[item.status]}</Tag>{item.paused && <Tag>已暂停</Tag>}</> },
+          { title: "最近动态", key: "updated", width: 180, sorter: (a, b) => Date.parse(a.updated_at) - Date.parse(b.updated_at), render: (_, item) => formatBusinessDateTime(item.updated_at) },
+          { title: "操作", key: "actions", width: 300, render: (_, item) => actions(item) },
+        ]} />
       <Modal
         open={!!dialog}
         title={dialog ? `${actionLabels[dialog.action]}待办` : "待办操作"}
@@ -243,13 +208,13 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
         onCancel={() => { if (busy === null) setDialog(undefined); }}
         onOk={submitDialog}
         confirmLoading={busy !== null}
-        okButtonProps={{ disabled: !reason.trim() || (!!dialog && ["transfer", "reassign"].includes(dialog.action) && (target === undefined || candidatesLoading)) }}
+        okButtonProps={{ disabled: !reason.trim() || (!!dialog && (!dialog.item.allowed_actions.includes(dialog.action) || (["transfer", "reassign"].includes(dialog.action) && (target === undefined || candidatesLoading)))) }}
         destroyOnHidden
       >
         <Space direction="vertical" style={{ width: "100%" }}>
           {dialog && ["transfer", "reassign"].includes(dialog.action) && (
             <>
-              {candidateError && <Alert type="error" message={candidateError} />}
+              {candidateError && <Alert type="error" message="候选人加载失败" description={<ApiErrorFeedback info={candidateError} />} />}
               <Select
                 aria-label="接收人"
                 placeholder="请选择接收人"
@@ -271,6 +236,5 @@ export default function WorkInbox({ subjectType, conflictMessage, renderRow, onO
           <Input.TextArea aria-label="原因" placeholder="请填写原因（必填）" value={reason} disabled={busy !== null} rows={3} onChange={(event) => setReason(event.target.value)} />
         </Space>
       </Modal>
-    </>
-  );
+    </>;
 }

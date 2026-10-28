@@ -1,3 +1,4 @@
+import { openLine, closeLine } from "./nativeUi";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -49,7 +50,7 @@ function openPage(data = inquiry()) {
     <Route path="/presales/inquiries/:id" element={<InquiryDetailPage />} />
     <Route path="/presales/inquiries/:id/edit" element={<EditRoute />} />
     <Route path="/presales/offers/new" element={<EditRoute />} />
-    <Route path="/presales/tasks/:id" element={<EditRoute />} />
+    <Route path="/presales/workbench/:id" element={<EditRoute />} />
   </Routes></MemoryRouter>);
   return screen.findByText("询价单 XJ0005");
 }
@@ -75,8 +76,10 @@ describe("询价详情", () => {
     expect(within(table).queryByText("采购4")).toBeNull();
     expect(within(table).queryByText(/¥1\.00/)).toBeNull();
     expect(screen.getByText("整批交付")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "展开 PN-8" }));
+    await openLine("PN-8");
     expect(screen.getByText("一年")).toBeInTheDocument();
+    await closeLine();
+    fireEvent.click(screen.getByRole("button", { name: "查看动态" }));
     expect(screen.getByText("时间线 presales_inquiry 5")).toBeInTheDocument();
   });
 
@@ -90,7 +93,7 @@ describe("询价详情", () => {
     expect(screen.queryByText("供应商")).toBeNull();
     expect(screen.queryByText("采购备注")).toBeNull();
     expect(screen.queryByText(/无权查看|已隐藏|私密/)).toBeNull();
-    expect(screen.getByText("报价 #1")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看报价 1 历史" })).toBeInTheDocument();
   });
 
   it("不同询价行各自找最低价，无货报价不标最低价", async () => {
@@ -220,7 +223,7 @@ describe("询价详情", () => {
 
   it.each([
     ["draft", "继续填写主动报价", "/presales/offers/new?draft=5"],
-    ["submitted", "更新 / 撤销报价", "/presales/tasks/5"],
+    ["submitted", "更新 / 撤销报价", "/presales/workbench/5"],
   ] as const)("主动报价 %s 提供可继续处理的入口", async (status, label, target) => {
     const user = userEvent.setup();
     await openPage(inquiry({ kind: "proactive_offer", status }));
@@ -289,7 +292,9 @@ it("点矩阵报价选择成交采纳，过期与旧版本不可选择，时间�
   expect(screen.getByRole("button", { name: "采纳 PN-8 报价 3" })).toBeDisabled();
   await user.click(screen.getByRole("button", { name: "采纳 PN-8 报价 2" }));
   expect(screen.getByRole("button", { name: "采纳 PN-8 报价 2" })).toHaveAttribute("aria-pressed", "true");
-  await user.click(screen.getByRole("button", { name: "隐藏时间线" }));
+  await user.click(screen.getByRole("button", { name: "查看动态" }));
+  expect(screen.getByText("时间线 presales_inquiry 5")).toBeInTheDocument();
+  await closeLine();
   expect(screen.queryByText("时间线 presales_inquiry 5")).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "关单" }));
   await user.click(screen.getByRole("button", { name: "确认关单" }));
@@ -306,6 +311,6 @@ it("详情草稿沿用不进入可采纳报价，草稿不报与沿用均标为�
   expect(screen.getByText("2026-12-06")).toBeVisible();
   expect(screen.getByText(/草稿（未回复） · 沿用报价 #90/)).toBeVisible();
   expect(screen.queryByRole("button", { name: "采纳 PN-8 报价 90" })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "展开 PN-8" }));
+  await openLine("PN-8");
   expect(screen.getAllByText("草稿（未回复）")).toHaveLength(2);
 });
