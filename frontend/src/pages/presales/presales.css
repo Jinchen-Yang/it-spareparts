@@ -1,12 +1,12 @@
 .presales-page { min-width: 0; }
-.presales-panel { padding: 20px; background: var(--mb-bg-card, #fff); border-radius: 12px; }
+.presales-panel { padding: 20px; background: var(--mb-surface); border-radius: 12px; }
 .presales-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
-.presales-muted { color: var(--mb-text-3, #8c8c8c); font-size: 13px; }
+.presales-muted { color: var(--mb-text-3); font-size: 13px; }
 .presales-page .ant-table-cell { overflow-wrap: anywhere; }
-.presales-footer { position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 16px 20px; margin-top: 16px; background: var(--mb-bg-card, #fff); border-top: 1px solid var(--mb-border, #eee); }
+.presales-footer { position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 16px 20px; margin-top: 16px; background: var(--mb-surface); border-top: 1px solid var(--mb-border); }
 .presales-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 24px; }
 .presales-wide { grid-column: 1 / -1; }
-.presales-offer-choice { display: block; margin: 4px 0; padding: 4px 8px; border: 1px solid #d9d9d9; border-radius: 6px; background: transparent; font: inherit; text-align: left; cursor: pointer; }
-.presales-offer-choice.is-selected { border-color: #1677ff; background: #e6f4ff; }
-.presales-offer-choice.is-lowest { border-color: #52c41a; }
-.presales-offer-choice:disabled { color: #8c8c8c; cursor: default; }
+.presales-offer-choice { display: block; margin: 4px 0; padding: 4px 8px; border: 1px solid var(--mb-border); border-radius: 6px; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.presales-offer-choice.is-selected { border-color: var(--mb-accent); background: var(--mb-accent-soft); }
+.presales-offer-choice.is-lowest { border-color: var(--mb-success); }
+.presales-offer-choice:disabled { color: var(--mb-text-3); cursor: default; }
