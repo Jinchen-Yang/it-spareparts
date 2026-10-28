@@ -86,6 +86,12 @@ beforeEach(() => {
 afterEach(cleanupAntd);
 
 describe("销售询价编辑", () => {
+  it("只读编辑页优先显示客户名称", async () => {
+    mocks.presales.getInquiry.mockResolvedValue(inquiry({ status: "submitted", customer_name: "客户名称而非编号" }));
+    mount("/presales/inquiries/1/edit");
+    expect(await screen.findByText("客户名称而非编号")).toBeVisible();
+    expect(screen.queryByText("5", { selector: ".ant-descriptions-item-content" })).not.toBeInTheDocument();
+  });
   it("输入未建档PN可就地建档并加入询价，建档本身不提交询价", async () => {
     localStorage.setItem("permissions", JSON.stringify({ page_master_data: true }));
     mount();

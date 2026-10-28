@@ -130,20 +130,26 @@ function OfferNewContent({ draftId }: { draftId: number }) {
     } catch (error) { await handlePresalesError(error); }
     finally { setBusy(false); }
   };
-  const refresh = async () => {
+  const refresh = async (preserveValues = false) => {
     if (!inquiry) return;
     const latest = await presales.getInquiry(inquiry.id);
     setInquiry(latest);
     const offers = latest.offers ?? [];
     setSaved(Object.fromEntries(offers.map((offer) => [offer.line_id, offer])));
-    setValues(Object.fromEntries((latest.lines ?? []).map((line) => [line.id,
+    if (!preserveValues) setValues(Object.fromEntries((latest.lines ?? []).map((line) => [line.id,
       offerInput(offers.find((offer) => offer.line_id === line.id))])));
     if (latest.status === "submitted") setPublished(true);
     setVersionConflict(false);
   };
   const operationError = async (error: unknown) => {
-    if (parseApiError(error).kind === "version_conflict") setVersionConflict(true);
+    const info = parseApiError(error);
+    if (info.kind === "version_conflict") setVersionConflict(true);
     await handlePresalesError(error);
+    if (info.status === 409 && info.code === "existing_draft") {
+      // 接续服务端草稿身份与版本，保留当前输入，由用户再次保存。
+      try { await refresh(true); }
+      catch (cause) { setVersionConflict(true); await handlePresalesError(cause); }
+    }
   };
   const saveDraft = async () => {
     if (!inquiry) return;

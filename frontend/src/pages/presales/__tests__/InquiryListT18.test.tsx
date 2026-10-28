@@ -69,6 +69,22 @@ it("客户名直接显示售前列表字段，不请求采购分析选项", asyn
   expect(mocks.purchaseOptions).not.toHaveBeenCalled();
 });
 
+it("清除排序后仍可连续翻页，只有排序实际变化才回到首页", async () => {
+  mocks.listInquiries.mockResolvedValue({ items: [inquiry], total: 61, page: 1, page_size: 20 });
+  mount();
+  await screen.findByText("XJ-T18");
+  // 默认降序的下一次点击即清除排序。
+  const header = screen.getByRole("columnheader", { name: /最近动态/ });
+  fireEvent.click(header);
+  await waitFor(() => expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ sort: "updated_at", dir: "desc", page: 1 })));
+  fireEvent.click(screen.getByTitle("2"));
+  await waitFor(() => expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ page: 2 })));
+  fireEvent.click(screen.getByTitle("3"));
+  await waitFor(() => expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ page: 3 })));
+  fireEvent.click(screen.getByRole("columnheader", { name: /行数/ }));
+  await waitFor(() => expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ sort: "line_count", page: 1 })));
+});
+
 it("搜索等待最后一次输入300ms后传给服务端，返回行仍由服务端决定", async () => {
   vi.useFakeTimers();
   const view = mount();

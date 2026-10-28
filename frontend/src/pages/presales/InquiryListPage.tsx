@@ -150,8 +150,10 @@ export default function InquiryListPage() {
         pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, showTotal: () => `本页显示 ${filtered.length} / ${items.length} 张 · 范围内共 ${total} 张` }}
         onChange={(pagination, _filters, sorter) => {
           const value = Array.isArray(sorter) ? sorter[0] : sorter;
-          setSort(value.order && value.columnKey ? { key: String(value.columnKey), dir: value.order === "ascend" ? "asc" : "desc" } : defaultSort);
-          setPage(value.columnKey !== sort?.key || (value.order === "ascend" ? "asc" : "desc") !== sort?.dir ? 1 : pagination.current ?? 1);
+          const nextSort: InquirySort = value.order && value.columnKey
+            ? { key: String(value.columnKey), dir: value.order === "ascend" ? "asc" : "desc" } : defaultSort;
+          setSort(nextSort);
+          setPage(nextSort.key !== sort?.key || nextSort.dir !== sort?.dir ? 1 : pagination.current ?? 1);
         }} />
     </div>
     <Drawer title={detail ? `${detail.inquiry_no} · 报价概览` : "报价概览"} open={!!detailId} width={640} onClose={() => setDetailId(undefined)} destroyOnHidden>

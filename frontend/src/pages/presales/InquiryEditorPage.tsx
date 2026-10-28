@@ -226,7 +226,7 @@ function InquiryEditorContent() {
           } })}>重新加载最新单据</Button>} />}
       {blocked && <Alert type="warning" message="当前单据不可在此编辑；已提交的销售询价请先撤回修改，关单后请复制为新单。" />}
       {!append && (blocked ? <Descriptions column={1} items={[
-        ...("customer_id" in (inquiry ?? {}) ? [{ key: "customer", label: "客户", children: customerId ?? "—" }] : []),
+        ...("customer_id" in (inquiry ?? {}) ? [{ key: "customer", label: "客户", children: inquiry?.customer_name ?? customerId ?? "—" }] : []),
         ...("notes" in (inquiry ?? {}) ? [{ key: "notes", label: "客户要求", children: notes }] : []),
       ]} /> : <Form layout="vertical" disabled={busy}>
         <div className="presales-form">

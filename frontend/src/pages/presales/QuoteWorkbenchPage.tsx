@@ -38,7 +38,8 @@ export default function QuoteWorkbenchPage() {
         isRowSelectable={(item) => !item.paused && ["pending", "in_progress"].includes(item.status)
           && (item.assignee_id != null || item.claimed_by != null) && item.allowed_actions.some((action) => ["start", "release", "complete"].includes(action))}
         renderRow={(item) => <><span>{String(item.summary.created_by_name ?? "业务人员")}</span><div className="presales-muted">{formatBusinessDateTime(String(item.summary.created_at ?? item.created_at))}</div></>}
-        onOpen={(item) => navigate(`/presales/workbench/${item.subject_id}`, { state: { workItem: item } })} />
+        onOpen={(item) => navigate(item.subject_type === "presales_offer_notice"
+          ? `/presales/inquiries/${item.subject_id}` : `/presales/workbench/${item.subject_id}`, { state: { workItem: item } })} />
     </div>
     {importOpen && <WorkbookDialog mode="quote" onClose={() => setImportOpen(false)} onApplied={() => {
       message.success("已保存为草稿，请在页面确认后回复"); setImportOpen(false); setRefreshKey((value) => value + 1);

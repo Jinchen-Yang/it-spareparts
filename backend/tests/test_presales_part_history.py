@@ -3,7 +3,7 @@
 from datetime import timedelta
 from decimal import Decimal
 
-from app.services.presales import common, inquiries, offers
+from app.services.presales import common, inquiries, offers, part_history, visibility
 from tests.test_presales_api_visibility import _client, _quoted, users  # noqa: F401
 
 
@@ -31,6 +31,46 @@ def test_part_history_uses_visibility_before_pagination_and_never_leaks_private_
 def test_part_history_requires_presales_permission(users):
     response = _client(users.denied).get(f"/api/presales/parts/{users.part.id}/inquiries")
     assert response.status_code == 403
+
+
+def test_part_history_pages_multiple_inquiries_before_building_details(db, users, monkeypatch):
+    visible = [_quoted(db, users)[0] for _ in range(4)]
+    _quoted(db, users, whole={"mode": "private"})
+    # 同一询价的多行也占独立分页位置。
+    inquiry = inquiries.create_draft(db, users.seller.id, lines=[
+        {"part_id": users.part.id, "qty": 3}, {"part_id": users.part.id, "qty": 4}])
+    inquiries.submit(db, inquiry.id, users.seller.id, inquiry.version)
+    db.commit()
+    detail_ids = []
+    original = visibility.inquiry_view
+
+    def view(db, inquiry, ctx):
+        detail_ids.append(inquiry.id)
+        return original(db, inquiry, ctx)
+
+    monkeypatch.setattr(visibility, "inquiry_view", view)
+    ctx = common.resolve_actor(db, users.other.id)[1]
+    first = part_history.list_lines(db, users.part.id, ctx, page=1, page_size=1)
+    assert first["total"] == 6
+    assert first["items"][0]["inquiry_id"] == inquiry.id
+    assert detail_ids == [inquiry.id]
+    detail_ids.clear()
+    second = part_history.list_lines(db, users.part.id, ctx, page=2, page_size=1)
+    assert second["total"] == 6
+    assert [row["inquiry_id"] for row in second["items"]] == [inquiry.id]
+    assert len({row["line_id"] for row in first["items"] + second["items"]}) == 2
+    assert detail_ids == [inquiry.id]
+    detail_ids.clear()
+    combined = part_history.list_lines(db, users.part.id, ctx, page=1, page_size=2)
+    assert [row["line_id"] for row in combined["items"]] == [row["line_id"] for row in first["items"] + second["items"]]
+    assert detail_ids == [inquiry.id]
+    detail_ids.clear()
+    following = part_history.list_lines(db, users.part.id, ctx, page=2, page_size=2)
+    assert [row["inquiry_id"] for row in following["items"]] == [visible[-1].id, visible[-2].id]
+    assert detail_ids == [visible[-1].id, visible[-2].id]
+    detail_ids.clear()
+    assert part_history.list_lines(db, users.part.id, ctx, page=10, page_size=2)["items"] == []
+    assert detail_ids == []
 
 
 def test_part_history_ignores_expired_quotes_and_keeps_tax_bases_separate(db, users):

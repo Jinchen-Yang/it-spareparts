@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Alert, App, Button, Drawer, Input, InputNumber, Modal, Space, Spin, Tag, Typography } from "antd";
-import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 import { presales, type ExistingChoice, type Inquiry, type InquiryLine, type LineResponseInput, type Offer, type OfferInput } from "../../api/presales";
 import { releaseWorkItem, type WorkItem } from "../../api/workItems";
 import GalleryPicker from "../../components/gallery/GalleryPicker";
@@ -24,6 +24,13 @@ export default function ProcessPage() {
 }
 
 export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inquiryId: number; onTaskChange?: () => void; onDirtyChange?: (dirty: boolean) => void }) {
+  const location = useLocation();
+  const navigationTask = (location.state as { workItem?: WorkItem } | null)?.workItem;
+  if (navigationTask?.subject_type === "presales_offer_notice") return <Navigate replace to={`/presales/inquiries/${inquiryId}`} state={location.state} />;
+  return <QuoteProcessContent inquiryId={inquiryId} onTaskChange={onTaskChange} onDirtyChange={onDirtyChange} />;
+}
+
+function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inquiryId: number; onTaskChange?: () => void; onDirtyChange?: (dirty: boolean) => void }) {
   const handlePresalesError = usePresalesError();
   const { choose, dialog } = useExistingOfferChoice();
   const location = useLocation();
@@ -124,7 +131,8 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
     return !dirty[line.id] && ownOffers.some((offer) => offer.line_id === line.id && ["draft", "published"].includes(offer.status)
       && quoteComplete(offer) && !offer.no_stock && !!line.part_id);
   });
-  const editable = inquiry.status === "submitted" && (proactive || (!!task && actorId != null)) && !paused && !refreshRequired;
+  const canProcess = inquiry.status === "submitted" && (proactive || (!!task && actorId != null)) && !paused;
+  const editable = canProcess && !refreshRequired;
   const refreshAfterSuccess = (error: unknown, action: string) => {
     setRefreshRequired(true);
     handlePresalesError.afterSuccess(error, action);
@@ -245,7 +253,7 @@ export function ProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inq
       existing: library[line.part_id!] ?? [],
       disabled: !canEdit || busy, responseDisabled: !editable || !active || busy,
       referenced: !!line.ref_offer_id && !proactive,
-      binding: !line.part_id && editable && active ? <PartBinding line={line} onBound={setInquiry} refresh={refresh} disabled={busy} /> : undefined,
+      binding: !line.part_id && canProcess && active ? <PartBinding line={line} onBound={setInquiry} refresh={refresh} disabled={busy || refreshRequired} /> : undefined,
       details: <>
         {proactive && (!current || current.status !== "published") && <Alert type="info" message="当前报价不可更新，可新建主动报价"
           action={<Link to="/presales/offers/new">新建主动报价</Link>} />}
