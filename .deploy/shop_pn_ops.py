@@ -43,6 +43,20 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def docker_started_at(value):
+    """Validate RFC3339 on Python 3.10 without altering raw StartedAt identity."""
+    pattern = (r'(\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d)'
+               r'(?:\.(\d{1,9}))?(Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)')
+    match = re.fullmatch(pattern, value) if isinstance(value, str) else None
+    need(match is not None, 'invalid Docker StartedAt')
+    fraction = (match[2] or '').ljust(6, '0')[:6]
+    normalized = match[1] + '.' + fraction + ('+00:00' if match[3] == 'Z' else match[3])
+    try:
+        return dt.datetime.fromisoformat(normalized).astimezone(dt.timezone.utc)
+    except (ValueError, OverflowError):
+        raise RuntimeError('invalid Docker StartedAt') from None
+
+
 def artifact(path):
     digest = hashlib.sha256()
     with Path(path).open('rb') as source:
@@ -137,7 +151,7 @@ class Release:
             need(set(writer) == {'name', 'id', 'image', 'started_at'} and re.fullmatch('[0-9a-f]{64}', writer['id'])
                  and re.fullmatch('sha256:[0-9a-f]{64}', writer['image'])
                  and re.fullmatch('(it-spareparts-app|itsp-presales3)-[a-z0-9-]{1,100}', writer['name']), 'source writer identity invalid')
-            need(dt.datetime.fromisoformat(writer['started_at'].replace('Z', '+00:00')).tzinfo is not None, 'source StartedAt timezone missing')
+            docker_started_at(writer['started_at'])
         need(len({w['id'] for w in hold['writers']}) == len({w['name'] for w in hold['writers']}) == 4, 'duplicate source writer')
         self.prefix = 'shop-pn-' + self.release[:12]
 

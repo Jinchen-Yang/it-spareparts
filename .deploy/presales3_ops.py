@@ -86,6 +86,25 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def docker_started_at(value):
+    """Parse Docker RFC3339 nanoseconds on Python 3.10; never change identity.
+
+    Only chronological comparisons use truncated microseconds. Manifest and
+    receipt StartedAt fields retain the original exact nine-digit string.
+    Truncation can conservatively reject equality; it cannot admit a newer job.
+    """
+    pattern = (r'(\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d)'
+               r'(?:\.(\d{1,9}))?(Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)')
+    match = re.fullmatch(pattern, value) if isinstance(value, str) else None
+    need(match is not None, 'invalid Docker StartedAt')
+    fraction = (match[2] or '').ljust(6, '0')[:6]
+    normalized = match[1] + '.' + fraction + ('+00:00' if match[3] == 'Z' else match[3])
+    try:
+        return dt.datetime.fromisoformat(normalized).astimezone(dt.timezone.utc)
+    except (ValueError, OverflowError):
+        raise RuntimeError('invalid Docker StartedAt') from None
+
+
 def stamp():
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
 
@@ -509,7 +528,7 @@ class Release:
         for writer in self.writers():
             row = self.inspect(writer["name"])
             need(row["Id"] == writer["id"] and row["Image"] == writer["image"], "writer identity differs at import gate")
-            started = dt.datetime.fromisoformat(row["State"]["StartedAt"].replace("Z", "+00:00"))
+            started = docker_started_at(row["State"]["StartedAt"])
             need(started.tzinfo is not None and created < started, "orphan job may belong to a surviving writer")
             starts[writer["id"]] = row["State"]["StartedAt"]
         return {"mode": "exact_readonly_exceptions", **current, "review_sha256": allowed["review_sha256"],

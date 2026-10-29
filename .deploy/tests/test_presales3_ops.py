@@ -298,6 +298,18 @@ class OpsTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "review evidence"):
             self.release.import_gate()
 
+    def test_import_gate_compares_docker_nanos_but_receipts_keep_exact_identity(self):
+        self.import_fixture()
+        raw = '2026-10-28T07:24:13.137207105Z'
+        for row in self.writer_rows.values():
+            row['State']['StartedAt'] = raw
+        result = self.release.import_gate()
+        self.assertEqual(set(result['writer_started_at'].values()), {raw})
+        self.assertTrue(all(row['State']['StartedAt'] == raw for row in self.writer_rows.values()))
+        next(iter(self.writer_rows.values()))['State']['StartedAt'] = 'not-a-timestamp'
+        with self.assertRaisesRegex(RuntimeError, 'invalid Docker StartedAt'):
+            self.release.import_gate()
+
     def test_freeze_checks_import_gate_before_stop_and_again_after_tcp_zero(self):
         release = self.release
         pre = {"schema": "oldhead", "active": {}, "inode": [1, 2], "import_gate": {"snapshot": "expected"}}
