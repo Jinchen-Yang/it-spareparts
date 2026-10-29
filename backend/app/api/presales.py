@@ -325,7 +325,7 @@ def list_inquiries(db: Db, ctx: Ctx,
                 query = query.where(PresalesInquiry.updated_at < datetime.combine(date_to + timedelta(days=1), time.min, zone))
             else:
                 query = query.where(PresalesInquiry.updated_at <= datetime.combine(date_to, time.max, zone))
-        items = []
+        visible = []
         for inquiry, name in db.execute(query):
             if not visibility.can_view_inquiry(db, inquiry, ctx):
                 continue
@@ -334,11 +334,16 @@ def list_inquiries(db: Db, ctx: Ctx,
                 from app.services.workflow.registry import Subject
                 if not work_items.subject_participation(db, Subject("presales_inquiry", inquiry.id), ctx)["assigned"]:
                     continue
+            visible.append((inquiry, name))
+        # 准入与参与者筛选仍在分页之前，保证 total 和每一页的权限范围准确。
+        # 昂贵的行答复/报价/待办序列化只服务当前页，页外记录不展开。
+        items = []
+        for inquiry, name in visible[(page - 1) * page_size:page * page_size]:
             view = visibility.inquiry_view(db, inquiry, ctx, detail=False)
             view["customer_name"] = name if "customer_id" in view else None
             view["is_owner"] = inquiry.created_by == user.id
             items.append(view)
-        return {"items": items[(page - 1) * page_size:page * page_size], "total": len(items),
+        return {"items": items, "total": len(visible),
                 "page": page, "page_size": page_size}
     return _call(db, read)
 

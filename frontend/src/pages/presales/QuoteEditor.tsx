@@ -7,13 +7,14 @@ import { presales } from "../../api/presales";
 import { readPermissionMap } from "../../nav";
 import { changedAudience } from "../../components/audience/rules";
 import CandidateSelect from "./CandidateSelect";
+import { basisLabel } from "./shared";
 
 const PRIVATE_AUDIENCE: AudienceRule = { mode: "private", user_ids: [], group_ids: [] };
-const editableFields = ["unit_price", "is_tax_inclusive", "no_stock", "qty_available", "stock_location",
+const editableFields = ["unit_price", "is_tax_inclusive", "price_basis", "no_stock", "qty_available", "stock_location",
   "lead_time", "source_key", "supplier_id", "notes"] as const;
 
 export function offerInput(offer?: Offer): OfferInput {
-  if (!offer) return { no_stock: false, supplier_audience: PRIVATE_AUDIENCE,
+  if (!offer) return { no_stock: false, is_tax_inclusive: true, price_basis: "sale", supplier_audience: PRIVATE_AUDIENCE,
     reporter_audience: PUBLIC_AUDIENCE, notes_audience: PUBLIC_AUDIENCE };
   // 返回中缺失的字段保持缺失，避免保存时把不可见内容清空或改为公开。
   return Object.fromEntries(editableFields.filter((field) => field in offer)
@@ -49,6 +50,7 @@ export default function QuoteEditor({ value, onChange, existing, disabled = fals
   if (disabled) return <Descriptions column={1} items={[
     { key: "price", label: "单价", children: value.no_stock ? "无货" : value.unit_price ?? "待填写" },
     { key: "tax", label: "含税口径", children: value.is_tax_inclusive === true ? "含税" : value.is_tax_inclusive === false ? "不含税" : "未声明" },
+    { key: "basis", label: "价格性质", children: basisLabel(value) },
     ...([ ["qty_available", "可供数量"], ["stock_location", "货物所在地"], ["lead_time", "交期"],
       ["supplier_id", "供应商"], ["source_key", "货源标识"], ["notes", "采购备注"] ] as const)
       .filter(([key]) => key in value).map(([key, title]) => ({ key, label: title, children: String(value[key] ?? "—") })),
@@ -65,9 +67,15 @@ export default function QuoteEditor({ value, onChange, existing, disabled = fals
       {<Form.Item label="含税口径">
         <Select aria-label={`${label}含税口径`} value={value.is_tax_inclusive === true ? "inc" : value.is_tax_inclusive === false ? "ex" : "unknown"}
           style={{ width: 150 }} disabled={disabled || value.no_stock}
-          options={[{ value: "unknown", label: "未声明" }, { value: "inc", label: "含税" }, { value: "ex", label: "不含税" }]}
+          options={[...(existing?.is_tax_inclusive == null && existing ? [{ value: "unknown", label: "未声明" }] : []),
+            { value: "inc", label: "含税" }, { value: "ex", label: "不含税" }]}
           onChange={(next) => change({ is_tax_inclusive: next === "unknown" ? null : next === "inc" })} />
       </Form.Item>}
+      <Form.Item label="价格性质">
+        <Select aria-label={`${label}价格性质`} value={value.price_basis ?? "sale"} style={{ width: 150 }} disabled={disabled}
+          options={[{ value: "sale", label: "售价" }, { value: "cost", label: "成本价" }]}
+          onChange={(next) => change({ price_basis: next })} />
+      </Form.Item>
       <Form.Item label="可供数量">
         <InputNumber aria-label={`${label}可供数量`} min={0} max={99999999999.999} precision={3}
           disabled={disabled || value.no_stock} value={value.qty_available == null ? null : Number(value.qty_available)}

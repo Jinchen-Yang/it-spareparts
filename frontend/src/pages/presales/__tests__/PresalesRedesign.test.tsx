@@ -23,7 +23,7 @@ vi.mock("../../../components/audience/AudiencePicker", () => ({
 import QuotePage from "../QuotePage";
 import AskPage from "../AskPage";
 import OfferNewPage from "../OfferNewPage";
-import { answerSentence, lineAnswer } from "../answers";
+import { answerSentence, lineAnswer, ownedOfferForEdit } from "../answers";
 
 const task: WorkItem = { id: 71, subject_type: "presales_inquiry", subject_id: 1, pool_key: "presales_inquiry",
   assignee_id: 7, claimed_by: 7, status: "in_progress", version: 3, paused: false,
@@ -53,6 +53,15 @@ beforeEach(() => {
 afterEach(async () => { await cleanupAntd(); vi.restoreAllMocks(); });
 
 describe("行答复推导", () => {
+  it("真实新草稿优先于当前已发布报价，历史快照不能回退成编辑源", () => {
+    const historical = offer({ unit_price: "100", expired: true, latest: { unit_price: "200", revision_no: 2, is_tax_inclusive: true } });
+    inquiry.offers = [historical];
+    expect(ownedOfferForEdit(inquiry, inquiry.lines![0], 7)).toBeUndefined();
+    const draft = offer({ id: 82, status: "draft", unit_price: "300" });
+    inquiry.offers.push(draft);
+    inquiry.line_answers = [{ line_id: 11, state: "quoted", responded: true, offer: offer({ version: 5, unit_price: "200" }) }];
+    expect(ownedOfferForEdit(inquiry, inquiry.lines![0], 7)).toBe(draft);
+  });
   it("有效价优先于不报，取最新报价并生成可转述的话", () => {
     const line = inquiry.lines![0];
     inquiry.offers = [offer({ id: 1, unit_price: "100", valid_from: "2026-10-25T01:00:00Z" }), offer({ id: 2, unit_price: "90", valid_from: "2026-10-26T01:00:00Z" })];
@@ -166,6 +175,32 @@ describe("报价页", () => {
     fireEvent.change(screen.getByRole("spinbutton", { name: "PN-1 单价" }), { target: { value: "110" } });
     fireEvent.click(within(screen.getByRole("spinbutton", { name: "PN-1 单价" }).closest("tr")!).getByRole("button", { name: /^保\s?存$/ }));
     await waitFor(() => expect(mocks.updateOffer).toHaveBeenCalledWith(81, expect.objectContaining({ unit_price: 110, expected_version: 1 })));
+    expect(mocks.saveOffer).not.toHaveBeenCalled();
+  });
+  it("询价B更新同一报价后回到询价A编辑，使用当前版本和字段并保留A的历史快照", async () => {
+    const historical = offer({ version: 1, unit_price: "100", expired: true });
+    let current = offer({ inquiry_id: 2, line_id: 21, version: 5, unit_price: "200", is_tax_inclusive: null, price_basis: "cost" });
+    inquiry = { ...inquiry, lines: [inquiry.lines![0]], offers: [historical],
+      line_answers: [{ line_id: 11, state: "quoted", responded: true, offer: current }] };
+    mocks.updateOffer.mockImplementation(async (_id, input) => {
+      if (input.expected_version !== current.version) throw { response: { status: 409 } };
+      current = { ...current, ...input, version: current.version + 1 };
+      inquiry = { ...inquiry, line_answers: [{ line_id: 11, state: "quoted", responded: true, offer: current }] };
+      return current;
+    });
+    renderQuote();
+    fireEvent.click(await screen.findByRole("button", { name: "已报价 1" }));
+    fireEvent.click(await screen.findByRole("button", { name: "更新报价" }));
+    const input = screen.getByRole("spinbutton", { name: "PN-1 单价" });
+    expect(input).toHaveValue("200");
+    expect(screen.getByRole("combobox", { name: "PN-1 价格性质" }).closest(".ant-select")).toHaveTextContent("成本价");
+    fireEvent.change(input, { target: { value: "250" } });
+    fireEvent.click(within(input.closest("tr")!).getByRole("button", { name: /^保\s?存$/ }));
+    await waitFor(() => expect(mocks.updateOffer).toHaveBeenCalledWith(81, expect.objectContaining({ expected_version: 5,
+      unit_price: 250, price_basis: "cost", is_tax_inclusive: null })));
+    await screen.findByText("¥250");
+    expect(historical.version).toBe(1);
+    expect(historical.unit_price).toBe("100");
     expect(mocks.saveOffer).not.toHaveBeenCalled();
   });
   it("关单后的本人报价仍可更新，存量未声明税口径不被改为含税", async () => {

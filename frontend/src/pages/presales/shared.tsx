@@ -48,19 +48,29 @@ export function taxLabel(value: boolean | null | undefined) {
   return value === true ? "含税" : value === false ? "不含税" : "未声明税基";
 }
 
+/** D-0047：价格性质不受成本数据权限隐藏；存量未填视为售价。 */
+export function basisLabel(offer: Pick<Offer, "price_basis">) {
+  return offer.price_basis === "cost" ? "成本价" : "售价";
+}
+
+export function PriceBasisTag({ offer }: { offer: Pick<Offer, "price_basis"> }) {
+  return <Tag color={offer.price_basis === "cost" ? "purple" : undefined}>{basisLabel(offer)}</Tag>;
+}
+
 export function OfferBadge({ offer }: { offer: Offer }) {
   const now = useNow([offer.valid_from]);
   const active = isOfferActive(offer, now);
   return <Space wrap size={4}><Tag color={active ? "green" : undefined} style={{ color: active ? undefined : "var(--mb-text-3)" }}>
     {active ? "有效报价" : "已失效"} {moneyExact(offer.unit_price == null ? null : Number(offer.unit_price))} · {taxLabel(offer.is_tax_inclusive)}
     {offer.reporter && ` · ${offer.reporter.name}`}
-  </Tag><OfferUpdates offer={offer} /></Space>;
+  </Tag><PriceBasisTag offer={offer} /><OfferUpdates offer={offer} /></Space>;
 }
 
 /** 更新提示只使用服务端已授权的 latest，不请求当前报价来补全。 */
 export function OfferUpdates({ offer }: { offer: Offer }) {
   return <>
-    {offer.latest && <Typography.Text type="secondary">该报价已更新为 {moneyExact(offer.latest.unit_price == null ? null : Number(offer.latest.unit_price))} · {taxLabel(offer.latest.is_tax_inclusive)}</Typography.Text>}
+    {offer.latest && <><Typography.Text type="secondary">该报价已更新为 {moneyExact(offer.latest.unit_price == null ? null : Number(offer.latest.unit_price))} · {taxLabel(offer.latest.is_tax_inclusive)}</Typography.Text>
+      {offer.latest.price_basis && <PriceBasisTag offer={offer.latest} />}</>}
     {offer.original_withdrawn && <Tag color="warning">原报价已撤销</Tag>}
   </>;
 }
@@ -95,7 +105,7 @@ export function latestActiveOffer(groups: Offer[], now = Date.now()): Offer | un
 export function LatestPriceTag({ offer }: { offer?: Offer }) {
   if (!offer) return null;
   return <Tag color="green" className="presales-price-tag" title={offer.reporter ? `${offer.reporter.name} 报价` : undefined}>
-    最新 {moneyExact(offer.unit_price == null ? null : Number(offer.unit_price))} {taxLabel(offer.is_tax_inclusive)}
+    最新 {moneyExact(offer.unit_price == null ? null : Number(offer.unit_price))} {taxLabel(offer.is_tax_inclusive)} · {basisLabel(offer)}
     {offer.valid_from && ` · ${formatBusinessDateTime(offer.valid_from).slice(5, 10)}`}
   </Tag>;
 }

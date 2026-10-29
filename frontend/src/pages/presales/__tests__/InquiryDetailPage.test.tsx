@@ -111,12 +111,14 @@ describe("询价详情", () => {
 
   it("调用 revisions 展示真实可见历史，并复用图库下载组件", async () => {
     const user = userEvent.setup();
-    mocks.revisions.mockResolvedValue([{ revision_no: 1, snapshot: offer(1, { unit_price: "75.00" }),
-      changed_fields: ["unit_price"], created_at: "2026-10-01T00:00:00Z", reason: "调整有效期" }]);
+    mocks.revisions.mockResolvedValue([{ revision_no: 1, snapshot: offer(1, { unit_price: "75.00", price_basis: "cost" }),
+      changed_fields: ["unit_price", "price_basis"], created_at: "2026-10-01T00:00:00Z", reason: "调整有效期" }]);
     await openPage();
     await user.click(screen.getByRole("button", { name: "查看报价 1 历史" }));
     const modal = await screen.findByRole("dialog");
     expect(await within(modal).findByText("75.00")).toBeInTheDocument();
+    expect(within(modal).getByText("成本价")).toBeVisible();
+    expect(within(modal).getByText("变更：单价、价格性质")).toBeVisible();
     expect(mocks.revisions).toHaveBeenCalledWith(1);
     expect(within(modal).getByText("原因：调整有效期")).toBeInTheDocument();
     expect(within(modal).queryByText("供应商")).toBeNull();

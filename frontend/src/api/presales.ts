@@ -96,7 +96,7 @@ export interface Offer extends Omit<OfferInput, "supplier_audience" | "reporter_
   reporter?: { id: number; name: string };
   created_at?: string;
   updated_at?: string;
-  latest?: Pick<Offer, "unit_price" | "is_tax_inclusive" | "revision_no">;
+  latest?: Pick<Offer, "unit_price" | "is_tax_inclusive" | "revision_no" | "price_basis">;
   original_withdrawn?: boolean;
   expired?: boolean;
   more?: Offer[];

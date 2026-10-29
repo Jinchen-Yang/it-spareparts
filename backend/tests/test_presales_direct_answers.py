@@ -134,6 +134,7 @@ def test_reuse_current_answer_updates_but_old_snapshot_and_completed_task_do_not
         assert answer["offer"]["unit_price"] == Decimal("234.56")
         assert answer["offer"]["price_basis"] == "cost"
         assert view["line_responses"][0]["offer"]["unit_price"] == Decimal("123.45")
+        assert view["line_responses"][0]["offer"]["latest"]["price_basis"] == "cost"
         assert view["line_responses"][0]["offer"]["expired"] is True
         assert view["can_urge"] is False
     with pytest.raises(InvalidTransition):
@@ -165,6 +166,71 @@ def test_paused_tasks_cannot_be_urged_in_read_or_write_paths(db, r6_actors):
     assert _view(db, inquiry, u.sales)["can_urge"] is False
     with pytest.raises(InvalidTransition):
         inquiries.urge(db, inquiry.id, u.sales.id)
+
+
+def test_new_reply_withdrawal_retains_handled_state_and_completed_task(db, r6_actors):
+    u = r6_actors
+    inquiry, line, _, quote = _publish(db, u, kind="sales_inquiry")
+    offers.withdraw(db, quote.id, u.buyer.id, "停止供货", expected_version=quote.version)
+    for actor in (u.sales, u.buyer):
+        view = _view(db, inquiry, actor)
+        assert view["line_answers"] == [{"line_id": line.id, "state": "unavailable", "responded": True}]
+        assert view["progress"] == {"quoted_lines": 1, "effective_quoted_lines": 0, "line_count": 1}
+        assert view["can_urge"] is False
+        assert all(item["status"] == "done" for item in view["work_items"])
+
+
+@pytest.mark.parametrize("withdraw_quote", [False, True], ids=["stale", "withdrawn"])
+def test_previous_line_version_quote_cannot_count_as_new_reply(db, r6_actors, withdraw_quote):
+    u = r6_actors
+    inquiry, line, _, quote = _publish(db, u, kind="sales_inquiry")
+    if withdraw_quote:
+        offers.withdraw(db, quote.id, u.buyer.id, "撤回", expected_version=quote.version)
+    inquiries.withdraw(db, inquiry.id, u.sales.id, inquiry.version)
+    inquiries.update_draft(db, inquiry.id, u.sales.id, inquiry.version,
+        lines=[{"line_key": line.line_key, "part_id": u.part.id, "qty": "2"}])
+    inquiries.resubmit(db, inquiry.id, u.sales.id, inquiry.version)
+    for actor in (u.sales, u.buyer):
+        view = _view(db, inquiry, actor)
+        assert view["line_answers"] == [{"line_id": line.id, "state": "pending", "responded": False}]
+        assert view["progress"]["quoted_lines"] == 0
+    assert _view(db, inquiry, u.sales)["can_urge"] is True
+
+
+def test_non_material_resubmit_keeps_withdrawn_reply_handled(db, r6_actors):
+    u = r6_actors
+    inquiry, line, _, quote = _publish(db, u, kind="sales_inquiry")
+    offers.withdraw(db, quote.id, u.buyer.id, "撤回", expected_version=quote.version)
+    inquiries.withdraw(db, inquiry.id, u.sales.id, inquiry.version)
+    inquiries.update_draft(db, inquiry.id, u.sales.id, inquiry.version,
+        lines=[{"line_key": line.line_key, "part_id": u.part.id, "notes": "仅备注变更"}])
+    inquiries.resubmit(db, inquiry.id, u.sales.id, inquiry.version)
+    view = _view(db, inquiry, u.sales)
+    assert view["line_answers"] == [{"line_id": line.id, "state": "unavailable", "responded": True}]
+    assert view["can_urge"] is False
+
+
+@pytest.mark.parametrize("kind", ["sales_inquiry", "proactive_offer"])
+def test_http_new_draft_defaults_tax_true_and_edit_preserves_historical_null(db, r6_actors, kind):
+    u = r6_actors
+    if kind == "sales_inquiry":
+        inquiry, lines = _pending(db, u)
+    else:
+        inquiry = inquiries.create_draft(db, u.buyer.id, kind=kind, lines=[{"part_id": u.part.id}])
+        lines = inquiries.lines_for(db, inquiry.id)
+    path = f"/api/presales/inquiries/{inquiry.id}/lines/{lines[0].id}/offers"
+    version = inquiry.version
+    db.commit()
+    client = _client(u.buyer)
+    created = client.post(path, json={"unit_price": "10", "expected_version": version})
+    assert created.status_code == 200, created.text
+    quote = created.json()
+    assert quote["is_tax_inclusive"] is True
+    legacy = client.post(path, json={"offer_id": quote["id"], "expected_version": quote["version"], "is_tax_inclusive": None})
+    assert legacy.status_code == 200, legacy.text
+    changed = client.post(path, json={"offer_id": quote["id"], "expected_version": legacy.json()["version"], "unit_price": "20"})
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["is_tax_inclusive"] is None
 
 
 def test_concurrent_first_direct_quotes_create_only_one_offer(db, r6_actors):

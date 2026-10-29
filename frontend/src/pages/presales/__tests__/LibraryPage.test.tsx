@@ -100,7 +100,9 @@ it("普通 409 保留业务原因不刷新，字段错误显示服务端原因",
 });
 
 it("报价角标只展示服务端返回的报价人，不随时间变为失效", async () => {
-  render(<OfferBadge offer={offer({ reporter: { id: 4, name: "采购甲" } })} />);
+  localStorage.setItem("permissions", JSON.stringify({ data_cost: false }));
+  render(<OfferBadge offer={offer({ reporter: { id: 4, name: "采购甲" }, price_basis: "cost" })} />);
+  expect(screen.getByText("成本价")).toBeVisible();
   expect(screen.getByText(/采购甲/)).toBeInTheDocument();
   await act(async () => { await vi.advanceTimersByTimeAsync(86_400_000); });
   expect(screen.getByText(/有效报价/)).toBeInTheDocument();

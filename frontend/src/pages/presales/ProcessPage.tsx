@@ -17,7 +17,8 @@ import PartBinding from "./PartBinding";
 import PageHeader from "../../components/PageHeader";
 import { findOwnTask, loadInquiry } from "./quoteData";
 import "./presales.css";
-import { answerSentence, lineAnswer } from "./answers";
+import { ownedOfferForEdit } from "./answers";
+import { CurrentAnswer } from "./InquiryOffers";
 
 export default function ProcessPage() {
   const { id } = useParams();
@@ -172,10 +173,8 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
   };
 
   const currentFor = (line: InquiryLine) => {
-    const referenceId = proactive ? line.ref_offer_id ?? savedResponse(line.id)?.ref_offer_id ?? line.linked_offer_ids?.[0] : undefined;
-    return (referenceId ? ownOffers.find((offer) => offer.id === referenceId) : undefined)
-      ?? ownOffers.find((offer) => offer.line_id === line.id && offer.status !== "withdrawn" && offer.status !== "stale")
-      ?? ownOffers.find((offer) => offer.line_id === line.id);
+    return ownedOfferForEdit(inquiry, line, actorId)
+      ?? ownOffers.find((offer) => offer.line_id === line.id && ["withdrawn", "stale"].includes(offer.status));
   };
   const valueKey = (line: InquiryLine) => `${currentFor(line)?.id ?? "new"}:${currentFor(line)?.version ?? 0}`;
   const valueFor = (line: InquiryLine) => {
@@ -255,7 +254,7 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
       referenced: !!line.ref_offer_id && !proactive,
       binding: !line.part_id && canProcess && active ? <PartBinding line={line} onBound={setInquiry} refresh={refresh} disabled={busy || refreshRequired} /> : undefined,
       details: <>
-        {inquiry.line_answers && <p>当前答复：{answerSentence(line, lineAnswer(inquiry, line))}</p>}
+        {inquiry.line_answers && <p>当前答复：<CurrentAnswer inquiry={inquiry} line={line} /></p>}
         {proactive && (!current || current.status !== "published") && <Alert type="info" message="当前报价不可更新，可新建主动报价"
           action={<Link to="/presales/offers/new">新建主动报价</Link>} />}
       </>,

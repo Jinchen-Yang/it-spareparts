@@ -14,7 +14,7 @@ import { formatBusinessDateTime } from "../../utils/date";
 import { moneyExact } from "../../utils/format";
 import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
 import { activeOfferGroups, flattenOffers, taxLabel, usePresalesError } from "./shared";
-import { basisLabel, lineAnswer, priceText } from "./answers";
+import { basisLabel, lineAnswer, ownedOfferForEdit, priceText } from "./answers";
 import PartBinding from "./PartBinding";
 import "./presales.css";
 
@@ -65,12 +65,9 @@ function rowsOf(source: Source, skips: Record<string, string>): QuoteRow[] {
   const actor = actorOf(source);
   return (source.inquiry.lines ?? []).filter((line) => line.status !== "deleted" && !line.ref_offer_id).map((line) => {
     const key = `${source.inquiry.id}:${line.id}`;
-    const originalOwn = actor == null ? undefined : (source.inquiry.offers ?? [])
-      .filter((offer) => offer.line_id === line.id && offer.reporter?.id === actor && ["draft", "published"].includes(offer.status))
-      .sort((a, b) => (a.status === "published" ? 1 : 0) - (b.status === "published" ? 1 : 0) || b.id - a.id)[0];
     const response = actor == null ? undefined : source.inquiry.line_responses?.find((row) => row.line_id === line.id && row.created_by === actor);
     const answer = lineAnswer(source.inquiry, line);
-    const own = originalOwn ?? (answer.state === "quoted" && answer.offer.reporter?.id === actor ? answer.offer : undefined);
+    const own = ownedOfferForEdit(source.inquiry, line, actor);
     const handled = own?.status === "published" || (response && !response.is_draft);
     const state: RowState = skips[key] != null ? "skip" : own?.status === "draft" ? "draft"
       : handled ? answer.state : "pending";

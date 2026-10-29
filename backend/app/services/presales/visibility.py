@@ -11,6 +11,7 @@ from app.models.presales import (
     PresalesOfferRevision,
 )
 from app.models.system import SysUser
+from app.models.workflow import SubjectEvent
 from app.services import audience, field_pool
 from app.services.presales.common import author_name, bypass, offer_effective, resolve_actor
 from app.services.workflow import work_items
@@ -205,7 +206,7 @@ def pinned_offer_view(db, offer_id, revision_no, ctx):
     if current.revision_no > revision_no:
         latest = offer_view(db, current, ctx)
         if latest is not None:
-            view["latest"] = {key: latest[key] for key in ("unit_price", "is_tax_inclusive", "revision_no")}
+            view["latest"] = {key: latest[key] for key in ("unit_price", "is_tax_inclusive", "revision_no", "price_basis")}
     return view
 
 def inquiry_view(db, inquiry, ctx, *, detail=True):
@@ -272,6 +273,25 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
     line_versions = {line.id: line.version for line in lines}
     handled = {offer["line_id"] for offer in offers
                if offer["status"] == "published" and offer["line_id"] in line_versions}
+    withdrawn = [offer for offer in offers if offer["status"] == "withdrawn"
+                 and offer["inquiry_id"] == inquiry.id and offer["line_id"] in line_versions]
+    if withdrawn:
+        # 报新价不生成 reuse/skip 响应；报价撤回不能抹掉本轮已处理事实。
+        # 使用只追加事件ID排序，避开时间戳精度和同事务 now()；实质变更重提后，
+        # 上一轮撤回报价不能冒充本轮答复。备注等未改变签名的修改继续保留处理事实。
+        changed_at, published_at = {}, {}
+        events = db.scalars(select(SubjectEvent).where(
+            SubjectEvent.subject_type == "presales_inquiry", SubjectEvent.subject_id == inquiry.id,
+            SubjectEvent.kind.in_(("inquiry.resubmitted", "offer.replied", "offer.published")),
+        ).order_by(SubjectEvent.id))
+        for event in events:
+            if event.kind == "inquiry.resubmitted":
+                changed_at.update({key: event.id for key in event.payload.get("changed_line_keys", [])})
+            else:
+                published_at.update({key: event.id for key in event.payload.get("offer_ids", [])})
+        keys = {line.id: line.line_key for line in lines}
+        handled.update(offer["line_id"] for offer in withdrawn
+                       if published_at.get(offer["id"], 0) > changed_at.get(keys[offer["line_id"]], 0))
     handled.update(line_id for line_id, view in line_references.items() if view is not None)
     handled.update(row.line_id for row in responses
                    if not row.is_draft and row.line_version == line_versions[row.line_id]

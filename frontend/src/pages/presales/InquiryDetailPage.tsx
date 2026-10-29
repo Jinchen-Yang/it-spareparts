@@ -7,12 +7,11 @@ import PartThumb from "../../components/gallery/PartThumb";
 import GalleryPicker from "../../components/gallery/GalleryPicker";
 import Timeline from "../../components/workflow/Timeline";
 import PageHeader from "../../components/PageHeader";
-import { hasValue, FieldValues, OfferPrice, offersForLine, OfferDetails, historyFields, displayValue } from "./InquiryOffers";
+import { hasValue, FieldValues, OfferPrice, offersForLine, OfferDetails, historyFields, displayValue, CurrentAnswer } from "./InquiryOffers";
 import "./presales.css";
-import { answerSentence, lineAnswer } from "./answers";
 import { formatBusinessDateTime } from "../../utils/date";
 import { formatMoney } from "../../utils/format";
-import { usePresalesError, isOfferActive, OfferBadge, taxLabel, useNow, OfferUpdates } from "./shared";
+import { usePresalesError, isOfferActive, OfferBadge, taxLabel, useNow, OfferUpdates, basisLabel } from "./shared";
 
 const statusLabels: Record<string, string> = { draft: "草稿", submitted: "已提交", revising: "撤回修改中", closed: "已结束" };
 const outcomeLabels: Record<string, string> = { won: "成交", lost: "未成交", cancelled: "取消" };
@@ -184,7 +183,7 @@ function InquiryDetailContent({ id }: { id: number }) {
       <Table aria-label="询价比价矩阵" rowKey="id" dataSource={lines} loading={loading} tableLayout="fixed" pagination={{ defaultPageSize: 20 }} columns={[
         { title: "PN / 描述", key: "pn", render: (_, line) => <><Space>{line.part_id && <PartThumb partId={line.part_id} pn={line.pn_raw} size={24} />}{line.pn_raw}{line.require_exact_pn && <Tag>一致</Tag>}</Space><div className="presales-muted">{line.description}</div></> },
         { title: "数量 / 期望交期", key: "quantity", width: 150, render: (_, line) => <>{line.qty}<div className="presales-muted">{line.expected_delivery || "—"}</div></> },
-        ...(inquiry.line_answers ? [{ title: "当前答复", key: "answer", render: (_: unknown, line: InquiryLine) => answerSentence(line, lineAnswer(inquiry, line)) }] : []),
+        ...(inquiry.line_answers ? [{ title: "当前答复", key: "answer", render: (_: unknown, line: InquiryLine) => <CurrentAnswer inquiry={inquiry} line={line} /> }] : []),
         { title: "报价对比", key: "offers", render: (_, line) => <>{(lineOffers.get(line.id) ?? []).filter((offer) => !referenceIds(line).has(offer.id)).map((offer) => <div key={offer.id}>{offer.reporter?.name}{renderOffer(line, offer)}</div>)}
           {(inquiry.line_responses ?? []).filter((response) => response.line_id === line.id && response.mode !== "quote").map((response) => <div key={`${response.created_by}:${response.line_id}`}>
             {response.is_draft ? `草稿（未回复） · ${response.mode === "skip" ? `不报：${response.reason}` : `沿用报价 #${response.ref_offer_id}`}` : response.mode === "skip" ? `不报：${response.reason}` : `沿用报价 #${response.ref_offer_id}`}
@@ -208,15 +207,15 @@ function InquiryDetailContent({ id }: { id: number }) {
       {historyError && <Alert type="error" message={historyError} action={<Button onClick={() => historyOffer && void showHistory(historyOffer)}>重试</Button>} />}
       <Table aria-label="报价历史" rowKey="revision_no" dataSource={history} loading={historyLoading} tableLayout="fixed" pagination={{ pageSize: 5 }} columns={[
         { title: "版本 / 时间", key: "version", width: 160, render: (_, revision) => <>第 {revision.revision_no} 版<div>{formatBusinessDateTime(revision.created_at)}</div>{revision.reason && <p>原因：{revision.reason}</p>}</> },
-        { title: "报价内容", key: "details", render: (_, revision) => <><Descriptions column={1} size="small" items={historyFields.filter((field) => hasValue(revision.snapshot[field.key])).map((field) => ({ key: field.key, label: field.label,
-          children: field.key === "is_tax_inclusive" ? taxLabel(revision.snapshot.is_tax_inclusive) : field.key === "valid_from" ? formatBusinessDateTime(revision.snapshot[field.key]) : displayValue(revision.snapshot[field.key]),
+        { title: "报价内容", key: "details", render: (_, revision) => <><Descriptions column={1} size="small" items={historyFields.filter((field) => field.key === "price_basis" || hasValue(revision.snapshot[field.key])).map((field) => ({ key: field.key, label: field.label,
+          children: field.key === "price_basis" ? basisLabel(revision.snapshot) : field.key === "is_tax_inclusive" ? taxLabel(revision.snapshot.is_tax_inclusive) : field.key === "valid_from" ? formatBusinessDateTime(revision.snapshot[field.key]) : displayValue(revision.snapshot[field.key]),
         }))} />{revision.snapshot.reporter?.name && <p>报价人：{revision.snapshot.reporter.name}</p>}{!!revision.changed_fields.length && <Typography.Text type="secondary">变更：{revision.changed_fields.map((field) => historyFields.find((entry) => entry.key === field)?.label ?? field).join("、")}</Typography.Text>}</> },
       ]} locale={{ emptyText: "暂无报价历史" }} />
     </Drawer>
     <Modal open={closeOpen} title="关单" onCancel={() => { if (!busy) setCloseOpen(false); }} onOk={() => void close()} confirmLoading={busy} okText="确认关单" cancelButtonProps={{ disabled: busy }} maskClosable={!busy} closable={!busy}>
       <Form layout="vertical"><Form.Item label="关单结果"><Radio.Group value={outcome} onChange={(event) => setOutcome(event.target.value)}><Radio value="won">成交</Radio><Radio value="lost">未成交</Radio><Radio value="cancelled">取消</Radio></Radio.Group></Form.Item>
         {outcome === "won" && <Form.Item label="采纳本单报价（可选）"><Select aria-label="采纳报价" allowClear value={wonOfferId} onChange={setWonOfferId} placeholder="选择采纳的本单报价（可选）" options={closeOptions.map((offer) => ({ value: offer.id,
-          label: `${lineForOffer(offer)?.pn_raw || ""} · 报价 #${offer.id}${offer.reporter ? ` · ${offer.reporter.name}` : ""} · ${offer.latest ? `当前${formatMoney(offer.latest.unit_price, { prefix: "¥" })} · ${taxLabel(offer.latest.is_tax_inclusive)} · 第 ${offer.latest.revision_no} 版` : `${formatMoney(offer.unit_price, { prefix: "¥" })} · ${taxLabel(offer.is_tax_inclusive)}`}`,
+          label: `${lineForOffer(offer)?.pn_raw || ""} · 报价 #${offer.id}${offer.reporter ? ` · ${offer.reporter.name}` : ""} · ${offer.latest ? `当前${formatMoney(offer.latest.unit_price, { prefix: "¥" })} · ${taxLabel(offer.latest.is_tax_inclusive)}${offer.latest.price_basis ? ` · ${basisLabel(offer.latest)}` : ""} · 第 ${offer.latest.revision_no} 版` : `${formatMoney(offer.unit_price, { prefix: "¥" })} · ${taxLabel(offer.is_tax_inclusive)} · ${basisLabel(offer)}`}`,
         }))} /></Form.Item>}
       </Form>
     </Modal>

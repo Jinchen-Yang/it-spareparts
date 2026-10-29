@@ -37,7 +37,7 @@ def test_reference_keeps_pinned_price_tax_source_and_field_audience_but_is_super
     ref = visibility.inquiry_view(db, inquiry, _ctx(db, u.sales))["lines"][0]["ref_offer"]
     assert ref["unit_price"] == Decimal("100.00") and ref["is_tax_inclusive"] is True
     assert ref["source_key"] == "source-A" and ref["notes"] == "报价备注"
-    assert ref["latest"] == {"unit_price": Decimal("75.00"), "is_tax_inclusive": False, "revision_no": 2}
+    assert ref["latest"] == {"unit_price": Decimal("75.00"), "is_tax_inclusive": False, "revision_no": 2, "price_basis": "sale"}
     assert "_inquiry" not in ref
     assert ref["expired"] is True and ref["original_withdrawn"] is False
 

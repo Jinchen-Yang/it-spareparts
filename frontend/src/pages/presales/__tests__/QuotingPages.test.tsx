@@ -586,6 +586,25 @@ it("原生表格不内嵌表单，不再显示统一有效期", async () => {
   await waitFor(() => expect(screen.getByRole("button", { name: "回复给销售" })).toBeEnabled());
 });
 
+it("旧深链跨询价更新时使用当前授权版本，既有成本性质随价格保存", async () => {
+  const historical = quote({ status: "published", version: 1, unit_price: "100", expired: true,
+    valid_from: "2026-10-25T00:00:00Z" });
+  const current = { ...historical, inquiry_id: 2, line_id: 21, version: 5, unit_price: "200", expired: false,
+    price_basis: "cost" as const, is_tax_inclusive: null };
+  currentInquiry = { ...currentInquiry, lines: [currentInquiry.lines![0]], offers: [historical],
+    line_answers: [{ line_id: 11, state: "quoted", responded: true, offer: current }] };
+  mocks.updateOffer.mockResolvedValue({ ...current, unit_price: 250, version: 6 });
+  processPage();
+  await openLine("PN-1");
+  expect(await screen.findByLabelText("PN-1单价")).toHaveValue("200");
+  expect(screen.getByRole("combobox", { name: "PN-1价格性质" }).closest(".ant-select")).toHaveTextContent("成本价");
+  fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "250" } });
+  fireEvent.click(screen.getByRole("button", { name: "更新报价" }));
+  await waitFor(() => expect(mocks.updateOffer).toHaveBeenCalledWith(81, expect.objectContaining({ expected_version: 5,
+    unit_price: 250, price_basis: "cost", is_tax_inclusive: null })));
+  expect(historical.unit_price).toBe("100");
+});
+
 it("保存一行报价不会丢失另一行未保存的编辑", async () => {
   processPage();
     await openLine("PN-1");

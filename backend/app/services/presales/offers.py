@@ -222,7 +222,7 @@ def save_draft(db, inquiry_id, line_id, actor, data, *, expected_version,
             inquiry_id=inquiry.id, line_id=line.id, part_id=line.part_id,
             work_item_id=task.id if task else None, created_by=user.id,
             source_key="", status="draft", no_stock=False,
-            version=1, revision_no=0,
+            version=1, revision_no=0, is_tax_inclusive=True,
             supplier_audience_rule_id=common.rule_id(db, None, ctx, default="private"),
         )
         db.add(offer)

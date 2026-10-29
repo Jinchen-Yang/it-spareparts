@@ -11,7 +11,8 @@ import { readPermissionMap } from "../../nav";
 import type { ColumnsType } from "antd/es/table";
 import PageHeader from "../../components/PageHeader";
 import PartThumb from "../../components/gallery/PartThumb";
-import { answerSentence, lineAnswer } from "./answers";
+import { lineAnswer } from "./answers";
+import { CurrentAnswer } from "./InquiryOffers";
 type InquirySort = { key: string; dir: "asc" | "desc" };
 import { isOfferActive, useNow } from "./shared";
 import { moneyExact } from "../../utils/format";
@@ -121,7 +122,7 @@ export default function InquiryListPage() {
     { key: "pns", title: "PN（前 3 个）", render: (_, row) => (details[row.id]?.lines ?? []).slice(0, 3).map((line) => <div key={line.id}>{line.part_id && <PartThumb partId={line.part_id} pn={line.pn_raw} size={24} />} {line.pn_raw}</div>) },
     { key: "answer", title: "当前报价", width: 250, render: (_, row) => {
       const current = details[row.id];
-      return current?.line_answers ? (current.lines ?? []).map((line) => <div key={line.id}>{answerSentence(line, lineAnswer(current, line))}</div>) : "—";
+      return current?.line_answers ? (current.lines ?? []).map((line) => <div key={line.id}><CurrentAnswer inquiry={current} line={line} /></div>) : "—";
     } },
     { key: "line_count", title: "行数", width: 80, sorter: true, render: (_, row) => row.line_count },
     { key: "status", title: "进度 / 处理人", width: 180, sorter: true, render: (_, row) => <><Tag>{progress(row)}</Tag><div>{(details[row.id]?.work_items ?? []).map((work) => {
@@ -171,7 +172,7 @@ export default function InquiryListPage() {
         { title: "PN / 描述", key: "pn", render: (_, line) => <>{line.pn_raw}<div className="presales-muted">{line.description}</div></> },
         { title: "数量", dataIndex: "qty", width: 70 },
         { title: "报价状态", key: "state", render: (_, line) => {
-          if (detail.line_answers) return answerSentence(line, lineAnswer(detail, line));
+          if (detail.line_answers) return <CurrentAnswer inquiry={detail} line={line} />;
           const count = lineOffers(detail, line).filter((offer) => isOfferActive(offer, now)).length;
           const responses = (detail.line_responses ?? []).filter((response) => response.line_id === line.id);
           const skipped = responses.filter((response) => !response.is_draft && response.mode === "skip");

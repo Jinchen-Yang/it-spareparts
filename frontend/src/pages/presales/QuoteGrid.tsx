@@ -4,7 +4,7 @@ import type { ColumnsType } from "antd/es/table";
 import type { InquiryLine, LineResponseInput, Offer, OfferInput } from "../../api/presales";
 import PriceRefBadge from "../../components/pricing/PriceRefBadge";
 import QuoteEditor from "./QuoteEditor";
-import { OfferBadge, activeOfferGroups, flattenOffers, taxLabel } from "./shared";
+import { OfferBadge, activeOfferGroups, basisLabel, flattenOffers, taxLabel } from "./shared";
 import { moneyExact } from "../../utils/format";
 import { formatBusinessDateTime } from "../../utils/date";
 import "./presales.css";
@@ -78,7 +78,7 @@ export default function QuoteGrid({ id, rows, now, proactive = false, onChange, 
           </Form.Item></Form> : !proactive && row.response?.mode === "reuse" ? <>
             {!row.responseDisabled && <Select aria-label={`${row.line.pn_raw}沿用报价`} placeholder="选择有效报价" value={row.response.ref_offer_id} style={{ width: "100%" }}
               onChange={(ref_offer_id: number) => onResponse?.(row.line.id, { mode: "reuse", ref_offer_id })}
-              options={offersFor(row).map((offer) => ({ value: offer.id, label: <span>{`报价 #${offer.id} · ${offer.reporter?.name ?? "采购"} · ${moneyExact(Number(offer.unit_price))} ${taxLabel(offer.is_tax_inclusive)}`}</span> }))} />}
+              options={offersFor(row).map((offer) => ({ value: offer.id, label: <span>{`报价 #${offer.id} · ${offer.reporter?.name ?? "采购"} · ${moneyExact(Number(offer.unit_price))} ${taxLabel(offer.is_tax_inclusive)} · ${basisLabel(offer)}`}</span> }))} />}
             {row.reused ? <div>所沿用报价：<OfferBadge offer={row.reused} /><div>原报价人：{row.reporterLabel ?? row.reused.reporter?.name ?? "其他采购"}</div>
               {row.reused.valid_from && <div>原报价时间：{formatBusinessDateTime(row.reused.valid_from)}</div>}</div> : row.response.ref_offer_id && <Tag>沿用报价当前不可见或已失效</Tag>}
           </> : <QuoteEditor label={row.line.pn_raw} value={row.value} disabled={row.disabled}
