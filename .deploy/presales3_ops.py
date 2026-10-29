@@ -50,6 +50,28 @@ print(json.dumps(accepted))
 TABLES = ("maintenance_project", "maintenance_project_contract", "dim_part", "f_sales_line",
           "f_purchase_line", "f_maintenance_order", "presales_inquiry", "presales_inquiry_line",
           "presales_offer", "presales_offer_revision", "work_item")
+IMPORT_GATE_SQL = """SELECT json_build_object(
+'batches', (SELECT coalesce(json_agg(t ORDER BY id),'[]') FROM (
+  SELECT b.id, encode(sha256(convert_to(to_jsonb(b)::text,'UTF8')),'hex') row_sha256,
+    coalesce(b.file_type='maint_bulk' AND b.import_job_id IS NULL
+      AND b.report_json->>'protocol_version'='maintenance-project-batch-transfer-v1'
+      AND jsonb_typeof(b.report_json->'public')='object'
+      AND jsonb_typeof(b.report_json->'plans')='array'
+      AND jsonb_typeof(b.report_json->'row_map')='object'
+      AND b.report_json->>'token_hash' ~ '^[0-9a-f]{64}$'
+      AND (jsonb_typeof(b.report_json->'archives')='array' OR (b.id=282 AND NOT b.report_json ? 'archives'))
+      AND NOT b.report_json ?| ARRAY['result','applied','applied_at','selection_hash','failure','cancelled','cancelled_at','canceled_at'],false) preview_shape
+  FROM sys_import_batch b WHERE b.status='processing') t),
+'jobs', (SELECT coalesce(json_agg(t ORDER BY id),'[]') FROM (
+  SELECT j.id, encode(sha256(convert_to(to_jsonb(j)::text,'UTF8')),'hex') row_sha256,
+    j.created_at, j.finished_at, j.total_files, j.done_files, j.error_files,
+    (SELECT coalesce(json_agg(x ORDER BY id),'[]') FROM (
+      SELECT b.id, b.file_type, b.status, encode(sha256(convert_to(to_jsonb(b)::text,'UTF8')),'hex') row_sha256
+      FROM sys_import_batch b WHERE b.import_job_id=j.id) x) batches
+  FROM sys_import_job j WHERE j.status='processing') t),
+'active_return_receipts', (SELECT count(*) FROM maintenance_doc_import_batch
+  WHERE report_json->>'protocol'='return_receipts_v1' AND report_json->>'status' IN ('queued','processing')))
+"""
 
 
 def need(condition, message):
@@ -168,6 +190,21 @@ def validate_manifest(manifest, root):
         need(isinstance(catalog, dict) and set(catalog) == {"enabled", "url", "token_sha256"}, "catalog_sync fields invalid")
         need(catalog["enabled"] is True and catalog["url"] == CATALOG_SYNC_URL, "catalog_sync must use approved enabled endpoint")
         need(isinstance(catalog["token_sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", catalog["token_sha256"]), "catalog_sync credential checksum required")
+    if "import_gate_allowlist" in manifest:
+        allowed = manifest["import_gate_allowlist"]
+        need(isinstance(allowed, dict) and set(allowed) == {"batches", "jobs", "review_sha256"}, "import gate allowlist fields invalid")
+        need(isinstance(allowed["review_sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", allowed["review_sha256"]), "reviewed import gate evidence required")
+        need(isinstance(allowed["batches"], list) and len(allowed["batches"]) == 3, "exact three preview exceptions required")
+        for item in allowed["batches"]:
+            need(isinstance(item, dict) and set(item) == {"id", "row_sha256"} and type(item["id"]) is int
+                 and isinstance(item["row_sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", item["row_sha256"]), "preview exception identity invalid")
+        need({item["id"] for item in allowed["batches"]} == {282, 428, 464}, "unreviewed preview exception ID")
+        need(isinstance(allowed["jobs"], list) and len(allowed["jobs"]) == 1, "exact orphan job exception required")
+        item = allowed["jobs"][0]
+        need(isinstance(item, dict) and set(item) == {"id", "row_sha256", "batch_id", "batch_row_sha256"}
+             and type(item["id"]) is int and item["id"] == 137 and type(item["batch_id"]) is int and item["batch_id"] > 0
+             and all(isinstance(item[key], str) and re.fullmatch(r"[0-9a-f]{64}", item[key])
+                     for key in ("row_sha256", "batch_row_sha256")), "orphan job exception identity invalid")
     need(re.fullmatch(r"[0-9a-f]{64}", manifest.get("nginx_sha256", "")), "frozen nginx checksum required")
     need(type(manifest.get("nginx_upstream_count")) is int and manifest["nginx_upstream_count"] > 0, "frozen nginx token count required")
     need(isinstance(manifest.get("additional_writers"), list), "explicit additional_writers list required")
@@ -289,9 +326,42 @@ class Release:
         return raw
 
     def sql(self, query, container=DB):
-        return self.run(["docker", "exec", "-e", "PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=30000",
+        return self.run(["docker", "exec", "-e", "PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=30000 -c timezone=UTC",
             container, "psql", "-U", "spareparts", "-d", "spareparts", "-X", "-At", "-v", "ON_ERROR_STOP=1",
             "-c", query]).decode().strip()
+
+    def import_gate(self):
+        """仅逐行绑定已审预览/孤儿账本，不把 processing 等同于运行或完成。"""
+        current = json.loads(self.sql(IMPORT_GATE_SQL))
+        need(current["active_return_receipts"] == 0, "queued/processing return receipt task blocks release")
+        allowed = self.m.get("import_gate_allowlist")
+        if allowed is None:
+            need(current["batches"] == [] and current["jobs"] == [], "processing import batch/job blocks release")
+            return {"mode": "all_zero", "batches": [], "jobs": [], "active_return_receipts": 0}
+        review = self.root / "import-gate-review.md"
+        need(not review.is_symlink() and artifact(review)["sha256"] == allowed["review_sha256"], "import gate review evidence changed")
+        expected = {item["id"]: item for item in allowed["batches"]}
+        need(len(current["batches"]) == len(expected) and {item["id"] for item in current["batches"]} == set(expected), "processing preview inventory changed")
+        for item in current["batches"]:
+            need(item["preview_shape"] is True and item["row_sha256"] == expected[item["id"]]["row_sha256"], "preview shape/row fingerprint changed")
+        need(len(current["jobs"]) == 1, "processing job inventory changed")
+        job, expected_job = current["jobs"][0], allowed["jobs"][0]
+        need(job["id"] == expected_job["id"] and job["row_sha256"] == expected_job["row_sha256"]
+             and job["finished_at"] is None and job["total_files"] == job["done_files"] == 1 and job["error_files"] == 0,
+             "orphan job identity/progress changed")
+        need(job["batches"] == [{"id": expected_job["batch_id"], "file_type": "sales", "status": "success",
+                                  "row_sha256": expected_job["batch_row_sha256"]}], "orphan job linked batch changed")
+        created = dt.datetime.fromisoformat(job["created_at"].replace("Z", "+00:00"))
+        need(created.tzinfo is not None, "orphan job timestamp lacks timezone")
+        starts = {}
+        for writer in self.writers():
+            row = self.inspect(writer["name"])
+            need(row["Id"] == writer["id"] and row["Image"] == writer["image"], "writer identity differs at import gate")
+            started = dt.datetime.fromisoformat(row["State"]["StartedAt"].replace("Z", "+00:00"))
+            need(started.tzinfo is not None and created < started, "orphan job may belong to a surviving writer")
+            starts[writer["id"]] = row["State"]["StartedAt"]
+        return {"mode": "exact_readonly_exceptions", **current, "review_sha256": allowed["review_sha256"],
+                "writer_started_at": starts, "job_completion_claimed": False, "post_import_refresh_completion_unknown": True}
 
     def schema(self, container=DB):
         value = self.sql("SELECT version_num FROM alembic_version", container)
@@ -397,7 +467,7 @@ class Release:
         catalog_sync = self.check_catalog_settings(self.inspect(self.old_app))
         self.nginx_baseline(self.inspect(self.old_front))
         need(self.schema() == self.m["old_schema"], "old schema drift")
-        need(self.sql("SELECT count(*) FROM sys_import_batch WHERE status='processing'") == "0", "active import")
+        imports = self.import_gate()
         need(self.sql("SELECT count(*) FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND (wait_event_type='Lock' OR application_name ILIKE '%migration%')") == "0", "active migration/lock")
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", self.m["port"]))
@@ -417,7 +487,7 @@ class Release:
         save(self.root / "all-inspect.private.json", all_rows)
         return {"containers": {row["Name"].lstrip("/"): fingerprint(row) for row in all_rows},
             "active": active, "inode": inode, "schema": self.schema(), "counts": self.counts(),
-            "db_image": self.inspect(DB)["Image"], "catalog_sync": catalog_sync}
+            "db_image": self.inspect(DB)["Image"], "catalog_sync": catalog_sync, "import_gate": imports}
 
     def images(self):
         self.marker("preflight")
@@ -440,15 +510,19 @@ class Release:
         self.protected()
         pre = self.marker("preflight")
         self.cas((self.root / "Caddyfile.baseline").read_bytes(), pre["active"], pre["inode"])
-        need(self.schema() == pre["schema"] and self.sql("SELECT count(*) FROM sys_import_batch WHERE status='processing'") == "0", "write-freeze precondition changed")
+        need(self.schema() == pre["schema"], "write-freeze schema changed")
+        imports_before = self.import_gate()
+        need(imports_before == pre["import_gate"], "import gate changed since preflight")
         for writer in self.writers():
             self.run(["docker", "stop", "--time", "60", writer["id"]], timeout=90)
         self.protected(old_running=False)
         need(self.sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
                       "AND backend_type='client backend' AND client_addr IS NOT NULL") == "0",
              "TCP database clients remain after reviewed writer freeze")
+        imports_after = self.import_gate()
+        need(imports_after == imports_before, "import gate changed during writer freeze")
         return {"stopped_ids": [row["id"] for row in self.writers()], "schema": self.schema(), "counts": self.counts(),
-                "data_fingerprints": self.data_fingerprints()}
+                "data_fingerprints": self.data_fingerprints(), "import_gate": imports_after}
 
     def recover_freeze(self):
         """stop 已发生而摘要失败时，只允许原 schema 下恢复确切旧实例。"""

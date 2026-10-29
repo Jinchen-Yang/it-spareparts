@@ -24,7 +24,7 @@
 
 1. 在可信控制机从精确提交生成源码归档和 SHA256；传到本次唯一发布目录（700），文件600。构建前后端镜像，OCI revision 均等于发布 SHA。构建允许使用现有 Dockerfile 的包索引参数；依赖版本及哈希锁不变。
 2. 冻结真实 Caddy 文件字节、inode、active JSON、上游；记录旧应用/前端容器 ID、镜像、网络及完整运行配置（仅生产私有证据）。记录其他站点/DB/商城保护快照，选择空闲 loopback 端口和不冲突的专用网络。
-3. 核查无正在 processing 的导入、并行部署或迁移。进入短暂停写窗口，完整记录被停止的本系统活动应用；不得停止 DB、Caddy、商城或无关容器。只读核查发现 r142、presales2、presales、shortkey 四个本系统 app 同连正式库，须按 manifest 中明确 ID/镜像逐个停写；停止后核本库 TCP 客户端归零，不按名称宽泛停止其他容器。旧版本实例在成功发布后保持停止。
+3. 按下节精确导入门禁确认没有真实活动导入、并行部署或迁移；不能把持久预览一概当作后台任务，也不能按类型或年龄泛化豁免。进入短暂停写窗口，完整记录被停止的本系统活动应用；不得停止 DB、Caddy、商城或无关容器。只读核查发现 r142、presales2、presales、shortkey 四个本系统 app 同连正式库，须按 manifest 中明确 ID/镜像逐个停写；停止后核本库 TCP 客户端归零，不按名称宽泛停止其他容器。旧版本实例在成功发布后保持停止。
 4. 备份完整生产 DB、上传目录、运行配置和 Caddy 基线；验证大小、SHA256、TOC。真实备份留在生产，不下载业务数据。
 5. 用专属 `--network none`、无端口、资源限制的 PostgreSQL 15 容器真实恢复旧 head 备份。逐表核对 `maintenance_project`、`maintenance_project_contract`，以及 dim_part、销售/采购/维保行等冻结计数；检查 head。按确切容器 ID 和归属标签清理本次恢复容器。
 6. 用候选镜像、生产原有运行环境和受限锁等待执行 `alembic upgrade head`，验证唯一目标 head 和 ORM 一致性。不得使用旧 r142 的只读 heads/current 代替迁移。
@@ -35,9 +35,21 @@
 11. 0/5/15/30 分钟观察自然流量：5xx/异常、重启/OOM、DB锁、同步积压与健康。汇总性能自然流量时注明样本窗口，不拿开发机合成耗时冒称生产改善。
 12. 发布标签绑定精确部署 SHA；回执记录真实切流时间、镜像 ID、head、备份及两次恢复、冒烟与观察。保留旧容器及备份，不清理其他发布的资源。
 
+## 导入停写门禁
+
+默认 manifest 不含 `import_gate_allowlist`，要求 `sys_import_batch` 和 `sys_import_job` 均无 processing。返件异步任务另查 `maintenance_doc_import_batch.report_json` 中 `protocol=return_receipts_v1` 的 queued/processing，任何一条均阻断，不能只看归档表已 success。
+
+本轮只读核查发现三个维保持久预览 batch 282/428/464，和一个孤儿作业账本 job 137。严格例外需显式 `import_gate_allowlist`，字段仅为 `batches`（三个 `{id,row_sha256}`）、`jobs`（一个 `{id:137,row_sha256,batch_id:230,batch_row_sha256}`）、`review_sha256`。发布目录还须提供受审 `import-gate-review.md`，其实际字节 SHA256 与 `review_sha256` 一致。没有这个显式快照和复审证据，不放行。
+
+三个 batch 的协议必须精确为 `maintenance-project-batch-transfer-v1`、file_type 为 maint_bulk、无 import_job_id，并具有 public 对象、plans 数组、row_map 对象和合法 token_hash 形状；只允许旧 batch 282 缺 archives，其余须为数组。任何 result/applied/applied_at/selection_hash/failure/cancelled/cancelled_at/canceled_at 键都会拒绝。这里仅验证 token_hash 形状，不输出其值。每条完整数据库行以 UTC 会话下 `SHA256(to_jsonb(row)::text)` 绑定，预览内容、审计字段、计数或状态变化都会阻断，不重新采样覆盖已审指纹。
+
+job 137 仅作为未完成的孤儿账本保留：其完整行及唯一关联 sales success batch 230 的完整行均须匹配已审摘要；total_files=done_files=1、error_files=0、finished_at 仍为 NULL，且 created_at 早于所有当前实际同库 writer 的 StartedAt（同时核原 ID/镜像）。复审还须证明对应旧源码使用进程内 daemon 且没有重启恢复路径。不能把这些条件解释为作业成功完成；post_import_refresh 是否完成仍未知，保留原账本不改状态、不重放、不触发业务刷新。
+
+`preflight`、`freeze` 停写前及停止全部 writer 后均运行相同只读门禁，后两次结果必须与 preflight 相同。停写后还必须 TCP 数据库客户端归零。任何未知 processing batch/job、已审例外消失/变化、活跃返件任务、writer 身份或时间不符均拒绝；只把技术 ID、整行摘要、检查布尔和例外风险写入私有回执，不输出业务正文或凭据。合成验证在 jinchen-dev 执行，证据 `presales-import-gate-unit.log` 和 `presales-import-gate-sql.log`；后者使用独占、network none、无端口 PostgreSQL 15 验证真实 JSON/整行摘要查询。
+
 ## 性能候选的目录同步配置
 
-PR #492 首次售前发布的 manifest 不含 `catalog_sync`，不读目录 token 文件、不执行目录配置探针，app/frontend 原 Env 逐项保留。只有包含 #494 最终已审性能代码的候选才能显式增加：
+本轮在 #494 最终性能代码正常集成后，只发布一次 #492 售前与性能的最终组合候选，迁移链为 `d6e8f0a2b4c6 → c6e8a1b3d5f7 → e9b3d5f7a1c4 → f1a3c5e7b9d2`；先验证商城 receiver，再显式启用 ITSP `catalog_sync`。控制器仍保留缺省路径：manifest 不含该键时，不读目录 token 文件、不执行目录配置探针，app/frontend 原 Env 逐项保留。只有包含 #494 最终已审性能代码的候选才能增加：
 
 ```json
 "catalog_sync": {

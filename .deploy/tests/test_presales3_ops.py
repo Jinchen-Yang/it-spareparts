@@ -6,13 +6,17 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from types import ModuleType, SimpleNamespace
 import unittest
+import uuid
 from unittest.mock import Mock, patch
 
 SOURCE = Path(__file__).resolve().parents[1] / "presales3_ops.py"
@@ -185,6 +189,133 @@ class OpsTests(unittest.TestCase):
             self.release.clone("newapp", old, "sha256:" + "1" * 64)
         self.release.run.assert_not_called()
 
+    def import_fixture(self):
+        ops.write_new(self.root / "import-gate-review.md", "Synthetic reviewed daemon/no-resume evidence; refresh unknown.")
+        allowed = {"batches": [{"id": bid, "row_sha256": str(index) * 64} for index, bid in enumerate((282, 428, 464), 1)],
+                   "jobs": [{"id": 137, "row_sha256": "4" * 64, "batch_id": 230, "batch_row_sha256": "5" * 64}],
+                   "review_sha256": ops.artifact(self.root / "import-gate-review.md")["sha256"]}
+        self.release.m["import_gate_allowlist"] = allowed
+        self.release.m["additional_writers"] = [{"name": "it-spareparts-app-" + name, "id": digit * 64, "image": "sha256:" + digit * 64}
+                                                  for name, digit in (("presales", "6"), ("presales2", "7"), ("shortkey", "8"))]
+        self.writer_rows = {}
+        for writer in self.release.writers():
+            row = container(writer["name"])
+            row.update(Id=writer["id"], Image=writer["image"])
+            row["State"]["StartedAt"] = "2026-10-28T07:24:13.137207105Z"
+            self.writer_rows[writer["name"]] = row
+        self.release.inspect = Mock(side_effect=lambda name: self.writer_rows[name])
+        current = {"batches": [{**item, "preview_shape": True} for item in allowed["batches"]],
+                   "jobs": [{"id": 137, "row_sha256": "4" * 64, "created_at": "2026-08-28T09:31:03.877734+00:00",
+                             "finished_at": None, "total_files": 1, "done_files": 1, "error_files": 0,
+                             "batches": [{"id": 230, "file_type": "sales", "status": "success", "row_sha256": "5" * 64}]}],
+                   "active_return_receipts": 0}
+        self.release.sql = Mock(side_effect=lambda _: json.dumps(current))
+        return current
+
+    def test_import_allowlist_manifest_rejects_unknown_ids_or_unbound_fingerprints(self):
+        self.import_fixture()
+        valid = self.release.m
+        root = ops.BASE / ("presales3-" + valid["release"])
+        self.assertEqual(ops.validate_manifest(valid, root), valid)
+        for change in (lambda x: x.update(review_sha256="pending"), lambda x: x["batches"][0].update(id=999),
+                       lambda x: x["batches"][0].update(row_sha256="bad"), lambda x: x["batches"].pop(),
+                       lambda x: x["jobs"][0].update(id=138), lambda x: x["jobs"][0].update(batch_row_sha256=""),
+                       lambda x: x.update(allow_all_maint_bulk=True)):
+            candidate = copy.deepcopy(valid)
+            change(candidate["import_gate_allowlist"])
+            with self.assertRaises(RuntimeError):
+                ops.validate_manifest(candidate, root)
+
+    def test_import_gate_without_allowlist_requires_no_batch_job_or_return_task(self):
+        empty = {"batches": [], "jobs": [], "active_return_receipts": 0}
+        self.release.sql = Mock(return_value=json.dumps(empty))
+        self.assertEqual(self.release.import_gate()["mode"], "all_zero")
+        for data in ({**empty, "batches": [{"id": 282}]}, {**empty, "jobs": [{"id": 137}]},
+                     {**empty, "active_return_receipts": 1}):
+            self.release.sql.return_value = json.dumps(data)
+            with self.assertRaises(RuntimeError):
+                self.release.import_gate()
+
+    def test_exact_preview_and_orphan_job_exceptions_remain_readonly_and_not_complete(self):
+        current = self.import_fixture()
+        before = copy.deepcopy(current)
+        result = self.release.import_gate()
+        self.assertEqual(result["mode"], "exact_readonly_exceptions")
+        self.assertFalse(result["job_completion_claimed"])
+        self.assertTrue(result["post_import_refresh_completion_unknown"])
+        self.assertEqual(current, before)
+        self.assertEqual(len(result["writer_started_at"]), 4)
+        self.assertEqual(self.release.sql.call_args.args, (ops.IMPORT_GATE_SQL,))
+
+    def test_import_gate_blocks_unknown_missing_changed_or_applied_preview(self):
+        current = self.import_fixture()
+        before = copy.deepcopy(current)
+        for mutate in (lambda x: x["batches"].append({"id": 999, "row_sha256": "a" * 64, "preview_shape": True}),
+                       lambda x: x["batches"].pop(), lambda x: x["batches"][0].update(preview_shape=False),
+                       lambda x: x["batches"][0].update(row_sha256="b" * 64)):
+            current.clear()
+            current.update(copy.deepcopy(before))
+            mutate(current)
+            with self.assertRaises(RuntimeError):
+                self.release.import_gate()
+
+    def test_import_gate_blocks_changed_job_progress_linked_batch_and_extra_jobs(self):
+        current = self.import_fixture()
+        before = copy.deepcopy(current)
+        for mutate in (lambda x: x["jobs"].append(copy.deepcopy(x["jobs"][0])), lambda x: x["jobs"].clear(),
+                       lambda x: x["jobs"][0].update(row_sha256="a" * 64), lambda x: x["jobs"][0].update(done_files=0),
+                       lambda x: x["jobs"][0].update(finished_at="2026-08-28T10:00:00Z"),
+                       lambda x: x["jobs"][0]["batches"][0].update(status="processing"),
+                       lambda x: x["jobs"][0]["batches"][0].update(row_sha256="a" * 64),
+                       lambda x: x.update(active_return_receipts=1)):
+            current.clear()
+            current.update(copy.deepcopy(before))
+            mutate(current)
+            with self.assertRaises(RuntimeError):
+                self.release.import_gate()
+
+    def test_orphan_job_cannot_belong_to_any_surviving_writer_or_changed_identity(self):
+        self.import_fixture()
+        writer = self.writer_rows["it-spareparts-app-shortkey"]
+        writer["State"]["StartedAt"] = "2026-08-01T00:00:00Z"
+        with self.assertRaisesRegex(RuntimeError, "surviving writer"):
+            self.release.import_gate()
+        writer["State"]["StartedAt"] = "2026-10-28T00:00:00Z"
+        writer["Id"] = "wrong-id"
+        with self.assertRaisesRegex(RuntimeError, "writer identity"):
+            self.release.import_gate()
+
+    def test_import_gate_refuses_changed_review_evidence(self):
+        self.import_fixture()
+        (self.root / "import-gate-review.md").write_text("changed")
+        with self.assertRaisesRegex(RuntimeError, "review evidence"):
+            self.release.import_gate()
+
+    def test_freeze_checks_import_gate_before_stop_and_again_after_tcp_zero(self):
+        release = self.release
+        pre = {"schema": "oldhead", "active": {}, "inode": [1, 2], "import_gate": {"snapshot": "expected"}}
+        release.marker = Mock(return_value=pre)
+        release.schema = Mock(return_value="oldhead")
+        release.protected, release.cas = Mock(), Mock()
+        release.sql = Mock(return_value="0")
+        release.counts = Mock(return_value={})
+        release.data_fingerprints = Mock(return_value={})
+        release.run = Mock()
+        ops.write_new(self.root / "Caddyfile.baseline", "baseline")
+        release.import_gate = Mock(return_value={"snapshot": "changed"})
+        with self.assertRaisesRegex(RuntimeError, "since preflight"):
+            release.freeze()
+        release.run.assert_not_called()
+        events = []
+        release.import_gate = Mock(side_effect=lambda: events.append("gate") or {"snapshot": "expected"})
+        release.run = Mock(side_effect=lambda *a, **k: events.append("stop"))
+        release.sql = Mock(side_effect=lambda *a: events.append("tcp_zero") or "0")
+        self.assertEqual(release.freeze()["import_gate"], pre["import_gate"])
+        self.assertEqual(events, ["gate", "stop", "tcp_zero", "gate"])
+        release.import_gate = Mock(side_effect=[pre["import_gate"], {"snapshot": "changed"}])
+        with self.assertRaisesRegex(RuntimeError, "during writer freeze"):
+            release.freeze()
+
     def test_artifact_stream_hash_and_exclusive_private_write(self):
         path = self.root / "data"
         content = b"synthetic" * 500000
@@ -346,10 +477,11 @@ class OpsTests(unittest.TestCase):
         release.m["additional_writers"] = [{"name": "legacy", "id": "legacy-id", "image": "legacy-image"}]
         rows = {"oldapp": {**container(), "Id": release.m["old_app_id"], "Image": release.m["old_app_image"]},
                 "legacy": container("legacy")}
-        pre = {"schema": "oldhead", "active": {}, "inode": [1, 2]}
+        pre = {"schema": "oldhead", "active": {}, "inode": [1, 2], "import_gate": {}}
         release.marker = Mock(return_value=pre)
         release.schema = Mock(return_value="oldhead")
         release.sql = Mock(return_value="0")
+        release.import_gate = Mock(return_value={})
         release.inspect = Mock(side_effect=lambda name: rows[name])
         release.protected, release.cas, release.wait_http = Mock(), Mock(), Mock()
         release.data_fingerprints = Mock(side_effect=RuntimeError("synthetic hash failure after stop"))
@@ -394,6 +526,92 @@ class OpsTests(unittest.TestCase):
         self.release.m["nginx_upstream_count"] = 1
         with self.assertRaisesRegex(RuntimeError, "token count drift"):
             self.release.nginx_baseline(frontend)
+
+
+@unittest.skipUnless(os.environ.get("PRESALES_IMPORT_GATE_SQL_DRILL") == "1", "explicit isolated jinchen-dev SQL drill only")
+class ImportGateSQLTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if socket.gethostname() != "jinchen-dev":
+            raise RuntimeError("synthetic SQL drill only runs on jinchen-dev")
+        cls.name = "itsp-import-gate-test-" + uuid.uuid4().hex[:12]
+        cls.cid = cls.command(["docker", "run", "-d", "--network", "none", "--name", cls.name,
+            "--label", "itsp.synthetic.import_gate=" + cls.name, "--memory", "512m", "--cpus", "1", "--pids-limit", "128",
+            "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "postgres:15"]).decode().strip()
+        cls.addClassCleanup(cls.cleanup_container)
+        for attempt in range(60):
+            result = subprocess.run(["docker", "exec", cls.cid, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], capture_output=True)
+            if result.returncode == 0:
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError("synthetic PostgreSQL15 not ready")
+        row = json.loads(cls.command(["docker", "inspect", cls.cid]))[0]
+        if row["HostConfig"]["NetworkMode"] != "none" or row["HostConfig"].get("PortBindings"):
+            raise RuntimeError("synthetic DB isolation differs")
+
+    @staticmethod
+    def command(argv, input=None):
+        return subprocess.run(argv, input=input, capture_output=True, timeout=90, check=True).stdout
+
+    @classmethod
+    def cleanup_container(cls):
+        row = json.loads(cls.command(["docker", "inspect", cls.cid]))[0]
+        if row["Id"] != cls.cid or row["Name"] != "/" + cls.name or row["Config"]["Labels"].get("itsp.synthetic.import_gate") != cls.name:
+            raise RuntimeError("synthetic DB cleanup ownership differs")
+        cls.command(["docker", "rm", "-f", "-v", cls.cid])
+
+    @classmethod
+    def sql(cls, query):
+        return cls.command(["docker", "exec", "-i", "-e", "PGOPTIONS=-c timezone=UTC", cls.cid,
+                            "psql", "-U", "postgres", "-X", "-At", "-v", "ON_ERROR_STOP=1"], query.encode()).decode().strip()
+
+    def setUp(self):
+        self.sql("""DROP TABLE IF EXISTS sys_import_batch,sys_import_job,maintenance_doc_import_batch;
+CREATE TABLE sys_import_batch(id int, file_type text, import_job_id int, status text, rows_total int, report_json jsonb);
+CREATE TABLE sys_import_job(id int, status text, created_at timestamptz, finished_at timestamptz, total_files int, done_files int, error_files int);
+CREATE TABLE maintenance_doc_import_batch(report_json jsonb);
+INSERT INTO sys_import_job VALUES(137,'processing','2026-08-28T09:31:03Z',NULL,1,1,0);
+INSERT INTO sys_import_batch VALUES(230,'sales',137,'success',4,NULL);""")
+        self.report = {"protocol_version": "maintenance-project-batch-transfer-v1", "public": {}, "plans": [],
+                       "row_map": {}, "token_hash": "a" * 64}
+        for bid in (282, 428, 464):
+            payload = {**self.report, **({} if bid == 282 else {"archives": []})}
+            value = json.dumps(payload).replace("'", "''")
+            self.sql("INSERT INTO sys_import_batch VALUES(" + str(bid) + ",'maint_bulk',NULL,'processing',1,'" + value + "'::jsonb)")
+
+    def test_actual_query_requires_preview_shape_and_hashes_entire_row(self):
+        before = json.loads(self.sql(ops.IMPORT_GATE_SQL))
+        self.assertTrue(all(row["preview_shape"] for row in before["batches"]))
+        self.assertEqual(before["jobs"][0]["batches"][0]["id"], 230)
+        self.sql("UPDATE sys_import_batch SET rows_total=2 WHERE id=282")
+        after = json.loads(self.sql(ops.IMPORT_GATE_SQL))
+        self.assertNotEqual(before["batches"][0]["row_sha256"], after["batches"][0]["row_sha256"])
+        self.assertTrue(after["batches"][0]["preview_shape"])
+        for key, value in (("result", None), ("applied_at", None), ("selection_hash", None), ("failure", None),
+                           ("cancelled_at", None), ("protocol_version", "wrong"), ("public", []), ("plans", {}),
+                           ("row_map", []), ("token_hash", "short")):
+            changed = {**self.report, key: value}
+            encoded = json.dumps(changed).replace("'", "''")
+            self.sql("UPDATE sys_import_batch SET report_json='" + encoded + "'::jsonb WHERE id=282")
+            with self.subTest(key=key):
+                self.assertFalse(json.loads(self.sql(ops.IMPORT_GATE_SQL))["batches"][0]["preview_shape"])
+        self.sql("UPDATE sys_import_batch SET report_json=report_json-'archives' WHERE id=428")
+        self.assertFalse(json.loads(self.sql(ops.IMPORT_GATE_SQL))["batches"][1]["preview_shape"])
+
+    def test_actual_query_blocks_return_receipt_queue_and_detects_linked_job_mutation(self):
+        before = json.loads(self.sql(ops.IMPORT_GATE_SQL))
+        self.assertEqual(before["active_return_receipts"], 0)
+        self.sql("""INSERT INTO maintenance_doc_import_batch VALUES
+('{"protocol":"return_receipts_v1","status":"queued"}'),
+('{"protocol":"return_receipts_v1","status":"processing"}'),
+('{"protocol":"return_receipts_v1","status":"done"}');
+UPDATE sys_import_batch SET rows_total=7 WHERE id=230;
+UPDATE sys_import_job SET done_files=0 WHERE id=137;""")
+        after = json.loads(self.sql(ops.IMPORT_GATE_SQL))
+        self.assertEqual(after["active_return_receipts"], 2)
+        self.assertNotEqual(before["jobs"][0]["row_sha256"], after["jobs"][0]["row_sha256"])
+        self.assertNotEqual(before["jobs"][0]["batches"][0]["row_sha256"], after["jobs"][0]["batches"][0]["row_sha256"])
 
 
 if __name__ == "__main__":
