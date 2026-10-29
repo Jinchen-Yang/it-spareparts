@@ -192,7 +192,7 @@ describe("报价页", () => {
     fireEvent.click(await screen.findByRole("button", { name: "已报价 1" }));
     fireEvent.click(await screen.findByRole("button", { name: "更新报价" }));
     const input = screen.getByRole("spinbutton", { name: "PN-1 单价" });
-    expect(input).toHaveValue("200");
+    expect(Number((input as HTMLInputElement).value)).toBe(200);
     expect(screen.getByRole("combobox", { name: "PN-1 价格性质" }).closest(".ant-select")).toHaveTextContent("成本价");
     fireEvent.change(input, { target: { value: "250" } });
     fireEvent.click(within(input.closest("tr")!).getByRole("button", { name: /^保\s?存$/ }));
@@ -321,7 +321,7 @@ describe("询价页", () => {
       more: [offer({ id: 2, unit_price: "95", is_tax_inclusive: false, valid_from: "2026-10-27T01:00:00Z" })] })] });
     render(<MemoryRouter><AskPage /></MemoryRouter>);
     fireEvent.change(await screen.findByRole("combobox", { name: "第 1 行 PN" }), { target: { value: "ABC-1" } });
-    expect((await screen.findAllByText(/最新 ¥95 不含税 · 10-27/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/最新 ¥95 不含税 · 售价 · 10-27/)).length).toBeGreaterThan(0);
     expect(mocks.library).toHaveBeenCalledWith([1, 2]);
     expect(screen.getByText("示例硬盘", { selector: "td *" })).toBeInTheDocument();
   });

@@ -596,7 +596,7 @@ it("旧深链跨询价更新时使用当前授权版本，既有成本性质随�
   mocks.updateOffer.mockResolvedValue({ ...current, unit_price: 250, version: 6 });
   processPage();
   await openLine("PN-1");
-  expect(await screen.findByLabelText("PN-1单价")).toHaveValue("200");
+  expect(Number((await screen.findByLabelText("PN-1单价") as HTMLInputElement).value)).toBe(200);
   expect(screen.getByRole("combobox", { name: "PN-1价格性质" }).closest(".ant-select")).toHaveTextContent("成本价");
   fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "250" } });
   fireEvent.click(screen.getByRole("button", { name: "更新报价" }));

@@ -89,12 +89,12 @@ describe("型号查询最新报价", () => {
   it("精确匹配、相似型号和自动打开的全景显示绿色标签，复用同一批报价", async () => {
     unifiedSearch.mockResolvedValue(response([42], true, [73]));
     library.mockResolvedValue({
-      42: [offer({ status: "withdrawn", more: [offer({ id: 2 })] })],
+      42: [offer({ status: "withdrawn", more: [offer({ id: 2, price_basis: "cost" })] })],
       73: [offer({ id: 3, part_id: 73, unit_price: "980" })],
     });
     renderAt("/parts?q=PN-42");
     await screen.findByText("精确匹配");
-    expectGreen(await card("精确匹配").findByText(/最新 ¥1,180 含税 · 10-29/));
+    expectGreen(await card("精确匹配").findByText(/最新 ¥1,180 含税 · 成本价 · 10-29/));
     expectGreen(card("相似型号").getByText(/最新 ¥980 含税/));
     await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ part_id: 42 }));
     const title = (await screen.findByText("型号全景：")).closest(".ant-card-head-title") as HTMLElement;
