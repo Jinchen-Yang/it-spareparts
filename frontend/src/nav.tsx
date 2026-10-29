@@ -112,6 +112,8 @@ const PresalesQuotePage = lazy(loadPresalesQuote);
 const loadPresalesRedirect = () => import("./pages/presales/TaskRedirect");
 const loadOfferNew = () => import("./pages/presales/OfferNewPage");
 const loadPresalesLibrary = () => import("./pages/presales/LibraryPage");
+const loadPresalesAsk = () => import("./pages/presales/AskPage");
+const loadPresalesQuoteRows = () => import("./pages/presales/QuotePage");
 
 const BossBoardPage = lazy(loadBossBoard);
 const PoolsPage = lazy(loadPools);
@@ -152,6 +154,8 @@ const PresalesWorkbenchPage = lazy(loadPresalesWorkbench);
 const PresalesRedirectPage = lazy(loadPresalesRedirect);
 const OfferNewPage = lazy(loadOfferNew);
 const PresalesLibraryPage = lazy(loadPresalesLibrary);
+const PresalesAskPage = lazy(loadPresalesAsk);
+const PresalesQuoteRowsPage = lazy(loadPresalesQuoteRows);
 
 // 组 key 加 grp- 前缀与 item key 隔离命名空间（防止将来改用 SubMenu 时 keyPath 相撞）
 export const NAV_GROUPS: NavGroup[] = [
@@ -170,6 +174,16 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    // 售前重设计（D-0046 / R 方案）：售前只留「询价」「报价」两个入口；
+    // 旧的询价单列表、报价库、报价工作台、主动报价改为深链（DETAIL_ROUTES），不占菜单。
+    key: "grp-presales",
+    label: "售前系统",
+    items: [
+      { key: "presales-ask", path: "/presales/ask", label: "询价", icon: <FileSearchOutlined />, perm: "page_presales", page: PresalesAskPage, load: loadPresalesAsk },
+      { key: "presales-quote-rows", path: "/presales/quote", label: "报价", menuLabel: <PresalesWorkLabel label="报价" />, icon: <ScheduleOutlined />, perm: "page_presales", page: PresalesQuoteRowsPage, load: loadPresalesQuoteRows },
+    ],
+  },
+  {
     key: "grp-price-analysis",
     label: "价格分析",
     items: [
@@ -180,8 +194,6 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-sales",
     label: "销售管理",
     items: [
-      { key: "presales-inquiries", path: "/presales/inquiries", label: "询价单", icon: <FileSearchOutlined />, perm: "page_presales", page: InquiryListPage, load: loadInquiryList },
-      { key: "presales-library", path: "/presales/library", label: "报价库", icon: <ProfileOutlined />, perm: "page_presales", page: PresalesLibraryPage, load: loadPresalesLibrary },
       // 销售分析（D-41）：页面权限键与采购侧不对称（page_sales_analysis），
       // 模板仅 admin/boss；后端另有角色硬门（purchaser/readonly/sales 即便授权也 403），
       // 菜单按角色过滤（§10.8）；数据面遮蔽（金额/对账/客户）由后端按 data_* 键处理
@@ -194,8 +206,6 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-purchase",
     label: "采购管理",
     items: [
-      { key: "presales-workbench", path: "/presales/workbench", label: "报价工作台", menuLabel: <PresalesWorkLabel />, icon: <ScheduleOutlined />, perm: "page_presales", page: PresalesWorkbenchPage, load: loadPresalesWorkbench },
-      { key: "presales-offers-new", path: "/presales/offers/new", label: "主动报价", icon: <DollarOutlined />, perm: "page_presales", page: OfferNewPage, load: loadOfferNew },
       // 采购分析（D-39，客户需求 Round1）：仅老板/管理员（page_purchase_analytics 模板仅
       // boss，admin 由 App 层恒放行；后端本轮加角色硬门，菜单同口径按角色过滤 §9）；
       // 日期/分类/三口径 + 分组下钻。
@@ -315,11 +325,15 @@ export interface DetailRoute {
 }
 
 export const DETAIL_ROUTES: DetailRoute[] = [
-  { key: "presales-inquiry-new", path: "/presales/inquiries/new", pattern: /^\/presales\/inquiries\/new$/, label: "新建询价", perm: "page_presales", menuKey: "presales-inquiries", page: InquiryEditorPage, load: loadInquiryEditor },
-  { key: "presales-inquiry-edit", path: "/presales/inquiries/:id/edit", pattern: /^\/presales\/inquiries\/\d+\/edit$/, label: "编辑询价", perm: "page_presales", menuKey: "presales-inquiries", page: InquiryEditorPage, load: loadInquiryEditor },
-  { key: "presales-inquiry-detail", path: "/presales/inquiries/:id", pattern: /^\/presales\/inquiries\/\d+$/, label: "询价详情", perm: "page_presales", menuKey: "presales-inquiries", page: InquiryDetailPage, load: loadInquiryDetail },
-  { key: "presales-quote", path: "/presales/workbench/:id", pattern: /^\/presales\/workbench\/\d+$/, label: "填写报价", perm: "page_presales", menuKey: "presales-workbench", page: PresalesQuotePage, load: loadPresalesQuote },
-  { key: "presales-task-process", path: "/presales/tasks/:id", pattern: /^\/presales\/tasks\/\d+$/, label: "报价工作台", perm: "page_presales", menuKey: "presales-workbench", page: PresalesRedirectPage, load: loadPresalesRedirect },
+  { key: "presales-inquiries", path: "/presales/inquiries", pattern: /^\/presales\/inquiries$/, label: "询价单", perm: "page_presales", menuKey: "presales-ask", page: InquiryListPage, load: loadInquiryList },
+  { key: "presales-library", path: "/presales/library", pattern: /^\/presales\/library$/, label: "报价库", perm: "page_presales", menuKey: "presales-quote-rows", page: PresalesLibraryPage, load: loadPresalesLibrary },
+  { key: "presales-workbench", path: "/presales/workbench", pattern: /^\/presales\/workbench$/, label: "报价工作台", perm: "page_presales", menuKey: "presales-quote-rows", page: PresalesWorkbenchPage, load: loadPresalesWorkbench },
+  { key: "presales-offers-new", path: "/presales/offers/new", pattern: /^\/presales\/offers\/new$/, label: "主动报价", perm: "page_presales", menuKey: "presales-quote-rows", page: OfferNewPage, load: loadOfferNew },
+  { key: "presales-inquiry-new", path: "/presales/inquiries/new", pattern: /^\/presales\/inquiries\/new$/, label: "新建询价", perm: "page_presales", menuKey: "presales-ask", page: InquiryEditorPage, load: loadInquiryEditor },
+  { key: "presales-inquiry-edit", path: "/presales/inquiries/:id/edit", pattern: /^\/presales\/inquiries\/\d+\/edit$/, label: "编辑询价", perm: "page_presales", menuKey: "presales-ask", page: InquiryEditorPage, load: loadInquiryEditor },
+  { key: "presales-inquiry-detail", path: "/presales/inquiries/:id", pattern: /^\/presales\/inquiries\/\d+$/, label: "询价详情", perm: "page_presales", menuKey: "presales-ask", page: InquiryDetailPage, load: loadInquiryDetail },
+  { key: "presales-quote", path: "/presales/workbench/:id", pattern: /^\/presales\/workbench\/\d+$/, label: "填写报价", perm: "page_presales", menuKey: "presales-quote-rows", page: PresalesQuotePage, load: loadPresalesQuote },
+  { key: "presales-task-process", path: "/presales/tasks/:id", pattern: /^\/presales\/tasks\/\d+$/, label: "报价工作台", perm: "page_presales", menuKey: "presales-quote-rows", page: PresalesRedirectPage, load: loadPresalesRedirect },
   {
     // 项目面板：从项目卡「进入面板」进来，不占导航项（菜单只挂主页 + 需求单与同步）
     key: "maintenance-project-panel",

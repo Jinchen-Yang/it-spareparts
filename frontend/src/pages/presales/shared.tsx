@@ -3,6 +3,7 @@ import { Space, Tag, Typography } from "antd";
 import type { Offer } from "../../api/presales";
 import { moneyExact } from "../../utils/format";
 import { useApiError } from "../../components/ApiErrorFeedback";
+import { formatBusinessDateTime } from "../../utils/date";
 
 /** 服务端截止可带微秒；浏览器以毫秒为单位，向上对齐才不会提前失效。 */
 export function offerDeadline(value: string | null | undefined): number {
@@ -83,4 +84,18 @@ export function activeOfferGroups(offers: Offer[], now: number): Offer[] {
 
 export function usePresalesError() {
   return useApiError();
+}
+
+/** 型号最新一条有效报价（含同报价人的其他货源），用于检索候选的小标签。 */
+export function latestActiveOffer(groups: Offer[], now = Date.now()): Offer | undefined {
+  return flattenOffers(groups).filter((offer) => isOfferActive(offer, now))
+    .reduce<Offer | undefined>((latest, offer) => !latest || Date.parse(offer.valid_from!) > Date.parse(latest.valid_from!) ? offer : latest, undefined);
+}
+
+export function LatestPriceTag({ offer }: { offer?: Offer }) {
+  if (!offer) return null;
+  return <Tag color="green" className="presales-price-tag" title={offer.reporter ? `${offer.reporter.name} 报价` : undefined}>
+    最新 {moneyExact(offer.unit_price == null ? null : Number(offer.unit_price))} {taxLabel(offer.is_tax_inclusive)}
+    {offer.valid_from && ` · ${formatBusinessDateTime(offer.valid_from).slice(5, 10)}`}
+  </Tag>;
 }

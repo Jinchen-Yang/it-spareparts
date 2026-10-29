@@ -10,3 +10,26 @@
 .presales-offer-choice.is-selected { border-color: var(--mb-accent); background: var(--mb-accent-soft); }
 .presales-offer-choice.is-lowest { border-color: var(--mb-success); }
 .presales-offer-choice:disabled { color: var(--mb-text-3); cursor: default; }
+.presales-stack { display: flex; flex-direction: column; gap: 16px; }
+.presales-h2 { margin: 0; font-size: 18px; }
+.presales-tight { margin-bottom: 4px; }
+.presales-inline-field { display: inline-flex; align-items: center; gap: 8px; flex: 0 1 320px; white-space: nowrap; }
+.presales-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.presales-sales { font-size: 15px; }
+.presales-ellipsis { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.presales-more { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px 16px; }
+.presales-more label, .presales-direct label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--mb-text-2); }
+.presales-direct { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; align-items: end; padding: 16px; border: 1px solid var(--mb-accent); background: var(--mb-accent-soft); border-radius: 8px; }
+.presales-direct p { margin: 0; }
+.presales-hint { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 6px 10px; border-radius: 6px; background: var(--mb-inset); font-size: 13px; }
+.presales-row-editing > td { background: var(--mb-accent-soft) !important; }
+.presales-inquiry-card { display: flex; flex-direction: column; gap: 8px; padding: 14px 0; border-top: 1px solid var(--mb-border); }
+.presales-answer { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; padding: 8px 12px; border: 1px solid var(--mb-border); border-radius: 8px; }
+.presales-answer-pn { min-width: 150px; font-weight: 600; }
+.presales-say.is-quoted { color: var(--mb-success); }
+.presales-say.is-pending { color: var(--mb-warning); }
+.presales-say.is-skip { color: var(--mb-text-2); }
+.presales-empty { padding: 32px; text-align: center; color: var(--mb-text-3); }
+.presales-price-tag { margin-inline-end: 0; font-size: 12px; line-height: 18px; }
+.presales-option { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.presales-option > .presales-muted { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
