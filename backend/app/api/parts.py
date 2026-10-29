@@ -391,6 +391,22 @@ def master_edit_state(
     return result
 
 
+@router.get("/master/{part_id}/catalog-sync")
+def master_catalog_sync_status(
+    part_id: int,
+    response: Response,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_page("page_master_data")),
+) -> dict:
+    from app.config import get_settings
+    from app.services.catalog_delivery import read_status
+
+    if not 1 <= part_id <= PG_INT_MAX or db.get(DimPart, part_id) is None:
+        raise HTTPException(404, "型号不存在")
+    response.headers["Cache-Control"] = "no-store"
+    return {"enabled": get_settings().shop_catalog_sync_enabled, **read_status(db, part_id)}
+
+
 @router.get("/master/{part_id}/edit-history")
 def master_edit_history(
     part_id: str,

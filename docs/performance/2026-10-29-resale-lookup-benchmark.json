@@ -1,0 +1,408 @@
+{
+  "measured_at_utc": "2026-10-29T18:05:56.173711+00:00",
+  "source": "synthetic_only",
+  "scope": "resolve_handler_and_sql_no_http_auth",
+  "baseline_revision": "d6e8f0a2b4c6",
+  "candidate": "batch",
+  "baseline_code_sha": "592b12f17b2bfea3b8ba7cd5a386ab9f1650295b",
+  "parts": 29632,
+  "aliases": 381,
+  "warmups_per_workload": 3,
+  "serial_repetitions": 20,
+  "percentile_method": "p50 median; p95 nearest rank",
+  "before_explain": {
+    "sql_template": "SELECT part_alias.id, part_alias.pn_raw, part_alias.pn_std, part_alias.source, part_alias.needs_review, part_alias.pn_compact, part_alias.part_id, part_alias.status, part_alias.created_at \nFROM part_alias \nWHERE upper(part_alias.pn_raw) = %(upper_1)s::VARCHAR AND part_alias.status IN (%(status_1_1)s::VARCHAR, %(status_1_2)s::VARCHAR)",
+    "plan": {
+      "Plan": {
+        "Node Type": "Seq Scan",
+        "Parallel Aware": false,
+        "Async Capable": false,
+        "Relation Name": "part_alias",
+        "Alias": "part_alias",
+        "Startup Cost": 0.0,
+        "Total Cost": 12.67,
+        "Plan Rows": 2,
+        "Plan Width": 77,
+        "Actual Startup Time": 0.05,
+        "Actual Total Time": 1.398,
+        "Actual Rows": 1,
+        "Actual Loops": 1,
+        "Filter": "(((status)::text = ANY ('{active,pending}'::text[])) AND (upper((pn_raw)::text) = 'BENCH-PN-000001'::text))",
+        "Rows Removed by Filter": 380,
+        "Shared Hit Blocks": 6,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      },
+      "Planning": {
+        "Shared Hit Blocks": 81,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      },
+      "Planning Time": 0.854,
+      "Triggers": [],
+      "Execution Time": 1.451
+    }
+  },
+  "before": {
+    "1_distinct": {
+      "items": 1,
+      "distinct_inputs": 1,
+      "latency_ms": {
+        "p50": 7.707,
+        "p95": 8.2021,
+        "max": 8.4389
+      },
+      "sql_count": {
+        "p50": 2.0,
+        "p95": 2,
+        "max": 2
+      },
+      "samples_ms": [
+        6.2037,
+        6.5812,
+        7.364,
+        7.3897,
+        7.5691,
+        7.6743,
+        7.4019,
+        7.81,
+        7.7294,
+        7.6846,
+        8.4389,
+        7.6488,
+        7.5841,
+        7.7745,
+        7.9174,
+        8.1596,
+        8.1752,
+        8.2021,
+        7.9352,
+        7.7551
+      ],
+      "result_sha256": "5584f23ad22c44c18ffb28db7bc287a5bcaf1e65962b2d35d1edddbe929782c8"
+    },
+    "10_distinct": {
+      "items": 10,
+      "distinct_inputs": 10,
+      "latency_ms": {
+        "p50": 32.6935,
+        "p95": 33.7233,
+        "max": 34.0418
+      },
+      "sql_count": {
+        "p50": 22.0,
+        "p95": 22,
+        "max": 22
+      },
+      "samples_ms": [
+        33.1399,
+        33.0315,
+        33.053,
+        34.0418,
+        33.2078,
+        33.3399,
+        33.7233,
+        31.6258,
+        32.726,
+        32.6729,
+        32.6509,
+        32.8308,
+        32.6446,
+        32.7004,
+        32.6195,
+        32.6002,
+        32.6867,
+        32.6816,
+        32.5117,
+        32.674
+      ],
+      "result_sha256": "f06854b837c3f4361442309db7d789ffb09e60b55788e5eca63c6737fd9dc7ff"
+    },
+    "100_distinct": {
+      "items": 100,
+      "distinct_inputs": 100,
+      "latency_ms": {
+        "p50": 314.2504,
+        "p95": 704.9909,
+        "max": 753.7922
+      },
+      "sql_count": {
+        "p50": 226.0,
+        "p95": 226,
+        "max": 226
+      },
+      "samples_ms": [
+        302.4945,
+        316.2995,
+        305.3938,
+        496.5934,
+        704.9909,
+        753.7922,
+        375.254,
+        309.7298,
+        312.2014,
+        308.9826,
+        480.9025,
+        305.3805,
+        299.9735,
+        290.7558,
+        309.2104,
+        305.6191,
+        594.3477,
+        664.3964,
+        645.1963,
+        669.0148
+      ],
+      "result_sha256": "82ca40d1d0a8d9d3a49df905f277c5b5bb6fdeb31b068b7996ba979f382f43a0"
+    },
+    "100_repeated": {
+      "items": 100,
+      "distinct_inputs": 1,
+      "latency_ms": {
+        "p50": 7.1865,
+        "p95": 7.7548,
+        "max": 8.1763
+      },
+      "sql_count": {
+        "p50": 2.0,
+        "p95": 2,
+        "max": 2
+      },
+      "samples_ms": [
+        6.0903,
+        6.639,
+        7.012,
+        7.0205,
+        7.1237,
+        8.1763,
+        7.415,
+        7.1991,
+        6.9769,
+        7.1199,
+        7.3586,
+        7.5416,
+        7.5208,
+        7.2599,
+        7.2863,
+        7.7548,
+        6.8426,
+        7.0716,
+        7.2433,
+        7.1738
+      ],
+      "result_sha256": "0c3f492622abf61cde7555622693cb8d161baaee39923b0bf526467d6ce1cb6b"
+    }
+  },
+  "after_explain": {
+    "sql_template": "SELECT part_alias.id, part_alias.pn_raw, part_alias.pn_std, part_alias.source, part_alias.needs_review, part_alias.pn_compact, part_alias.part_id, part_alias.status, part_alias.created_at, upper(part_alias.pn_raw) AS upper_1 \nFROM part_alias \nWHERE upper(part_alias.pn_raw) IN (%(upper_2_1)s::VARCHAR, %(upper_2_2)s::VARCHAR, %(upper_2_3)s::VARCHAR, %(upper_2_4)s::VARCHAR, %(upper_2_5)s::VARCHAR, %(upper_2_6)s::VARCHAR, %(upper_2_7)s::VARCHAR, %(upper_2_8)s::VARCHAR, %(upper_2_9)s::VARCHAR, %(upper_2_10)s::VARCHAR, %(upper_2_11)s::VARCHAR, %(upper_2_12)s::VARCHAR, %(upper_2_13)s::VARCHAR, %(upper_2_14)s::VARCHAR, %(upper_2_15)s::VARCHAR, %(upper_2_16)s::VARCHAR, %(upper_2_17)s::VARCHAR, %(upper_2_18)s::VARCHAR, %(upper_2_19)s::VARCHAR, %(upper_2_20)s::VARCHAR, %(upper_2_21)s::VARCHAR, %(upper_2_22)s::VARCHAR, %(upper_2_23)s::VARCHAR, %(upper_2_24)s::VARCHAR, %(upper_2_25)s::VARCHAR, %(upper_2_26)s::VARCHAR, %(upper_2_27)s::VARCHAR, %(upper_2_28)s::VARCHAR, %(upper_2_29)s::VARCHAR, %(upper_2_30)s::VARCHAR, %(upper_2_31)s::VARCHAR, %(upper_2_32)s::VARCHAR, %(upper_2_33)s::VARCHAR, %(upper_2_34)s::VARCHAR, %(upper_2_35)s::VARCHAR, %(upper_2_36)s::VARCHAR, %(upper_2_37)s::VARCHAR, %(upper_2_38)s::VARCHAR, %(upper_2_39)s::VARCHAR, %(upper_2_40)s::VARCHAR, %(upper_2_41)s::VARCHAR, %(upper_2_42)s::VARCHAR, %(upper_2_43)s::VARCHAR, %(upper_2_44)s::VARCHAR, %(upper_2_45)s::VARCHAR, %(upper_2_46)s::VARCHAR, %(upper_2_47)s::VARCHAR, %(upper_2_48)s::VARCHAR, %(upper_2_49)s::VARCHAR, %(upper_2_50)s::VARCHAR, %(upper_2_51)s::VARCHAR, %(upper_2_52)s::VARCHAR, %(upper_2_53)s::VARCHAR, %(upper_2_54)s::VARCHAR, %(upper_2_55)s::VARCHAR, %(upper_2_56)s::VARCHAR, %(upper_2_57)s::VARCHAR, %(upper_2_58)s::VARCHAR, %(upper_2_59)s::VARCHAR, %(upper_2_60)s::VARCHAR, %(upper_2_61)s::VARCHAR, %(upper_2_62)s::VARCHAR, %(upper_2_63)s::VARCHAR, %(upper_2_64)s::VARCHAR, %(upper_2_65)s::VARCHAR, %(upper_2_66)s::VARCHAR, %(upper_2_67)s::VARCHAR, %(upper_2_68)s::VARCHAR, %(upper_2_69)s::VARCHAR, %(upper_2_70)s::VARCHAR, %(upper_2_71)s::VARCHAR, %(upper_2_72)s::VARCHAR, %(upper_2_73)s::VARCHAR, %(upper_2_74)s::VARCHAR, %(upper_2_75)s::VARCHAR, %(upper_2_76)s::VARCHAR, %(upper_2_77)s::VARCHAR, %(upper_2_78)s::VARCHAR, %(upper_2_79)s::VARCHAR, %(upper_2_80)s::VARCHAR, %(upper_2_81)s::VARCHAR, %(upper_2_82)s::VARCHAR, %(upper_2_83)s::VARCHAR, %(upper_2_84)s::VARCHAR, %(upper_2_85)s::VARCHAR, %(upper_2_86)s::VARCHAR, %(upper_2_87)s::VARCHAR, %(upper_2_88)s::VARCHAR, %(upper_2_89)s::VARCHAR, %(upper_2_90)s::VARCHAR, %(upper_2_91)s::VARCHAR, %(upper_2_92)s::VARCHAR, %(upper_2_93)s::VARCHAR, %(upper_2_94)s::VARCHAR, %(upper_2_95)s::VARCHAR, %(upper_2_96)s::VARCHAR, %(upper_2_97)s::VARCHAR, %(upper_2_98)s::VARCHAR, %(upper_2_99)s::VARCHAR, %(upper_2_100)s::VARCHAR) AND part_alias.status IN (%(status_1_1)s::VARCHAR, %(status_1_2)s::VARCHAR)",
+    "plan": {
+      "Plan": {
+        "Node Type": "Seq Scan",
+        "Parallel Aware": false,
+        "Async Capable": false,
+        "Relation Name": "part_alias",
+        "Alias": "part_alias",
+        "Startup Cost": 0.25,
+        "Total Cost": 14.3,
+        "Plan Rows": 172,
+        "Plan Width": 109,
+        "Actual Startup Time": 0.107,
+        "Actual Total Time": 1.618,
+        "Actual Rows": 61,
+        "Actual Loops": 1,
+        "Filter": "(((status)::text = ANY ('{active,pending}'::text[])) AND (upper((pn_raw)::text) = ANY ('{BENCH-ALIAS-000240,BENCH-MISSING-000096,BENCH-ALIAS-000231,BENCH-ALIAS-000204,BENCH-PN-000025,BENCH-PN-000091,BENCH-ALIAS-000261,BENCH-MISSING-000027,BENCH-PN-000085,BENCH-ALIAS-000207,BENCH-MISSING-000084,BENCH-PN-000013,BENCH-PN-000082,BENCH-MISSING-000063,BENCH-MISSING-000015,BENCH-MISSING-000072,BENCH-MISSING-000012,BENCH-PN-000058,BENCH-PN-000043,BENCH-MISSING-000003,BENCH-MISSING-000021,BENCH-ALIAS-000267,BENCH-PN-000097,BENCH-ALIAS-000228,BENCH-PN-000028,BENCH-PN-000046,BENCH-ALIAS-000198,BENCH-PN-000049,BENCH-ALIAS-000195,BENCH-ALIAS-000219,BENCH-PN-000001,BENCH-ALIAS-000201,BENCH-PN-000073,BENCH-PN-000070,BENCH-ALIAS-000288,BENCH-MISSING-000090,BENCH-PN-000037,BENCH-MISSING-000036,BENCH-ALIAS-000255,BENCH-MISSING-000045,BENCH-PN-000076,BENCH-PN-000100,BENCH-ALIAS-000222,BENCH-ALIAS-000237,BENCH-ALIAS-000276,BENCH-ALIAS-000249,BENCH-MISSING-000048,BENCH-ALIAS-000246,BENCH-PN-000061,BENCH-ALIAS-000213,BENCH-ALIAS-000192,BENCH-MISSING-000081,BENCH-MISSING-000006,BENCH-MISSING-000099,BENCH-PN-000079,BENCH-MISSING-000033,BENCH-PN-000067,BENCH-ALIAS-000279,BENCH-PN-000016,BENCH-ALIAS-000243,BENCH-PN-000094,BENCH-MISSING-000039,BENCH-MISSING-000030,BENCH-MISSING-000009,BENCH-MISSING-000066,BENCH-PN-000019,BENCH-PN-000007,BENCH-ALIAS-000285,BENCH-MISSING-000078,BENCH-PN-000055,BENCH-ALIAS-000273,BENCH-MISSING-000060,BENCH-PN-000022,BENCH-PN-000031,BENCH-MISSING-000057,BENCH-MISSING-000069,BENCH-ALIAS-000234,BENCH-ALIAS-000210,BENCH-MISSING-000024,BENCH-MISSING-000051,BENCH-ALIAS-000225,BENCH-ALIAS-000252,BENCH-MISSING-000054,BENCH-PN-000052,BENCH-MISSING-000093,BENCH-MISSING-000042,BENCH-PN-000064,BENCH-ALIAS-000270,BENCH-MISSING-000075,BENCH-ALIAS-000258,BENCH-ALIAS-000282,BENCH-PN-000004,BENCH-MISSING-000087,BENCH-PN-000088,BENCH-PN-000010,BENCH-MISSING-000018,BENCH-ALIAS-000264,BENCH-PN-000040,BENCH-PN-000034,BENCH-ALIAS-000216}'::text[])))",
+        "Rows Removed by Filter": 320,
+        "Shared Hit Blocks": 6,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      },
+      "Planning": {
+        "Shared Hit Blocks": 4,
+        "Shared Read Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Dirtied Blocks": 0,
+        "Local Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      },
+      "Planning Time": 0.62,
+      "Triggers": [],
+      "Execution Time": 1.664
+    }
+  },
+  "after": {
+    "1_distinct": {
+      "items": 1,
+      "distinct_inputs": 1,
+      "latency_ms": {
+        "p50": 7.9308,
+        "p95": 9.1109,
+        "max": 9.6818
+      },
+      "sql_count": {
+        "p50": 2.0,
+        "p95": 2,
+        "max": 2
+      },
+      "samples_ms": [
+        7.5884,
+        7.4668,
+        7.7464,
+        8.4336,
+        9.1109,
+        8.7568,
+        9.6818,
+        8.6505,
+        8.351,
+        8.1461,
+        7.956,
+        7.806,
+        7.9056,
+        7.7632,
+        8.5893,
+        7.8711,
+        7.8254,
+        7.8374,
+        7.8204,
+        8.2785
+      ],
+      "result_sha256": "5584f23ad22c44c18ffb28db7bc287a5bcaf1e65962b2d35d1edddbe929782c8"
+    },
+    "10_distinct": {
+      "items": 10,
+      "distinct_inputs": 10,
+      "latency_ms": {
+        "p50": 12.4261,
+        "p95": 13.5813,
+        "max": 14.1938
+      },
+      "sql_count": {
+        "p50": 3.0,
+        "p95": 3,
+        "max": 3
+      },
+      "samples_ms": [
+        14.1938,
+        12.2406,
+        11.5922,
+        11.8725,
+        12.4383,
+        13.4751,
+        12.4139,
+        13.0361,
+        12.4057,
+        13.0161,
+        12.9568,
+        13.1807,
+        12.7128,
+        12.0605,
+        13.5813,
+        12.1533,
+        12.8327,
+        11.344,
+        11.7203,
+        12.0817
+      ],
+      "result_sha256": "f06854b837c3f4361442309db7d789ffb09e60b55788e5eca63c6737fd9dc7ff"
+    },
+    "100_distinct": {
+      "items": 100,
+      "distinct_inputs": 100,
+      "latency_ms": {
+        "p50": 31.4357,
+        "p95": 41.0402,
+        "max": 42.6468
+      },
+      "sql_count": {
+        "p50": 3.0,
+        "p95": 3,
+        "max": 3
+      },
+      "samples_ms": [
+        30.7609,
+        32.0386,
+        29.363,
+        29.5494,
+        26.3613,
+        22.7659,
+        24.7419,
+        29.9523,
+        36.3323,
+        42.6468,
+        35.103,
+        31.0008,
+        33.3667,
+        31.8706,
+        28.6369,
+        41.0402,
+        35.4861,
+        30.5114,
+        32.5952,
+        33.0714
+      ],
+      "result_sha256": "82ca40d1d0a8d9d3a49df905f277c5b5bb6fdeb31b068b7996ba979f382f43a0"
+    },
+    "100_repeated": {
+      "items": 100,
+      "distinct_inputs": 1,
+      "latency_ms": {
+        "p50": 8.111,
+        "p95": 8.8829,
+        "max": 9.3386
+      },
+      "sql_count": {
+        "p50": 2.0,
+        "p95": 2,
+        "max": 2
+      },
+      "samples_ms": [
+        7.6447,
+        8.109,
+        8.7541,
+        7.9004,
+        8.1129,
+        8.4341,
+        7.8693,
+        8.2775,
+        8.8829,
+        6.9454,
+        7.323,
+        7.7046,
+        8.4713,
+        7.9355,
+        7.9306,
+        8.011,
+        8.5204,
+        8.4547,
+        9.3386,
+        8.1703
+      ],
+      "result_sha256": "0c3f492622abf61cde7555622693cb8d161baaee39923b0bf526467d6ce1cb6b"
+    }
+  },
+  "output_equivalent": true
+}

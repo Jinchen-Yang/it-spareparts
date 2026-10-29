@@ -1,0 +1,19 @@
+# 单 PN 创建后目录投递技术方案
+
+决策: 无（D-36 自动发布边界内的技术实现；用户已确认创建即触发）
+
+测量：2026-10-29 H6Z27A 首次镜像等待4小时13分32秒，创建时正在分段全扫；现有五分钟 changes 同步不创建未绑定身份。源码没有商城单身份同步接收接口，故采用两个独立候选 PR，均不合并、不部署。
+
+## 配对契约 v1
+
+1. itsp 共用 `create_part_in_transaction` 同事务记录持久 outbox；失败回滚不留任务，提交仅唤醒后台消费者，不在用户请求内做跨系统 HTTP。专用worker有租约、CAS回执、指数退避及重启恢复；状态和安全错误码可查询。
+2. itsp 增加 `POST /api/integrations/resale/parts/by-ids`，沿用独立 catalog 只读服务认证，body `{"partIds":[正整数]}`（1–100项、禁止额外键），返回 `{"schemaVersion":1,"items":[...]}`。每项与既有 `/list` 的身份/字段白名单完全同形；保持原 part_id（不把墓碑重定向为另一身份）、不含销售计数/价格/库存/业务状态。
+3. itsp 向 shop `POST /api/integrations/catalog/parts/sync` 投递 `{"schemaVersion":1,"deliveryId":"UUID","partId":正整数}`。使用独立目录同步 Bearer 服务凭据；不复用图库密钥或浏览器会话。默认关闭，未来发布由运维另行配置密钥并启用，不在本任务改生产。
+4. shop 认证后按 partId 拉取**当前** `/by-ids` 读面，复用现有目录应用逻辑、同一 advisory lock 和冲突保护；只应用目标身份，不推进/重置全量 cursor，不触发全扫，不排 AI，不产生库存流水。源缺失/读取失败返回可重试错误；人工冲突明确回执，不能报成功。
+5. shop 用持久 deliveryId+partId 回执保证重放；相同ID不同身份拒绝。回执与目标应用同事务。持锁后若镜像版本新于拉取的源版本，跳过旧版本并回执 unchanged；批量路径也不得用较旧页覆盖新通知结果。人工覆盖/停用和已有图库/库存历史继续保护。
+6. 成功响应：`{"schemaVersion":1,"deliveryId":"UUID","partId":正整数,"status":"applied|unchanged|conflict"}`。itsp校验所有身份字段，不把任意200当成成功；conflict保留待核状态，可观测，不写业务事实。
+7. 小时/每日批量与既有cron保持兜底。outbox单独迁移、downgrade；先部署接收端、再部署生产者并单独启用是未来runbook，当前不执行。
+
+## 验证
+
+仅 jinchen-dev 合成数据：三建档入口事务回滚、提交不等网络、断网退避恢复、租约到期重领、并发消费者、旧回执CAS、重复投递、认证默认关闭、ID碰撞、源更新/合并、现有人工保护、无库存流水与AI任务、全量游标不变、两仓精确契约、升降升迁移。前后对比以旧分段扫描等待和新队列端到端模拟分别标注，不能称生产已提速。

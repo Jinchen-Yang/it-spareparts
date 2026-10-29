@@ -1,0 +1,3752 @@
+{
+  "window_start": "2026-10-22T17:56:33.170721+00:00",
+  "window_end": "2026-10-29T17:56:33.170721+00:00",
+  "quantiles": "nearest-rank",
+  "sources": [
+    {
+      "container": "it-spareparts-frontend-r142",
+      "requests": 73858,
+      "without_timing": 0,
+      "excluded_chat": 29,
+      "first": "2026-10-28T07:24:50.932597+00:00",
+      "last": "2026-10-29T17:55:05.258564+00:00"
+    },
+    {
+      "container": "it-spareparts-frontend-presales2",
+      "requests": 41541,
+      "without_timing": 0,
+      "excluded_chat": 4,
+      "first": "2026-10-27T16:25:53.214554+00:00",
+      "last": "2026-10-28T07:24:58.130131+00:00"
+    },
+    {
+      "container": "it-spareparts-frontend-presales",
+      "requests": 3954,
+      "without_timing": 0,
+      "excluded_chat": 0,
+      "first": "2026-10-27T07:48:02.469081+00:00",
+      "last": "2026-10-27T16:25:04.866896+00:00"
+    },
+    {
+      "container": "it-spareparts-frontend-shortkey",
+      "requests": 11124,
+      "without_timing": 0,
+      "excluded_chat": 9,
+      "first": "2026-10-26T03:26:12.841254+00:00",
+      "last": "2026-10-27T07:48:17.506757+00:00"
+    },
+    {
+      "container": "it-spareparts-frontend-livesearch",
+      "requests": 3279,
+      "without_timing": 0,
+      "excluded_chat": 0,
+      "first": "2026-10-25T19:34:24.144688+00:00",
+      "last": "2026-10-26T03:26:13.372528+00:00"
+    },
+    {
+      "container": "it-spareparts-frontend-gallery",
+      "requests": 800,
+      "without_timing": 0,
+      "excluded_chat": 6,
+      "first": "2026-10-25T08:48:15.235213+00:00",
+      "last": "2026-10-25T19:35:24.084131+00:00"
+    },
+    {
+      "container": "it-spareparts-frontend-pnmaster",
+      "requests": 5163,
+      "without_timing": 0,
+      "excluded_chat": 0,
+      "first": "2026-10-24T16:03:02.770102+00:00",
+      "last": "2026-10-25T09:27:29.237048+00:00"
+    },
+    {
+      "container": "it-spareparts-frontend-batch",
+      "requests": 15557,
+      "without_timing": 0,
+      "excluded_chat": 3,
+      "first": "2026-10-22T17:57:04.704067+00:00",
+      "last": "2026-10-24T19:08:42.856364+00:00"
+    },
+    {
+      "container": "it-spareparts-frontend-valuation-hf",
+      "requests": 0,
+      "without_timing": 0,
+      "excluded_chat": 0,
+      "first": null,
+      "last": null
+    },
+    {
+      "container": "it-spareparts-frontend-bg",
+      "requests": 0,
+      "without_timing": 0,
+      "excluded_chat": 0,
+      "first": null,
+      "last": null
+    },
+    {
+      "container": "it-spareparts-frontend-1",
+      "requests": 22379,
+      "without_timing": 0,
+      "excluded_chat": 17,
+      "first": "2026-10-22T21:13:27.484526+00:00",
+      "last": "2026-10-29T17:30:42.315467+00:00"
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "POST",
+      "route": "/api/maintenance/wbdd-imports",
+      "n": 3,
+      "p50_s": 84.568,
+      "p95_s": 88.694,
+      "max_s": 88.694,
+      "total_s": 212.577,
+      "status": {
+        "200": 3
+      },
+      "upstream": {
+        "n": 3,
+        "p50_s": 84.512,
+        "p95_s": 88.639,
+        "max_s": 88.639,
+        "total_s": 212.446
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/integrations/pn-master/parts/merge",
+      "n": 2,
+      "p50_s": 0.124,
+      "p95_s": 15.014,
+      "max_s": 15.014,
+      "total_s": 15.138,
+      "status": {
+        "499": 1,
+        "200": 1
+      },
+      "upstream": {
+        "n": 2,
+        "p50_s": 0.124,
+        "p95_s": 15.013,
+        "max_s": 15.013,
+        "total_s": 15.137
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/import/precheck",
+      "n": 25,
+      "p50_s": 2.003,
+      "p95_s": 14.752,
+      "max_s": 47.79,
+      "total_s": 135.121,
+      "status": {
+        "200": 25
+      },
+      "upstream": {
+        "n": 25,
+        "p50_s": 1.991,
+        "p95_s": 14.447,
+        "max_s": 44.236,
+        "total_s": 128.539
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/projects/stable/{project_id}/master-workbook/apply",
+      "n": 152,
+      "p50_s": 1.198,
+      "p95_s": 13.59,
+      "max_s": 25.924,
+      "total_s": 400.906,
+      "status": {
+        "200": 152
+      },
+      "upstream": {
+        "n": 152,
+        "p50_s": 1.15,
+        "p95_s": 13.107,
+        "max_s": 25.768,
+        "total_s": 388.033
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/projects/stable/{project_id}/master-workbook/validate",
+      "n": 160,
+      "p50_s": 0.878,
+      "p95_s": 12.943,
+      "max_s": 20.895,
+      "total_s": 393.129,
+      "status": {
+        "200": 154,
+        "422": 6
+      },
+      "upstream": {
+        "n": 160,
+        "p50_s": 0.81,
+        "p95_s": 12.42,
+        "max_s": 20.8,
+        "total_s": 376.55
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/wbdd-imports/latest/missing",
+      "n": 58,
+      "p50_s": 0.257,
+      "p95_s": 12.122,
+      "max_s": 13.819,
+      "total_s": 241.479,
+      "status": {
+        "200": 44,
+        "403": 13,
+        "499": 1
+      },
+      "upstream": {
+        "n": 58,
+        "p50_s": 0.257,
+        "p95_s": 12.12,
+        "max_s": 13.819,
+        "total_s": 241.466
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/parts/{part_id}/gallery/images",
+      "n": 178,
+      "p50_s": 1.242,
+      "p95_s": 7.262,
+      "max_s": 7.963,
+      "total_s": 431.625,
+      "status": {
+        "201": 168,
+        "200": 8,
+        "422": 2
+      },
+      "upstream": {
+        "n": 178,
+        "p50_s": 1.242,
+        "p95_s": 7.262,
+        "max_s": 7.963,
+        "total_s": 431.593
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable/{project_id}/master-workbook.xlsx",
+      "n": 280,
+      "p50_s": 0.724,
+      "p95_s": 7.18,
+      "max_s": 17.788,
+      "total_s": 506.216,
+      "status": {
+        "200": 280
+      },
+      "upstream": {
+        "n": 280,
+        "p50_s": 0.724,
+        "p95_s": 7.18,
+        "max_s": 17.699,
+        "total_s": 506.12
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/presales/lines/{line_id}/create-part",
+      "n": 55,
+      "p50_s": 2.034,
+      "p95_s": 5.992,
+      "max_s": 32.468,
+      "total_s": 156.772,
+      "status": {
+        "200": 47,
+        "504": 1,
+        "422": 7
+      },
+      "upstream": {
+        "n": 55,
+        "p50_s": 2.034,
+        "p95_s": 5.992,
+        "max_s": 32.468,
+        "total_s": 156.769
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/analytics/maintenance-dashboard/export",
+      "n": 2,
+      "p50_s": 1.543,
+      "p95_s": 5.531,
+      "max_s": 5.531,
+      "total_s": 7.074,
+      "status": {
+        "200": 2
+      },
+      "upstream": {
+        "n": 2,
+        "p50_s": 1.543,
+        "p95_s": 5.531,
+        "max_s": 5.531,
+        "total_s": 7.074
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/integrations/resale/parts/resolve",
+      "n": 2318,
+      "p50_s": 4.253,
+      "p95_s": 4.467,
+      "max_s": 12.381,
+      "total_s": 8570.784,
+      "status": {
+        "200": 2318
+      },
+      "upstream": {
+        "n": 2318,
+        "p50_s": 4.253,
+        "p95_s": 4.466,
+        "max_s": 12.381,
+        "total_s": 8570.372
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/presales/inquiries",
+      "n": 1890,
+      "p50_s": 0.994,
+      "p95_s": 3.791,
+      "max_s": 26.078,
+      "total_s": 2678.894,
+      "status": {
+        "200": 1863,
+        "401": 21,
+        "499": 2,
+        "500": 4
+      },
+      "upstream": {
+        "n": 1890,
+        "p50_s": 0.994,
+        "p95_s": 3.791,
+        "max_s": 26.078,
+        "total_s": 2678.917
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/inventory/dynamic",
+      "n": 95,
+      "p50_s": 1.584,
+      "p95_s": 2.931,
+      "max_s": 3.611,
+      "total_s": 183.739,
+      "status": {
+        "200": 94,
+        "499": 1
+      },
+      "upstream": {
+        "n": 95,
+        "p50_s": 1.584,
+        "p95_s": 2.931,
+        "max_s": 3.611,
+        "total_s": 183.741
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/import/upload-batch",
+      "n": 24,
+      "p50_s": 0.07,
+      "p95_s": 2.631,
+      "max_s": 2.806,
+      "total_s": 7.007,
+      "status": {
+        "200": 24
+      },
+      "upstream": {
+        "n": 24,
+        "p50_s": 0.045,
+        "p95_s": 0.066,
+        "max_s": 0.08,
+        "total_s": 1.113
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/presales/lines/{line_id}/bind-part",
+      "n": 23,
+      "p50_s": 1.034,
+      "p95_s": 2.536,
+      "max_s": 2.645,
+      "total_s": 23.641,
+      "status": {
+        "200": 23
+      },
+      "upstream": {
+        "n": 23,
+        "p50_s": 1.034,
+        "p95_s": 2.536,
+        "max_s": 2.645,
+        "total_s": 23.64
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/presales/lines/{line_id}/part-check",
+      "n": 144,
+      "p50_s": 0.862,
+      "p95_s": 2.364,
+      "max_s": 2.98,
+      "total_s": 108.143,
+      "status": {
+        "200": 144
+      },
+      "upstream": {
+        "n": 144,
+        "p50_s": 0.862,
+        "p95_s": 2.364,
+        "max_s": 2.98,
+        "total_s": 108.135
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/sales/analytics/options",
+      "n": 860,
+      "p50_s": 1.421,
+      "p95_s": 2.303,
+      "max_s": 3.498,
+      "total_s": 1189.174,
+      "status": {
+        "200": 838,
+        "500": 1,
+        "403": 21
+      },
+      "upstream": {
+        "n": 860,
+        "p50_s": 1.421,
+        "p95_s": 2.303,
+        "max_s": 3.498,
+        "total_s": 1189.18
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/movements/search",
+      "n": 18,
+      "p50_s": 1.674,
+      "p95_s": 2.293,
+      "max_s": 2.293,
+      "total_s": 24.124,
+      "status": {
+        "200": 14,
+        "401": 4
+      },
+      "upstream": {
+        "n": 18,
+        "p50_s": 1.674,
+        "p95_s": 2.293,
+        "max_s": 2.293,
+        "total_s": 24.113
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/projects/stable/{project_id}/acceptance/attachments",
+      "n": 15,
+      "p50_s": 0.208,
+      "p95_s": 2.18,
+      "max_s": 2.18,
+      "total_s": 6.015,
+      "status": {
+        "200": 15
+      },
+      "upstream": {
+        "n": 15,
+        "p50_s": 0.109,
+        "p95_s": 0.401,
+        "max_s": 0.401,
+        "total_s": 2.089
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/data-quality/calibration/purchase-price",
+      "n": 1,
+      "p50_s": 2.133,
+      "p95_s": 2.133,
+      "max_s": 2.133,
+      "total_s": 2.133,
+      "status": {
+        "200": 1
+      },
+      "upstream": {
+        "n": 1,
+        "p50_s": 2.133,
+        "p95_s": 2.133,
+        "max_s": 2.133,
+        "total_s": 2.133
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/demands/search",
+      "n": 106,
+      "p50_s": 1.236,
+      "p95_s": 1.921,
+      "max_s": 2.058,
+      "total_s": 95.313,
+      "status": {
+        "200": 105,
+        "403": 1
+      },
+      "upstream": {
+        "n": 106,
+        "p50_s": 1.236,
+        "p95_s": 1.921,
+        "max_s": 2.058,
+        "total_s": 95.284
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/sales/analytics/orders/export",
+      "n": 3,
+      "p50_s": 1.224,
+      "p95_s": 1.83,
+      "max_s": 1.83,
+      "total_s": 4.262,
+      "status": {
+        "200": 3
+      },
+      "upstream": {
+        "n": 3,
+        "p50_s": 1.222,
+        "p95_s": 1.83,
+        "max_s": 1.83,
+        "total_s": 4.252
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/analytics/maintenance-dashboard/projects",
+      "n": 52,
+      "p50_s": 0.283,
+      "p95_s": 1.817,
+      "max_s": 3.066,
+      "total_s": 35.634,
+      "status": {
+        "200": 52
+      },
+      "upstream": {
+        "n": 52,
+        "p50_s": 0.283,
+        "p95_s": 1.817,
+        "max_s": 3.066,
+        "total_s": 35.634
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/boss-board/projects",
+      "n": 407,
+      "p50_s": 1.351,
+      "p95_s": 1.789,
+      "max_s": 9.89,
+      "total_s": 558.069,
+      "status": {
+        "200": 407
+      },
+      "upstream": {
+        "n": 407,
+        "p50_s": 1.351,
+        "p95_s": 1.789,
+        "max_s": 9.89,
+        "total_s": 558.06
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/parts/master/check",
+      "n": 35,
+      "p50_s": 1.001,
+      "p95_s": 1.751,
+      "max_s": 2.918,
+      "total_s": 36.394,
+      "status": {
+        "200": 35
+      },
+      "upstream": {
+        "n": 35,
+        "p50_s": 1.001,
+        "p95_s": 1.752,
+        "max_s": 2.918,
+        "total_s": 36.396
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/presales/inquiries/{inquiry_id}",
+      "n": 19934,
+      "p50_s": 0.892,
+      "p95_s": 1.454,
+      "max_s": 4.741,
+      "total_s": 16270.962,
+      "status": {
+        "200": 19653,
+        "499": 55,
+        "500": 225,
+        "401": 1
+      },
+      "upstream": {
+        "n": 19934,
+        "p50_s": 0.892,
+        "p95_s": 1.454,
+        "max_s": 4.741,
+        "total_s": 16270.978
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/dashboard/price-discipline-summary",
+      "n": 5,
+      "p50_s": 0.902,
+      "p95_s": 1.444,
+      "max_s": 1.444,
+      "total_s": 5.212,
+      "status": {
+        "200": 5
+      },
+      "upstream": {
+        "n": 5,
+        "p50_s": 0.902,
+        "p95_s": 1.444,
+        "max_s": 1.444,
+        "total_s": 5.211
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/analytics/explorer",
+      "n": 1062,
+      "p50_s": 0.462,
+      "p95_s": 1.441,
+      "max_s": 12.887,
+      "total_s": 620.642,
+      "status": {
+        "499": 69,
+        "200": 970,
+        "422": 21,
+        "401": 2
+      },
+      "upstream": {
+        "n": 1062,
+        "p50_s": 0.462,
+        "p95_s": 1.441,
+        "max_s": 12.887,
+        "total_s": 620.633
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/purchases/analytics/options",
+      "n": 100,
+      "p50_s": 1.092,
+      "p95_s": 1.359,
+      "max_s": 2.083,
+      "total_s": 111.851,
+      "status": {
+        "200": 99,
+        "500": 1
+      },
+      "upstream": {
+        "n": 100,
+        "p50_s": 1.092,
+        "p95_s": 1.359,
+        "max_s": 2.083,
+        "total_s": 111.854
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/parts/master",
+      "n": 20,
+      "p50_s": 1.055,
+      "p95_s": 1.306,
+      "max_s": 1.597,
+      "total_s": 21.854,
+      "status": {
+        "200": 20
+      },
+      "upstream": {
+        "n": 20,
+        "p50_s": 1.055,
+        "p95_s": 1.306,
+        "max_s": 1.597,
+        "total_s": 21.846
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/analytics/maintenance-dashboard/summary",
+      "n": 248,
+      "p50_s": 0.582,
+      "p95_s": 1.29,
+      "max_s": 3.226,
+      "total_s": 131.954,
+      "status": {
+        "200": 244,
+        "422": 4
+      },
+      "upstream": {
+        "n": 248,
+        "p50_s": 0.582,
+        "p95_s": 1.29,
+        "max_s": 3.226,
+        "total_s": 131.95
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/parts/search",
+      "n": 3359,
+      "p50_s": 0.872,
+      "p95_s": 1.192,
+      "max_s": 3.768,
+      "total_s": 2597.465,
+      "status": {
+        "200": 3359
+      },
+      "upstream": {
+        "n": 3359,
+        "p50_s": 0.872,
+        "p95_s": 1.192,
+        "max_s": 3.768,
+        "total_s": 2597.454
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/analytics/pn-ranking",
+      "n": 174,
+      "p50_s": 0.606,
+      "p95_s": 1.169,
+      "max_s": 1.896,
+      "total_s": 113.595,
+      "status": {
+        "200": 167,
+        "422": 6,
+        "499": 1
+      },
+      "upstream": {
+        "n": 174,
+        "p50_s": 0.606,
+        "p95_s": 1.169,
+        "max_s": 1.896,
+        "total_s": 113.599
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/governance/metrics",
+      "n": 20,
+      "p50_s": 1.029,
+      "p95_s": 1.154,
+      "max_s": 1.169,
+      "total_s": 20.674,
+      "status": {
+        "200": 20
+      },
+      "upstream": {
+        "n": 20,
+        "p50_s": 1.029,
+        "p95_s": 1.154,
+        "max_s": 1.169,
+        "total_s": 20.674
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/integrations/pn-master/parts",
+      "n": 1060,
+      "p50_s": 0.977,
+      "p95_s": 1.151,
+      "max_s": 2.648,
+      "total_s": 1058.387,
+      "status": {
+        "409": 63,
+        "200": 997
+      },
+      "upstream": {
+        "n": 1060,
+        "p50_s": 0.977,
+        "p95_s": 1.151,
+        "max_s": 2.648,
+        "total_s": 1058.329
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/sales/analytics/groups",
+      "n": 434,
+      "p50_s": 0.326,
+      "p95_s": 1.109,
+      "max_s": 2.163,
+      "total_s": 177.249,
+      "status": {
+        "200": 434
+      },
+      "upstream": {
+        "n": 434,
+        "p50_s": 0.326,
+        "p95_s": 1.109,
+        "max_s": 2.163,
+        "total_s": 177.25
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/boss-board/projects/search",
+      "n": 986,
+      "p50_s": 0.655,
+      "p95_s": 1.081,
+      "max_s": 2.394,
+      "total_s": 693.842,
+      "status": {
+        "200": 986
+      },
+      "upstream": {
+        "n": 986,
+        "p50_s": 0.655,
+        "p95_s": 1.081,
+        "max_s": 2.394,
+        "total_s": 693.695
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable/{project_id}/master-workbook/row-fields",
+      "n": 77,
+      "p50_s": 0.436,
+      "p95_s": 1.067,
+      "max_s": 1.35,
+      "total_s": 40.031,
+      "status": {
+        "200": 77
+      },
+      "upstream": {
+        "n": 77,
+        "p50_s": 0.436,
+        "p95_s": 1.067,
+        "max_s": 1.35,
+        "total_s": 40.031
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/boss-board/projects/{project_id}/orders",
+      "n": 148,
+      "p50_s": 0.389,
+      "p95_s": 1.04,
+      "max_s": 1.648,
+      "total_s": 71.687,
+      "status": {
+        "200": 147,
+        "500": 1
+      },
+      "upstream": {
+        "n": 148,
+        "p50_s": 0.389,
+        "p95_s": 1.04,
+        "max_s": 1.648,
+        "total_s": 71.677
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/analytics/maintenance-dashboard/valuation",
+      "n": 63,
+      "p50_s": 0.09,
+      "p95_s": 1.032,
+      "max_s": 1.562,
+      "total_s": 14.978,
+      "status": {
+        "200": 35,
+        "401": 28
+      },
+      "upstream": {
+        "n": 63,
+        "p50_s": 0.09,
+        "p95_s": 1.032,
+        "max_s": 1.562,
+        "total_s": 14.979
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/dashboard/pools",
+      "n": 10,
+      "p50_s": 0.804,
+      "p95_s": 1.001,
+      "max_s": 1.001,
+      "total_s": 8.307,
+      "status": {
+        "200": 10
+      },
+      "upstream": {
+        "n": 10,
+        "p50_s": 0.804,
+        "p95_s": 1.001,
+        "max_s": 1.001,
+        "total_s": 8.306
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/analytics/maintenance-dashboard/receipts",
+      "n": 35,
+      "p50_s": 0.245,
+      "p95_s": 0.978,
+      "max_s": 1.063,
+      "total_s": 12.004,
+      "status": {
+        "200": 35
+      },
+      "upstream": {
+        "n": 35,
+        "p50_s": 0.245,
+        "p95_s": 0.978,
+        "max_s": 1.063,
+        "total_s": 12.004
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/demands/void-fast",
+      "n": 10,
+      "p50_s": 0.119,
+      "p95_s": 0.96,
+      "max_s": 0.96,
+      "total_s": 2.067,
+      "status": {
+        "200": 10
+      },
+      "upstream": {
+        "n": 10,
+        "p50_s": 0.119,
+        "p95_s": 0.96,
+        "max_s": 0.96,
+        "total_s": 2.067
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/import/batches",
+      "n": 84,
+      "p50_s": 0.276,
+      "p95_s": 0.915,
+      "max_s": 1.311,
+      "total_s": 34.811,
+      "status": {
+        "200": 84
+      },
+      "upstream": {
+        "n": 84,
+        "p50_s": 0.276,
+        "p95_s": 0.915,
+        "max_s": 1.311,
+        "total_s": 34.806
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/sales/analytics/amount-histogram",
+      "n": 771,
+      "p50_s": 0.156,
+      "p95_s": 0.893,
+      "max_s": 1.889,
+      "total_s": 175.438,
+      "status": {
+        "200": 771
+      },
+      "upstream": {
+        "n": 771,
+        "p50_s": 0.156,
+        "p95_s": 0.893,
+        "max_s": 1.889,
+        "total_s": 175.437
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/sales/analytics/trend",
+      "n": 64,
+      "p50_s": 0.326,
+      "p95_s": 0.85,
+      "max_s": 3.786,
+      "total_s": 26.362,
+      "status": {
+        "200": 64
+      },
+      "upstream": {
+        "n": 64,
+        "p50_s": 0.326,
+        "p95_s": 0.85,
+        "max_s": 3.787,
+        "total_s": 26.365
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/boss-board/projects/{project_id}",
+      "n": 1117,
+      "p50_s": 0.43,
+      "p95_s": 0.842,
+      "max_s": 2.19,
+      "total_s": 556.047,
+      "status": {
+        "200": 1116,
+        "401": 1
+      },
+      "upstream": {
+        "n": 1117,
+        "p50_s": 0.43,
+        "p95_s": 0.842,
+        "max_s": 2.19,
+        "total_s": 556.05
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/sales/analytics/orders",
+      "n": 944,
+      "p50_s": 0.162,
+      "p95_s": 0.838,
+      "max_s": 3.823,
+      "total_s": 266.973,
+      "status": {
+        "200": 920,
+        "500": 1,
+        "403": 23
+      },
+      "upstream": {
+        "n": 944,
+        "p50_s": 0.162,
+        "p95_s": 0.838,
+        "max_s": 3.823,
+        "total_s": 266.959
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/dashboard/part-ranking",
+      "n": 5,
+      "p50_s": 0.642,
+      "p95_s": 0.827,
+      "max_s": 0.827,
+      "total_s": 3.345,
+      "status": {
+        "200": 5
+      },
+      "upstream": {
+        "n": 5,
+        "p50_s": 0.643,
+        "p95_s": 0.827,
+        "max_s": 0.827,
+        "total_s": 3.345
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/import/jobs/{job_id}",
+      "n": 1562,
+      "p50_s": 0.077,
+      "p95_s": 0.821,
+      "max_s": 2.607,
+      "total_s": 330.522,
+      "status": {
+        "200": 1562
+      },
+      "upstream": {
+        "n": 1562,
+        "p50_s": 0.077,
+        "p95_s": 0.821,
+        "max_s": 2.607,
+        "total_s": 330.522
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/work-items/{item_id}/transfer",
+      "n": 14,
+      "p50_s": 0.065,
+      "p95_s": 0.79,
+      "max_s": 0.79,
+      "total_s": 1.891,
+      "status": {
+        "200": 14
+      },
+      "upstream": {
+        "n": 14,
+        "p50_s": 0.065,
+        "p95_s": 0.79,
+        "max_s": 0.79,
+        "total_s": 1.891
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/pool-analysis/pools/{group_id}",
+      "n": 46,
+      "p50_s": 0.587,
+      "p95_s": 0.778,
+      "max_s": 1.084,
+      "total_s": 26.877,
+      "status": {
+        "200": 46
+      },
+      "upstream": {
+        "n": 46,
+        "p50_s": 0.587,
+        "p95_s": 0.778,
+        "max_s": 1.084,
+        "total_s": 26.877
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/dashboard/sales",
+      "n": 5,
+      "p50_s": 0.58,
+      "p95_s": 0.77,
+      "max_s": 0.77,
+      "total_s": 2.976,
+      "status": {
+        "200": 5
+      },
+      "upstream": {
+        "n": 5,
+        "p50_s": 0.58,
+        "p95_s": 0.77,
+        "max_s": 0.77,
+        "total_s": 2.976
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/sales/analytics/summary",
+      "n": 964,
+      "p50_s": 0.304,
+      "p95_s": 0.761,
+      "max_s": 4.078,
+      "total_s": 326.986,
+      "status": {
+        "200": 913,
+        "401": 28,
+        "403": 23
+      },
+      "upstream": {
+        "n": 964,
+        "p50_s": 0.304,
+        "p95_s": 0.761,
+        "max_s": 4.078,
+        "total_s": 326.976
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/auth/login",
+      "n": 498,
+      "p50_s": 0.252,
+      "p95_s": 0.731,
+      "max_s": 3.077,
+      "total_s": 185.705,
+      "status": {
+        "200": 421,
+        "401": 50,
+        "422": 2,
+        "502": 25
+      },
+      "upstream": {
+        "n": 498,
+        "p50_s": 0.251,
+        "p95_s": 0.731,
+        "max_s": 3.077,
+        "total_s": 185.623
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/analytics/maintenance-dashboard/orders",
+      "n": 323,
+      "p50_s": 0.374,
+      "p95_s": 0.722,
+      "max_s": 1.574,
+      "total_s": 102.376,
+      "status": {
+        "200": 319,
+        "422": 4
+      },
+      "upstream": {
+        "n": 323,
+        "p50_s": 0.374,
+        "p95_s": 0.722,
+        "max_s": 1.574,
+        "total_s": 102.374
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/auth/change-password",
+      "n": 1,
+      "p50_s": 0.722,
+      "p95_s": 0.722,
+      "max_s": 0.722,
+      "total_s": 0.722,
+      "status": {
+        "200": 1
+      },
+      "upstream": {
+        "n": 1,
+        "p50_s": 0.722,
+        "p95_s": 0.722,
+        "max_s": 0.722,
+        "total_s": 0.722
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable/{project_id}/purchases",
+      "n": 114,
+      "p50_s": 0.188,
+      "p95_s": 0.72,
+      "max_s": 1.091,
+      "total_s": 29.467,
+      "status": {
+        "200": 113,
+        "500": 1
+      },
+      "upstream": {
+        "n": 114,
+        "p50_s": 0.188,
+        "p95_s": 0.72,
+        "max_s": 1.091,
+        "total_s": 29.465
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/purchases/recent",
+      "n": 341,
+      "p50_s": 0.397,
+      "p95_s": 0.646,
+      "max_s": 1.257,
+      "total_s": 122.398,
+      "status": {
+        "200": 341
+      },
+      "upstream": {
+        "n": 341,
+        "p50_s": 0.398,
+        "p95_s": 0.646,
+        "max_s": 1.257,
+        "total_s": 122.403
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable/{project_id}/master-workbook/rows",
+      "n": 125,
+      "p50_s": 0.189,
+      "p95_s": 0.637,
+      "max_s": 1.392,
+      "total_s": 31.018,
+      "status": {
+        "200": 124,
+        "500": 1
+      },
+      "upstream": {
+        "n": 125,
+        "p50_s": 0.188,
+        "p95_s": 0.637,
+        "max_s": 1.392,
+        "total_s": 31.017
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/profit",
+      "n": 46,
+      "p50_s": 0.263,
+      "p95_s": 0.634,
+      "max_s": 2.596,
+      "total_s": 16.96,
+      "status": {
+        "200": 46
+      },
+      "upstream": {
+        "n": 46,
+        "p50_s": 0.263,
+        "p95_s": 0.634,
+        "max_s": 2.546,
+        "total_s": 16.853
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/dashboard/purchase-orders",
+      "n": 5,
+      "p50_s": 0.462,
+      "p95_s": 0.628,
+      "max_s": 0.628,
+      "total_s": 2.269,
+      "status": {
+        "200": 5
+      },
+      "upstream": {
+        "n": 5,
+        "p50_s": 0.462,
+        "p95_s": 0.628,
+        "max_s": 0.628,
+        "total_s": 2.27
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/governance/summary",
+      "n": 20,
+      "p50_s": 0.537,
+      "p95_s": 0.622,
+      "max_s": 0.779,
+      "total_s": 11.071,
+      "status": {
+        "200": 20
+      },
+      "upstream": {
+        "n": 20,
+        "p50_s": 0.537,
+        "p95_s": 0.622,
+        "max_s": 0.779,
+        "total_s": 11.072
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/purchases/analysis",
+      "n": 91,
+      "p50_s": 0.123,
+      "p95_s": 0.603,
+      "max_s": 1.12,
+      "total_s": 16.111,
+      "status": {
+        "200": 91
+      },
+      "upstream": {
+        "n": 91,
+        "p50_s": 0.124,
+        "p95_s": 0.603,
+        "max_s": 1.12,
+        "total_s": 16.109
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/analytics/maintenance-dashboard/quantity-checks",
+      "n": 15,
+      "p50_s": 0.218,
+      "p95_s": 0.589,
+      "max_s": 0.589,
+      "total_s": 3.251,
+      "status": {
+        "200": 14,
+        "422": 1
+      },
+      "upstream": {
+        "n": 15,
+        "p50_s": 0.218,
+        "p95_s": 0.589,
+        "max_s": 0.589,
+        "total_s": 3.252
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable/{project_id}/workspace",
+      "n": 1121,
+      "p50_s": 0.271,
+      "p95_s": 0.58,
+      "max_s": 2.134,
+      "total_s": 375.976,
+      "status": {
+        "200": 1118,
+        "403": 1,
+        "500": 1,
+        "401": 1
+      },
+      "upstream": {
+        "n": 1121,
+        "p50_s": 0.271,
+        "p95_s": 0.58,
+        "max_s": 2.134,
+        "total_s": 375.952
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/analytics/spend-trend",
+      "n": 455,
+      "p50_s": 0.209,
+      "p95_s": 0.576,
+      "max_s": 4.735,
+      "total_s": 127.462,
+      "status": {
+        "200": 454,
+        "401": 1
+      },
+      "upstream": {
+        "n": 455,
+        "p50_s": 0.209,
+        "p95_s": 0.576,
+        "max_s": 4.734,
+        "total_s": 127.465
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/dashboard/kpi",
+      "n": 5,
+      "p50_s": 0.481,
+      "p95_s": 0.568,
+      "max_s": 0.568,
+      "total_s": 2.254,
+      "status": {
+        "200": 5
+      },
+      "upstream": {
+        "n": 5,
+        "p50_s": 0.481,
+        "p95_s": 0.568,
+        "max_s": 0.568,
+        "total_s": 2.253
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/pool-analysis/pools",
+      "n": 273,
+      "p50_s": 0.321,
+      "p95_s": 0.528,
+      "max_s": 1.631,
+      "total_s": 90.453,
+      "status": {
+        "200": 273
+      },
+      "upstream": {
+        "n": 273,
+        "p50_s": 0.321,
+        "p95_s": 0.528,
+        "max_s": 1.631,
+        "total_s": 90.448
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/acceptance-checklist/{batch_id}/apply",
+      "n": 6,
+      "p50_s": 0.045,
+      "p95_s": 0.52,
+      "max_s": 0.52,
+      "total_s": 0.74,
+      "status": {
+        "200": 6
+      },
+      "upstream": {
+        "n": 6,
+        "p50_s": 0.045,
+        "p95_s": 0.52,
+        "max_s": 0.52,
+        "total_s": 0.74
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/project-manager-assignments/search",
+      "n": 23,
+      "p50_s": 0.064,
+      "p95_s": 0.485,
+      "max_s": 0.672,
+      "total_s": 2.465,
+      "status": {
+        "200": 23
+      },
+      "upstream": {
+        "n": 23,
+        "p50_s": 0.064,
+        "p95_s": 0.485,
+        "max_s": 0.672,
+        "total_s": 2.465
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable/{project_id}/return-receipt-summary",
+      "n": 795,
+      "p50_s": 0.261,
+      "p95_s": 0.477,
+      "max_s": 2.124,
+      "total_s": 214.816,
+      "status": {
+        "200": 794,
+        "503": 1
+      },
+      "upstream": {
+        "n": 795,
+        "p50_s": 0.261,
+        "p95_s": 0.477,
+        "max_s": 2.124,
+        "total_s": 214.812
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/parts/overview",
+      "n": 505,
+      "p50_s": 0.172,
+      "p95_s": 0.473,
+      "max_s": 1.681,
+      "total_s": 114.494,
+      "status": {
+        "200": 505
+      },
+      "upstream": {
+        "n": 505,
+        "p50_s": 0.172,
+        "p95_s": 0.473,
+        "max_s": 1.681,
+        "total_s": 114.486
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/presales/customers",
+      "n": 1248,
+      "p50_s": 0.309,
+      "p95_s": 0.469,
+      "max_s": 1.294,
+      "total_s": 389.006,
+      "status": {
+        "200": 1012,
+        "499": 232,
+        "500": 4
+      },
+      "upstream": {
+        "n": 1248,
+        "p50_s": 0.309,
+        "p95_s": 0.468,
+        "max_s": 1.294,
+        "total_s": 389.014
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/analytics/maintenance-dashboard/consumption",
+      "n": 23,
+      "p50_s": 0.302,
+      "p95_s": 0.467,
+      "max_s": 0.662,
+      "total_s": 5.867,
+      "status": {
+        "200": 23
+      },
+      "upstream": {
+        "n": 23,
+        "p50_s": 0.302,
+        "p95_s": 0.467,
+        "max_s": 0.662,
+        "total_s": 5.867
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/presales/library/search",
+      "n": 98,
+      "p50_s": 0.191,
+      "p95_s": 0.452,
+      "max_s": 1.913,
+      "total_s": 21.419,
+      "status": {
+        "200": 79,
+        "499": 19
+      },
+      "upstream": {
+        "n": 98,
+        "p50_s": 0.191,
+        "p95_s": 0.452,
+        "max_s": 1.913,
+        "total_s": 21.421
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/parts/{part_id}/gallery",
+      "n": 9031,
+      "p50_s": 0.186,
+      "p95_s": 0.451,
+      "max_s": 4.517,
+      "total_s": 1991.238,
+      "status": {
+        "200": 8523,
+        "404": 267,
+        "401": 25,
+        "500": 216
+      },
+      "upstream": {
+        "n": 9031,
+        "p50_s": 0.186,
+        "p95_s": 0.451,
+        "max_s": 4.517,
+        "total_s": 1991.236
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/work-items",
+      "n": 2429,
+      "p50_s": 0.053,
+      "p95_s": 0.418,
+      "max_s": 5.255,
+      "total_s": 297.218,
+      "status": {
+        "200": 2396,
+        "499": 33
+      },
+      "upstream": {
+        "n": 2429,
+        "p50_s": 0.053,
+        "p95_s": 0.419,
+        "max_s": 5.255,
+        "total_s": 297.23
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/project-assignments/orders",
+      "n": 1077,
+      "p50_s": 0.221,
+      "p95_s": 0.418,
+      "max_s": 1.201,
+      "total_s": 282.632,
+      "status": {
+        "200": 1076,
+        "500": 1
+      },
+      "upstream": {
+        "n": 1077,
+        "p50_s": 0.221,
+        "p95_s": 0.418,
+        "max_s": 1.201,
+        "total_s": 282.637
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable/{project_id}/return-receipt-demands",
+      "n": 3989,
+      "p50_s": 0.225,
+      "p95_s": 0.418,
+      "max_s": 4.378,
+      "total_s": 925.499,
+      "status": {
+        "200": 3989
+      },
+      "upstream": {
+        "n": 3989,
+        "p50_s": 0.225,
+        "p95_s": 0.418,
+        "max_s": 4.378,
+        "total_s": 925.499
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/site-issues/search",
+      "n": 2690,
+      "p50_s": 0.19,
+      "p95_s": 0.4,
+      "max_s": 4.397,
+      "total_s": 616.113,
+      "status": {
+        "200": 2689,
+        "500": 1
+      },
+      "upstream": {
+        "n": 2690,
+        "p50_s": 0.19,
+        "p95_s": 0.4,
+        "max_s": 4.397,
+        "total_s": 614.758
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/pool-analysis/pools/{group_id}/price-map",
+      "n": 45,
+      "p50_s": 0.244,
+      "p95_s": 0.39,
+      "max_s": 0.578,
+      "total_s": 11.718,
+      "status": {
+        "200": 45
+      },
+      "upstream": {
+        "n": 45,
+        "p50_s": 0.244,
+        "p95_s": 0.39,
+        "max_s": 0.578,
+        "total_s": 11.719
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/governance/parts",
+      "n": 20,
+      "p50_s": 0.299,
+      "p95_s": 0.382,
+      "max_s": 0.429,
+      "total_s": 6.194,
+      "status": {
+        "200": 20
+      },
+      "upstream": {
+        "n": 20,
+        "p50_s": 0.299,
+        "p95_s": 0.382,
+        "max_s": 0.429,
+        "total_s": 6.195
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable/{project_id}/return-receipts",
+      "n": 795,
+      "p50_s": 0.221,
+      "p95_s": 0.371,
+      "max_s": 2.117,
+      "total_s": 183.423,
+      "status": {
+        "200": 792,
+        "503": 3
+      },
+      "upstream": {
+        "n": 795,
+        "p50_s": 0.221,
+        "p95_s": 0.371,
+        "max_s": 2.117,
+        "total_s": 183.421
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/site-issues/projects/{project_id}/candidates/search",
+      "n": 698,
+      "p50_s": 0.219,
+      "p95_s": 0.362,
+      "max_s": 2.118,
+      "total_s": 163.533,
+      "status": {
+        "200": 697,
+        "500": 1
+      },
+      "upstream": {
+        "n": 698,
+        "p50_s": 0.219,
+        "p95_s": 0.362,
+        "max_s": 2.118,
+        "total_s": 163.22
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/analytics/filter-options",
+      "n": 119,
+      "p50_s": 0.099,
+      "p95_s": 0.358,
+      "max_s": 0.713,
+      "total_s": 14.759,
+      "status": {
+        "200": 119
+      },
+      "upstream": {
+        "n": 119,
+        "p50_s": 0.099,
+        "p95_s": 0.358,
+        "max_s": 0.713,
+        "total_s": 14.76
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/{project_id}/source-cancellations",
+      "n": 92,
+      "p50_s": 0.14,
+      "p95_s": 0.35,
+      "max_s": 1.201,
+      "total_s": 17.738,
+      "status": {
+        "200": 91,
+        "500": 1
+      },
+      "upstream": {
+        "n": 92,
+        "p50_s": 0.14,
+        "p95_s": 0.35,
+        "max_s": 1.201,
+        "total_s": 17.736
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/replenishment-beta/capabilities",
+      "n": 22,
+      "p50_s": 0.019,
+      "p95_s": 0.347,
+      "max_s": 0.486,
+      "total_s": 1.244,
+      "status": {
+        "200": 22
+      },
+      "upstream": {
+        "n": 22,
+        "p50_s": 0.019,
+        "p95_s": 0.347,
+        "max_s": 0.486,
+        "total_s": 1.245
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/parts/price-refs",
+      "n": 1729,
+      "p50_s": 0.116,
+      "p95_s": 0.343,
+      "max_s": 1.207,
+      "total_s": 297.612,
+      "status": {
+        "200": 1713,
+        "500": 16
+      },
+      "upstream": {
+        "n": 1729,
+        "p50_s": 0.116,
+        "p95_s": 0.343,
+        "max_s": 1.207,
+        "total_s": 297.474
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable/{project_id}",
+      "n": 1144,
+      "p50_s": 0.113,
+      "p95_s": 0.327,
+      "max_s": 1.319,
+      "total_s": 185.758,
+      "status": {
+        "200": 1141,
+        "403": 1,
+        "500": 1,
+        "401": 1
+      },
+      "upstream": {
+        "n": 1144,
+        "p50_s": 0.113,
+        "p95_s": 0.327,
+        "max_s": 1.319,
+        "total_s": 185.778
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/presales/library",
+      "n": 7819,
+      "p50_s": 0.181,
+      "p95_s": 0.313,
+      "max_s": 1.434,
+      "total_s": 1473.55,
+      "status": {
+        "200": 7715,
+        "401": 12,
+        "500": 92
+      },
+      "upstream": {
+        "n": 7819,
+        "p50_s": 0.181,
+        "p95_s": 0.313,
+        "max_s": 1.434,
+        "total_s": 1473.5
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/parts/suggest",
+      "n": 1732,
+      "p50_s": 0.12,
+      "p95_s": 0.306,
+      "max_s": 2.785,
+      "total_s": 253.421,
+      "status": {
+        "200": 1465,
+        "499": 242,
+        "401": 22,
+        "500": 3
+      },
+      "upstream": {
+        "n": 1732,
+        "p50_s": 0.12,
+        "p95_s": 0.306,
+        "max_s": 2.785,
+        "total_s": 253.422
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/presales/parts/{part_id}/inquiries",
+      "n": 60,
+      "p50_s": 0.097,
+      "p95_s": 0.299,
+      "max_s": 0.86,
+      "total_s": 6.293,
+      "status": {
+        "200": 55,
+        "401": 5
+      },
+      "upstream": {
+        "n": 60,
+        "p50_s": 0.097,
+        "p95_s": 0.299,
+        "max_s": 0.86,
+        "total_s": 6.292
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/audience/people",
+      "n": 170,
+      "p50_s": 0.038,
+      "p95_s": 0.295,
+      "max_s": 0.676,
+      "total_s": 11.516,
+      "status": {
+        "200": 170
+      },
+      "upstream": {
+        "n": 170,
+        "p50_s": 0.038,
+        "p95_s": 0.295,
+        "max_s": 0.676,
+        "total_s": 11.52
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/parts/{part_id}/gallery/uploads/sign",
+      "n": 196,
+      "p50_s": 0.147,
+      "p95_s": 0.29,
+      "max_s": 1.437,
+      "total_s": 33.961,
+      "status": {
+        "200": 177,
+        "404": 19
+      },
+      "upstream": {
+        "n": 196,
+        "p50_s": 0.147,
+        "p95_s": 0.29,
+        "max_s": 1.437,
+        "total_s": 33.841
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/presales/inquiries/{inquiry_id}/lines",
+      "n": 5,
+      "p50_s": 0.118,
+      "p95_s": 0.289,
+      "max_s": 0.289,
+      "total_s": 0.785,
+      "status": {
+        "200": 5
+      },
+      "upstream": {
+        "n": 5,
+        "p50_s": 0.118,
+        "p95_s": 0.289,
+        "max_s": 0.289,
+        "total_s": 0.784
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/pools",
+      "n": 10,
+      "p50_s": 0.075,
+      "p95_s": 0.279,
+      "max_s": 0.279,
+      "total_s": 1.214,
+      "status": {
+        "200": 10
+      },
+      "upstream": {
+        "n": 10,
+        "p50_s": 0.075,
+        "p95_s": 0.279,
+        "max_s": 0.279,
+        "total_s": 1.214
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/presales/inquiries/{inquiry_id}/reply",
+      "n": 294,
+      "p50_s": 0.106,
+      "p95_s": 0.275,
+      "max_s": 2.7,
+      "total_s": 48.46,
+      "status": {
+        "200": 273,
+        "409": 21
+      },
+      "upstream": {
+        "n": 294,
+        "p50_s": 0.106,
+        "p95_s": 0.275,
+        "max_s": 2.7,
+        "total_s": 48.452
+      }
+    },
+    {
+      "method": "PATCH",
+      "route": "/api/presales/inquiries/{inquiry_id}",
+      "n": 40,
+      "p50_s": 0.14,
+      "p95_s": 0.266,
+      "max_s": 1.659,
+      "total_s": 8.389,
+      "status": {
+        "200": 40
+      },
+      "upstream": {
+        "n": 40,
+        "p50_s": 0.14,
+        "p95_s": 0.266,
+        "max_s": 1.659,
+        "total_s": 8.387
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/presales/inquiries",
+      "n": 284,
+      "p50_s": 0.122,
+      "p95_s": 0.25,
+      "max_s": 3.016,
+      "total_s": 44.794,
+      "status": {
+        "201": 284
+      },
+      "upstream": {
+        "n": 284,
+        "p50_s": 0.122,
+        "p95_s": 0.249,
+        "max_s": 3.016,
+        "total_s": 44.767
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/import/batches/{batch_id}",
+      "n": 2,
+      "p50_s": 0.112,
+      "p95_s": 0.25,
+      "max_s": 0.25,
+      "total_s": 0.362,
+      "status": {
+        "200": 2
+      },
+      "upstream": {
+        "n": 2,
+        "p50_s": 0.112,
+        "p95_s": 0.25,
+        "max_s": 0.25,
+        "total_s": 0.362
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/parts/{part_id}/pool-reference",
+      "n": 505,
+      "p50_s": 0.067,
+      "p95_s": 0.239,
+      "max_s": 0.613,
+      "total_s": 47.208,
+      "status": {
+        "200": 474,
+        "403": 31
+      },
+      "upstream": {
+        "n": 505,
+        "p50_s": 0.067,
+        "p95_s": 0.239,
+        "max_s": 0.613,
+        "total_s": 47.213
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/purchases/analytics/summary",
+      "n": 397,
+      "p50_s": 0.105,
+      "p95_s": 0.239,
+      "max_s": 2.07,
+      "total_s": 57.335,
+      "status": {
+        "200": 394,
+        "500": 3
+      },
+      "upstream": {
+        "n": 397,
+        "p50_s": 0.105,
+        "p95_s": 0.239,
+        "max_s": 2.071,
+        "total_s": 57.333
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/integrations/resale/parts/snapshots",
+      "n": 2260,
+      "p50_s": 0.161,
+      "p95_s": 0.235,
+      "max_s": 3.493,
+      "total_s": 373.451,
+      "status": {
+        "200": 2260
+      },
+      "upstream": {
+        "n": 2260,
+        "p50_s": 0.161,
+        "p95_s": 0.235,
+        "max_s": 3.493,
+        "total_s": 373.231
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/replenishment-beta/catalog",
+      "n": 24,
+      "p50_s": 0.145,
+      "p95_s": 0.23,
+      "max_s": 0.267,
+      "total_s": 3.713,
+      "status": {
+        "200": 24
+      },
+      "upstream": {
+        "n": 24,
+        "p50_s": 0.145,
+        "p95_s": 0.23,
+        "max_s": 0.268,
+        "total_s": 3.715
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/purchases/cancellation-stats",
+      "n": 52,
+      "p50_s": 0.181,
+      "p95_s": 0.221,
+      "max_s": 0.872,
+      "total_s": 10.151,
+      "status": {
+        "200": 52
+      },
+      "upstream": {
+        "n": 52,
+        "p50_s": 0.181,
+        "p95_s": 0.221,
+        "max_s": 0.873,
+        "total_s": 10.152
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/projects/stable/{project_id}/acceptance/checklist/preview",
+      "n": 7,
+      "p50_s": 0.137,
+      "p95_s": 0.211,
+      "max_s": 0.211,
+      "total_s": 0.99,
+      "status": {
+        "200": 7
+      },
+      "upstream": {
+        "n": 7,
+        "p50_s": 0.136,
+        "p95_s": 0.211,
+        "max_s": 0.211,
+        "total_s": 0.988
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/purchases/analytics/orders",
+      "n": 48,
+      "p50_s": 0.08,
+      "p95_s": 0.209,
+      "max_s": 0.47,
+      "total_s": 5.116,
+      "status": {
+        "200": 48
+      },
+      "upstream": {
+        "n": 48,
+        "p50_s": 0.08,
+        "p95_s": 0.209,
+        "max_s": 0.471,
+        "total_s": 5.117
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/presales/inquiries/{inquiry_id}/close",
+      "n": 17,
+      "p50_s": 0.102,
+      "p95_s": 0.202,
+      "max_s": 0.202,
+      "total_s": 1.819,
+      "status": {
+        "200": 17
+      },
+      "upstream": {
+        "n": 17,
+        "p50_s": 0.102,
+        "p95_s": 0.201,
+        "max_s": 0.201,
+        "total_s": 1.815
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/subjects/{subject_type}/{subject_id}/events",
+      "n": 524,
+      "p50_s": 0.065,
+      "p95_s": 0.194,
+      "max_s": 1.145,
+      "total_s": 42.036,
+      "status": {
+        "200": 524
+      },
+      "upstream": {
+        "n": 524,
+        "p50_s": 0.065,
+        "p95_s": 0.194,
+        "max_s": 1.145,
+        "total_s": 42.034
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/presales/inquiries/{inquiry_id}/resubmit",
+      "n": 22,
+      "p50_s": 0.12,
+      "p95_s": 0.193,
+      "max_s": 0.65,
+      "total_s": 3.347,
+      "status": {
+        "200": 22
+      },
+      "upstream": {
+        "n": 22,
+        "p50_s": 0.12,
+        "p95_s": 0.193,
+        "max_s": 0.65,
+        "total_s": 3.347
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/role-templates/{code}/sync",
+      "n": 49,
+      "p50_s": 0.059,
+      "p95_s": 0.19,
+      "max_s": 5.05,
+      "total_s": 9.058,
+      "status": {
+        "200": 48,
+        "400": 1
+      },
+      "upstream": {
+        "n": 49,
+        "p50_s": 0.059,
+        "p95_s": 0.19,
+        "max_s": 5.05,
+        "total_s": 9.056
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/workbooks/{schema_name}/preview",
+      "n": 5,
+      "p50_s": 0.179,
+      "p95_s": 0.187,
+      "max_s": 0.187,
+      "total_s": 0.892,
+      "status": {
+        "422": 1,
+        "200": 4
+      },
+      "upstream": {
+        "n": 5,
+        "p50_s": 0.179,
+        "p95_s": 0.187,
+        "max_s": 0.187,
+        "total_s": 0.892
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable",
+      "n": 119,
+      "p50_s": 0.083,
+      "p95_s": 0.186,
+      "max_s": 1.921,
+      "total_s": 13.691,
+      "status": {
+        "200": 119
+      },
+      "upstream": {
+        "n": 119,
+        "p50_s": 0.083,
+        "p95_s": 0.186,
+        "max_s": 1.921,
+        "total_s": 13.689
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/replenishment-beta/projects",
+      "n": 22,
+      "p50_s": 0.093,
+      "p95_s": 0.185,
+      "max_s": 0.221,
+      "total_s": 2.14,
+      "status": {
+        "200": 22
+      },
+      "upstream": {
+        "n": 22,
+        "p50_s": 0.093,
+        "p95_s": 0.185,
+        "max_s": 0.221,
+        "total_s": 2.136
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/parts/categories",
+      "n": 1337,
+      "p50_s": 0.079,
+      "p95_s": 0.183,
+      "max_s": 2.138,
+      "total_s": 142.654,
+      "status": {
+        "200": 1336,
+        "500": 1
+      },
+      "upstream": {
+        "n": 1337,
+        "p50_s": 0.079,
+        "p95_s": 0.183,
+        "max_s": 2.138,
+        "total_s": 142.646
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/presales/reference",
+      "n": 871,
+      "p50_s": 0.111,
+      "p95_s": 0.181,
+      "max_s": 0.824,
+      "total_s": 106.018,
+      "status": {
+        "200": 871
+      },
+      "upstream": {
+        "n": 871,
+        "p50_s": 0.111,
+        "p95_s": 0.181,
+        "max_s": 0.824,
+        "total_s": 105.973
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/replenishment-beta/applications/{application_id}",
+      "n": 3,
+      "p50_s": 0.166,
+      "p95_s": 0.179,
+      "max_s": 0.179,
+      "total_s": 0.399,
+      "status": {
+        "200": 3
+      },
+      "upstream": {
+        "n": 3,
+        "p50_s": 0.166,
+        "p95_s": 0.179,
+        "max_s": 0.179,
+        "total_s": 0.399
+      }
+    },
+    {
+      "method": "PUT",
+      "route": "/api/role-templates/{code}",
+      "n": 29,
+      "p50_s": 0.041,
+      "p95_s": 0.179,
+      "max_s": 1.76,
+      "total_s": 3.156,
+      "status": {
+        "200": 28,
+        "409": 1
+      },
+      "upstream": {
+        "n": 29,
+        "p50_s": 0.039,
+        "p95_s": 0.085,
+        "max_s": 1.76,
+        "total_s": 2.974
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/accounts",
+      "n": 130,
+      "p50_s": 0.087,
+      "p95_s": 0.175,
+      "max_s": 1.119,
+      "total_s": 14.242,
+      "status": {
+        "200": 130
+      },
+      "upstream": {
+        "n": 130,
+        "p50_s": 0.085,
+        "p95_s": 0.113,
+        "max_s": 1.017,
+        "total_s": 12.627
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/presales/workbooks/inquiry-template",
+      "n": 11,
+      "p50_s": 0.005,
+      "p95_s": 0.174,
+      "max_s": 0.174,
+      "total_s": 0.377,
+      "status": {
+        "401": 9,
+        "200": 2
+      },
+      "upstream": {
+        "n": 11,
+        "p50_s": 0.005,
+        "p95_s": 0.174,
+        "max_s": 0.174,
+        "total_s": 0.377
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/presales/inquiries/{inquiry_id}/submit",
+      "n": 269,
+      "p50_s": 0.109,
+      "p95_s": 0.171,
+      "max_s": 0.963,
+      "total_s": 32.046,
+      "status": {
+        "200": 269
+      },
+      "upstream": {
+        "n": 269,
+        "p50_s": 0.109,
+        "p95_s": 0.171,
+        "max_s": 0.963,
+        "total_s": 32.038
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/presales/workbooks/sales-summary",
+      "n": 1,
+      "p50_s": 0.167,
+      "p95_s": 0.167,
+      "max_s": 0.167,
+      "total_s": 0.167,
+      "status": {
+        "200": 1
+      },
+      "upstream": {
+        "n": 1,
+        "p50_s": 0.167,
+        "p95_s": 0.167,
+        "max_s": 0.167,
+        "total_s": 0.167
+      }
+    },
+    {
+      "method": "PATCH",
+      "route": "/api/maintenance/projects/stable/{project_id}",
+      "n": 20,
+      "p50_s": 0.091,
+      "p95_s": 0.166,
+      "max_s": 0.477,
+      "total_s": 2.374,
+      "status": {
+        "200": 20
+      },
+      "upstream": {
+        "n": 20,
+        "p50_s": 0.091,
+        "p95_s": 0.166,
+        "max_s": 0.477,
+        "total_s": 2.373
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/work-items/candidates",
+      "n": 1897,
+      "p50_s": 0.077,
+      "p95_s": 0.162,
+      "max_s": 2.278,
+      "total_s": 192.355,
+      "status": {
+        "200": 1896,
+        "499": 1
+      },
+      "upstream": {
+        "n": 1897,
+        "p50_s": 0.077,
+        "p95_s": 0.162,
+        "max_s": 2.278,
+        "total_s": 192.361
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/presales/inquiries/{inquiry_id}/lines/{line_id}/offers",
+      "n": 472,
+      "p50_s": 0.09,
+      "p95_s": 0.158,
+      "max_s": 2.294,
+      "total_s": 52.196,
+      "status": {
+        "200": 471,
+        "409": 1
+      },
+      "upstream": {
+        "n": 472,
+        "p50_s": 0.09,
+        "p95_s": 0.158,
+        "max_s": 2.294,
+        "total_s": 52.187
+      }
+    },
+    {
+      "method": "PATCH",
+      "route": "/api/parts/master",
+      "n": 133,
+      "p50_s": 0.078,
+      "p95_s": 0.157,
+      "max_s": 1.013,
+      "total_s": 13.013,
+      "status": {
+        "200": 133
+      },
+      "upstream": {
+        "n": 133,
+        "p50_s": 0.077,
+        "p95_s": 0.156,
+        "max_s": 1.013,
+        "total_s": 12.962
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/presales/inquiries/{inquiry_id}/withdraw",
+      "n": 23,
+      "p50_s": 0.097,
+      "p95_s": 0.154,
+      "max_s": 0.41,
+      "total_s": 2.66,
+      "status": {
+        "200": 23
+      },
+      "upstream": {
+        "n": 23,
+        "p50_s": 0.097,
+        "p95_s": 0.154,
+        "max_s": 0.409,
+        "total_s": 2.659
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable/{project_id}/master-workbook/collection-plan",
+      "n": 22,
+      "p50_s": 0.056,
+      "p95_s": 0.154,
+      "max_s": 0.202,
+      "total_s": 1.575,
+      "status": {
+        "200": 22
+      },
+      "upstream": {
+        "n": 22,
+        "p50_s": 0.056,
+        "p95_s": 0.154,
+        "max_s": 0.202,
+        "total_s": 1.575
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/presales/offers/{offer_id}/revisions",
+      "n": 32,
+      "p50_s": 0.062,
+      "p95_s": 0.146,
+      "max_s": 1.347,
+      "total_s": 3.44,
+      "status": {
+        "200": 30,
+        "403": 2
+      },
+      "upstream": {
+        "n": 32,
+        "p50_s": 0.062,
+        "p95_s": 0.146,
+        "max_s": 1.347,
+        "total_s": 3.439
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/acceptance-files/{file_id}",
+      "n": 2,
+      "p50_s": 0.069,
+      "p95_s": 0.138,
+      "max_s": 0.138,
+      "total_s": 0.207,
+      "status": {
+        "200": 2
+      },
+      "upstream": {
+        "n": 2,
+        "p50_s": 0.067,
+        "p95_s": 0.124,
+        "max_s": 0.124,
+        "total_s": 0.191
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/replenishment-beta/applications",
+      "n": 22,
+      "p50_s": 0.065,
+      "p95_s": 0.131,
+      "max_s": 0.222,
+      "total_s": 1.651,
+      "status": {
+        "200": 22
+      },
+      "upstream": {
+        "n": 22,
+        "p50_s": 0.065,
+        "p95_s": 0.131,
+        "max_s": 0.222,
+        "total_s": 1.653
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/audience/groups",
+      "n": 180,
+      "p50_s": 0.037,
+      "p95_s": 0.129,
+      "max_s": 0.793,
+      "total_s": 11.078,
+      "status": {
+        "200": 168,
+        "401": 12
+      },
+      "upstream": {
+        "n": 180,
+        "p50_s": 0.036,
+        "p95_s": 0.129,
+        "max_s": 0.794,
+        "total_s": 11.074
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/work-items/{item_id}/claim",
+      "n": 277,
+      "p50_s": 0.065,
+      "p95_s": 0.129,
+      "max_s": 4.236,
+      "total_s": 27.71,
+      "status": {
+        "200": 273,
+        "409": 4
+      },
+      "upstream": {
+        "n": 277,
+        "p50_s": 0.065,
+        "p95_s": 0.129,
+        "max_s": 4.236,
+        "total_s": 27.699
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/integrations/pn-master/parts/batch-get",
+      "n": 1001,
+      "p50_s": 0.105,
+      "p95_s": 0.118,
+      "max_s": 0.444,
+      "total_s": 98.672,
+      "status": {
+        "200": 1001
+      },
+      "upstream": {
+        "n": 1001,
+        "p50_s": 0.105,
+        "p95_s": 0.118,
+        "max_s": 0.444,
+        "total_s": 98.603
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/work-items/{item_id}/start",
+      "n": 21,
+      "p50_s": 0.075,
+      "p95_s": 0.115,
+      "max_s": 0.157,
+      "total_s": 1.645,
+      "status": {
+        "200": 21
+      },
+      "upstream": {
+        "n": 21,
+        "p50_s": 0.075,
+        "p95_s": 0.115,
+        "max_s": 0.157,
+        "total_s": 1.646
+      }
+    },
+    {
+      "method": "PATCH",
+      "route": "/api/maintenance/return-receipts/{receipt_id}",
+      "n": 12,
+      "p50_s": 0.063,
+      "p95_s": 0.113,
+      "max_s": 0.113,
+      "total_s": 0.79,
+      "status": {
+        "200": 12
+      },
+      "upstream": {
+        "n": 12,
+        "p50_s": 0.062,
+        "p95_s": 0.112,
+        "max_s": 0.112,
+        "total_s": 0.786
+      }
+    },
+    {
+      "method": "PATCH",
+      "route": "/api/presales/offers/{offer_id}",
+      "n": 12,
+      "p50_s": 0.067,
+      "p95_s": 0.112,
+      "max_s": 0.112,
+      "total_s": 0.866,
+      "status": {
+        "200": 12
+      },
+      "upstream": {
+        "n": 12,
+        "p50_s": 0.067,
+        "p95_s": 0.111,
+        "max_s": 0.111,
+        "total_s": 0.866
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/analytics/maintenance-dashboard/options",
+      "n": 182,
+      "p50_s": 0.073,
+      "p95_s": 0.105,
+      "max_s": 1.083,
+      "total_s": 14.292,
+      "status": {
+        "200": 182
+      },
+      "upstream": {
+        "n": 182,
+        "p50_s": 0.072,
+        "p95_s": 0.105,
+        "max_s": 1.083,
+        "total_s": 14.274
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/presales/inquiries/{inquiry_id}/publish",
+      "n": 16,
+      "p50_s": 0.074,
+      "p95_s": 0.101,
+      "max_s": 0.101,
+      "total_s": 1.229,
+      "status": {
+        "200": 15,
+        "409": 1
+      },
+      "upstream": {
+        "n": 16,
+        "p50_s": 0.073,
+        "p95_s": 0.101,
+        "max_s": 0.101,
+        "total_s": 1.228
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/data-quality/issues",
+      "n": 1,
+      "p50_s": 0.101,
+      "p95_s": 0.101,
+      "max_s": 0.101,
+      "total_s": 0.101,
+      "status": {
+        "200": 1
+      },
+      "upstream": {
+        "n": 1,
+        "p50_s": 0.101,
+        "p95_s": 0.101,
+        "max_s": 0.101,
+        "total_s": 0.101
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/fields/template",
+      "n": 517,
+      "p50_s": 0.042,
+      "p95_s": 0.098,
+      "max_s": 7.056,
+      "total_s": 32.809,
+      "status": {
+        "200": 514,
+        "499": 3
+      },
+      "upstream": {
+        "n": 517,
+        "p50_s": 0.042,
+        "p95_s": 0.098,
+        "max_s": 7.056,
+        "total_s": 32.814
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable/{project_id}/acceptance",
+      "n": 89,
+      "p50_s": 0.054,
+      "p95_s": 0.097,
+      "max_s": 2.329,
+      "total_s": 8.119,
+      "status": {
+        "200": 89
+      },
+      "upstream": {
+        "n": 89,
+        "p50_s": 0.054,
+        "p95_s": 0.097,
+        "max_s": 2.329,
+        "total_s": 8.118
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/integrations/resale/parts/price-reference",
+      "n": 33,
+      "p50_s": 0.005,
+      "p95_s": 0.096,
+      "max_s": 0.112,
+      "total_s": 0.599,
+      "status": {
+        "200": 5,
+        "401": 28
+      },
+      "upstream": {
+        "n": 33,
+        "p50_s": 0.005,
+        "p95_s": 0.097,
+        "max_s": 0.112,
+        "total_s": 0.599
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/integrations/resale/parts/list",
+      "n": 2454,
+      "p50_s": 0.027,
+      "p95_s": 0.095,
+      "max_s": 2.93,
+      "total_s": 117.827,
+      "status": {
+        "200": 2454
+      },
+      "upstream": {
+        "n": 2454,
+        "p50_s": 0.026,
+        "p95_s": 0.095,
+        "max_s": 2.93,
+        "total_s": 117.409
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/integrations/pn-master/aliases",
+      "n": 3,
+      "p50_s": 0.081,
+      "p95_s": 0.095,
+      "max_s": 0.095,
+      "total_s": 0.23,
+      "status": {
+        "200": 3
+      },
+      "upstream": {
+        "n": 3,
+        "p50_s": 0.081,
+        "p95_s": 0.094,
+        "max_s": 0.094,
+        "total_s": 0.229
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/projects/stable/{project_id}/acceptance/submit",
+      "n": 3,
+      "p50_s": 0.089,
+      "p95_s": 0.094,
+      "max_s": 0.094,
+      "total_s": 0.261,
+      "status": {
+        "200": 3
+      },
+      "upstream": {
+        "n": 3,
+        "p50_s": 0.088,
+        "p95_s": 0.094,
+        "max_s": 0.094,
+        "total_s": 0.26
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/fields/defs",
+      "n": 492,
+      "p50_s": 0.04,
+      "p95_s": 0.094,
+      "max_s": 7.055,
+      "total_s": 30.457,
+      "status": {
+        "200": 475,
+        "401": 12,
+        "499": 5
+      },
+      "upstream": {
+        "n": 492,
+        "p50_s": 0.04,
+        "p95_s": 0.094,
+        "max_s": 7.055,
+        "total_s": 30.461
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/role-templates/{code}/archive",
+      "n": 1,
+      "p50_s": 0.094,
+      "p95_s": 0.094,
+      "max_s": 0.094,
+      "total_s": 0.094,
+      "status": {
+        "200": 1
+      },
+      "upstream": {
+        "n": 1,
+        "p50_s": 0.094,
+        "p95_s": 0.094,
+        "max_s": 0.094,
+        "total_s": 0.094
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/site-issues/projects/{project_id}/demand-candidates",
+      "n": 2,
+      "p50_s": 0.091,
+      "p95_s": 0.092,
+      "max_s": 0.092,
+      "total_s": 0.183,
+      "status": {
+        "200": 2
+      },
+      "upstream": {
+        "n": 2,
+        "p50_s": 0.091,
+        "p95_s": 0.092,
+        "max_s": 0.092,
+        "total_s": 0.183
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/projects/stable/{project_id}/return-receipts",
+      "n": 309,
+      "p50_s": 0.055,
+      "p95_s": 0.088,
+      "max_s": 0.621,
+      "total_s": 19.065,
+      "status": {
+        "201": 309
+      },
+      "upstream": {
+        "n": 309,
+        "p50_s": 0.055,
+        "p95_s": 0.088,
+        "max_s": 0.621,
+        "total_s": 19.028
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/accounts/_meta",
+      "n": 130,
+      "p50_s": 0.035,
+      "p95_s": 0.087,
+      "max_s": 0.99,
+      "total_s": 6.555,
+      "status": {
+        "200": 130
+      },
+      "upstream": {
+        "n": 130,
+        "p50_s": 0.035,
+        "p95_s": 0.087,
+        "max_s": 0.99,
+        "total_s": 6.558
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/work-items/badge",
+      "n": 14977,
+      "p50_s": 0.04,
+      "p95_s": 0.085,
+      "max_s": 12.374,
+      "total_s": 839.336,
+      "status": {
+        "200": 14800,
+        "401": 60,
+        "499": 106,
+        "500": 11
+      },
+      "upstream": {
+        "n": 14977,
+        "p50_s": 0.04,
+        "p95_s": 0.085,
+        "max_s": 12.374,
+        "total_s": 839.362
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable/{project_id}/acceptance/checklist",
+      "n": 77,
+      "p50_s": 0.047,
+      "p95_s": 0.085,
+      "max_s": 0.573,
+      "total_s": 4.402,
+      "status": {
+        "200": 77
+      },
+      "upstream": {
+        "n": 77,
+        "p50_s": 0.047,
+        "p95_s": 0.085,
+        "max_s": 0.573,
+        "total_s": 4.402
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/integrations/pn-master/parts/{part_id}",
+      "n": 91,
+      "p50_s": 0.018,
+      "p95_s": 0.084,
+      "max_s": 0.119,
+      "total_s": 2.008,
+      "status": {
+        "200": 57,
+        "401": 33,
+        "404": 1
+      },
+      "upstream": {
+        "n": 91,
+        "p50_s": 0.018,
+        "p95_s": 0.083,
+        "max_s": 0.119,
+        "total_s": 2.007
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/governance/merges",
+      "n": 1,
+      "p50_s": 0.083,
+      "p95_s": 0.083,
+      "max_s": 0.083,
+      "total_s": 0.083,
+      "status": {
+        "200": 1
+      },
+      "upstream": {
+        "n": 1,
+        "p50_s": 0.083,
+        "p95_s": 0.083,
+        "max_s": 0.083,
+        "total_s": 0.083
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/work-items/{item_id}/release",
+      "n": 6,
+      "p50_s": 0.06,
+      "p95_s": 0.08,
+      "max_s": 0.08,
+      "total_s": 0.394,
+      "status": {
+        "200": 6
+      },
+      "upstream": {
+        "n": 6,
+        "p50_s": 0.06,
+        "p95_s": 0.081,
+        "max_s": 0.081,
+        "total_s": 0.395
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/demands/orders/{source_order_id}/lines",
+      "n": 2,
+      "p50_s": 0.049,
+      "p95_s": 0.075,
+      "max_s": 0.075,
+      "total_s": 0.124,
+      "status": {
+        "200": 2
+      },
+      "upstream": {
+        "n": 2,
+        "p50_s": 0.049,
+        "p95_s": 0.075,
+        "max_s": 0.075,
+        "total_s": 0.124
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/integrations/pn-master/changes",
+      "n": 1771,
+      "p50_s": 0.02,
+      "p95_s": 0.073,
+      "max_s": 4.45,
+      "total_s": 75.838,
+      "status": {
+        "200": 1771
+      },
+      "upstream": {
+        "n": 1771,
+        "p50_s": 0.02,
+        "p95_s": 0.073,
+        "max_s": 4.45,
+        "total_s": 75.736
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/governance/candidates",
+      "n": 1,
+      "p50_s": 0.072,
+      "p95_s": 0.072,
+      "max_s": 0.072,
+      "total_s": 0.072,
+      "status": {
+        "200": 1
+      },
+      "upstream": {
+        "n": 1,
+        "p50_s": 0.072,
+        "p95_s": 0.072,
+        "max_s": 0.072,
+        "total_s": 0.072
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/governance/aliases",
+      "n": 1,
+      "p50_s": 0.07,
+      "p95_s": 0.07,
+      "max_s": 0.07,
+      "total_s": 0.07,
+      "status": {
+        "200": 1
+      },
+      "upstream": {
+        "n": 1,
+        "p50_s": 0.07,
+        "p95_s": 0.07,
+        "max_s": 0.07,
+        "total_s": 0.07
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/governance/issues",
+      "n": 1,
+      "p50_s": 0.065,
+      "p95_s": 0.065,
+      "max_s": 0.065,
+      "total_s": 0.065,
+      "status": {
+        "200": 1
+      },
+      "upstream": {
+        "n": 1,
+        "p50_s": 0.065,
+        "p95_s": 0.065,
+        "max_s": 0.065,
+        "total_s": 0.065
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/sales/analytics/orders/{order_id}",
+      "n": 52,
+      "p50_s": 0.044,
+      "p95_s": 0.064,
+      "max_s": 0.067,
+      "total_s": 2.205,
+      "status": {
+        "200": 52
+      },
+      "upstream": {
+        "n": 52,
+        "p50_s": 0.044,
+        "p95_s": 0.064,
+        "max_s": 0.067,
+        "total_s": 2.204
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/integrations/pn-master/parts/lookup",
+      "n": 1121,
+      "p50_s": 0.06,
+      "p95_s": 0.064,
+      "max_s": 0.439,
+      "total_s": 69.567,
+      "status": {
+        "200": 1121
+      },
+      "upstream": {
+        "n": 1121,
+        "p50_s": 0.06,
+        "p95_s": 0.064,
+        "max_s": 0.439,
+        "total_s": 69.501
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/parts/master/{part_id}/edit-state",
+      "n": 249,
+      "p50_s": 0.037,
+      "p95_s": 0.06,
+      "max_s": 1.403,
+      "total_s": 13.077,
+      "status": {
+        "200": 249
+      },
+      "upstream": {
+        "n": 249,
+        "p50_s": 0.037,
+        "p95_s": 0.06,
+        "max_s": 1.403,
+        "total_s": 13.084
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/presales/suppliers",
+      "n": 846,
+      "p50_s": 0.021,
+      "p95_s": 0.059,
+      "max_s": 1.119,
+      "total_s": 27.409,
+      "status": {
+        "200": 846
+      },
+      "upstream": {
+        "n": 846,
+        "p50_s": 0.021,
+        "p95_s": 0.059,
+        "max_s": 1.12,
+        "total_s": 27.407
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/projects/stable/{project_id}/expense-rows",
+      "n": 4,
+      "p50_s": 0.042,
+      "p95_s": 0.058,
+      "max_s": 0.058,
+      "total_s": 0.19,
+      "status": {
+        "200": 4
+      },
+      "upstream": {
+        "n": 4,
+        "p50_s": 0.042,
+        "p95_s": 0.058,
+        "max_s": 0.058,
+        "total_s": 0.19
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/work-items/{item_id}/complete",
+      "n": 10,
+      "p50_s": 0.038,
+      "p95_s": 0.058,
+      "max_s": 0.058,
+      "total_s": 0.405,
+      "status": {
+        "422": 10
+      },
+      "upstream": {
+        "n": 10,
+        "p50_s": 0.038,
+        "p95_s": 0.058,
+        "max_s": 0.058,
+        "total_s": 0.404
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/purchases/analysis/part",
+      "n": 3,
+      "p50_s": 0.056,
+      "p95_s": 0.058,
+      "max_s": 0.058,
+      "total_s": 0.154,
+      "status": {
+        "200": 3
+      },
+      "upstream": {
+        "n": 3,
+        "p50_s": 0.056,
+        "p95_s": 0.058,
+        "max_s": 0.058,
+        "total_s": 0.154
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/return-receipts/{receipt_id}/void",
+      "n": 2,
+      "p50_s": 0.056,
+      "p95_s": 0.058,
+      "max_s": 0.058,
+      "total_s": 0.114,
+      "status": {
+        "200": 2
+      },
+      "upstream": {
+        "n": 2,
+        "p50_s": 0.056,
+        "p95_s": 0.058,
+        "max_s": 0.058,
+        "total_s": 0.114
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/maintenance/return-receipts/{receipt_id}/audit",
+      "n": 2,
+      "p50_s": 0.051,
+      "p95_s": 0.057,
+      "max_s": 0.057,
+      "total_s": 0.108,
+      "status": {
+        "200": 2
+      },
+      "upstream": {
+        "n": 2,
+        "p50_s": 0.051,
+        "p95_s": 0.057,
+        "max_s": 0.057,
+        "total_s": 0.108
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/integrations/resale/parts/price-evidence",
+      "n": 4201,
+      "p50_s": 0.041,
+      "p95_s": 0.056,
+      "max_s": 0.867,
+      "total_s": 172.608,
+      "status": {
+        "200": 4201
+      },
+      "upstream": {
+        "n": 4201,
+        "p50_s": 0.041,
+        "p95_s": 0.056,
+        "max_s": 0.867,
+        "total_s": 172.086
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/presales/workbooks/inquiry-schema",
+      "n": 3,
+      "p50_s": 0.054,
+      "p95_s": 0.055,
+      "max_s": 0.055,
+      "total_s": 0.155,
+      "status": {
+        "200": 3
+      },
+      "upstream": {
+        "n": 3,
+        "p50_s": 0.054,
+        "p95_s": 0.055,
+        "max_s": 0.055,
+        "total_s": 0.155
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/system-settings",
+      "n": 33552,
+      "p50_s": 0.022,
+      "p95_s": 0.054,
+      "max_s": 18.491,
+      "total_s": 1663.427,
+      "status": {
+        "200": 32414,
+        "401": 987,
+        "499": 8,
+        "500": 16,
+        "502": 127
+      },
+      "upstream": {
+        "n": 33552,
+        "p50_s": 0.022,
+        "p95_s": 0.054,
+        "max_s": 18.491,
+        "total_s": 1663.407
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/maintenance/projects/stable/search",
+      "n": 1,
+      "p50_s": 0.051,
+      "p95_s": 0.051,
+      "max_s": 0.051,
+      "total_s": 0.051,
+      "status": {
+        "200": 1
+      },
+      "upstream": {
+        "n": 1,
+        "p50_s": 0.05,
+        "p95_s": 0.05,
+        "max_s": 0.05,
+        "total_s": 0.05
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/auth/beta-features",
+      "n": 23781,
+      "p50_s": 0.019,
+      "p95_s": 0.05,
+      "max_s": 11.221,
+      "total_s": 845.632,
+      "status": {
+        "200": 23311,
+        "401": 398,
+        "499": 12,
+        "500": 19,
+        "502": 41
+      },
+      "upstream": {
+        "n": 23781,
+        "p50_s": 0.019,
+        "p95_s": 0.05,
+        "max_s": 11.221,
+        "total_s": 845.634
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/purchases/analytics/orders/{order_id}",
+      "n": 15,
+      "p50_s": 0.038,
+      "p95_s": 0.05,
+      "max_s": 0.05,
+      "total_s": 0.574,
+      "status": {
+        "200": 15
+      },
+      "upstream": {
+        "n": 15,
+        "p50_s": 0.039,
+        "p95_s": 0.05,
+        "max_s": 0.05,
+        "total_s": 0.575
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/parts/master/categories",
+      "n": 203,
+      "p50_s": 0.026,
+      "p95_s": 0.049,
+      "max_s": 0.699,
+      "total_s": 7.629,
+      "status": {
+        "200": 203
+      },
+      "upstream": {
+        "n": 203,
+        "p50_s": 0.026,
+        "p95_s": 0.049,
+        "max_s": 0.699,
+        "total_s": 7.634
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/fields/defs",
+      "n": 1,
+      "p50_s": 0.049,
+      "p95_s": 0.049,
+      "max_s": 0.049,
+      "total_s": 0.049,
+      "status": {
+        "201": 1
+      },
+      "upstream": {
+        "n": 1,
+        "p50_s": 0.049,
+        "p95_s": 0.049,
+        "max_s": 0.049,
+        "total_s": 0.049
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/integrations/resale/bad-receipts",
+      "n": 246,
+      "p50_s": 0.037,
+      "p95_s": 0.048,
+      "max_s": 0.145,
+      "total_s": 9.333,
+      "status": {
+        "200": 246
+      },
+      "upstream": {
+        "n": 246,
+        "p50_s": 0.037,
+        "p95_s": 0.047,
+        "max_s": 0.145,
+        "total_s": 9.334
+      }
+    },
+    {
+      "method": "PUT",
+      "route": "/api/accounts/{username}",
+      "n": 46,
+      "p50_s": 0.035,
+      "p95_s": 0.048,
+      "max_s": 0.321,
+      "total_s": 1.95,
+      "status": {
+        "200": 45,
+        "500": 1
+      },
+      "upstream": {
+        "n": 46,
+        "p50_s": 0.036,
+        "p95_s": 0.048,
+        "max_s": 0.321,
+        "total_s": 1.953
+      }
+    },
+    {
+      "method": "PATCH",
+      "route": "/api/integrations/pn-master/parts/{part_id}",
+      "n": 69,
+      "p50_s": 0.036,
+      "p95_s": 0.047,
+      "max_s": 0.055,
+      "total_s": 2.55,
+      "status": {
+        "200": 69
+      },
+      "upstream": {
+        "n": 69,
+        "p50_s": 0.036,
+        "p95_s": 0.047,
+        "max_s": 0.055,
+        "total_s": 2.546
+      }
+    },
+    {
+      "method": "POST",
+      "route": "<unmapped-api>",
+      "n": 6,
+      "p50_s": 0.008,
+      "p95_s": 0.04,
+      "max_s": 0.04,
+      "total_s": 0.082,
+      "status": {
+        "404": 6
+      },
+      "upstream": {
+        "n": 6,
+        "p50_s": 0.008,
+        "p95_s": 0.01,
+        "max_s": 0.01,
+        "total_s": 0.05
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/parts/master/suggest",
+      "n": 256,
+      "p50_s": 0.018,
+      "p95_s": 0.035,
+      "max_s": 0.101,
+      "total_s": 5.171,
+      "status": {
+        "200": 256
+      },
+      "upstream": {
+        "n": 256,
+        "p50_s": 0.018,
+        "p95_s": 0.035,
+        "max_s": 0.101,
+        "total_s": 5.172
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/fields/name-suggestions",
+      "n": 34,
+      "p50_s": 0.02,
+      "p95_s": 0.026,
+      "max_s": 0.032,
+      "total_s": 0.706,
+      "status": {
+        "200": 34
+      },
+      "upstream": {
+        "n": 34,
+        "p50_s": 0.02,
+        "p95_s": 0.025,
+        "max_s": 0.032,
+        "total_s": 0.705
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/workbooks/{schema_name}/schema",
+      "n": 1,
+      "p50_s": 0.024,
+      "p95_s": 0.024,
+      "max_s": 0.024,
+      "total_s": 0.024,
+      "status": {
+        "200": 1
+      },
+      "upstream": {
+        "n": 1,
+        "p50_s": 0.024,
+        "p95_s": 0.024,
+        "max_s": 0.024,
+        "total_s": 0.024
+      }
+    },
+    {
+      "method": "GET",
+      "route": "<unmapped-api>",
+      "n": 113,
+      "p50_s": 0.009,
+      "p95_s": 0.016,
+      "max_s": 1.132,
+      "total_s": 2.202,
+      "status": {
+        "404": 112,
+        "499": 1
+      },
+      "upstream": {
+        "n": 113,
+        "p50_s": 0.009,
+        "p95_s": 0.016,
+        "max_s": 1.132,
+        "total_s": 2.2
+      }
+    }
+  ]
+}
