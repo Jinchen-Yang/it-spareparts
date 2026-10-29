@@ -35,7 +35,12 @@ export function priceText(offer: Pick<Offer, "unit_price" | "is_tax_inclusive">)
   return `${moneyExact(offer.unit_price == null ? null : Number(offer.unit_price))} ${taxLabel(offer.is_tax_inclusive)}`;
 }
 
-/** 一句可以直接转述给客户的话。 */
+/** D-0047：价格性质；存量与未填视为售价。 */
+export function basisLabel(offer: Pick<Offer, "price_basis">) {
+  return offer.price_basis === "cost" ? "成本价" : "售价";
+}
+
+/** 一句可以直接转述给客户的话；价格性质是内部标注，不写进这句话。 */
 export function answerSentence(line: InquiryLine, answer: LineAnswer) {
   if (answer.state === "quoted") return `${line.pn_raw} ${priceText(answer.offer)}，${answer.reporter} ${formatBusinessDateTime(answer.at)} 报价`;
   if (answer.state === "skip") return `${line.pn_raw} 不报：${answer.reason}`;

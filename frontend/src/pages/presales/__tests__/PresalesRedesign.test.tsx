@@ -6,7 +6,7 @@ import type { WorkItem } from "../../../api/workItems";
 
 const mocks = vi.hoisted(() => ({ getInquiry: vi.fn(), library: vi.fn(), listWorkItems: vi.fn(), saveOffer: vi.fn(),
   updateOffer: vi.fn(), replyInquiry: vi.fn(), claimWorkItem: vi.fn(), listInquiries: vi.fn(), createInquiry: vi.fn(),
-  submitInquiry: vi.fn(), customers: vi.fn(), listWorkCandidates: vi.fn(), suggestParts: vi.fn(), refreshWorkBadges: vi.fn() }));
+  submitInquiry: vi.fn(), urgeInquiry: vi.fn(), customers: vi.fn(), listWorkCandidates: vi.fn(), suggestParts: vi.fn(), refreshWorkBadges: vi.fn() }));
 vi.mock("../../../api/presales", () => ({ presales: mocks }));
 vi.mock("../../../api/workItems", () => ({ listWorkItems: mocks.listWorkItems, claimWorkItem: mocks.claimWorkItem, listWorkCandidates: mocks.listWorkCandidates }));
 vi.mock("../../../api/search", () => ({ suggestParts: mocks.suggestParts }));
@@ -88,6 +88,27 @@ describe("报价页", () => {
       line_responses: [{ line_id: 11, mode: "quote" }, { line_id: 12, mode: "skip", reason: "停产" }] })));
   });
 
+  it("紧急与被催办的单置顶，报价可选成本价，坏件不返回直接可见", async () => {
+    const other = { ...inquiry, id: 2, inquiry_no: "XJ-2", created_by_name: "李四", priority: "urgent" as const, urge_count: 2,
+      lines: [{ ...inquiry.lines![0], id: 21, inquiry_id: 2, pn_raw: "PN-U", return_defective: false }], work_items: [{ ...inquiry.work_items![0], id: 72 }] };
+    mocks.getInquiry.mockImplementation(async (id: number) => id === 2 ? other : inquiry);
+    mocks.listWorkItems.mockImplementation(async ({ tab }: { tab: string }) => ({ items: tab === "claimed" ? [task, { ...task, id: 72, subject_id: 2 }] : [],
+      total: tab === "claimed" ? 2 : 0, page: 1, page_size: 100, can_supervise: false }));
+    mocks.saveOffer.mockResolvedValue(offer({ status: "draft" }));
+    renderQuote();
+    const first = (await screen.findAllByRole("spinbutton", { name: /单价$/ }))[0];
+    expect(first).toHaveAccessibleName("PN-U 单价");
+    const row = first.closest("tr")!;
+    expect(within(row).getByText("紧急")).toBeInTheDocument();
+    expect(within(row).getByText("已催 2 次")).toBeInTheDocument();
+    expect(within(row).getByText("不返回")).toBeInTheDocument();
+    fireEvent.change(first, { target: { value: "50" } });
+    fireEvent.mouseDown(within(row).getByRole("combobox", { name: "PN-U 价格性质" }));
+    fireEvent.click(await screen.findByTitle("成本价"));
+    fireEvent.click(within(row).getByRole("button", { name: /^保\s?存$/ }));
+    await waitFor(() => expect(mocks.saveOffer).toHaveBeenCalledWith(2, 21, expect.objectContaining({ unit_price: 50, price_basis: "cost" })));
+  });
+
   it("已报价行点「更新报价」原地改价，调用更新接口", async () => {
     inquiry.offers = [offer()];
     mocks.updateOffer.mockResolvedValue(offer({ unit_price: "110" }));
@@ -109,9 +130,12 @@ describe("询价页", () => {
     render(<MemoryRouter><AskPage /></MemoryRouter>);
     fireEvent.change(await screen.findByRole("combobox", { name: "第 1 行 PN" }), { target: { value: "ABC-1" } });
     fireEvent.click(screen.getByRole("checkbox", { name: "第 1 行要求 PN 一致" }));
+    expect(screen.getByRole("checkbox", { name: "第 1 行坏件返回" })).toBeChecked();
+    fireEvent.click(screen.getByRole("checkbox", { name: "第 1 行坏件返回" }));
+    fireEvent.click(screen.getByRole("radio", { name: "紧急" }));
     fireEvent.click(screen.getByRole("button", { name: "提交询价" }));
-    await waitFor(() => expect(mocks.createInquiry).toHaveBeenCalledWith(expect.objectContaining({ kind: "sales_inquiry",
-      lines: [expect.objectContaining({ pn_raw: "ABC-1", part_id: null, qty: 1, require_exact_pn: false })] })));
+    await waitFor(() => expect(mocks.createInquiry).toHaveBeenCalledWith(expect.objectContaining({ kind: "sales_inquiry", priority: "urgent",
+      lines: [expect.objectContaining({ pn_raw: "ABC-1", part_id: null, qty: 1, require_exact_pn: false, return_defective: false })] })));
     await waitFor(() => expect(mocks.submitInquiry).toHaveBeenCalledWith(5, { expected_version: 4 }));
     expect(localStorage.getItem("presales:exact-pn")).toBe("0");
   });
@@ -140,5 +164,20 @@ describe("询价页", () => {
     expect(screen.getByText("不报：停产")).toBeInTheDocument();
     expect(screen.getByText("全部已答复")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "复制 PN-1 报价给客户" })).toBeInTheDocument();
+    expect(screen.getByText("售价")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /催\s?办/ })).not.toBeInTheDocument();
+  });
+
+  it("未回复完的询价可催办，显示紧急与已催次数", async () => {
+    inquiry.priority = "urgent";
+    inquiry.offers = [offer({ price_basis: "cost" })];
+    mocks.listInquiries.mockResolvedValue({ items: [inquiry], total: 1, page: 1, page_size: 10 });
+    mocks.urgeInquiry.mockResolvedValue({ ...inquiry, urge_count: 1, last_urged_at: "2026-10-29T02:00:00Z" });
+    render(<MemoryRouter><AskPage /></MemoryRouter>);
+    expect(await screen.findByText("紧急")).toBeInTheDocument();
+    expect(screen.getByText("成本价")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /催\s?办/ }));
+    await waitFor(() => expect(mocks.urgeInquiry).toHaveBeenCalledWith(1));
+    expect(await screen.findByText(/已催 1 次/)).toBeInTheDocument();
   });
 });

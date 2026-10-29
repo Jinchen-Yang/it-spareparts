@@ -11,7 +11,7 @@ import { formatBusinessDateTime } from "../../utils/date";
 import { moneyExact } from "../../utils/format";
 import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
 import { activeOfferGroups, flattenOffers, taxLabel, usePresalesError } from "./shared";
-import { priceText } from "./answers";
+import { basisLabel, priceText } from "./answers";
 import PartBinding from "./PartBinding";
 import "./presales.css";
 
@@ -27,7 +27,7 @@ interface QuoteRow {
   response?: LineResponse;
   state: RowState;
 }
-type RowValue = Pick<OfferInput, "unit_price" | "is_tax_inclusive" | "lead_time" | "qty_available" | "stock_location" | "notes">;
+type RowValue = Pick<OfferInput, "unit_price" | "is_tax_inclusive" | "price_basis" | "lead_time" | "qty_available" | "stock_location" | "notes">;
 
 const TABS: WorkTab[] = ["assigned", "claimed", "pool", "done"];
 const STATE_LABEL: Record<RowState, string> = { pending: "待报价", draft: "已填，待回复", quoted: "已报价", skip: "不报" };
@@ -77,7 +77,7 @@ function canAct(source: Source) {
 }
 
 function valueOf(offer?: Offer): RowValue {
-  return { unit_price: offer?.unit_price ?? null, is_tax_inclusive: offer?.is_tax_inclusive ?? true, lead_time: offer?.lead_time ?? "",
+  return { unit_price: offer?.unit_price ?? null, is_tax_inclusive: offer?.is_tax_inclusive ?? true, price_basis: offer?.price_basis ?? "sale", lead_time: offer?.lead_time ?? "",
     qty_available: offer?.qty_available ?? null, stock_location: offer?.stock_location ?? "", notes: offer?.notes ?? "" };
 }
 
@@ -99,6 +99,7 @@ function DirectQuote({ onDone, onClose }: { onDone: (text: string) => void; onCl
   const [part, setPart] = useState<PartSuggestion>();
   const [price, setPrice] = useState<number | null>(null);
   const [tax, setTax] = useState(true);
+  const [basis, setBasis] = useState<"sale" | "cost">("sale");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     const query = text.trim();
@@ -116,7 +117,7 @@ function DirectQuote({ onDone, onClose }: { onDone: (text: string) => void; onCl
       // PR-B 上线前沿用主动报价单据承载；已有本人报价时按 D-0046 第 2 条直接更新那条。
       const draft = await presales.createInquiry({ kind: "proactive_offer", lines: [{ part_id: part.part_id, pn_raw: part.pn_std, description: part.description, qty: 1 }] });
       const line = draft.lines![0];
-      await presales.saveOffer(draft.id, line.id, { unit_price: price, is_tax_inclusive: tax, no_stock: false, expected_version: draft.version });
+      await presales.saveOffer(draft.id, line.id, { unit_price: price, is_tax_inclusive: tax, price_basis: basis, no_stock: false, expected_version: draft.version });
       const choices: Record<number, ExistingChoice> = {};
       for (;;) {
         try {
@@ -142,6 +143,7 @@ function DirectQuote({ onDone, onClose }: { onDone: (text: string) => void; onCl
       options={options.map((row) => ({ key: String(row.part_id), value: row.pn_std, label: <span>{row.pn_std} <span className="presales-muted">{row.summary || row.description}</span></span> }))} /></label>
     <label>单价（元）<InputNumber aria-label="主动报价单价" min={0} precision={2} style={{ width: "100%" }} value={price} onChange={(value) => setPrice(value)} /></label>
     <label>税<Select aria-label="主动报价含税" value={tax ? "inc" : "ex"} onChange={(value) => setTax(value === "inc")} options={[{ value: "inc", label: "含税" }, { value: "ex", label: "不含税" }]} /></label>
+    <label>价格性质<Select aria-label="主动报价价格性质" value={basis} onChange={setBasis} options={[{ value: "sale", label: "售价" }, { value: "cost", label: "成本价" }]} /></label>
     <Space><Button type="primary" loading={busy} disabled={!part || price == null} onClick={() => void save()}>保存</Button><Button onClick={onClose}>收起</Button></Space>
     {text && !part && <span className="presales-wide presales-muted">请从下拉中选择已建档的型号</span>}
   </div>;
@@ -194,7 +196,11 @@ export default function QuotePage() {
     return () => { cancelled = true; };
   }, [partKey]);
 
-  const allRows = useMemo(() => sources.flatMap((source) => rowsOf(source, skips)), [sources, skips]);
+  // D-0047：紧急单在前，其次被催办的单（催得多的在前），同档保持待办原有顺序。
+  const rank = (source: Source) => (source.inquiry.priority === "urgent" ? 2 : 0) + (source.inquiry.urge_count ? 1 : 0);
+  const allRows = useMemo(() => [...sources].map((source, index) => ({ source, index }))
+    .sort((a, b) => rank(b.source) - rank(a.source) || (b.source.inquiry.urge_count ?? 0) - (a.source.inquiry.urge_count ?? 0) || a.index - b.index)
+    .flatMap(({ source }) => rowsOf(source, skips)), [sources, skips]);
   const counts = allRows.reduce((result, row) => ({ ...result, [row.state]: result[row.state] + 1 }), { pending: 0, draft: 0, quoted: 0, skip: 0 } as Record<RowState, number>);
   const keyword = query.trim().toUpperCase();
   const rows = allRows.filter((row) => (filter === "all" || editing[row.key] || (filter === "pending" ? ["pending", "draft"].includes(row.state) : row.state === filter))
@@ -308,7 +314,11 @@ export default function QuotePage() {
       <b className="presales-sales">{row.source.inquiry.created_by_name ?? "业务人员"}</b>
       <Link className="presales-muted" to={`/presales/workbench/${row.source.inquiry.id}`} state={{ workItem: row.source.task }}>
         {row.source.inquiry.inquiry_no}{row.source.inquiry.customer_name ? ` · ${row.source.inquiry.customer_name}` : ""}</Link>
-      {row.source.pool && <Tag>公共池</Tag>}
+      <Space size={4} wrap>
+        {row.source.inquiry.priority === "urgent" && <Tag color="red">紧急</Tag>}
+        {!!row.source.inquiry.urge_count && <Tag color="volcano" title={`最近 ${formatBusinessDateTime(row.source.inquiry.last_urged_at)}`}>已催 {row.source.inquiry.urge_count} 次</Tag>}
+        {row.source.pool && <Tag>公共池</Tag>}
+      </Space>
     </div> },
     { title: "PN / 描述", key: "pn", render: (_, row) => <div className="presales-cell">
       <b>{row.line.pn_raw}</b>
@@ -317,6 +327,7 @@ export default function QuotePage() {
     </div> },
     { title: "数量", key: "qty", width: 70, render: (_, row) => Number(row.line.qty) },
     { title: "PN 一致", key: "exact", width: 84, render: (_, row) => row.line.require_exact_pn ? "要求一致" : "—" },
+    { title: "坏件", key: "return", width: 72, render: (_, row) => row.line.return_defective === false ? <Tag>不返回</Tag> : "返回" },
     { title: "单价（元）", key: "price", width: 140, render: (_, row) => editable(row)
       ? <InputNumber aria-label={`${row.line.pn_raw} 单价`} min={0} max={999999999999.99} precision={2} style={{ width: "100%" }} placeholder="单价"
         value={valueFor(row).unit_price == null || valueFor(row).unit_price === "" ? null : Number(valueFor(row).unit_price)}
@@ -326,6 +337,10 @@ export default function QuotePage() {
       ? <Select aria-label={`${row.line.pn_raw} 含税`} style={{ width: "100%" }} value={valueFor(row).is_tax_inclusive === false ? "ex" : "inc"}
         onChange={(value) => change(row, { is_tax_inclusive: value === "inc" })} options={[{ value: "inc", label: "含税" }, { value: "ex", label: "不含税" }]} />
       : row.state === "quoted" ? taxLabel((row.own ?? row.response?.offer)?.is_tax_inclusive) : "—" },
+    { title: "价格性质", key: "basis", width: 100, render: (_, row) => editable(row)
+      ? <Select aria-label={`${row.line.pn_raw} 价格性质`} style={{ width: "100%" }} value={valueFor(row).price_basis ?? "sale"}
+        onChange={(value) => change(row, { price_basis: value })} options={[{ value: "sale", label: "售价" }, { value: "cost", label: "成本价" }]} />
+      : row.state === "quoted" ? basisLabel(row.own ?? row.response?.offer ?? {}) : "—" },
     { title: "状态", key: "state", width: 130, render: (_, row) => {
       const offer = row.state === "quoted" ? row.own ?? row.response?.offer : undefined;
       return <div className="presales-cell">
@@ -364,7 +379,7 @@ export default function QuotePage() {
       {loadError && <Alert type="error" message="报价行加载失败" action={<Button onClick={() => void load()}>重试</Button>} />}
       {Object.keys(skips).length > 0 && <Typography.Text type="secondary">标为不报的行会在整单填完时一起回复给销售；离开本页前请填完该单其余行。</Typography.Text>}
       <Spin spinning={loading}>
-        <Table aria-label="报价行" rowKey="key" size="middle" dataSource={rows} columns={columns} tableLayout="fixed" scroll={{ x: 1100 }}
+        <Table aria-label="报价行" rowKey="key" size="middle" dataSource={rows} columns={columns} tableLayout="fixed" scroll={{ x: 1280 }}
           rowClassName={(row) => editable(row) ? "presales-row-editing" : ""}
           pagination={{ defaultPageSize: 50, showSizeChanger: true, hideOnSinglePage: true }}
           locale={{ emptyText: loading ? "加载中" : "没有符合条件的报价行" }}

@@ -67,6 +67,7 @@ class LineInput(Input):
     description: str | None = None
     qty: Decimal = Field(default=Decimal("1"), gt=0, max_digits=14, decimal_places=3)
     require_exact_pn: bool = False
+    return_defective: bool = True
     ref_offer_id: int | None = Field(default=None, gt=0)
     notes: str | None = None
     notes_audience: AudienceInput | None = None
@@ -76,6 +77,7 @@ class LineInput(Input):
 
 class CreateInquiry(Input):
     kind: Literal["sales_inquiry", "proactive_offer"] = "sales_inquiry"
+    priority: Literal["normal", "urgent"] = "normal"
     customer_id: int | None = Field(default=None, gt=0)
     notes: str | None = None
     lines: list[LineInput] = Field(default_factory=list, max_length=200)
@@ -86,6 +88,7 @@ class CreateInquiry(Input):
 
 
 class UpdateInquiry(VersionInput):
+    priority: Literal["normal", "urgent"] | None = None
     customer_id: int | None = Field(default=None, gt=0)
     notes: str | None = None
     lines: list[LineInput] | None = Field(default=None, max_length=200)
@@ -114,6 +117,7 @@ class OfferData(Input):
     source_key: str = Field(default="", max_length=128)
     supplier_id: int | None = Field(default=None, gt=0)
     notes: str | None = None
+    price_basis: Literal["sale", "cost"] = "sale"
     supplier_audience: AudienceInput | None = None
     reporter_audience: AudienceInput | None = None
     notes_audience: AudienceInput | None = None
@@ -375,6 +379,11 @@ def append_lines(inquiry_id: int, body: AppendLines, db: Db, ctx: Ctx):
     lines = body.model_dump(exclude_unset=True)["lines"]
     return _inquiry_action(db, ctx, lambda: inquiries.append_lines(
         db, inquiry_id, ctx, body.expected_version, lines))
+
+
+@router.post("/inquiries/{inquiry_id}/urge")
+def urge_inquiry(inquiry_id: int, db: Db, ctx: Ctx):
+    return _inquiry_action(db, ctx, lambda: inquiries.urge(db, inquiry_id, ctx))
 
 
 @router.post("/inquiries/{inquiry_id}/close")

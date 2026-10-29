@@ -24,6 +24,8 @@ export interface LineInput {
   expected_delivery?: string | null;
   qty?: number | string;
   require_exact_pn?: boolean;
+  /** D-0047：坏件是否返回，默认返回。 */
+  return_defective?: boolean;
   ref_offer_id?: number | null;
   notes?: string | null;
   notes_audience?: AudienceRule;
@@ -48,8 +50,11 @@ export interface InquiryLine extends Omit<LineInput, "notes_audience" | "field_v
   ref_offer?: Offer;
 }
 
+export type InquiryPriority = "normal" | "urgent";
+
 export interface InquiryInput {
   kind?: "sales_inquiry" | "proactive_offer";
+  priority?: InquiryPriority;
   customer_id?: number | null;
   notes?: string | null;
   lines?: LineInput[];
@@ -69,6 +74,8 @@ export interface OfferInput {
   source_key?: string;
   supplier_id?: number | null;
   notes?: string | null;
+  /** D-0047：价格性质，售价（默认）或成本价，仅作标注。 */
+  price_basis?: "sale" | "cost";
   supplier_audience?: AudienceRule;
   reporter_audience?: AudienceRule;
   notes_audience?: AudienceRule;
@@ -139,6 +146,9 @@ export interface Inquiry {
   status: "draft" | "submitted" | "revising" | "closed";
   version: number;
   revision: number;
+  priority?: InquiryPriority;
+  urge_count?: number;
+  last_urged_at?: string | null;
   customer_id?: number | null;
   customer_name?: string | null;
   is_owner?: boolean;
@@ -232,6 +242,8 @@ export const presales = {
   resubmitInquiry: (id: number, body: VersionInput) => inquiryAction(id, "resubmit", body),
   withdrawInquiry: (id: number, body: VersionInput) => inquiryAction(id, "withdraw", body),
   copyInquiry: (id: number, body: VersionInput) => inquiryAction(id, "copy", body),
+  /** D-0047：发起人催办未回复的询价，30 分钟限一次（过早返回 409 urge_too_soon）。 */
+  async urgeInquiry(id: number) { return (await api.post<Inquiry>(`${root}/inquiries/${id}/urge`)).data; },
   async appendLines(id: number, body: VersionInput & { lines: LineInput[] }) {
     return (await api.post<Inquiry>(`${root}/inquiries/${id}/lines`, body)).data;
   },

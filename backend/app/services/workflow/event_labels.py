@@ -10,7 +10,7 @@ EVENT_LABELS = {
     "inquiry.lines_appended": "追加询价行", "inquiry.closed": "结束询价", "inquiry.copied": "复制为新询价",
     "inquiry.part_bound": "绑定已有型号", "inquiry.part_created": "新建并绑定型号",
     "offer.stale": "报价已标记为旧版本", "offer.draft_saved": "保存报价草稿", "offer.decision_saved": "保存沿用或不报草稿",
-    "offer.replied": "回复报价", "offer.updated": "更新报价", "offer.withdrawn": "撤销报价",
+    "offer.replied": "回复报价", "inquiry.urged": "催办", "offer.updated": "更新报价", "offer.withdrawn": "撤销报价",
     "offer.published": "发布主动报价", "offer.daily_rebuilt": "更新每日报价快照",
 }
 

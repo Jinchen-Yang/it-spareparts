@@ -18,6 +18,7 @@
 | POST | `/inquiries/{inquiry_id}/withdraw` | 撤回为 revising，暂停未结束待办 |
 | POST | `/inquiries/{inquiry_id}/resubmit` | 按 line_key 比较上一提交版，报价 stale、恢复或重开待办，revision 加一 |
 | POST | `/inquiries/{inquiry_id}/lines` | 追加新行，不需撤回；body 为 expected_version、lines |
+| POST | `/inquiries/{inquiry_id}/urge` | D-0047 催办：仅发起人，询价须已提交且仍有未完成待办；30 分钟限一次，过早返回 409 `urge_too_soon`；累计 urge_count、记 last_urged_at 与时间线，不改单据版本与待办 |
 | POST | `/inquiries/{inquiry_id}/close` | outcome=won/lost/cancelled，won_offer_id 可选且必须属于本单或本单引用／沿用的报价；记录采纳版本并结束未完成待办 |
 | POST | `/inquiries/{inquiry_id}/copy` | 返回新草稿、新编号和新 line_key；保留原生字段及可见性，不复制报价、引用、成交、字段值 |
 | POST | `/inquiries/{inquiry_id}/lines/{line_id}/offers` | 创建或保存报价草稿；采购需 `action_presales_quote` 且为本单处理人，主动报价需 `action_presales_offer` |
@@ -32,6 +33,9 @@
 | GET | `/library?part_ids=1,2` | 批量返回 `{part_id: [offer]}`；每 PN 每报价人一条最新有效主报价，其他可见有效报价置于 more；空列表表示无可见有效报价 |
 | GET | `/library/search?q=&limit=` | M1 实时检索，M8 过滤后的有效报价加权，每个候选附去重后的 offers、offer_count（报价人数） |
 | POST | `/reference` | 采购参考：part_ids 或 inquiry_id；返回 M3 reference、offers、gallery=[{part_id}]；指定 inquiry_id 时沿用候选同时满足查看者与单据所有人的 M8／字段组权限 |
+
+D-0047 新增字段：询价单 `priority`（normal/urgent，默认 normal，建单与修改可写）、`urge_count`、`last_urged_at`（只读）；
+询价行 `return_defective`（布尔，默认 true）；报价 `price_basis`（sale/cost，默认 sale，保存与更新可写，按报价原有受众规则可见）。
 
 建档两种写动作以及查重均要求 `action_presales_bind_part` 和 `page_master_data`，且必须为处理人、
 主动报价发起人或主管。公共池先领单。主数据字段包括 description、brand、manufacturer、summary、

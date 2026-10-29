@@ -20,7 +20,7 @@ from app.services.workflow.registry import Conflict, Forbidden, InvalidTransitio
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 EDITABLE = {
     "unit_price", "is_tax_inclusive", "no_stock", "qty_available", "stock_location",
-    "lead_time", "source_key", "supplier_id", "notes",
+    "lead_time", "source_key", "supplier_id", "notes", "price_basis",
     "supplier_audience", "reporter_audience", "notes_audience",
 }
 
@@ -136,6 +136,9 @@ def _apply(db, offer, data, ctx):
         elif key in {"stock_location", "lead_time"}:
             if value is not None and (not isinstance(value, str) or len(value) > 256):
                 raise InvalidTransition("所在地和交期最多 256 字")
+        elif key == "price_basis":
+            if value not in {"sale", "cost"}:
+                raise InvalidTransition("价格性质只能是售价或成本价")
         elif key == "notes" and value is not None and not isinstance(value, str):
             raise InvalidTransition("备注必须为文本")
         if getattr(offer, field) != value:

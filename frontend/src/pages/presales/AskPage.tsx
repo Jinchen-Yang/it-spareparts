@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, App, AutoComplete, Button, Checkbox, Collapse, Input, InputNumber, Pagination, Popover, Select, Space, Spin, Table, Tag } from "antd";
+import { Alert, App, AutoComplete, Button, Checkbox, Collapse, Input, InputNumber, Pagination, Popover, Radio, Select, Space, Spin, Table, Tag } from "antd";
 import { DeleteOutlined } from "@ant-design/icons";
 import { Link } from "react-router-dom";
-import { presales, type Inquiry, type InquiryLine, type Offer } from "../../api/presales";
+import { presales, type Inquiry, type InquiryLine, type InquiryPriority, type Offer } from "../../api/presales";
 import type { AudienceRule } from "../../api/audience";
 import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
 import { suggestParts, type PartSuggestion } from "../../api/search";
@@ -11,14 +11,14 @@ import PageHeader from "../../components/PageHeader";
 import { readPermissionMap } from "../../nav";
 import { formatBusinessDateTime } from "../../utils/date";
 import CandidateSelect from "./CandidateSelect";
-import { answerSentence, lineAnswer, priceText, requiredLines } from "./answers";
+import { answerSentence, basisLabel, lineAnswer, priceText, requiredLines } from "./answers";
 import { LatestPriceTag, latestActiveOffer, usePresalesError } from "./shared";
 import "./presales.css";
 
 const EXACT_KEY = "presales:exact-pn";
 const PAGE_SIZE = 10;
 
-interface Row { key: number; pn: string; part?: PartSuggestion; latest?: Offer; qty: number; exact: boolean; note: string }
+interface Row { key: number; pn: string; part?: PartSuggestion; latest?: Offer; qty: number; exact: boolean; returnDefective: boolean; note: string }
 
 function readExact() {
   try { return localStorage.getItem(EXACT_KEY) !== "0"; } catch { return true; }
@@ -72,9 +72,10 @@ function NewInquiry({ onCreated }: { onCreated: () => void }) {
   const customerVisible = localStorage.getItem("role") === "admin" || readPermissionMap().data_customer !== false;
   const nextKey = useRef(2);
   const [exactPref, setExactPref] = useState(readExact);
-  const blank = (key: number): Row => ({ key, pn: "", qty: 1, exact: exactPref, note: "" });
+  const blank = (key: number): Row => ({ key, pn: "", qty: 1, exact: exactPref, returnDefective: true, note: "" });
   const [rows, setRows] = useState<Row[]>([blank(1)]);
   const [customerId, setCustomerId] = useState<number>();
+  const [priority, setPriority] = useState<InquiryPriority>("normal");
   const [notes, setNotes] = useState("");
   const [delivery, setDelivery] = useState("");
   const [assigneeIds, setAssigneeIds] = useState<number[]>([]);
@@ -102,13 +103,14 @@ function NewInquiry({ onCreated }: { onCreated: () => void }) {
     setBusy(true);
     try {
       const created = await presales.createInquiry({ kind: "sales_inquiry", ...(customerVisible ? { customer_id: customerId ?? null } : {}),
-        notes, assignee_ids: assigneeIds, offer_audience: audience,
+        notes, assignee_ids: assigneeIds, offer_audience: audience, priority,
         lines: filled.map((row) => ({ part_id: row.part?.part_id ?? null, pn_raw: row.part?.pn_std ?? row.pn.trim(),
           description: row.part ? row.part.summary || row.part.description || null : null, qty: row.qty, require_exact_pn: row.exact,
+          return_defective: row.returnDefective,
           notes: row.note.trim() || null, expected_delivery: delivery || null })) });
       if (submit) await presales.submitInquiry(created.id, { expected_version: created.version });
       void message.success(submit ? `询价 ${created.inquiry_no} 已提交，进入采购报价` : `草稿 ${created.inquiry_no} 已保存`);
-      setRows([blank(nextKey.current++)]); setCustomerId(undefined); setNotes(""); setDelivery(""); setAssigneeIds([]); setAudience(PUBLIC_AUDIENCE);
+      setRows([blank(nextKey.current++)]); setCustomerId(undefined); setNotes(""); setDelivery(""); setAssigneeIds([]); setAudience(PUBLIC_AUDIENCE); setPriority("normal");
       onCreated();
     } catch (error) { await handleError(error); }
     finally { setBusy(false); }
@@ -117,6 +119,8 @@ function NewInquiry({ onCreated }: { onCreated: () => void }) {
     <div className="presales-toolbar">
       <h2 className="presales-h2">新建询价</h2>
       {customerVisible && <span className="presales-inline-field">客户<CandidateSelect label="客户" load={presales.customers} value={customerId} onChange={setCustomerId} disabled={busy} /></span>}
+      <span className="presales-inline-field presales-inline-auto">优先级<Radio.Group aria-label="优先级" optionType="button" size="small" value={priority}
+        onChange={(event) => setPriority(event.target.value)} options={[{ value: "normal", label: "普通" }, { value: "urgent", label: "紧急" }]} /></span>
       <span className="presales-muted" style={{ marginLeft: "auto" }}>数量默认 1；「PN 一致」按你上次的习惯预选</span>
     </div>
     <Table aria-label="新建询价行" rowKey="key" size="small" pagination={false} dataSource={rows} tableLayout="fixed" scroll={{ x: 900 }} columns={[
@@ -129,6 +133,7 @@ function NewInquiry({ onCreated }: { onCreated: () => void }) {
       { title: "数量", key: "qty", width: 96, render: (_, row) => <InputNumber aria-label={`第 ${row.key} 行数量`} min={0.001} max={99999999999.999} style={{ width: "100%" }}
         value={row.qty} onChange={(qty) => update(row.key, { qty: qty ?? 0 })} /> },
       { title: "PN 一致", key: "exact", width: 80, align: "center", render: (_, row) => <Checkbox aria-label={`第 ${row.key} 行要求 PN 一致`} checked={row.exact} onChange={(event) => update(row.key, { exact: event.target.checked })} /> },
+      { title: "坏件返回", key: "return", width: 84, align: "center", render: (_, row) => <Checkbox aria-label={`第 ${row.key} 行坏件返回`} checked={row.returnDefective} onChange={(event) => update(row.key, { returnDefective: event.target.checked })} /> },
       { title: "备注", key: "note", width: 200, render: (_, row) => <Input aria-label={`第 ${row.key} 行备注`} placeholder="可选" value={row.note} onChange={(event) => update(row.key, { note: event.target.value })} /> },
       { title: "", key: "remove", width: 48, render: (_, row) => <Button type="text" danger aria-label={`删除第 ${row.key} 行`} icon={<DeleteOutlined />}
         disabled={rows.length === 1} onClick={() => setRows((previous) => previous.filter((other) => other.key !== row.key))} /> },
@@ -169,11 +174,29 @@ function AnswerLine({ inquiry, line }: { inquiry: Inquiry; line: InquiryLine }) 
   return <div className="presales-answer">
     <span className="presales-answer-pn">{line.pn_raw} <span className="presales-muted">× {Number(line.qty)}</span></span>
     <b className={`presales-say is-${answer.state}`}>{answer.state === "quoted" ? priceText(answer.offer) : answer.state === "skip" ? `不报：${answer.reason}` : "待报价"}</b>
+    {answer.state === "quoted" && <Tag color={answer.offer.price_basis === "cost" ? "purple" : undefined}>{basisLabel(answer.offer)}</Tag>}
+    {!line.return_defective && <Tag>坏件不返回</Tag>}
     <span className="presales-muted">{answer.state === "quoted" ? `${answer.reporter} · ${formatBusinessDateTime(answer.at)}` : answer.state === "skip" ? answer.reporter
       : inquiry.status === "submitted" ? "已进采购报价" : ""}</span>
     {answer.state === "quoted" && <Button type="link" size="small" style={{ marginLeft: "auto" }} aria-label={`复制 ${line.pn_raw} 报价给客户`}
       onClick={() => { void navigator.clipboard?.writeText(sentence).catch(() => undefined); setCopied(true); }}>{copied ? "已复制" : "复制给客户"}</Button>}
   </div>;
+}
+
+/** D-0047：发起人催未回复的询价，30 分钟限一次（服务端校验，过早时提示还需等待）。 */
+function UrgeButton({ inquiry, onUrged }: { inquiry: Inquiry; onUrged: (inquiry: Inquiry) => void }) {
+  const { message } = App.useApp();
+  const handleError = usePresalesError();
+  const [busy, setBusy] = useState(false);
+  return <Button size="small" danger loading={busy} onClick={async () => {
+    setBusy(true);
+    try {
+      const urged = await presales.urgeInquiry(inquiry.id);
+      void message.success(`已催办 ${inquiry.inquiry_no}，采购报价页会置顶标红`);
+      onUrged(urged);
+    } catch (error) { await handleError(error); }
+    finally { setBusy(false); }
+  }}>催办</Button>;
 }
 
 function MyInquiries({ refreshKey }: { refreshKey: number }) {
@@ -215,9 +238,13 @@ function MyInquiries({ refreshKey }: { refreshKey: number }) {
           <div className="presales-toolbar presales-tight">
             <Link to={`/presales/inquiries/${inquiry.id}`}><b>{inquiry.inquiry_no}</b></Link>
             {inquiry.customer_name && <span>{inquiry.customer_name}</span>}
+            {inquiry.priority === "urgent" && <Tag color="red">紧急</Tag>}
             {statusChip(inquiry, lines)}
             <span className="presales-muted">{formatBusinessDateTime(inquiry.submitted_at ?? inquiry.updated_at)}</span>
+            {!!inquiry.urge_count && <span className="presales-muted">已催 {inquiry.urge_count} 次 · 最近 {formatBusinessDateTime(inquiry.last_urged_at)}</span>}
             {["draft", "revising"].includes(inquiry.status) && <Link style={{ marginLeft: "auto" }} to={`/presales/inquiries/${inquiry.id}/edit`}>继续编辑</Link>}
+            {inquiry.status === "submitted" && lines.some((line) => lineAnswer(inquiry, line).state === "pending") && <span style={{ marginLeft: "auto" }}>
+              <UrgeButton inquiry={inquiry} onUrged={(urged) => setItems((previous) => previous.map((item) => item.id === urged.id ? urged : item))} /></span>}
           </div>
           {lines.length ? lines.map((line) => <AnswerLine key={line.id} inquiry={inquiry} line={line} />)
             : <span className="presales-muted">{inquiry.line_count} 行</span>}

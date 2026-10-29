@@ -54,9 +54,14 @@ class PresalesInquiry(Base):
         "presales_offer.id", use_alter=True, name="fk_presales_inquiry_won_offer",
     ))
     won_offer_revision_no: Mapped[int | None] = mapped_column(Integer)
+    # D-0047：优先级两档；催办只记次数与最近时间，30 分钟间隔由服务层校验。
+    priority: Mapped[str] = mapped_column(String(8), default="normal", server_default="normal")
+    urge_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_urged_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 
     __table_args__ = (
         CheckConstraint("kind IN ('sales_inquiry', 'proactive_offer')", name="ck_presales_inquiry_kind"),
+        CheckConstraint("priority IN ('normal', 'urgent')", name="ck_presales_inquiry_priority"),
         CheckConstraint("status IN ('draft', 'submitted', 'revising', 'closed')", name="ck_presales_inquiry_status"),
         CheckConstraint("revision >= 1 AND version >= 1", name="ck_presales_inquiry_version"),
         CheckConstraint("closed_outcome IS NULL OR closed_outcome IN ('won', 'lost', 'cancelled')", name="ck_presales_inquiry_outcome"),
@@ -86,6 +91,7 @@ class PresalesInquiryLine(Base):
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     notes: Mapped[str | None] = mapped_column(Text)
     notes_audience_rule_id: Mapped[int | None] = mapped_column(ForeignKey("audience_rule.id"))
+    return_defective: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now(), onupdate=func.now())
 
@@ -124,6 +130,8 @@ class PresalesOffer(Base):
     reporter_audience_rule_id: Mapped[int | None] = mapped_column(ForeignKey("audience_rule.id"))
     notes_audience_rule_id: Mapped[int | None] = mapped_column(ForeignKey("audience_rule.id"))
     notes: Mapped[str | None] = mapped_column(Text)
+    # D-0047：成本价 / 售价只作标注，可见性仍按报价受众规则。
+    price_basis: Mapped[str] = mapped_column(String(8), default="sale", server_default="sale")
     revision_no: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     created_by: Mapped[int] = mapped_column(ForeignKey("sys_user.id"))
@@ -132,6 +140,7 @@ class PresalesOffer(Base):
 
     __table_args__ = (
         CheckConstraint("status IN ('draft', 'published', 'withdrawn', 'stale')", name="ck_presales_offer_status"),
+        CheckConstraint("price_basis IN ('sale', 'cost')", name="ck_presales_offer_price_basis"),
         CheckConstraint("revision_no >= 0 AND version >= 1 AND validity_days >= 1", name="ck_presales_offer_version"),
         CheckConstraint("unit_price IS NULL OR unit_price >= 0", name="ck_presales_offer_price"),
         CheckConstraint("qty_available IS NULL OR qty_available >= 0", name="ck_presales_offer_qty"),
