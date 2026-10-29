@@ -29,6 +29,24 @@ DB = "it-spareparts-db-1"
 CADDY = "it-spareparts-caddy-1"
 BASE = Path("/data/spareparts/releases")
 HOSTS = {"ybwznt.com", "www.ybwznt.com"}
+CATALOG_SYNC_URL = "https://shop.ybwznt.com/api/integrations/catalog/parts/sync"
+CATALOG_SYNC_KEYS = {"SHOP_CATALOG_SYNC_ENABLED", "SHOP_CATALOG_SYNC_URL", "SHOP_CATALOG_SYNC_TOKEN"}
+# 只导入配置模型，不导入 app.main/db、不连接网络；任何验证错误只输出布尔值。
+CATALOG_SETTINGS_PROBE = b'''import json, os
+try:
+    from app.config import Settings
+    required = {"shop_catalog_sync_enabled", "shop_catalog_sync_url", "shop_catalog_sync_token"}
+    if not required.issubset(Settings.model_fields):
+        accepted = False
+    else:
+        settings = Settings()
+        accepted = (settings.shop_catalog_sync_enabled is True
+            and settings.shop_catalog_sync_url == os.environ["SHOP_CATALOG_SYNC_URL"]
+            and settings.shop_catalog_sync_token.get_secret_value() == os.environ["SHOP_CATALOG_SYNC_TOKEN"])
+except Exception:
+    accepted = False
+print(json.dumps(accepted))
+'''
 TABLES = ("maintenance_project", "maintenance_project_contract", "dim_part", "f_sales_line",
           "f_purchase_line", "f_maintenance_order", "presales_inquiry", "presales_inquiry_line",
           "presales_offer", "presales_offer_revision", "work_item")
@@ -78,6 +96,11 @@ def fingerprint(container):
     return {"id": container["Id"], "image": container["Image"],
             "running": container["State"]["Running"], "started_at": container["State"]["StartedAt"],
             "restart_count": container["RestartCount"], "oom_killed": container["State"]["OOMKilled"]}
+
+
+def has_log_errors(raw):
+    # safe_path 使用 status=500；保留旧 combined/uvicorn 格式的状态码识别。
+    return bool(re.search(rb'Traceback|\bERROR\b|" 5[0-9][0-9] |(?:^|\s)status=5[0-9][0-9](?:\s|$)', raw))
 
 
 def site_dials(config):
@@ -140,6 +163,11 @@ def validate_manifest(manifest, root):
     need(manifest.get("caddyfile") in {"/opt/it-spareparts/Caddyfile", "/etc/caddy/Caddyfile"}, "unknown Caddy path")
     for field in ("source_sha256", "smoke_sha256", "controller_sha256"):
         need(re.fullmatch(r"[0-9a-f]{64}", manifest.get(field, "")), "reviewed checksum required: " + field)
+    if "catalog_sync" in manifest:
+        catalog = manifest["catalog_sync"]
+        need(isinstance(catalog, dict) and set(catalog) == {"enabled", "url", "token_sha256"}, "catalog_sync fields invalid")
+        need(catalog["enabled"] is True and catalog["url"] == CATALOG_SYNC_URL, "catalog_sync must use approved enabled endpoint")
+        need(isinstance(catalog["token_sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", catalog["token_sha256"]), "catalog_sync credential checksum required")
     need(re.fullmatch(r"[0-9a-f]{64}", manifest.get("nginx_sha256", "")), "frozen nginx checksum required")
     need(type(manifest.get("nginx_upstream_count")) is int and manifest["nginx_upstream_count"] > 0, "frozen nginx token count required")
     need(isinstance(manifest.get("additional_writers"), list), "explicit additional_writers list required")
@@ -190,6 +218,55 @@ class Release:
         need(row.get("release") == self.sha and row.get("manifest_sha256") == digest(self.manifest_bytes)
              and row.get("phase") == name and row.get("status") == "PASS", "phase receipt mismatch")
         return row
+
+    def catalog_environment(self, original):
+        """没有显式配置时逐字节保留 Env；启用时只替换三个批准键。"""
+        if "catalog_sync" not in self.m:
+            return copy.deepcopy(original)
+        path = self.root / "catalog.token.private"
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as source:
+            metadata = os.fstat(source.fileno())
+            need(stat.S_ISREG(metadata.st_mode) and metadata.st_uid == 0
+                 and stat.S_IMODE(metadata.st_mode) == 0o600, "catalog token must be a root-owned 0600 regular file")
+            raw = source.read(257)
+        need(32 <= len(raw) <= 256 and all(0x21 <= byte <= 0x7e for byte in raw)
+             and digest(raw) == self.m["catalog_sync"]["token_sha256"], "catalog token format/checksum differs")
+        token = raw.decode("ascii")
+        entries = [entry.partition("=") for entry in (original or [])]
+        need(all(separator for _, separator, _ in entries), "invalid runtime environment entry")
+        names = [key.upper() for key, _, _ in entries]
+        need(len(names) == len(set(names)), "ambiguous duplicate runtime environment keys")
+        for key, _, value in entries:
+            upper = key.upper()
+            if upper in CATALOG_SYNC_KEYS:
+                need(key == upper, "catalog setting must use canonical environment name")
+                continue
+            if any(word in upper for word in ("TOKEN", "SECRET", "PASSWORD", "API_KEY")):
+                need(not value or (value != token and value.strip().lower() != digest(raw)),
+                     "catalog credential reuses another service credential")
+        replacements = {"SHOP_CATALOG_SYNC_ENABLED": "true", "SHOP_CATALOG_SYNC_URL": CATALOG_SYNC_URL,
+                        "SHOP_CATALOG_SYNC_TOKEN": token}
+        result = []
+        for key, _, value in entries:
+            result.append(key + "=" + replacements.pop(key, value))
+        result.extend(key + "=" + value for key, value in replacements.items())
+        return result
+
+    def check_catalog_settings(self, old):
+        if "catalog_sync" not in self.m:
+            return None
+        environment = self.catalog_environment(old["Config"].get("Env"))
+        need(all("\n" not in entry and "\r" not in entry for entry in environment), "multiline runtime environment cannot be safely probed")
+        path = self.root / "catalog-settings.env.private"
+        write_new(path, "\n".join(environment) + "\n")
+        result = self.run(["docker", "run", "--rm", "-i", "--name", self.prefix + "-catalog-settings",
+            "--network", "none", "--read-only", "--tmpfs", "/tmp:size=16m,mode=1777", "--memory", "256m",
+            "--cpus", "1", "--pids-limit", "64", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--env-file", str(path), "--entrypoint", "python", self.m["app_image"], "-B", "-"],
+            input=CATALOG_SETTINGS_PROBE, timeout=60)
+        need(json.loads(result) is True, "candidate image does not support/accept catalog sync settings")
+        return {**self.m["catalog_sync"], "settings_verified": True}
 
     def writers(self):
         return [{"name": self.old_app, "id": self.m["old_app_id"], "image": self.m["old_app_image"]},
@@ -317,6 +394,7 @@ class Release:
             row = self.inspect(writer["name"])
             need(row["Id"] == writer["id"] and row["Image"] == writer["image"] and row["State"]["Running"], "writer identity drift")
             need("it-spareparts_default" in row["NetworkSettings"]["Networks"] and not row["HostConfig"].get("PortBindings"), "writer network or exposed host port drift")
+        catalog_sync = self.check_catalog_settings(self.inspect(self.old_app))
         self.nginx_baseline(self.inspect(self.old_front))
         need(self.schema() == self.m["old_schema"], "old schema drift")
         need(self.sql("SELECT count(*) FROM sys_import_batch WHERE status='processing'") == "0", "active import")
@@ -339,7 +417,7 @@ class Release:
         save(self.root / "all-inspect.private.json", all_rows)
         return {"containers": {row["Name"].lstrip("/"): fingerprint(row) for row in all_rows},
             "active": active, "inode": inode, "schema": self.schema(), "counts": self.counts(),
-            "db_image": self.inspect(DB)["Image"]}
+            "db_image": self.inspect(DB)["Image"], "catalog_sync": catalog_sync}
 
     def images(self):
         self.marker("preflight")
@@ -486,6 +564,10 @@ class Release:
     def clone(self, name, old, image, frontend=False):
         cfg, host = copy.deepcopy(old["Config"]), copy.deepcopy(old["HostConfig"])
         cfg.update(Hostname=name, Image=image)
+        if not frontend and "catalog_sync" in self.m:
+            need(self.marker("preflight").get("catalog_sync") == {**self.m["catalog_sync"], "settings_verified": True},
+                 "catalog settings lack completed candidate preflight")
+            cfg["Env"] = self.catalog_environment(cfg.get("Env"))
         def provenance(key):
             return key in {"org.opencontainers.image.revision", "bg.release", "bg.parent"} or key.startswith("hotfix.")
         cfg["Labels"] = {k: v for k, v in (cfg.get("Labels") or {}).items() if not provenance(k)}
@@ -643,7 +725,7 @@ class Release:
                  and not baseline[key]["oom_killed"] and baseline[key]["restart_count"] == 0, "candidate restart/OOM/identity drift")
             raw = self.run(["docker", "logs", "--since", self.marker("cutover")["time"], name], merge_stderr=True)
             write_new(self.root / (name + "-observe-" + stamp() + ".private.log"), raw)
-            need(not re.search(rb'Traceback|\bERROR\b|" 5[0-9][0-9] ', raw), "live application error")
+            need(not has_log_errors(raw), "live application error")
         self.protected(old_running=False)
         need(self.sql("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock'") == "0", "live lock waiter")
         for path in ("/api/health", "/api/ready"):

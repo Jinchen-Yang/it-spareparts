@@ -106,6 +106,66 @@ def test_same_pn_merges_and_distributes_without_reply(db, quote_data):
     assert replay["replayed"] and len(list(db.scalars(select(PresalesOffer)))) == 2
 
 
+@pytest.mark.parametrize("bound", [True, False], ids=["part", "raw-pn"])
+def test_opposite_return_defective_terms_split_and_are_readonly(db, quote_data, bound):
+    data = quote_data
+    identity = {"part_id": data.parts[0].id} if bound else {"pn_raw": "SAME-RAW-PN"}
+    sources = [_submitted(db, data, lines=[{**identity, "return_defective": value}]) for value in (True, False)]
+    content = quote_workbook.export_quote_sheet(db, [row.id for row in sources], data.buyer.id)
+    sheet = load_workbook(BytesIO(content))["采购报价表"]
+    columns = {cell.value: cell.column for cell in sheet[1]}
+    assert sheet.max_row == 3
+    cells = [sheet.cell(row, columns["坏件是否返回"]) for row in (2, 3)]
+    assert {cell.value for cell in cells} == {True, False}
+    assert all(cell.protection.locked for cell in cells)
+    changed = _edit(content, {2: {"坏件是否返回": not cells[0].value}})
+    preview = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, changed,
+        ctx=common.resolve_actor(db, data.buyer.id)[1])
+    assert not preview["plan"]["errors"] and preview["plan"]["counts"]["unchanged"] == 2
+    assert any("锁定" in warning["message"] for warning in preview["plan"]["warnings"])
+    assert [inquiries.lines_for(db, source.id)[0].return_defective for source in sources] == [True, False]
+
+
+@pytest.mark.parametrize("label,basis", [("成本价", "cost"), ("售价", "sale")])
+def test_workbook_price_basis_import_export_and_existing_draft_patch_preserve(db, quote_data, label, basis):
+    data = quote_data
+    inquiry = _submitted(db, data)
+    content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
+    _apply(db, data, _edit(content, {2: {"处理方式": "报价", "单价": 25, "价格性质": label}}))
+    draft = db.scalar(select(PresalesOffer).where(PresalesOffer.inquiry_id == inquiry.id))
+    assert draft.price_basis == basis
+    exported = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
+    sheet = load_workbook(BytesIO(exported))["采购报价表"]
+    columns = {cell.value: cell.column for cell in sheet[1]}
+    assert sheet.cell(2, columns["价格性质"]).value == label
+    _apply(db, data, _edit(exported, {2: {"单价": 30}}))
+    assert draft.price_basis == basis and draft.unit_price == Decimal("30")
+    published = offers.reply(db, inquiry.id, data.buyer.id, expected_version=inquiry.version)[0]
+    assert published.price_basis == basis
+
+
+@pytest.mark.parametrize("explicit_basis", [None, "售价"])
+def test_excel_update_cost_quote_preserves_unedited_basis_and_null_tax(db, quote_data, explicit_basis):
+    data = quote_data
+    original = _published(db, data)
+    offers.update_offer(db, original.id, data.buyer.id,
+        {"price_basis": "cost", "is_tax_inclusive": None}, expected_version=original.version)
+    inquiry = _submitted(db, data)
+    content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
+    sheet = load_workbook(BytesIO(content))["采购报价表"]
+    columns = {cell.value: cell.column for cell in sheet[1]}
+    assert "成本价" in sheet.cell(2, columns["已有有效报价"]).value
+    values = {"处理方式": "报价", "单价": 22, "已有报价时的选择": "更新", "目标报价编号": original.id}
+    if explicit_basis is not None:
+        values["价格性质"] = explicit_basis
+    _apply(db, data, _edit(content, {2: values}))
+    draft = db.scalar(select(PresalesOffer).where(PresalesOffer.inquiry_id == inquiry.id))
+    expected = "sale" if explicit_basis else "cost"
+    assert draft.price_basis == expected and draft.is_tax_inclusive is None
+    published = offers.reply(db, inquiry.id, data.buyer.id, expected_version=inquiry.version)[0]
+    assert published.id == original.id and published.price_basis == expected and published.is_tax_inclusive is None
+
+
 def test_exact_requirement_splits_and_unknown_pn_can_skip(db, quote_data):
     data = quote_data
     first = _submitted(db, data)
@@ -312,6 +372,7 @@ def test_price_only_patch_preserves_different_source_drafts_and_hidden_columns(d
         line = inquiries.lines_for(db, inquiry.id)[0]
         drafts.append(offers.save_draft(db, inquiry.id, line.id, data.buyer.id,
             {"unit_price": str(10 + index), "supplier_id": data.supplier.id,
+             "price_basis": "cost" if index == 0 else "sale",
              "notes": f"来源备注{index}", "stock_location": f"仓库{index}"},
             expected_version=inquiry.version))
     content = quote_workbook.export_quote_sheet(db, [row.id for row in sources], data.buyer.id,
@@ -320,6 +381,7 @@ def test_price_only_patch_preserves_different_source_drafts_and_hidden_columns(d
     assert [row.unit_price for row in drafts] == [Decimal("25.00"), Decimal("25.00")]
     assert [row.notes for row in drafts] == ["来源备注0", "来源备注1"]
     assert [row.stock_location for row in drafts] == ["仓库0", "仓库1"]
+    assert [row.price_basis for row in drafts] == ["cost", "sale"]
     assert all(row.supplier_id == data.supplier.id for row in drafts)
 
 

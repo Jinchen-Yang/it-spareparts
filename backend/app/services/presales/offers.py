@@ -324,6 +324,12 @@ def save_line_decision(db, inquiry_id, line_id, actor, *, expected_version, mode
             raise InvalidTransition("报价必须填写单价；无货请选择不报并填写原因")
         targets = _publication_plans(db, [draft], inquiry, ctx, on_existing, existing_offer_id, None)
         target = targets[0][1]
+        if target is not None and old is None:
+            # 新建的是更新原报价所需的草稿；未选择新口径不能把默认售价/含税覆盖原值。
+            # 已有草稿保留其原值，明确填写的成本/售价或税口径仍按输入更新。
+            for key in ("price_basis", "is_tax_inclusive"):
+                if key not in (data or {}):
+                    setattr(draft, key, getattr(target, key))
         draft.workbook_choice = ({"on_existing": "update", "existing_offer_id": target.id,
                                   "existing_version": target.version} if target else
                                  {"on_existing": "new"} if on_existing == "new" else {})

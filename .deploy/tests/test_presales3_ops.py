@@ -1,12 +1,17 @@
 """纯合成发布控制器测试；只在 jinchen-dev 执行，无生产连接。"""
 import ast
+import contextlib
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
+import stat
 import subprocess
+import sys
 import tempfile
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -69,6 +74,116 @@ class OpsTests(unittest.TestCase):
                              ("subnet", "8.8.8.0/24"), ("old_front_id", "short")):
             with self.subTest(field=field), self.assertRaises((RuntimeError, ValueError)):
                 ops.validate_manifest({**valid, field: value}, root)
+
+    def catalog(self, token=b"synthetic-independent-catalog-token-123"):
+        self.release.m["catalog_sync"] = {"enabled": True, "url": ops.CATALOG_SYNC_URL,
+                                          "token_sha256": ops.digest(token)}
+        ops.write_new(self.root / "catalog.token.private", token)
+        return token.decode("ascii")
+
+    def root_token_metadata(self, *, uid=0, mode=stat.S_IFREG | 0o600):
+        return patch.object(ops.os, "fstat", return_value=SimpleNamespace(st_uid=uid, st_mode=mode))
+
+    def test_catalog_manifest_has_only_enabled_fixed_url_and_hash(self):
+        valid = manifest()
+        valid["catalog_sync"] = {"enabled": True, "url": ops.CATALOG_SYNC_URL, "token_sha256": "f" * 64}
+        root = ops.BASE / ("presales3-" + valid["release"])
+        self.assertEqual(ops.validate_manifest(valid, root), valid)
+        for catalog in (None, {}, {**valid["catalog_sync"], "token": "must-not-be-in-manifest"},
+                        {**valid["catalog_sync"], "enabled": False}, {**valid["catalog_sync"], "enabled": 1},
+                        {**valid["catalog_sync"], "url": "https://other.example/parts/sync"},
+                        {**valid["catalog_sync"], "token_sha256": "bad"}):
+            with self.subTest(catalog=catalog), self.assertRaises(RuntimeError):
+                ops.validate_manifest({**valid, "catalog_sync": catalog}, root)
+
+    def test_absent_catalog_config_preserves_environment_and_does_not_probe(self):
+        original = ["OTHER=exact value", "SHOP_CATALOG_SYNC_ENABLED=false", "SHOP_CATALOG_SYNC_TOKEN=original"]
+        self.assertEqual(self.release.catalog_environment(original), original)
+        self.assertIsNot(self.release.catalog_environment(original), original)
+        self.assertIsNone(self.release.catalog_environment(None))
+        self.release.run = Mock()
+        self.assertIsNone(self.release.check_catalog_settings({"Config": {"Env": original}}))
+        self.release.run.assert_not_called()
+
+    def test_catalog_environment_only_changes_three_keys(self):
+        token = self.catalog()
+        old = ["OTHER=exact value", "SHOP_CATALOG_SYNC_URL=https://old.invalid", "SECRET_KEY=unchanged-other-key",
+               "SHOP_CATALOG_SYNC_ENABLED=false", "SHOP_CATALOG_SYNC_TOKEN=old-token", "DATABASE_URL=unchanged"]
+        with self.root_token_metadata():
+            result = self.release.catalog_environment(old)
+        self.assertEqual(result, ["OTHER=exact value", "SHOP_CATALOG_SYNC_URL=" + ops.CATALOG_SYNC_URL,
+            "SECRET_KEY=unchanged-other-key", "SHOP_CATALOG_SYNC_ENABLED=true", "SHOP_CATALOG_SYNC_TOKEN=" + token,
+            "DATABASE_URL=unchanged"])
+        self.assertIn("SHOP_CATALOG_SYNC_TOKEN=old-token", old)
+
+    def test_catalog_token_owner_mode_hash_and_format_fail_closed(self):
+        self.catalog()
+        for uid, mode in ((1000, stat.S_IFREG | 0o600), (0, stat.S_IFREG | 0o644), (0, stat.S_IFIFO | 0o600)):
+            with self.subTest(uid=uid, mode=mode), self.root_token_metadata(uid=uid, mode=mode), self.assertRaises(RuntimeError):
+                self.release.catalog_environment([])
+        for value in (b"short", b"x" * 257, b"x" * 32 + b"\n", b"x" * 31 + b" ", b"x" * 31 + b"\xff"):
+            (self.root / "catalog.token.private").write_bytes(value)
+            self.release.m["catalog_sync"]["token_sha256"] = ops.digest(value)
+            with self.subTest(value_length=len(value)), self.root_token_metadata(), self.assertRaises(RuntimeError):
+                self.release.catalog_environment([])
+        (self.root / "catalog.token.private").write_bytes(b"x" * 32)
+        self.release.m["catalog_sync"]["token_sha256"] = "0" * 64
+        with self.root_token_metadata(), self.assertRaises(RuntimeError):
+            self.release.catalog_environment([])
+
+    def test_catalog_token_symlink_is_rejected(self):
+        self.catalog()
+        path = self.root / "catalog.token.private"
+        target = self.root / "elsewhere.private"
+        path.rename(target)
+        path.symlink_to(target)
+        with self.assertRaises(OSError):
+            self.release.catalog_environment([])
+
+    def test_catalog_credential_cannot_reuse_gallery_directory_or_master_credentials(self):
+        token = self.catalog()
+        for original in (["SHOP_GALLERY_TOKEN=" + token], ["RESALE_CATALOG_TOKEN_SHA256=" + ops.digest(token.encode())],
+                         ["PN_MASTER_INTEGRATION_TOKEN_SHA256=" + ops.digest(token.encode())],
+                         ["RESALE_EXPORT_TOKEN_SHA256=" + ops.digest(token.encode())], ["SECRET_KEY=" + token]):
+            with self.subTest(key=original[0].partition("=")[0]), self.root_token_metadata(), self.assertRaises(RuntimeError):
+                self.release.catalog_environment(original)
+
+    def test_candidate_settings_probe_is_network_isolated_and_has_no_secret_in_argv(self):
+        token = self.catalog()
+        self.release.run = Mock(return_value=b"true\n")
+        with self.root_token_metadata():
+            receipt = self.release.check_catalog_settings({"Config": {"Env": ["OTHER=keep"]}})
+        self.assertEqual(receipt, {**self.release.m["catalog_sync"], "settings_verified": True})
+        command = self.release.run.call_args.args[0]
+        self.assertEqual(command[command.index("--network") + 1], "none")
+        self.assertIn("--read-only", command)
+        self.assertNotIn("-p", command)
+        self.assertNotIn(token, " ".join(command))
+        self.assertNotIn(token.encode(), self.release.run.call_args.kwargs["input"])
+        self.assertIn("SHOP_CATALOG_SYNC_TOKEN=" + token, (self.root / "catalog-settings.env.private").read_text())
+
+    def test_candidate_settings_probe_rejects_old_or_ignoring_image(self):
+        self.catalog()
+        self.release.run = Mock(return_value=b"false\n")
+        with self.root_token_metadata(), self.assertRaisesRegex(RuntimeError, "does not support/accept"):
+            self.release.check_catalog_settings({"Config": {"Env": []}})
+
+    def test_probe_prints_false_for_settings_without_catalog_fields(self):
+        fake_app, fake_config = ModuleType("app"), ModuleType("app.config")
+        fake_config.Settings = type("OldSettings", (), {"model_fields": {"database_url": object()}})
+        captured = io.StringIO()
+        with patch.dict(sys.modules, {"app": fake_app, "app.config": fake_config}), contextlib.redirect_stdout(captured):
+            exec(ops.CATALOG_SETTINGS_PROBE, {})
+        self.assertEqual(captured.getvalue(), "false\n")
+
+    def test_clone_requires_completed_settings_probe_before_creating_container(self):
+        self.catalog()
+        self.release.marker = Mock(return_value={})
+        self.release.run = Mock()
+        old = {"Config": {"Env": ["OTHER=unchanged"]}, "HostConfig": {}}
+        with self.assertRaisesRegex(RuntimeError, "lack completed candidate preflight"):
+            self.release.clone("newapp", old, "sha256:" + "1" * 64)
+        self.release.run.assert_not_called()
 
     def test_artifact_stream_hash_and_exclusive_private_write(self):
         path = self.root / "data"
@@ -211,6 +326,20 @@ class OpsTests(unittest.TestCase):
             result = self.release.run(["docker", "logs", "candidate"], merge_stderr=True)
         self.assertIn(b"ERROR", result)
         self.assertEqual(run.call_args.kwargs["stderr"], subprocess.STDOUT)
+
+    def test_safe_path_and_legacy_logs_detect_server_errors_only(self):
+        for raw in (b"safe_path=/api/presales status=500 request_time=0.01",
+                    b"safe_path=/health/db status=504\n", b"status=503",
+                    b'GET /health/db HTTP/1.1" 502 Bad Gateway',
+                    b"Traceback (most recent call last):", b"ERROR request failed"):
+            with self.subTest(raw=raw):
+                self.assertTrue(ops.has_log_errors(raw))
+        for raw in (b"safe_path=/api/presales status=200 request_time=0.01",
+                    b"safe_path=/api/presales status=401", b"safe_path=/api/presales status=409",
+                    b'GET /api/presales HTTP/1.1" 404 Not Found',
+                    b"safe_path=/status=500/ status=200", b"status=5000", b"status=200 upstream_status=502"):
+            with self.subTest(raw=raw):
+                self.assertFalse(ops.has_log_errors(raw))
 
     def test_incomplete_freeze_can_only_recover_original_writers_without_migration(self):
         release = self.release

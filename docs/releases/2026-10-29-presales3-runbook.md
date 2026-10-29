@@ -29,11 +29,31 @@
 5. 用专属 `--network none`、无端口、资源限制的 PostgreSQL 15 容器真实恢复旧 head 备份。逐表核对 `maintenance_project`、`maintenance_project_contract`，以及 dim_part、销售/采购/维保行等冻结计数；检查 head。按确切容器 ID 和归属标签清理本次恢复容器。
 6. 用候选镜像、生产原有运行环境和受限锁等待执行 `alembic upgrade head`，验证唯一目标 head 和 ORM 一致性。不得使用旧 r142 的只读 heads/current 代替迁移。
 7. 在停写窗口生成第一份新 head 完整备份，再做一次隔离真实恢复并核 head 和逐表计数。旧恢复脚本固定过期 head，不能直接调用。
-8. 以原运行配置克隆本次 app/frontend，唯一允许差异为镜像/发布标签、容器名、专用网络、loopback端口和前端反代新 app 的只读配置。不改 .env、数据库容器、系统设置或其他站点。真实 Nginx 有三处旧 app 上游，preflight 绑定完整文件 SHA256 与出现次数，只替换这些目标字节；app 不允许宿主机发布端口。
+8. 以原运行配置克隆本次 app/frontend，基础允许差异为镜像/发布标签、容器名、专用网络、loopback端口和前端反代新 app 的只读配置。没有显式 `catalog_sync` 时，旧 Env 完全保留；仅性能候选按下节已审配置启用目录同步时，允许 app 的三个指定环境键改变。不改宿主 .env、数据库容器、系统设置或其他站点。真实 Nginx 有三处旧 app 上游，preflight 绑定完整文件 SHA256 与出现次数，只替换这些目标字节；app 不允许宿主机发布端口。
 9. 候选 loopback 只读冒烟：health/db、匿名拒绝、已有合法身份读取售前询价/报价库、当前答复、最新报价查询、前端 ask/quote/parts 页面及资产；核新镜像 revision 和迁移头。禁止生产测试建档、创建询价、报价、催办或强制同步。
 10. Caddy 文件及 active 配置 CAS 改动本系统目标上游，validate/reload；确认其他站点不变。公网两域名只读冒烟，核页面资产与候选一致。
 11. 0/5/15/30 分钟观察自然流量：5xx/异常、重启/OOM、DB锁、同步积压与健康。汇总性能自然流量时注明样本窗口，不拿开发机合成耗时冒称生产改善。
 12. 发布标签绑定精确部署 SHA；回执记录真实切流时间、镜像 ID、head、备份及两次恢复、冒烟与观察。保留旧容器及备份，不清理其他发布的资源。
+
+## 性能候选的目录同步配置
+
+PR #492 首次售前发布的 manifest 不含 `catalog_sync`，不读目录 token 文件、不执行目录配置探针，app/frontend 原 Env 逐项保留。只有包含 #494 最终已审性能代码的候选才能显式增加：
+
+```json
+"catalog_sync": {
+  "enabled": true,
+  "url": "https://shop.ybwznt.com/api/integrations/catalog/parts/sync",
+  "token_sha256": "<独立服务令牌的64位小写SHA256>"
+}
+```
+
+对象只接受这三个字段；不接受关闭值、其他 URL 或明文 token。明文只来自本次 root/0700 发布目录内固定的 `catalog.token.private`：必须为 root/0600 普通文件、不可为符号链接、32–256 字节可打印 ASCII、无空格或换行，且与 manifest 哈希一致。该令牌必须与商城接收端配置对应，并独立于图库、既有目录读取、PN 写穿和其他既有凭据；不把明文写入 manifest、命令参数、聊天或报告。
+
+显式启用时仅允许 app 的 `SHOP_CATALOG_SYNC_ENABLED=true`、固定地址的 `SHOP_CATALOG_SYNC_URL`、文件中读出的 `SHOP_CATALOG_SYNC_TOKEN` 三个键改变。其他 Env 条目的顺序与值、frontend Env、其余运行配置继续保持并逐字段核对。明文只进入生产私有的环境探针文件和容器创建 JSON。
+
+在停写之前，`preflight` 用精确候选镜像、`--network none`、只读根文件系统和受限资源，只导入 `app.config.Settings` 验证三个真实模型字段存在且接受实际候选值，不导入应用或数据库。探针只输出布尔值，旧售前镜像即使忽略未知环境变量也不能冒充已支持。clone 还要求已完成该探针的 preflight 回执，并再次读取/核验令牌文件哈希。
+
+先按商城窄发布计划发布并验证接收端，再发布和启用 ITSP 生产者。上线后观察真实自然新增 PN 的 outbox 与接收回执；没有自然样本时明确记录等待样本，不为了验证而创建生产 PN、报价、库存流水或其他业务记录。合成投递时长不能当作生产效果。配置控制路径验证见 `jinchen-dev:/home/cloudlay/work/release-evidence-01a188b2/presales-catalog-ops-unit.log`（25 项合成测试通过，包含旧镜像拒绝、默认环境不变、三键范围、令牌权限/哈希/复用及原发布控制回归）。
 
 ## 回退边界
 

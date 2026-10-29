@@ -180,7 +180,8 @@ def _reference(db, line, ctx, *, allow_new=False):
 
 def _signature(line):
     return {"part_id": line.part_id, "pn_raw": line.pn_raw, "qty": str(Decimal(line.qty).normalize()),
-            "require_exact_pn": line.require_exact_pn, "has_reference": line.ref_offer_id is not None}
+            "require_exact_pn": line.require_exact_pn, "return_defective": line.return_defective,
+            "has_reference": line.ref_offer_id is not None}
 
 
 def _snapshot(db, inquiry):
@@ -403,7 +404,7 @@ def resubmit(db, inquiry_id, actor, expected_version):
         raise InvalidTransition("只能重新提交已撤回的销售询价")
     rows = _validate_submit(db, inquiry, ctx)
     # 旧快照没有引用标记；不能仅因升级了签名就重开已经回复的待办。
-    previous = {key: {"has_reference": False, **signature}
+    previous = {key: {"has_reference": False, "return_defective": True, **signature}
                 for key, signature in inquiry.submitted_snapshot.get("lines", {}).items()}
     current = {line.line_key: _signature(line) for line in rows}
     changed = {key for key in previous if key not in current or previous[key] != current[key]}
@@ -429,7 +430,7 @@ def resubmit(db, inquiry_id, actor, expected_version):
         offers = list(db.scalars(select(PresalesOffer).where(PresalesOffer.line_id.in_(ids),
             PresalesOffer.status.in_(("draft", "published"))).order_by(PresalesOffer.id).with_for_update()))
         for offer in offers:
-            mark_stale(db, offer, user.id, "询价行删除或 PN、数量、要求 PN 一致发生变化")
+            mark_stale(db, offer, user.id, "询价行删除或 PN、数量、要求 PN 一致、坏件返回条件发生变化")
     items = work_items.list_by_subject(db, subject(inquiry), user.id, lock=True)
     old_assignees = inquiry.submitted_snapshot.get("assignee_ids", [])
     inquiry.status = "submitted"
