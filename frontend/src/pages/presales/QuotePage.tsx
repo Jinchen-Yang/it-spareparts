@@ -68,7 +68,10 @@ function rowsOf(source: Source, skips: Record<string, string>): QuoteRow[] {
     const response = actor == null ? undefined : source.inquiry.line_responses?.find((row) => row.line_id === line.id && row.created_by === actor);
     const answer = lineAnswer(source.inquiry, line);
     const own = ownedOfferForEdit(source.inquiry, line, actor);
-    const handled = own?.status === "published" || (response && !response.is_draft);
+    // 完成待办已由服务端校验本人逐行答复；报价撤回不会撤销这次处理。
+    const completedResponse = actor != null && liveTask(source).status === "done"
+      && source.inquiry.line_answers?.some((row) => row.line_id === line.id && row.responded);
+    const handled = own?.status === "published" || (response && !response.is_draft) || completedResponse;
     const state: RowState = skips[key] != null ? "skip" : own?.status === "draft" ? "draft"
       : handled ? answer.state : "pending";
     return { key, source, line, own, response, state, displayOffer: answer.state === "quoted" ? answer.offer : undefined,

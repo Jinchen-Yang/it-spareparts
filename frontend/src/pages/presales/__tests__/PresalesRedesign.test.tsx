@@ -177,6 +177,42 @@ describe("报价页", () => {
     await waitFor(() => expect(mocks.updateOffer).toHaveBeenCalledWith(81, expect.objectContaining({ unit_price: 110, expected_version: 1 })));
     expect(mocks.saveOffer).not.toHaveBeenCalled();
   });
+  it("本人整单回复后撤回新报价，已完成待办仍计为已回复而非待报价", async () => {
+    inquiry.lines = [inquiry.lines![0]];
+    inquiry.work_items = [{ ...inquiry.work_items![0], status: "done" }];
+    inquiry.offers = [offer({ status: "withdrawn", version: 2 })];
+    inquiry.line_responses = [];
+    inquiry.line_answers = [{ line_id: 11, state: "unavailable", responded: true }];
+    renderQuote();
+    expect(await screen.findByRole("button", { name: "暂无有效价 1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "待报价 0" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "暂无有效价 1" }));
+    expect(await screen.findByText("已回复，当前无有效报价")).toBeInTheDocument();
+    expect(screen.queryByText("待报价", { selector: ".ant-tag" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("spinbutton", { name: "PN-1 单价" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "更新报价" })).not.toBeInTheDocument();
+  });
+  it("其他采购已答复仍不能替代本人未完成待办的报价", async () => {
+    const other = offer({ reporter: { id: 8, name: "采购乙" } });
+    inquiry.lines = [inquiry.lines![0]];
+    inquiry.offers = [other];
+    inquiry.line_responses = [{ line_id: 11, mode: "reuse", ref_offer_id: 81, created_by: 8,
+      work_item_id: 72, expired: false, is_draft: false, offer: other }];
+    inquiry.line_answers = [{ line_id: 11, state: "quoted", responded: true, offer: other }];
+    // 列表可能滞后为 done；详情里的本人任务仍 in_progress，不能误读别人的完成状态。
+    inquiry.work_items!.push({ ...inquiry.work_items![0], id: 72, assignee_id: 8, claimed_by: 8, status: "done" });
+    mocks.listWorkItems.mockImplementation(async ({ tab }: { tab: string }) => ({
+      items: tab === "done" ? [{ ...task, status: "done" }] : [], total: tab === "done" ? 1 : 0,
+      page: 1, page_size: 100, can_supervise: false,
+    }));
+    renderQuote();
+    expect(await screen.findByRole("spinbutton", { name: "PN-1 单价" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "待报价 1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "已报价 0" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "暂无有效价 0" })).toBeInTheDocument();
+    expect(screen.getByText("待报价", { selector: ".ant-tag" })).toBeInTheDocument();
+    expect(mocks.replyInquiry).not.toHaveBeenCalled();
+  });
   it("询价B更新同一报价后回到询价A编辑，使用当前版本和字段并保留A的历史快照", async () => {
     const historical = offer({ version: 1, unit_price: "100", expired: true });
     let current = offer({ inquiry_id: 2, line_id: 21, version: 5, unit_price: "200", is_tax_inclusive: null, price_basis: "cost" });
