@@ -248,6 +248,7 @@ _Avoid_: 销售件数、销售订单去重数、收入行数、未知补零
 - [D-35 PN 紧凑双榜与成本截图范围](docs/decisions/0013-PN紧凑双榜与成本截图范围.md)：已知需求成本（含税）与需求净量；销售可接收含成本截图，服务端权限继续沿用 D-25。
 - [D-36 主数据库与商城目录互通](docs/decisions/0014-主数据库与商城目录互通.md)：itsp＝备件系统，其 PN 主数据＝主数据库；shop＝商城。主数据库自动发布，商城数据处理页人工确认后单次提交；AI 只由人触发、结果默认留商城。图库归商城、按稳定 part_id 只读关联，身份自动镜像且不受上游排除影响。两仓同版契约：[catalog v2.0-draft](docs/integrations/catalog-v2.md)、[gallery v1.0-draft](docs/integrations/gallery-v1.md)。
 - **整目录列举（D-36 v1 过渡读面）**：`POST /api/integrations/resale/parts/list`，按 `(updated_at, id)` keyset 活读全部 `dim_part`，含身份墓碑（`status=merged`，一跳 `mergedIntoId`／`mergedIntoPnStd`，区别于维保需求单墓碑）；不带别名、销售记录数或业务字段，不是 v2 固定快照。loader `_upsert_parts` 冲突更新推进 `updated_at`。契约见 [resale-catalog-v1-list](docs/integrations/resale-catalog-v1-list.md)。
+- **同 PN 技术版本（D-0049）**：实际更新由数据库统一保证 `dim_part.updated_at` 严格前进，避免事务开始时间倒退导致商城误拒绝合法最新资料；无变化导入不推进，不回填历史 PN。该保证不是跨 PN 的全局提交顺序，周期全量对账仍保留。见 [D-0049](docs/decisions/0029-目录源版本单调与旧快照保护.md)。
 
 ## 工作簿首次应用回执（2026-10-16，D-38）
 

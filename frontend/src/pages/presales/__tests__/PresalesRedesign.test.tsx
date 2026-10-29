@@ -213,6 +213,46 @@ describe("报价页", () => {
     }
   });
 
+  it("报价库后一批失败保留成功型号的沿用，明确提示且刷新后恢复", async () => {
+    inquiry.lines = Array.from({ length: 201 }, (_, index) => ({ ...inquiry.lines![0],
+      id: index + 11, part_id: index + 1, pn_raw: `PN-${index + 1}`, line_key: `line-${index + 1}`, seq: index + 1 }));
+    mocks.library.mockImplementation(async (ids: number[]) => {
+      if (ids.includes(201)) throw { response: { status: 503 } };
+      return { 1: [offer({ line_id: 999, unit_price: "250" })] };
+    });
+    renderQuote();
+    await screen.findByText("部分型号的已有报价未能加载，请刷新重试。");
+    const input = await screen.findByRole("spinbutton", { name: "PN-1 单价" });
+    fireEvent.click(within(input.closest("tr")!).getByRole("button", { name: "Expand row" }));
+    fireEvent.click(await screen.findByRole("button", { name: "沿用" }));
+    expect(Number((input as HTMLInputElement).value)).toBe(250);
+    mocks.library.mockImplementation(async (ids: number[]) => Object.fromEntries(ids.filter((id) => id === 1 || id === 201)
+      .map((id) => [id, [offer({ line_id: 999, part_id: id, unit_price: "250" })]])));
+    fireEvent.click(screen.getByRole("button", { name: "刷新已有报价" }));
+    await waitFor(() => expect(mocks.library).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(screen.queryByText("部分型号的已有报价未能加载，请刷新重试。")).not.toBeInTheDocument());
+    expect(Number((screen.getByRole("spinbutton", { name: "PN-1 单价" }) as HTMLInputElement).value)).toBe(250);
+    fireEvent.change(screen.getByRole("searchbox", { name: "筛选报价行" }), { target: { value: "PN-201" } });
+    const last = await screen.findByRole("spinbutton", { name: "PN-201 单价" });
+    fireEvent.click(within(last.closest("tr")!).getByRole("button", { name: "Expand row" }));
+    expect(await screen.findByRole("button", { name: "沿用" })).toBeInTheDocument();
+  });
+
+  it.each([401, 403])("报价库后一批鉴权失败 %s 时清空已读报价并停止后续批次", async (status) => {
+    inquiry.lines = Array.from({ length: 401 }, (_, index) => ({ ...inquiry.lines![0],
+      id: index + 11, part_id: index + 1, pn_raw: `PN-${index + 1}`, line_key: `line-${index + 1}`, seq: index + 1 }));
+    mocks.library.mockImplementation(async (ids: number[]) => {
+      if (ids.includes(201)) throw { response: { status } };
+      return { 1: [offer({ line_id: 999, unit_price: "250" })] };
+    });
+    renderQuote();
+    await screen.findByText("部分型号的已有报价未能加载，请刷新重试。");
+    const input = await screen.findByRole("spinbutton", { name: "PN-1 单价" });
+    fireEvent.click(within(input.closest("tr")!).getByRole("button", { name: "Expand row" }));
+    expect(screen.queryByRole("button", { name: "沿用" })).not.toBeInTheDocument();
+    expect(mocks.library).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["resolve", "reject"])("刷新后的报价库不被取消请求的迟到 %s 覆盖", async (result) => {
     let resolveOld!: (data: Record<number, Offer[]>) => void;
     let rejectOld!: (error: Error) => void;
@@ -232,6 +272,7 @@ describe("报价页", () => {
     fireEvent.click(await screen.findByRole("button", { name: "沿用" }));
     await waitFor(() => expect(Number((input as HTMLInputElement).value)).toBe(250));
     expect(screen.getByText(/同型号已有 ¥250/)).toBeInTheDocument();
+    expect(screen.queryByText("部分型号的已有报价未能加载，请刷新重试。")).not.toBeInTheDocument();
     expect(mocks.library).toHaveBeenCalledTimes(2);
   });
 

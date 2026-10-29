@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import traceback
+from types import ModuleType
 from urllib.error import HTTPError
 from urllib.request import urlopen
 from urllib.parse import urlsplit
@@ -31,6 +32,8 @@ BASE = Path("/data/spareparts/releases")
 HOSTS = {"ybwznt.com", "www.ybwznt.com"}
 CATALOG_SYNC_URL = "https://shop.ybwznt.com/api/integrations/catalog/parts/sync"
 CATALOG_SYNC_KEYS = {"SHOP_CATALOG_SYNC_ENABLED", "SHOP_CATALOG_SYNC_URL", "SHOP_CATALOG_SYNC_TOKEN"}
+SHOP_BASE = Path('/data/shop/releases')
+SOURCE_HEAD = 'a3c5e7f9b2d4'
 # 只导入配置模型，不导入 app.main/db、不连接网络；任何验证错误只输出布尔值。
 CATALOG_SETTINGS_PROBE = b'''import json, os
 try:
@@ -93,6 +96,18 @@ def artifact(path):
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             value.update(chunk)
     return {"path": str(path), "bytes": Path(path).stat().st_size, "sha256": value.hexdigest()}
+
+
+def reviewed_module(path, expected):
+    """Execute the exact verified bytes, without import-time or pyc TOCTOU."""
+    path = Path(path)
+    need(not path.is_symlink(), 'reviewed module symlink refused')
+    raw = path.read_bytes()
+    need(digest(raw) == expected, 'reviewed module checksum differs')
+    module = ModuleType(path.stem)
+    module.__file__ = str(path)
+    exec(compile(raw, str(path), 'exec'), module.__dict__)
+    return module
 
 
 def write_new(path, data):
@@ -172,6 +187,11 @@ def validate_manifest(manifest, root):
     need(re.fullmatch(r"[0-9a-f]{40}", sha), "invalid release SHA")
     need(root == BASE / ("presales3-" + sha), "release directory mismatch")
     need(re.fullmatch(r"[0-9a-z_]{1,32}", manifest.get("target_head", "")), "invalid target head")
+    handoff = manifest.get('source_handoff')
+    need(isinstance(handoff, dict) and set(handoff) == {'release', 'manifest_sha256', 'controller_sha256', 'gate_sha256'}, 'D49 source_handoff required')
+    need(re.fullmatch('[0-9a-f]{40}', handoff.get('release', '')) and all(
+        re.fullmatch('[0-9a-f]{64}', handoff.get(key, '')) for key in ('manifest_sha256', 'controller_sha256', 'gate_sha256')), 'handoff identity invalid')
+    need(manifest['target_head'] == SOURCE_HEAD, 'D49 monotone source head required')
     need(re.fullmatch(r"[0-9a-f]{40}", manifest.get("old_revision", "")), "explicit old revision required")
     need(re.fullmatch(r"[0-9a-z_]{1,32}", manifest.get("old_schema", "")), "explicit old schema required")
     for field in ("old_app", "old_front"):
@@ -309,6 +329,138 @@ class Release:
         return [{"name": self.old_app, "id": self.m["old_app_id"], "image": self.m["old_app_image"]},
                 *self.m["additional_writers"]]
 
+    def peer(self):
+        spec = self.m['source_handoff']
+        root = SHOP_BASE / ('pn-' + spec['release'])
+        need(root.resolve() == root, 'shop release path changed')
+        need(artifact(root / 'manifest.json')['sha256'] == spec['manifest_sha256'], 'shop manifest changed')
+        module = reviewed_module(root / 'shop_pn_ops.py', spec['controller_sha256'])
+        peer = module.Release(root / 'manifest.json')
+        need(peer.m['controller_sha256'] == spec['controller_sha256'], 'shop reviewed controller differs')
+        need(self.m.get('catalog_sync', {}).get('token_sha256') == peer.m['catalog_token_sha256'], 'catalog service credential binding differs')
+        expected = peer.m['source_hold']
+        need(expected['release'] == self.sha and expected['controller_sha256'] == self.m['controller_sha256']
+             and expected['gate_sha256'] == spec['gate_sha256'], 'source/shop handoff binding differs')
+        need(len(self.writers()) == 4 and [{k: row[k] for k in ('name', 'id', 'image')} for row in expected['writers']] == self.writers(), 'four source identities differ')
+        return peer
+
+    def source_tcp_zero(self):
+        need(self.sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND client_addr IS NOT NULL") == '0', 'source TCP clients remain')
+
+    def hold_intent(self):
+        path = self.root / 'hold-source.intent.json'
+        row = json.loads(path.read_bytes())
+        need(row.get('release') == self.sha and row.get('manifest_sha256') == digest(self.manifest_bytes)
+             and row.get('shop_manifest_sha256') == self.m['source_handoff']['manifest_sha256']
+             and row.get('phase') == 'hold-source', 'hold intent identity differs')
+        return row
+
+    def hold_plan(self):
+        peer = self.peer()
+        need(not (peer.root / 'preflight.intent.json').exists(), 'shop already entered preflight')
+        need(self.schema() == self.m['old_schema'], 'hold old schema differs')
+        rows = json.loads(self.run(['docker', 'inspect', *self.run(['docker', 'ps', '-aq']).decode().split()]))
+        target = self.database_target(self.inspect(self.old_app))
+        need(target in {('db', 5432, '/spareparts'), (DB, 5432, '/spareparts')}, 'hold database target differs')
+        expected = peer.m['source_hold']['writers']
+        need({r['Id'] for r in rows if r['State']['Running'] and self.database_target(r) == target} == {r['id'] for r in expected}, 'hold unlisted source writer')
+        for writer in expected:
+            row = self.inspect(writer['name'])
+            need(row['Id'] == writer['id'] and row['Image'] == writer['image'] and row['State']['Running']
+                 and row['State']['StartedAt'] == writer['started_at'], 'hold source identity differs')
+        front = self.inspect(self.old_front)
+        need(front['Id'] == self.m['old_front_id'] and front['Image'] == self.m['old_front_image'] and front['State']['Running'], 'hold frontend identity differs')
+        for key in ('old_app_image', 'old_front_image'):
+            need(self.inspect(self.m[key], True)['Config']['Labels'].get('org.opencontainers.image.revision') == self.m['old_revision'], 'hold old release revision differs')
+        for key in ('app', 'frontend'):
+            image = self.inspect(self.m[key + '_image'], True)
+            need(image['Id'] == self.m[key + '_image'] and image['Config']['Labels'].get('org.opencontainers.image.revision') == self.sha, 'hold candidate revision differs')
+        need(artifact(self.root / 'source.tar.gz')['sha256'] == self.m['source_sha256'], 'hold source archive differs')
+        data, active, st = self.caddyfile.read_bytes(), self.active(), self.caddyfile.stat()
+        need(all(site_dials(active).get(host) == [self.old_front + ':80'] for host in HOSTS), 'hold old entry differs')
+        inode = [st.st_dev, st.st_ino]
+        self.cas(data, active, inode)
+        return {'schema': self.schema(), 'import_gate': self.import_gate(), 'writers': expected,
+                'containers': {r['Name'].lstrip('/'): fingerprint(r) for r in rows},
+                'entry': {'data_hex': data.hex(), 'active': active, 'inode': inode},
+                'shop_release': peer.release, 'shop_manifest_sha256': digest(peer.raw)}
+
+    def hold_state(self, *, stopped=True, full=False):
+        before = self.hold_intent()
+        need(self.schema() == before['schema'] == self.m['old_schema'], 'held source schema drift')
+        entry = before['entry']
+        self.cas(bytes.fromhex(entry['data_hex']), entry['active'], entry['inode'])
+        writers = {r['name'] for r in before['writers']}
+        for name, expected in before['containers'].items():
+            if full or name in writers:
+                current = fingerprint(self.inspect(name))
+                if name in writers:
+                    expected = {**expected, 'running': False if stopped else current['running']}
+                need(current == expected, 'held source identity/protected drift: ' + name)
+        need(self.import_gate() == before['import_gate'], 'held source import gate drift')
+        if stopped:
+            self.source_tcp_zero()
+        return before
+
+    def hold_source(self):
+        self.hold_state(stopped=False, full=True)
+        for writer in self.hold_intent()['writers']:
+            self.run(['docker', 'stop', '--time', '60', writer['id']], timeout=90)
+        before = self.hold_state(full=True)
+        return {'shop_manifest_sha256': before['shop_manifest_sha256'], 'shop_release': before['shop_release'],
+                'hold_intent_sha256': artifact(self.root / 'hold-source.intent.json')['sha256'],
+                'writers': before['writers'], 'source_tcp_clients': 0, 'import_gate': before['import_gate']}
+
+    def assert_hold(self):
+        peer = self.peer()
+        need(not (self.root / 'recover-hold-source.intent.json').exists(), 'hold recovery may have begun')
+        receipt = self.marker('hold-source')
+        need(receipt['hold_intent_sha256'] == artifact(self.root / 'hold-source.intent.json')['sha256']
+             and receipt['shop_manifest_sha256'] == digest(peer.raw)
+             and receipt['writers'] == peer.m['source_hold']['writers'], 'hold receipt binding differs')
+        self.hold_state()
+        return {'manifest_sha256': digest(self.manifest_bytes), 'hold_sha256': artifact(self.root / 'hold-source.json')['sha256']}
+
+    def may_resume_source(self):
+        peer = self.peer()
+        phases = ('freeze', 'backup-old', 'migrate', 'backup-new', 'create', 'activate', 'recover-freeze', 'seal-handoff')
+        need(not any((peer.root / (phase + suffix)).exists() for phase in phases for suffix in ('.intent.json', '.json'))
+             and not (peer.root / 'exposure-started.json').exists(), 'shop may have changed; source forward-only')
+        need(not any((self.root / name).exists() for name in ('migrate.intent.json', 'migrate.json', 'bluegreen.intent.json', 'cutover.intent.json', 'exposure-started.json')), 'source migration/exposure may have begun; forward-only')
+
+    def recover_hold_source(self):
+        self.may_resume_source()
+        before = self.hold_state(stopped=False, full=True)
+        for writer in before['writers']:
+            if not self.inspect(writer['id'])['State']['Running']:
+                self.run(['docker', 'start', writer['id']])
+        for attempt in range(60):
+            healthy = True
+            for writer in before['writers']:
+                row = self.inspect(writer['name'])
+                need(row['Id'] == writer['id'] and row['Image'] == writer['image'] and row['State']['Running'], 'held original failed after restart')
+                healthy = healthy and row['State'].get('Health', {}).get('Status') == 'healthy'
+            if healthy:
+                self.wait_http('https://ybwznt.com/health/db')
+                need(self.schema() == before['schema'], 'recovery schema changed')
+                entry = before['entry']
+                self.cas(bytes.fromhex(entry['data_hex']), entry['active'], entry['inode'])
+                imports = self.import_gate()
+                need({k: v for k, v in imports.items() if k != 'writer_started_at'} ==
+                     {k: v for k, v in before['import_gate'].items() if k != 'writer_started_at'}, 'recovery import gate changed')
+                writer_names = {r['name'] for r in before['writers']}
+                for name, expected in before['containers'].items():
+                    if name not in writer_names:
+                        need(fingerprint(self.inspect(name)) == expected, 'recovery protected drift')
+                for writer in before['writers']:
+                    row = self.inspect(writer['name'])
+                    need(row['Id'] == writer['id'] and row['Image'] == writer['image'] and row['State']['Running']
+                         and row['State'].get('Health', {}).get('Status') == 'healthy', 'recovery final original health changed')
+                return {'restored_original_processes': True, 'database_restored': False,
+                        'containers': {r['name']: fingerprint(self.inspect(r['name'])) for r in before['writers']}}
+            time.sleep(1)
+        raise RuntimeError('held original health timeout')
+
     @staticmethod
     def database_target(container):
         values = [v.split("=", 1)[1] for v in (container["Config"].get("Env") or []) if v.startswith("DATABASE_URL=")]
@@ -326,7 +478,7 @@ class Release:
         return raw
 
     def sql(self, query, container=DB):
-        return self.run(["docker", "exec", "-e", "PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=30000 -c timezone=UTC",
+        return self.run(["docker", "exec", "-e", "PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=30000 -c lock_timeout=3000 -c timezone=UTC",
             container, "psql", "-U", "spareparts", "-d", "spareparts", "-X", "-At", "-v", "ON_ERROR_STOP=1",
             "-c", query]).decode().strip()
 
@@ -434,12 +586,21 @@ class Release:
 
     def frozen(self):
         self.marker("freeze")
+        if 'source_handoff' in self.m:
+            need(self.peer().handoff_health()['seal_sha256'] == self.marker('preflight')['shop_handoff']['seal_sha256'], 'completed shop/version handoff changed')
         self.protected(old_running=False)
         pre = self.marker("preflight")
         self.cas((self.root / "Caddyfile.baseline").read_bytes(), pre["active"], pre["inode"])
         need(not (self.root / "exposure-started.json").exists(), "release may have admitted writes; forward-only")
 
     def preflight(self):
+        handoff = None
+        if 'source_handoff' in self.m:
+            held = self.assert_hold()
+            peer = self.peer()
+            sealed = peer.mark('seal-handoff')
+            need(sealed.get('protected_final') is True and sealed['source_hold'] == held, 'completed shop handoff required')
+            handoff = peer.handoff_health()
         need(not self.root.is_symlink() and stat.S_IMODE(self.root.stat().st_mode) == 0o700, "release directory must be private")
         names = self.run(["docker", "ps", "-a", "--format", "{{.Names}}"]).decode().splitlines()
         need(names and not any(n.startswith(self.prefix) for n in names), "candidate resource collision")
@@ -450,7 +611,7 @@ class Release:
         for name, key in ((self.old_app, "app"), (self.old_front, "front")):
             item = self.inspect(name)
             need(item["Id"] == self.m["old_" + key + "_id"] and item["Image"] == self.m["old_" + key + "_image"]
-                 and item["State"]["Running"], "frozen old release drift")
+                 and item["State"]["Running"] == (not handoff or key == 'front'), "frozen old release drift")
             need(self.inspect(item["Image"], True)["Config"]["Labels"]["org.opencontainers.image.revision"] == self.m["old_revision"],
                  "old OCI revision drift")
             save(self.root / (name + ".inspect.private.json"), item)
@@ -459,10 +620,10 @@ class Release:
         writer_names = {row["name"] for row in self.writers()}
         actual_writers = {row["Name"].lstrip("/") for row in all_rows if row["State"]["Running"]
             and self.database_target(row) == db_target}
-        need(actual_writers == writer_names, "same-database writer inventory differs from reviewed manifest")
+        need(actual_writers == (set() if handoff else writer_names), "same-database writer inventory differs from reviewed manifest")
         for writer in self.writers():
             row = self.inspect(writer["name"])
-            need(row["Id"] == writer["id"] and row["Image"] == writer["image"] and row["State"]["Running"], "writer identity drift")
+            need(row["Id"] == writer["id"] and row["Image"] == writer["image"] and row["State"]["Running"] == (not bool(handoff)), "writer identity drift")
             need("it-spareparts_default" in row["NetworkSettings"]["Networks"] and not row["HostConfig"].get("PortBindings"), "writer network or exposed host port drift")
         catalog_sync = self.check_catalog_settings(self.inspect(self.old_app))
         self.nginx_baseline(self.inspect(self.old_front))
@@ -485,9 +646,12 @@ class Release:
         self.cas(data, active, inode)
         write_new(self.root / "Caddyfile.baseline", data)
         save(self.root / "all-inspect.private.json", all_rows)
+        if handoff:
+            self.assert_hold()
+            need(peer.handoff_health()['seal_sha256'] == handoff['seal_sha256'], 'shop handoff changed during ITSP preflight')
         return {"containers": {row["Name"].lstrip("/"): fingerprint(row) for row in all_rows},
             "active": active, "inode": inode, "schema": self.schema(), "counts": self.counts(),
-            "db_image": self.inspect(DB)["Image"], "catalog_sync": catalog_sync, "import_gate": imports}
+            "db_image": self.inspect(DB)["Image"], "catalog_sync": catalog_sync, "import_gate": imports, 'shop_handoff': handoff}
 
     def images(self):
         self.marker("preflight")
@@ -513,8 +677,12 @@ class Release:
         need(self.schema() == pre["schema"], "write-freeze schema changed")
         imports_before = self.import_gate()
         need(imports_before == pre["import_gate"], "import gate changed since preflight")
-        for writer in self.writers():
-            self.run(["docker", "stop", "--time", "60", writer["id"]], timeout=90)
+        if 'source_handoff' in self.m:
+            self.assert_hold()
+            need(pre.get('shop_handoff', {}).get('seal_sha256') == self.peer().handoff_health()['seal_sha256'], 'shop handoff differs before ITSP freeze')
+        else:
+            for writer in self.writers():
+                self.run(["docker", "stop", "--time", "60", writer["id"]], timeout=90)
         self.protected(old_running=False)
         need(self.sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
                       "AND backend_type='client backend' AND client_addr IS NOT NULL") == "0",
@@ -526,6 +694,8 @@ class Release:
 
     def recover_freeze(self):
         """stop 已发生而摘要失败时，只允许原 schema 下恢复确切旧实例。"""
+        if 'source_handoff' in self.m:
+            self.may_resume_source()
         need((self.root / "freeze.intent.json").exists() and not (self.root / "freeze.json").exists(), "not an incomplete freeze")
         need(not any((self.root / name).exists() for name in
                      ("migrate.intent.json", "migrate.json", "exposure-started.json", "cutover.intent.json")),
@@ -804,9 +974,14 @@ class Release:
         need(self.sql("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock'") == "0", "live lock waiter")
         for path in ("/api/health", "/api/ready"):
             self.http("https://shop.ybwznt.com" + path)
-        return {"public": result, "static_assets_verified": len(paths), "schema": self.schema(), "forward_only": True}
+        shop = self.peer().handoff_health() if 'source_handoff' in self.m else None
+        if shop:
+            need(shop['seal_sha256'] == pre['shop_handoff']['seal_sha256'], 'shop handoff identity changed')
+        return {"public": result, "static_assets_verified": len(paths), "schema": self.schema(), "forward_only": True, 'shop_observation': shop}
 
     def rollback(self):
+        if 'source_handoff' in self.m:
+            self.may_resume_source()
         self.frozen()
         names = self.run(["docker", "ps", "-a", "--format", "{{.Names}}"]).decode().splitlines()
         for name in (self.app, self.front):
@@ -830,12 +1005,14 @@ class Release:
         return {"schema": old, "restored_old_app": self.m["old_app_id"], "no_database_restore": True}
 
     def execute(self, phase):
-        need(phase in {"preflight", "images", "freeze", "recover-freeze", "backup-old", "migrate", "backup-new", "bluegreen", "cutover", "verify", "rollback"}, "unknown phase")
+        need(phase in {"hold-source", "recover-hold-source", "preflight", "images", "freeze", "recover-freeze", "backup-old", "migrate", "backup-new", "bluegreen", "cutover", "verify", "rollback"}, "unknown phase")
         need(artifact(Path(__file__))["sha256"] == self.m["controller_sha256"], "controller changed after review")
+        if 'source_handoff' in self.m:
+            need(artifact(Path(__file__).with_name('catalog_source_version_gate.py'))['sha256'] == self.m['source_handoff']['gate_sha256'], 'source version gate changed after review')
         # 持久 owner 防止两个发布在不同阶段之间交错；不自动清除或接管别人的owner。
         owner = BASE / ".presales3-active-owner.json"
         if not owner.exists():
-            need(phase == "preflight", "missing release ownership")
+            need(phase == "hold-source", "missing release ownership")
             save(owner, {"release": self.sha, "manifest_sha256": digest(self.manifest_bytes)})
         need(not owner.is_symlink(), "owner symlink refused")
         need(json.loads(owner.read_text()) == {"release": self.sha, "manifest_sha256": digest(self.manifest_bytes)}, "another release owns production")
@@ -843,7 +1020,9 @@ class Release:
         need(not target.exists(), "phase already completed; inspect receipt before retry")
         # intent 也是只创建一次：网络结果不明时必须先核实，不能盲目重跑。
         if phase != "verify":
-            save(self.root / (phase + ".intent.json"), {"release": self.sha, "time": stamp()})
+            plan = self.hold_plan() if phase == 'hold-source' else {}
+            save(self.root / (phase + ".intent.json"), {"release": self.sha, "time": stamp(), 'phase': phase,
+                 'manifest_sha256': digest(self.manifest_bytes), **plan})
         result = self.backup(phase.split("-")[1]) if phase.startswith("backup-") else getattr(self, phase.replace("-", "_"))()
         save(target, {"release": self.sha, "manifest_sha256": digest(self.manifest_bytes), "phase": phase,
                       "status": "PASS", "time": dt.datetime.now(dt.timezone.utc).isoformat(), **result})
@@ -854,6 +1033,8 @@ def main():
     os.umask(0o077)
     need(len(sys.argv) == 3 and os.geteuid() == 0, "usage: presales3_ops.py MANIFEST PHASE (root)")
     release = Release(sys.argv[1])
+    joint = os.open(BASE / '.catalog-source-handoff.lock', os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    fcntl.flock(joint, fcntl.LOCK_EX | fcntl.LOCK_NB)
     lock = os.open(BASE / ".itsp-production-deploy.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:

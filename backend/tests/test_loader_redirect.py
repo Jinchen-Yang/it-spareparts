@@ -1,9 +1,9 @@
 """loader 商品身份重定向：别名重定向 / 合并墓碑不复活 / 库存路径（整改 P3 核心回归）。"""
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from app.etl import loader
 from app.models.dimensions import DimPart, PartAlias
@@ -106,28 +106,25 @@ def test_reimport_conflict_bumps_active_updated_at(db, batch):
     _import_purchase(db, batch, [f.purchase_line("O1", "L1", "PN-BUMP")])
     part = db.scalar(select(DimPart).where(DimPart.pn_std == "PN-BUMP"))
     db.commit()
-    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    before = part.updated_at
 
     # enrich 冲突：description 之前为空，本次填充。
-    db.execute(update(DimPart).where(DimPart.id == part.id).values(updated_at=yesterday))
-    db.commit()
     _import_purchase(db, batch, [f.purchase_line("O2", "L2", "PN-BUMP", description="补描述")])
     db.refresh(part)
     assert part.description == "补描述"
-    assert part.updated_at > yesterday
+    assert part.updated_at > before
 
     # 业务列不变的纯冲突更新：CASE ... IS DISTINCT FROM 判定无变化，updated_at 保持。
-    db.execute(update(DimPart).where(DimPart.id == part.id).values(updated_at=yesterday))
-    db.commit()
+    before = part.updated_at
     _import_purchase(db, batch, [f.purchase_line("O3", "L3", "PN-BUMP", description=None)])
     db.refresh(part)
-    assert part.updated_at == yesterday
+    assert part.updated_at == before
 
     # 品牌由空变 HPE：业务列变化，推进。
     _import_purchase(db, batch, [f.purchase_line("O4", "L4", "PN-BUMP", brand="HPE")])
     db.refresh(part)
     assert part.brand == "HPE"
-    assert part.updated_at > yesterday
+    assert part.updated_at > before
 
 
 def test_upsert_conflict_on_tombstone_keeps_updated_at(db, batch):

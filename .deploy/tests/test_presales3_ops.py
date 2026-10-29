@@ -27,14 +27,16 @@ SPEC.loader.exec_module(ops)
 
 def manifest():
     return {"release": "a" * 40, "old_revision": "b" * 40, "old_schema": "oldhead",
-            "target_head": "newhead", "old_app": "it-spareparts-app-r142",
+            "target_head": ops.SOURCE_HEAD, "old_app": "it-spareparts-app-r142",
             "old_front": "it-spareparts-frontend-r142", "old_app_id": "c" * 64,
             "old_front_id": "d" * 64, "old_app_image": "sha256:" + "e" * 64,
             "old_front_image": "sha256:" + "f" * 64, "app_image": "sha256:" + "1" * 64,
             "frontend_image": "sha256:" + "2" * 64, "port": 18299,
             "caddyfile": "/opt/it-spareparts/Caddyfile", "subnet": "172.30.249.0/24",
             "source_sha256": "3" * 64, "smoke_sha256": "4" * 64, "controller_sha256": "5" * 64,
-            "additional_writers": [], "nginx_sha256": "6" * 64, "nginx_upstream_count": 3}
+            "additional_writers": [], "nginx_sha256": "6" * 64, "nginx_upstream_count": 3,
+            "source_handoff": {"release": "7" * 40, "manifest_sha256": "8" * 64,
+                               "controller_sha256": "9" * 64, "gate_sha256": "0" * 64}}
 
 
 def config():
@@ -59,6 +61,9 @@ class OpsTests(unittest.TestCase):
         self.release = ops.Release.__new__(ops.Release)
         self.release.root = self.root
         self.release.m = manifest()
+        # Existing unit cases exercise individual legacy primitives; constructor
+        # validation always requires the D49 protocol in a real release.
+        self.release.m.pop('source_handoff')
         self.release.sha = "a" * 40
         self.release.manifest_bytes = json.dumps(manifest()).encode()
         self.release.prefix = "itsp-presales3-test"
@@ -75,7 +80,8 @@ class OpsTests(unittest.TestCase):
         self.assertEqual(ops.validate_manifest(valid, root), valid)
         for field, value in (("old_revision", ""), ("old_schema", ""), ("old_app", "other-app"),
                              ("target_head", "head;rm"), ("smoke_sha256", ""), ("port", True),
-                             ("subnet", "8.8.8.0/24"), ("old_front_id", "short")):
+                             ("subnet", "8.8.8.0/24"), ("old_front_id", "short"),
+                             ('target_head', 'f1a3c5e7b9d2'), ('source_handoff', None)):
             with self.subTest(field=field), self.assertRaises((RuntimeError, ValueError)):
                 ops.validate_manifest({**valid, field: value}, root)
 
@@ -215,6 +221,7 @@ class OpsTests(unittest.TestCase):
     def test_import_allowlist_manifest_rejects_unknown_ids_or_unbound_fingerprints(self):
         self.import_fixture()
         valid = self.release.m
+        valid['source_handoff'] = manifest()['source_handoff']
         root = ops.BASE / ("presales3-" + valid["release"])
         self.assertEqual(ops.validate_manifest(valid, root), valid)
         for change in (lambda x: x.update(review_sha256="pending"), lambda x: x["batches"][0].update(id=999),
@@ -401,7 +408,7 @@ class OpsTests(unittest.TestCase):
         release.marker = Mock(side_effect=lambda n: pre if n == "preflight" else {"app": ops.fingerprint(new), "frontend": ops.fingerprint(front)})
         release.frozen = Mock()
         release.inspect = Mock(side_effect=lambda n: new if n == "newapp" else front)
-        release.schema = Mock(return_value="newhead")
+        release.schema = Mock(return_value=ops.SOURCE_HEAD)
         release.smoke = Mock()
         release.cas = Mock()
         release.caddy_destination = Mock(return_value="/etc/caddy/Caddyfile")

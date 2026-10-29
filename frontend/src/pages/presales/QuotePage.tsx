@@ -12,6 +12,7 @@ import CreatePartModal from "../../components/parts/CreatePartModal";
 import { readPermissionMap } from "../../nav";
 import { formatBusinessDateTime } from "../../utils/date";
 import { moneyExact } from "../../utils/format";
+import { parseApiError } from "../../utils/apiError";
 import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
 import { activeOfferGroups, flattenOffers, taxLabel, usePresalesError } from "./shared";
 import { basisLabel, lineAnswer, ownedOfferForEdit, priceText } from "./answers";
@@ -169,6 +170,7 @@ export default function QuotePage() {
   const [loadError, setLoadError] = useState(false);
   const [refreshRequired, setRefreshRequired] = useState(false);
   const [library, setLibrary] = useState<Record<number, Offer[]>>({});
+  const [libraryError, setLibraryError] = useState(false);
   const [filter, setFilter] = useState<Filter>("pending");
   const [query, setQuery] = useState("");
   const [values, setValues] = useState<Record<string, RowValue>>({});
@@ -220,19 +222,32 @@ export default function QuotePage() {
   const partKey = [...new Set(sources.flatMap((source) => (source.inquiry.lines ?? []).flatMap((line) => line.part_id ? [line.part_id] : [])))].sort((a, b) => a - b).join(",");
   useEffect(() => {
     let cancelled = false;
-    if (!partKey) { setLibrary({}); return; }
+    setLibrary({}); setLibraryError(false);
+    if (!partKey) return;
     const partIds = partKey.split(",").map(Number);
     const loadLibrary = async () => {
       const merged: Record<number, Offer[]> = {};
+      let failed = false;
       // quote-library 与后端 _part_ids 契约一致：单次最多 200 个型号。
       for (let offset = 0; offset < partIds.length; offset += 200) {
-        const data = await presales.library(partIds.slice(offset, offset + 200));
-        if (cancelled) return;
-        Object.assign(merged, data);
+        try {
+          const data = await presales.library(partIds.slice(offset, offset + 200));
+          if (cancelled) return;
+          Object.assign(merged, data);
+        } catch (error) {
+          if (cancelled) return;
+          failed = true;
+          const status = parseApiError(error).status;
+          if (status === 401 || status === 403) {
+            setLibrary({}); setLibraryError(true);
+            return;
+          }
+        }
       }
       setLibrary(merged);
+      setLibraryError(failed);
     };
-    void loadLibrary().catch(() => { if (!cancelled) setLibrary({}); });
+    void loadLibrary();
     return () => { cancelled = true; };
   }, [partKey, sources]);
 
@@ -429,6 +444,7 @@ export default function QuotePage() {
       {direct && <DirectQuote onClose={() => setDirect(false)} onDone={(text) => { setDirect(false); setToast(text); void load(); }} />}
       {toast && <Alert type="success" showIcon closable message={toast} onClose={() => setToast("")} />}
       {loadError && <Alert type="error" message="报价行加载失败" action={<Button onClick={() => void load()}>重试</Button>} />}
+      {libraryError && <Alert type="warning" message="部分型号的已有报价未能加载，请刷新重试。" action={<Button disabled={loading} onClick={() => void load()}>刷新已有报价</Button>} />}
       {refreshRequired && !loadError && <Alert type="warning" message="保存已成功，状态刷新尚未完成。填写内容已保留，请先刷新后再操作。" action={<Button onClick={() => void load()}>刷新最新状态</Button>} />}
       {Object.keys(skips).length > 0 && <Typography.Text type="secondary">标为不报的行会在整单填完时一起回复给销售；离开本页前请填完该单其余行。</Typography.Text>}
       <Spin spinning={loading}>

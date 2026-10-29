@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 import traceback
+from types import ModuleType
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -26,6 +27,7 @@ DB = 'it-shop-next-db'
 CADDY = 'it-spareparts-caddy-1'
 OLD_HEAD = '0026_pn_master_follow_merges'
 NEW_HEAD = '0027_catalog_delivery_receipt'
+SOURCE_BASE = Path('/data/spareparts/releases')
 
 
 def need(test, message):
@@ -47,6 +49,17 @@ def artifact(path):
         for chunk in iter(lambda: source.read(1024 * 1024), b''):
             digest.update(chunk)
     return {'path': str(path), 'bytes': Path(path).stat().st_size, 'sha256': digest.hexdigest()}
+
+
+def reviewed_module(path, expected):
+    path = Path(path)
+    need(not path.is_symlink(), 'reviewed module symlink refused')
+    raw = path.read_bytes()
+    need(sha(raw) == expected, 'reviewed module checksum differs')
+    module = ModuleType(path.stem)
+    module.__file__ = str(path)
+    exec(compile(raw, str(path), 'exec'), module.__dict__)
+    return module
 
 
 def save(path, value):
@@ -115,6 +128,17 @@ class Release:
             need(re.fullmatch('sha256:[0-9a-f]{64}', self.m.get(key, '')), 'candidate image invalid')
         for key in ('source_sha256', 'controller_sha256', 'catalog_token_sha256'):
             need(re.fullmatch('[0-9a-f]{64}', self.m.get(key, '')), 'reviewed hash required: ' + key)
+        hold = self.m.get('source_hold')
+        need(isinstance(hold, dict) and set(hold) == {'release', 'controller_sha256', 'gate_sha256', 'writers'}, 'D49 source_hold required')
+        need(re.fullmatch('[0-9a-f]{40}', hold.get('release', '')) and all(re.fullmatch('[0-9a-f]{64}', hold.get(k, ''))
+             for k in ('controller_sha256', 'gate_sha256')), 'source hold identity invalid')
+        need(isinstance(hold['writers'], list) and len(hold['writers']) == 4, 'exactly four source writers required')
+        for writer in hold['writers']:
+            need(set(writer) == {'name', 'id', 'image', 'started_at'} and re.fullmatch('[0-9a-f]{64}', writer['id'])
+                 and re.fullmatch('sha256:[0-9a-f]{64}', writer['image'])
+                 and re.fullmatch('(it-spareparts-app|itsp-presales3)-[a-z0-9-]{1,100}', writer['name']), 'source writer identity invalid')
+            need(dt.datetime.fromisoformat(writer['started_at'].replace('Z', '+00:00')).tzinfo is not None, 'source StartedAt timezone missing')
+        need(len({w['id'] for w in hold['writers']}) == len({w['name'] for w in hold['writers']}) == 4, 'duplicate source writer')
         self.prefix = 'shop-pn-' + self.release[:12]
 
     def run(self, argv, *, input=None, stdin=None, stdout=None, timeout=180):
@@ -138,7 +162,7 @@ class Release:
     def sql(self, query, container=DB):
         original = self.inspect(DB)
         values = env_map(original)
-        return self.run(['docker', 'exec', '-e', 'PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=30000',
+        return self.run(['docker', 'exec', '-e', 'PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=30000 -c lock_timeout=3000 -c timezone=UTC',
                          container, 'psql', '-U', values['POSTGRES_USER'], '-d', values['POSTGRES_DB'], '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-c', query]).decode().strip()
 
     def schema(self, container=DB):
@@ -167,13 +191,61 @@ class Release:
         need(self.entry() == before['entry'], 'Caddy drift; another deployment may be active')
 
     def frozen(self):
-        self.mark('freeze')
+        receipt = self.mark('freeze')
+        if 'source_hold' in self.m:
+            need(receipt.get('version_gate', {}).get('status') == 'PASS', 'completed source version gate required')
+            source = self.source_release()
+            held = source.assert_hold()
+            need(receipt['source_hold'] == held and receipt['source_manifest_sha256'] == held['manifest_sha256'], 'frozen source binding differs')
         self.protected()
         for name, expected in self.m['old'].items():
             row = self.inspect(expected['id'])
             need(not row['State']['Running'] and row['Image'] == expected['image'], 'frozen writer changed: ' + name)
+            if 'source_hold' in self.m:
+                need(fingerprint(row) == receipt['shop_writers'][name], 'completed freeze fingerprint changed: ' + name)
+
+    def source_release(self):
+        expected = self.m['source_hold']
+        root = SOURCE_BASE / ('presales3-' + expected['release'])
+        module = reviewed_module(root / 'presales3_ops.py', expected['controller_sha256'])
+        source = module.Release(root / 'manifest.json')
+        need(source.m['source_handoff'] == {'release': self.release, 'manifest_sha256': sha(self.raw),
+             'controller_sha256': self.m['controller_sha256'], 'gate_sha256': expected['gate_sha256']}, 'reciprocal handoff binding differs')
+        need([{k: w[k] for k in ('name', 'id', 'image')} for w in expected['writers']] == source.writers(), 'source writer manifest differs')
+        return source
+
+    def both_frozen(self):
+        source = self.source_release()
+        held = source.assert_hold()
+        self.protected()
+        need(self.schema() == OLD_HEAD, 'version gate old shop schema differs')
+        before = self.mark('preflight')['containers']
+        frozen = {}
+        for name, expected in self.m['old'].items():
+            row = self.inspect(expected['id'])
+            need(row['Name'] == '/' + name and row['Id'] == expected['id'] and row['Image'] == expected['image']
+                 and fingerprint(row) == {**before[expected['id']], 'running': False}, 'shop freeze identity drift')
+            frozen[name] = fingerprint(row)
+        need(self.sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND client_addr IS NOT NULL") == '0', 'shop TCP clients remain')
+        return {'source_hold': held, 'source_writers': source.hold_intent()['writers'], 'shop_writers': frozen,
+                'source_manifest_sha256': held['manifest_sha256'], 'shop_manifest_sha256': sha(self.raw)}
+
+    def version_gate(self):
+        source = self.source_release()
+        gate = reviewed_module(Path(__file__).with_name('catalog_source_version_gate.py'), self.m['source_hold']['gate_sha256'])
+        def read(query, controller):
+            need(query.lstrip().startswith('SELECT '), 'version gate must be SELECT only')
+            # Both controllers force read-only sessions; verify their effective setting.
+            settings = json.loads(controller.sql("SELECT json_build_object('read_only', current_setting('transaction_read_only'), 'statement_timeout', current_setting('statement_timeout'), 'lock_timeout', current_setting('lock_timeout'))"))
+            need(settings == {'read_only': 'on', 'statement_timeout': '30s', 'lock_timeout': '3s'}, 'read-only SQL settings not active')
+            return [json.loads(line) for line in controller.sql(query).splitlines() if line]
+        frozen = self.both_frozen()
+        result = gate.collect(lambda q: read(q, source), lambda q: read(q, self), assert_frozen=self.both_frozen)
+        need(self.both_frozen() == frozen, 'freeze identity changed during version gate')
+        return {**frozen, 'version_gate': result}
 
     def preflight(self):
+        held = self.source_release().assert_hold()
         need(artifact(Path(__file__))['sha256'] == self.m['controller_sha256'], 'controller changed')
         need(artifact(self.root / 'source.tar.gz')['sha256'] == self.m['source_sha256'], 'source archive changed')
         for key in ('app_image', 'frontend_image'):
@@ -205,10 +277,11 @@ class Release:
         save(self.root / 'all-inspect.private.json', rows)
         save(self.root / 'Caddyfile.baseline', Path('/opt/it-spareparts/Caddyfile').read_bytes())
         return {'containers': {cid: fingerprint(row) for cid, row in all_rows.items()}, 'entry': self.entry(),
-                'schema': OLD_HEAD, 'db_image': db['Image'], 'counts': self.counts()}
+                'schema': OLD_HEAD, 'db_image': db['Image'], 'counts': self.counts(), 'source_hold': held}
 
     def freeze(self):
         self.protected()
+        need(self.source_release().assert_hold() == self.mark('preflight')['source_hold'], 'source hold changed since shop preflight')
         need(self.schema() == OLD_HEAD, 'freeze schema changed')
         for name in (APPS[3], APPS[0], APPS[2], APPS[1], BRIDGE):
             expected = self.m['old'][name]
@@ -218,7 +291,8 @@ class Release:
             save(self.root / ('stopped-' + name + '.json'), {'id': expected['id']})
         self.protected()
         need(self.sql("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND client_addr IS NOT NULL") == '0', 'unidentified database clients remain')
-        return {'schema': self.schema(), 'counts': self.counts()}
+        gate = self.version_gate()
+        return {'schema': self.schema(), 'counts': self.counts(), **gate}
 
     def restore(self, dump, head, counts, suffix):
         name = self.prefix + '-restore-' + suffix
@@ -387,6 +461,41 @@ class Release:
         checks['catalog_authenticated_validation']=self.http('/api/integrations/catalog/parts/sync',(422,),method='POST',data=b'{}',authenticated=True)
         return {'schema':NEW_HEAD,'checks':checks,'forward_only':True}
 
+    def seal_handoff(self):
+        # Seal only after a completed verify. Recheck the ORIGINAL full protected
+        # set one last time; ITSP then takes a new complete baseline.
+        receipts = sorted(self.root.glob('verify-*.json'))
+        need(receipts, 'completed shop verify required before handoff')
+        verified = json.loads(receipts[-1].read_bytes())
+        need(verified.get('phase') == 'verify' and verified.get('status') == 'PASS'
+             and verified.get('manifest_sha256') == sha(self.raw), 'shop verify receipt differs')
+        result = self.verify()
+        held = self.source_release().assert_hold()
+        freeze = self.mark('freeze')
+        need(freeze.get('version_gate', {}).get('status') == 'PASS' and freeze['source_hold'] == held, 'final frozen version gate missing or mismatched')
+        self.protected()
+        active = self.mark('activate')
+        return {**result, 'protected_final': True, 'source_hold': held,
+                'freeze_sha256': artifact(self.root / 'freeze.json')['sha256'],
+                'verify_sha256': artifact(receipts[-1])['sha256'], 'entry': self.entry(),
+                'started': active['started'], 'bridge': active['bridge']}
+
+    def handoff_health(self):
+        """Observe after ITSP has legitimately changed Caddy; never reuse old Caddy CAS."""
+        sealed = self.mark('seal-handoff')
+        need(sealed.get('protected_final') is True and self.schema() == NEW_HEAD, 'shop handoff/schema differs')
+        freeze = self.mark('freeze')
+        need(sealed['freeze_sha256'] == artifact(self.root / 'freeze.json')['sha256']
+             and freeze.get('version_gate', {}).get('status') == 'PASS'
+             and sealed['source_hold'] == freeze['source_hold'], 'sealed version gate binding differs')
+        for expected in (*sealed['started'].values(), sealed['bridge']):
+            need(expected['running'] and not expected['oom']
+                 and fingerprint(self.inspect(expected['id'])) == expected, 'sealed shop runtime drift')
+        checks = {path: self.http(path) for path in ('/api/health', '/api/ready', '/healthz')}
+        checks['catalog_auth'] = self.http('/api/integrations/catalog/parts/sync', (401,), method='POST', data=b'{}')
+        checks['catalog_authenticated_validation'] = self.http('/api/integrations/catalog/parts/sync', (422,), method='POST', data=b'{}', authenticated=True)
+        return {'seal_sha256': artifact(self.root / 'seal-handoff.json')['sha256'], 'checks': checks}
+
     def recover_freeze(self):
         # 只处理尚未迁移/创建/暴露的部分停服。不会恢复 dump 或删除 receipt。
         self.mark('preflight')
@@ -434,8 +543,11 @@ class Release:
             time.sleep(1)
 
     def execute(self,phase):
-        need(phase in {'preflight','freeze','backup-old','migrate','backup-new','create','activate','verify','recover-freeze'},'unknown phase')
+        need(phase in {'preflight','freeze','backup-old','migrate','backup-new','create','activate','verify','recover-freeze','seal-handoff'},'unknown phase')
         need(artifact(Path(__file__))['sha256']==self.m['controller_sha256'],'controller changed after review')
+        if 'source_hold' in self.m:
+            need(artifact(Path(__file__).with_name('catalog_source_version_gate.py'))['sha256'] == self.m['source_hold']['gate_sha256'], 'source version gate changed after review')
+        need(not (self.root / 'seal-handoff.json').exists(), 'shop handoff sealed; ITSP now owns protected baseline')
         owner=BASE/'.shop-pn-active-owner.json'
         if not owner.exists():
             need(phase=='preflight','missing release owner')
@@ -444,7 +556,7 @@ class Release:
         receipt=self.root/((phase+'-'+now() if phase=='verify' else phase)+'.json')
         if phase!='verify':
             need(not receipt.exists(),'phase already completed')
-            save(self.root/(phase+'.intent.json'),{'at':now(),'phase':phase})
+            save(self.root/(phase+'.intent.json'),{'at':now(),'phase':phase,'manifest_sha256':sha(self.raw)})
         result=self.backup(phase.split('-')[1]) if phase.startswith('backup-') else getattr(self,phase.replace('-','_'))()
         save(receipt,{'phase':phase,'status':'PASS','manifest_sha256':sha(self.raw),'at':now(),**result})
         print(json.dumps({'phase':phase,'status':'PASS','receipt':str(receipt),'sha256':artifact(receipt)['sha256']}))
@@ -454,6 +566,8 @@ def main():
     os.umask(0o077)
     need(len(sys.argv)==3 and os.geteuid()==0,'usage: shop_pn_ops.py MANIFEST PHASE (root)')
     release=Release(sys.argv[1])
+    joint=os.open(SOURCE_BASE/'.catalog-source-handoff.lock',os.O_WRONLY|os.O_CREAT|os.O_NOFOLLOW,0o600)
+    fcntl.flock(joint,fcntl.LOCK_EX|fcntl.LOCK_NB)
     lock=os.open(BASE/'.shop-production-deploy.lock',os.O_WRONLY|os.O_CREAT|os.O_NOFOLLOW,0o600)
     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     try:

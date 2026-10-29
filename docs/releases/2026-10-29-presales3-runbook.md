@@ -1,6 +1,6 @@
 # 2026-10-29 售前与刷新性能发布 Runbook
 
-决策: D-0048
+决策: D-0048、D-0049
 
 本轮由杨金臣明确授权当前 Codex 主会话完成修复、保守细节裁定、正常合并与生产发布。此文是操作门禁，实际执行结果另记回执；未填入精确提交与证据前不代表可以切流。
 
@@ -14,7 +14,7 @@
 
 ## 放行条件
 
-本轮先正常合并性能 PR #494，再将售前 PR #492 同步到 main；尚未部署的 e9 迁移父头改为 c6，形成唯一链 `d6e8f0a2b4c6 → c6e8a1b3d5f7 → e9b3d5f7a1c4 → f1a3c5e7b9d2`。不先发布独立售前版本。组合预验 `291cd01c` 在 jinchen-dev 完成全售前与目录投递/解析 564 项通过、2 项可选 LibreOffice 跳过，另有生产 d6 往返与已有独立报价/已提交 outbox 拒降完整性 2 项通过，源码前后摘要一致。后续审查另收口报价库超过 200 个 PN 的分批读取、旧报价更新保留未明确修改的税价标记，以及已完成停写阶段禁止误恢复的边界；这些增量须保留独立复审和专项验证证据。最终集成提交必须核对与预验树的全部差异，并完成其自身完整 CI；预验或早期运行期间收到文件同步的诊断性全量均不能替代最终候选门禁。
+本轮先正常合并性能 PR #494，再将售前 PR #492 同步到 main；尚未部署的 e9 迁移父头改为 c6，形成唯一链 `d6e8f0a2b4c6 → c6e8a1b3d5f7 → e9b3d5f7a1c4 → f1a3c5e7b9d2 → a3c5e7f9b2d4`。不先发布独立售前版本。组合预验 `291cd01c` 在 jinchen-dev 完成全售前与目录投递/解析 564 项通过、2 项可选 LibreOffice 跳过，另有生产 d6 往返与已有独立报价/已提交 outbox 拒降完整性 2 项通过，源码前后摘要一致。后续审查另收口报价库超过 200 个 PN 的分批读取、旧报价更新保留未明确修改的税价标记，以及已完成停写阶段禁止误恢复的边界；这些增量须保留独立复审和专项验证证据。最终集成提交必须核对与预验树的全部差异，并完成其自身完整 CI；预验或早期运行期间收到文件同步的诊断性全量均不能替代最终候选门禁。
 
 1. 最终 main 精确 SHA 的来源仅为本次授权范围；与现生产 diff 逐项核对。
 2. jinchen-dev 独立数据库完成售前真实触发路径、后端全量、前端 tsc/Vitest/build；空库升级、唯一 head、ORM 零漂移、降一级再升及拒绝破坏性降级均有证据。
@@ -23,6 +23,20 @@
 5. 候选控制脚本、源码归档和前后端镜像都绑定该 SHA；不把未提交工作区打成生产源。生产写入前创建并回读 `release-` 标签，必须精确指向已验证的发布提交；标签存在不能代替实际切流和运行回执。
 
 ## 操作顺序
+
+**D-0049 顺序门禁优先于下列单系统步骤。** 最终 head 为 `a3c5e7f9b2d4`，父为 `f1a3c5e7b9d2`，仅新增源版本技术触发器，不回填 PN。按 `ITSP hold-source → Shop preflight/freeze（双方 TCP0 后最终版本门禁）→ Shop backup-old/migrate/backup-new/create/activate/verify/seal-handoff → ITSP preflight/images/freeze/backup-old/migrate/backup-new/bluegreen/cutover/verify` 执行。两个最终 SHA 的正常合并、CI、release 标签和制品身份必须先完成；不能以旧候选预验替代。
+
+`hold-source` 是实际停源阶段，在商城 preflight 前执行。控制器先读取精确四源实例的 ID、image、StartedAt、全容器指纹、旧 schema、Caddy 字节/inode/active 与导入门禁，并把这些与两份最终 manifest hash、两候选 SHA 写入独占、fsync 的 intent，之后才能 stop 四个源 writer。全部停止、源 TCP0、完整保护及导入门禁复核后才写 PASS。旧 frontend、数据库、Caddy 与其他站点保持受保护；源 API 暂不可用属于此停写窗口。
+
+商城完成最后的原保护集合核验并写 `seal-handoff.json` 后，ITSP `preflight` 才可接受该同一 hold 所绑定的四个源进程已停止。它重查四个 ID/image/StartedAt、旧 schema、Caddy、导入门禁及 TCP0，然后采集**包括新商城所有实例的完整新 protected 基线**。后续 `freeze` 不再启动或再次停旧源，只复核门禁并采集冻结计数/行摘要。任何阶段不能泛化忽略跨系统漂移。ITSP 切流后使用这份完整新基线及商城只读健康、匿名 401/合法凭据空请求 422 检查；不再调用商城旧 Caddy 基线的 `verify`。
+
+### D-0049 manifest 与文件契约
+
+先固定商城 `manifest.json`，包含 `source_hold`：`release`（最终 ITSP 40 位 SHA）、`controller_sha256`（ITSP 控制器实际字节）、`gate_sha256`（共享门禁实际字节）、`writers`（有序四项 `{name,id,image,started_at}`，顺序与 ITSP `old_app` 再接 `additional_writers` 一致）。不得填示例 ID；StartedAt 必须现场回读。
+
+再固定 ITSP manifest 的 `source_handoff`，且只含 `{release,manifest_sha256,controller_sha256,gate_sha256}`：分别为最终商城 SHA、刚固定商城 manifest 实际字节 hash、商城控制器实际字节 hash、相同门禁 hash。两份 manifest 不互相静态包含 hash；ITSP `hold-source` 回执再绑定实际 ITSP manifest hash。两个 catalog token hash 必须一致。ITSP `target_head` 必须为 `a3c5e7f9b2d4`。
+
+ITSP 固定目录中放 `presales3_ops.py` 和 `catalog_source_version_gate.py`；商城固定目录中放 `shop_pn_ops.py` 和同字节 `catalog_source_version_gate.py`。另按原契约放源码归档、只读 smoke、导入审查、凭据与 manifest。互载控制器和 helper 均先校验实际字节 hash，再 compile 已验字节，不执行未绑定 import、不写 pyc。两入口均先持有 `/data/spareparts/releases/.catalog-source-handoff.lock`，再取原单系统锁；锁只保护本次控制阶段，不替代实际状态复核。
 
 1. 在可信控制机从精确提交生成源码归档和 SHA256；传到本次唯一发布目录（700），文件600。构建前后端镜像，OCI revision 均等于发布 SHA。构建允许使用现有 Dockerfile 的包索引参数；依赖版本及哈希锁不变。
 2. 冻结真实 Caddy 文件字节、inode、active JSON、上游；记录旧应用/前端容器 ID、镜像、网络及完整运行配置（仅生产私有证据）。记录其他站点/DB/商城保护快照，选择空闲 loopback 端口和不冲突的专用网络。
@@ -51,7 +65,7 @@ job 137 仅作为未完成的孤儿账本保留：其完整行及唯一关联 sa
 
 ## 性能候选的目录同步配置
 
-本轮在 #494 最终性能代码正常集成后，只发布一次 #492 售前与性能的最终组合候选，迁移链为 `d6e8f0a2b4c6 → c6e8a1b3d5f7 → e9b3d5f7a1c4 → f1a3c5e7b9d2`；先验证商城 receiver，再显式启用 ITSP `catalog_sync`。控制器仍保留缺省路径：manifest 不含该键时，不读目录 token 文件、不执行目录配置探针，app/frontend 原 Env 逐项保留。只有包含 #494 最终已审性能代码的候选才能增加：
+本轮在 #494 最终性能代码正常集成后，只发布一次 #492 售前与性能的最终组合候选，迁移链为 `d6e8f0a2b4c6 → c6e8a1b3d5f7 → e9b3d5f7a1c4 → f1a3c5e7b9d2 → a3c5e7f9b2d4`；先验证商城 receiver，再显式启用 ITSP `catalog_sync`。本轮 D-0049 交接要求显式绑定相同的 catalog token hash；无配置时保留原 Env 的底层函数继续有单测，但不是本轮可用的发布旁路。只有包含 #494 与 D-0049 最终已审代码的候选才能配置：
 
 ```json
 "catalog_sync": {
@@ -65,7 +79,7 @@ job 137 仅作为未完成的孤儿账本保留：其完整行及唯一关联 sa
 
 显式启用时仅允许 app 的 `SHOP_CATALOG_SYNC_ENABLED=true`、固定地址的 `SHOP_CATALOG_SYNC_URL`、文件中读出的 `SHOP_CATALOG_SYNC_TOKEN` 三个键改变。其他 Env 条目的顺序与值、frontend Env、其余运行配置继续保持并逐字段核对。明文只进入生产私有的环境探针文件和容器创建 JSON。
 
-在停写之前，`preflight` 用精确候选镜像、`--network none`、只读根文件系统和受限资源，只导入 `app.config.Settings` 验证三个真实模型字段存在且接受实际候选值，不导入应用或数据库。探针只输出布尔值，旧售前镜像即使忽略未知环境变量也不能冒充已支持。clone 还要求已完成该探针的 preflight 回执，并再次读取/核验令牌文件哈希。
+在商城封存交接后的 ITSP `preflight`，用精确候选镜像、`--network none`、只读根文件系统和受限资源，只导入 `app.config.Settings` 验证三个真实模型字段存在且接受实际候选值，不导入应用或数据库。探针只输出布尔值，旧售前镜像即使忽略未知环境变量也不能冒充已支持。clone 还要求已完成该探针的 preflight 回执，并再次读取/核验令牌文件哈希。
 
 先按商城窄发布计划发布并验证接收端，再发布和启用 ITSP 生产者。上线后观察真实自然新增 PN 的 outbox 与接收回执；没有自然样本时明确记录等待样本，不为了验证而创建生产 PN、报价、库存流水或其他业务记录。合成投递时长不能当作生产效果。配置控制路径验证见 `jinchen-dev:/home/cloudlay/work/release-evidence-01a188b2/presales-catalog-ops-unit.log`（25 项合成测试通过，包含旧镜像拒绝、默认环境不变、三键范围、令牌权限/哈希/复用及原发布控制回归）。
 
@@ -73,12 +87,16 @@ job 137 仅作为未完成的孤儿账本保留：其完整行及唯一关联 sa
 
 迁移 `f1a3c5e7b9d2` 允许报价没有来源单据，并新增独立受众。已有独立报价时 downgrade 明确拒绝，不能删除报价、伪造 BJ 或恢复旧 dump 覆盖新业务数据。
 
-控制器 `.deploy/presales3_ops.py` 的每阶段由 manifest SHA256、控制器 SHA256、意图与完成回执绑定。停写过程中若计数/摘要检查失败而没有 `freeze.json`，只能走 `recover-freeze`：必须已有 freeze intent、尚无迁移/放行意图，且真实数据库仍是旧 head、Caddy 完整 CAS 不变、旧应用 ID/镜像一致；仅恢复被停止的原实例，不迁移也不还原数据库。该路径和正常完整冻结后的 rollback 分开，不盲目重试失败阶段。
+控制器 `.deploy/presales3_ops.py` 的每阶段由 manifest SHA256、控制器 SHA256、意图与完成回执绑定。D-0049 恢复仅走 `recover-hold-source`，且仅限**商城首次可变阶段 intent（最早 freeze）之前**：包括 hold 部分 stop 失败或 hold 已 PASS，但必须原 schema/Caddy/全保护指纹/四源 ID/image/StartedAt/导入门禁仍一致。恢复后逐实例 Running 与 Docker health、主站数据库健康及保护/导入门禁复核通过才写 PASS，不还原数据库。恢复 intent 一旦出现，该 hold 不能再被商城接受；不得删除任何 intent/receipt 伪造可重跑状态。
 
-- 对外放行之前：维持停写，确认没有任何候选业务写入，按已演练的链路降回冻结旧 head，再恢复旧 app/Caddy；核健康和原配置。具体降级目标随最终合并迁移链核定，不能盲目 `downgrade -1`。
+商城 freeze intent 已出现（即使失败、超时或结果不明）、商城任何后续可变阶段已可能发生，或 ITSP 迁移/暴露已可能发生，均禁止自动恢复旧源。ITSP `recover-freeze` 与 `rollback` 同受此限制；保留冻结并受控前滚。商城自身未完成 freeze 的受审窄恢复不授予恢复旧源的权限。
+
+- D-0049 商城可变边界之前：仅上述原身份恢复；边界之后即使 ITSP 尚未对外放行，也保持源冻结、受控前滚，不能恢复缺少单调约束的旧 writer。
 - 对外放行之后：默认只允许保留数据的前滚修复。没有证明旧镜像兼容全部新 schema/新记录前，不自动回切旧镜像；不得以数据库快照覆盖线上新写入。需要停写时只影响本系统，并保留调查证据。
 - SSH 结果不明时先重新读取实际状态和回执，不盲目重复备份、迁移、切流或清理。
 
 ## 已知保守选择
+
+D-0049 控制实现开发验证：`jinchen-dev:/home/cloudlay/work/d49-ops-01a188b2/tests-final.log`，89 项全部通过、无 skip，受管执行真实退出码0。包括既有15项商城阶段守卫、源/商城交接失败路径、真实PG15元数据只读SQL与两系统旧/新头恢复、实际Docker配置克隆，以及4个独占network-none进程真实部分stop失败/恢复。停源演练中的schema/Caddy/导入/TCP/HTTP为合成seam，未连接生产；SQL和恢复由独立真实PG15用例覆盖。日志SHA256 `6afd2ed5d2e53fbbf7fd04429d911a16c452b95baf096907c3c124534fb7514b`。这不代表生产门禁已执行或最终提交已通过CI；控制器最终字节仍须跨模型独立复审。
 
 精确显示名对应账号缺少独立测试身份标记，64条历史领取均已完成。本轮不依据显示名或 admin 角色撤权、不改派已完成单据。库存三库明确属于氚云。主数据“待补全”筛选及全系统账号标记能力不作为本次修复的依赖，不扩张本轮数据范围。
