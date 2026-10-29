@@ -52,8 +52,8 @@ const part = (id: number): PartSuggestion => ({ part_id: id, pn_std: `PN-${id}`,
   match_type: "exact_pn", match_reason: "PN 精确", matched_terms: [] });
 const quote = (patch: Partial<Offer> = {}): Offer => ({ id: 81, inquiry_id: 1, line_id: 11, part_id: 1,
   unit_price: "120.00", is_tax_inclusive: true, no_stock: false, qty_available: "3", stock_location: "上海",
-  lead_time: "现货", validity_days: 1, supplier_id: null, source_key: "", notes: null,
-  reporter: { id: 7, name: "采购甲" }, version: 1, revision_no: 0, status: "draft", valid_from: null, valid_until: null, ...patch });
+  lead_time: "现货", supplier_id: null, source_key: "", notes: null,
+  reporter: { id: 7, name: "采购甲" }, version: 1, revision_no: 0, status: "draft", valid_from: null, ...patch });
 const baseInquiry = (): Inquiry => ({ id: 1, kind: "sales_inquiry", inquiry_no: "XJ-1", status: "submitted",
   version: 4, revision: 1, created_by: 3, created_at: "2026-10-25T00:00:00Z", updated_at: "2026-10-25T00:00:00Z",
   line_count: 2, progress: { quoted_lines: 0, line_count: 2 }, notes: "客户要求",
@@ -80,7 +80,7 @@ beforeEach(() => {
   mocks.revisions.mockResolvedValue([]);
   mocks.replyInquiry.mockImplementation(async () => {
     currentInquiry = { ...currentInquiry, offers: currentInquiry.offers?.map((offer) => ({ ...offer, status: "published" as const,
-      version: offer.version + 1, valid_from: "2026-10-25T04:00:00Z", valid_until: "2026-10-25T15:59:59.999999Z" })),
+      version: offer.version + 1, valid_from: "2026-10-25T04:00:00Z" })),
       work_items: [{ ...currentInquiry.work_items![0], status: "done", version: 4 }] };
     return currentInquiry.offers;
   });
@@ -113,7 +113,7 @@ async function makeProactiveDraft() {
 describe("采购待办与询价处理", () => {
   it("报价通知进入只读询价详情并显示通知报价，不请求采购参考接口", async () => {
     currentInquiry = { ...baseInquiry(), kind: "proactive_offer", created_by: undefined,
-      offers: [quote({ status: "published", unit_price: "567.89", valid_from: "2026-10-25T00:00:00Z", valid_until: "2099-01-01T00:00:00Z" })] };
+      offers: [quote({ status: "published", unit_price: "567.89", valid_from: "2026-10-25T00:00:00Z" })] };
     render(<MemoryRouter initialEntries={["/presales/tasks"]}><Routes>
       <Route path="/presales/tasks" element={<TasksPage />} />
       <Route path="/presales/inquiries/:id" element={<InquiryDetailPage />} />
@@ -225,21 +225,20 @@ describe("采购待办与询价处理", () => {
     }));
   });
 
-  it("逐行保存新报价或填写不报原因，1天与3天按上海自然日显示，全部完成才回复", async () => {
+  it("逐行保存新报价或填写不报原因，不再填写有效期，全部完成才回复", async () => {
     processPage();
     await openLine("PN-1");
     await openLine("PN-1");
     await screen.findByLabelText("PN-1单价");
-    expect(screen.getByLabelText("统一有效期")).toHaveValue("1");
-    expect(within(screen.getByRole("dialog")).getByText("将于 10月25日 23:59 失效（上海时间）")).toBeInTheDocument();
+    expect(screen.queryByLabelText("统一有效期")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("PN-1有效天数")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("dialog")).getByText("报价不设有效期，一直有效，直到你更新或撤回。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "回复给销售" })).toBeDisabled();
     fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "120" } });
-    fireEvent.change(screen.getByLabelText("PN-1有效天数"), { target: { value: "3" } });
-    expect(screen.getByText("将于 10月27日 23:59 失效（上海时间）")).toBeInTheDocument();
     expect(screen.getAllByLabelText("供应商可见性：私密")).toHaveLength(1);
     fireEvent.click(screen.getAllByRole("button", { name: "保存该行报价" })[0]);
     await waitFor(() => expect(mocks.saveOffer).toHaveBeenCalledWith(1, 11, expect.objectContaining({
-      unit_price: 120, validity_days: 3, expected_version: 4, work_item_id: 71,
+      unit_price: 120, expected_version: 4, work_item_id: 71,
       supplier_audience: { mode: "private", user_ids: [], group_ids: [] },
     })));
     await waitFor(() => expect(screen.getByText("已保存草稿")).toBeInTheDocument());
@@ -263,7 +262,7 @@ describe("采购待办与询价处理", () => {
 
   it("已回复报价更新走报价版本，不覆盖未调整的可见性，撤销必填原因", async () => {
     currentInquiry.lines = [currentInquiry.lines![0]];
-    currentInquiry.offers = [quote({ status: "published", version: 6, valid_from: "2026-10-25T00:00:00Z", valid_until: "2026-10-25T15:59:59Z" })];
+    currentInquiry.offers = [quote({ status: "published", version: 6, valid_from: "2026-10-25T00:00:00Z" })];
     currentInquiry.work_items![0].status = "done";
     mocks.updateOffer.mockImplementation(async () => {
       const updated = quote({ ...currentInquiry.offers![0], unit_price: 150, version: 7 });
@@ -368,7 +367,7 @@ describe("采购待办与询价处理", () => {
 
   it("销售已引用的行仅展示钉住报价，不提供再次报价或撤销入口", async () => {
     const published = quote({ status: "published", revision_no: 1,
-      valid_from: "2026-10-25T00:00:00Z", valid_until: "2026-10-25T15:59:59Z" });
+      valid_from: "2026-10-25T00:00:00Z" });
     currentInquiry.lines![0] = { ...currentInquiry.lines![0], ref_offer_id: published.id,
       ref_offer_revision_no: 1, ref_offer: published };
     currentInquiry.offers = [published];
@@ -384,7 +383,7 @@ describe("采购待办与询价处理", () => {
 
   it("主动报价无需采购待办，可更新重复报价指向的原有效报价", async () => {
     const original = quote({ id: 99, line_id: 90, inquiry_id: 9, status: "published", version: 8,
-      valid_from: "2026-10-25T00:00:00Z", valid_until: "2026-10-25T15:59:59Z" });
+      valid_from: "2026-10-25T00:00:00Z" });
     currentInquiry = { ...currentInquiry, kind: "proactive_offer", created_by: 7,
       lines: [{ ...currentInquiry.lines![0], ref_offer_id: 99 }], offers: [], work_items: [] };
     mocks.library.mockResolvedValue({ 1: [original] });
@@ -399,7 +398,7 @@ describe("采购待办与询价处理", () => {
 
   it("重复主动报价引用过期后，先通过历史定位原单，再用当前版本续期", async () => {
     const expired = quote({ id: 99, line_id: 90, inquiry_id: 9, status: "published", version: 12,
-      valid_from: "2026-10-20T00:00:00Z", valid_until: "2026-10-20T15:59:59Z" });
+      valid_from: "2026-10-20T00:00:00Z" });
     currentInquiry = { ...currentInquiry, kind: "proactive_offer", created_by: 7,
       lines: [{ ...currentInquiry.lines![0], ref_offer_id: 99 }], offers: [], work_items: [] };
     mocks.library.mockResolvedValue({ 1: [] });
@@ -410,9 +409,9 @@ describe("采购待办与询价处理", () => {
     processPage(false);
     await openLine("PN-1");
     await openLine("PN-1");
-    fireEvent.change(screen.getByLabelText("PN-1有效天数"), { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "130" } });
     fireEvent.click(screen.getByRole("button", { name: "更新报价" }));
-    await waitFor(() => expect(mocks.updateOffer).toHaveBeenCalledWith(99, expect.objectContaining({ expected_version: 12, validity_days: 3 })));
+    await waitFor(() => expect(mocks.updateOffer).toHaveBeenCalledWith(99, expect.objectContaining({ expected_version: 12 })));
     expect(mocks.revisions).toHaveBeenCalledWith(99);
     expect(mocks.getInquiry).toHaveBeenCalledWith(9);
   });
@@ -492,7 +491,7 @@ describe("采购主动报价", () => {
   });
 
   it("本人同 PN 有效报价提示发布时明确选择更新或另报一条", async () => {
-    mocks.library.mockResolvedValue({ 1: [quote({ status: "published", valid_from: "2026-10-25T00:00:00Z", valid_until: "2026-10-25T15:59:59Z" })] });
+    mocks.library.mockResolvedValue({ 1: [quote({ status: "published", valid_from: "2026-10-25T00:00:00Z" })] });
     offerPage();
     await makeProactiveDraft();
     await openLine("PN-1");
@@ -572,14 +571,14 @@ it("处理页切换单据后，上一单保存触发的迟到刷新不会覆盖�
   expect(screen.queryByText("XJ-1")).not.toBeInTheDocument();
 });
 
-it("原生表格不内嵌表单，统一有效期同步到每行 Drawer 草稿", async () => {
+it("原生表格不内嵌表单，不再显示统一有效期", async () => {
   processPage();
   const grid = await screen.findByRole("table", { name: "采购报价明细" });
   expect(within(grid).getAllByRole("row")).toHaveLength(3);
   expect(screen.queryByLabelText("PN-1供应商")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("PN-2供应商")).not.toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("统一有效期"), { target: { value: "3" } });
-  expect(screen.getByText("将于 10月27日 23:59 失效（上海时间）")).toBeInTheDocument();
+  expect(screen.queryByLabelText("统一有效期")).not.toBeInTheDocument();
+  expect(screen.getByText("报价不设有效期，一直有效，直到更新或撤回")).toBeInTheDocument();
   await openLine("PN-1");
   fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "100" } });
   await openLine("PN-2");
@@ -587,8 +586,8 @@ it("原生表格不内嵌表单，统一有效期同步到每行 Drawer 草稿",
   await closeLine();
   fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
   await waitFor(() => expect(mocks.saveOffer).toHaveBeenCalledTimes(2));
-  expect(mocks.saveOffer).toHaveBeenCalledWith(1, 11, expect.objectContaining({ unit_price: 100, validity_days: 3 }));
-  expect(mocks.saveOffer).toHaveBeenCalledWith(1, 12, expect.objectContaining({ unit_price: 200, validity_days: 3 }));
+  expect(mocks.saveOffer).toHaveBeenCalledWith(1, 11, expect.objectContaining({ unit_price: 100 }));
+  expect(mocks.saveOffer).toHaveBeenCalledWith(1, 12, expect.objectContaining({ unit_price: 200 }));
   await waitFor(() => expect(screen.getByRole("button", { name: "回复给销售" })).toBeEnabled());
 });
 
@@ -660,16 +659,13 @@ it("保存失败仍保留未保存输入，离开页面和返回列表均保护�
   expect(screen.getByLabelText("PN-1单价")).toHaveValue("133.00");
 });
 
-it("载入已有有效期并显示混合状态；隐藏客户要求不显示空值占位", async () => {
-  currentInquiry.offers = [quote({ validity_days: 7 }), quote({ id: 82, line_id: 12, part_id: 2, validity_days: 3 })];
+it("隐藏客户要求不显示空值占位", async () => {
+  currentInquiry.offers = [quote(), quote({ id: 82, line_id: 12, part_id: 2 })];
   delete currentInquiry.notes;
   processPage();
   await openLine("PN-1");
   await screen.findByLabelText("PN-1单价");
-  expect(screen.getByText("各行有效期不同；修改后统一应用")).toBeInTheDocument();
   expect(screen.queryByText("无客户补充要求")).not.toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("统一有效期"), { target: { value: "7" } });
-  expect(within(screen.getByRole("dialog")).getByText("将于 10月31日 23:59 失效（上海时间）")).toBeInTheDocument();
 });
 
 

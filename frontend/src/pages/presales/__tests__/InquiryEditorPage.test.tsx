@@ -30,7 +30,7 @@ const partA = { part_id: 10, pn_std: "PN-A", brand: "品牌甲", summary: "型�
 const partB = { ...partA, part_id: 11, pn_std: "PN-B" };
 const validOffer: Offer = { id: 70, inquiry_id: 5, line_id: 50, part_id: 10, version: 1, revision_no: 1,
   status: "published", unit_price: "12.50", is_tax_inclusive: true, no_stock: false,
-  valid_from: "2020-01-01T00:00:00Z", valid_until: "2099-01-01T00:00:00Z" };
+  valid_from: "2020-01-01T00:00:00Z" };
 const field = { id: 31, name: "质保要求", value_type: "text", subject_type: "presales_inquiry", level: "line",
   owner_scope: "personal", owner_id: "sales", choices: null, default_rule_id: null, default_rule: null,
   auto_include: true, sort: 0, archived: false };
@@ -314,10 +314,10 @@ describe("销售询价编辑", () => {
   });
 });
 
-it("已保存引用按钉住快照判断失效，当前续期不能让旧引用恢复有效", async () => {
+it("已保存引用按钉住快照判断失效，被取代的引用不因当前报价有效而恢复", async () => {
   const data = inquiry();
   data.lines![0] = { ...data.lines![0], ref_offer_id: 70, ref_offer_revision_no: 1,
-    ref_offer: { ...validOffer, valid_until: "2020-01-02T00:00:00Z" } };
+    ref_offer: { ...validOffer, expired: true } };
   mocks.presales.getInquiry.mockResolvedValue(data);
   mount("/presales/inquiries/1/edit");
     await openLine("PN-A");

@@ -7,7 +7,7 @@ const library = vi.hoisted(() => vi.fn());
 vi.mock("../../../api/presales", () => ({ presales: { library } }));
 vi.mock("../../../components/pricing/PriceRefBadge", () => ({ default: () => <span>参考价角标</span> }));
 const quote: Offer = { id: 1, inquiry_id: 2, line_id: 3, part_id: 8, version: 1, revision_no: 1,
-  unit_price: "25.00", status: "published", valid_from: "2026-10-25T00:00:00Z", valid_until: "2026-10-25T16:00:00Z" };
+  unit_price: "25.00", status: "published", valid_from: "2026-10-25T00:00:00Z" };
 beforeEach(() => {
   vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-25T15:59:59.999Z")); library.mockReset();
 });

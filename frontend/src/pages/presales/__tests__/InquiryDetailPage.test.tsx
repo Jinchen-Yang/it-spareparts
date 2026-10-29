@@ -22,7 +22,7 @@ function offer(id: number, patch: Partial<Offer> = {}): Offer {
   return {
     id, inquiry_id: 5, line_id: 11, part_id: 8, unit_price: "100.00", is_tax_inclusive: true,
     no_stock: false, qty_available: "2", stock_location: "北京", lead_time: "现货", version: 1,
-    revision_no: 1, status: "published", valid_from: "2026-01-01T00:00:00Z", valid_until: "2099-12-31T15:59:59Z",
+    revision_no: 1, status: "published", valid_from: "2026-01-01T00:00:00Z",
     reporter: { id: id + 20, name: `采购${id}` }, ...patch,
   };
 }
@@ -64,7 +64,7 @@ describe("询价详情", () => {
       offer(1, { unit_price: "100.00" }), offer(2, { unit_price: "90.00" }),
       offer(3, { unit_price: "20.00", status: "stale" }), offer(4, { unit_price: "1.00", status: "withdrawn" }),
       offer(5, { unit_price: "80.00", is_tax_inclusive: false }),
-      offer(6, { unit_price: "10.00", valid_until: "2020-01-01T00:00:00Z" }),
+      offer(6, { unit_price: "10.00", expired: true }),
     ] }));
     const table = within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-8/ });
     const lowest = within(table).getAllByText(/最低价/);
@@ -161,7 +161,7 @@ describe("询价详情", () => {
     const data = inquiry({ offers: [] });
     data.lines![0].ref_offer_id = 7;
     mocks.library.mockResolvedValue({ 8: [offer(7, { inquiry_id: 3, line_id: 99,
-      valid_until: "2020-01-01T00:00:00Z", notes: "过期报价备注" })] });
+      expired: true, notes: "过期报价备注" })] });
     await openPage(data);
     expect(mocks.library).not.toHaveBeenCalled();
     expect(screen.queryByText("采购7")).toBeNull();
@@ -236,7 +236,7 @@ describe("询价详情", () => {
 it("引用只展示行内钉住版本，当前报价不覆盖旧价格，续期也不使旧报价复活", async () => {
   const data = inquiry({ offers: [offer(7, { unit_price: "999.00", revision_no: 3 })] });
   data.lines![0] = { ...data.lines![0], ref_offer_id: 7, ref_offer_revision_no: 1,
-    ref_offer: offer(7, { unit_price: "120.00", valid_until: "2020-01-01T00:00:00Z",
+    ref_offer: offer(7, { unit_price: "120.00", expired: true,
       latest: { unit_price: "999.00", is_tax_inclusive: false, revision_no: 3 } }) };
   await openPage(data);
   const table = within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-8/ });
@@ -287,7 +287,7 @@ it("同一报价ID在不同询价行钉住不同版本时，逐行使用各自�
 it("点矩阵报价选择成交采纳，过期与旧版本不可选择，时间线可以隐藏", async () => {
   const user = userEvent.setup();
   mocks.closeInquiry.mockResolvedValue(inquiry({ status: "closed", won_offer_id: 2 }));
-  await openPage(inquiry({ offers: [offer(1, { status: "stale" }), offer(2), offer(3, { valid_until: "2020-01-01T00:00:00Z" })] }));
+  await openPage(inquiry({ offers: [offer(1, { status: "stale" }), offer(2), offer(3, { expired: true })] }));
   expect(screen.getByRole("button", { name: "采纳 PN-8 报价 1" })).toBeDisabled();
   expect(screen.getByRole("button", { name: "采纳 PN-8 报价 3" })).toBeDisabled();
   await user.click(screen.getByRole("button", { name: "采纳 PN-8 报价 2" }));

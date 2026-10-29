@@ -28,10 +28,10 @@ const task: WorkItem = { id: 71, subject_type: "presales_inquiry", subject_id: 1
   assignee_id: 7, claimed_by: null, status: "in_progress", version: 3, paused: false,
   summary: {}, created_at: "2026-10-25T00:00:00Z", updated_at: "2026-10-25T00:00:00Z", allowed_actions: [] };
 const quote = (patch: Partial<Offer> = {}): Offer => ({ id: 81, inquiry_id: 1, line_id: 11, part_id: 1,
-  unit_price: "120.00", no_stock: false, validity_days: 3, notes: null, reporter: { id: 7, name: "采购甲" },
-  version: 1, revision_no: 0, status: "draft", valid_from: null, valid_until: null, ...patch });
+  unit_price: "120.00", no_stock: false, notes: null, reporter: { id: 7, name: "采购甲" },
+  version: 1, revision_no: 0, status: "draft", valid_from: null, ...patch });
 const activeQuote = () => quote({ id: 99, inquiry_id: 9, line_id: 90, status: "published", revision_no: 1,
-  valid_from: "2026-10-25T00:00:00Z", valid_until: "2026-10-27T15:59:59.999999Z" });
+  valid_from: "2026-10-25T00:00:00Z" });
 let inquiry: Inquiry;
 
 beforeEach(() => {
@@ -83,7 +83,7 @@ describe("r6 采购逐行三选一", () => {
     expect(screen.queryByLabelText("PN-1单价")).not.toBeInTheDocument();
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "PN-1沿用报价" }));
     fireEvent.click(await screen.findByText(/报价 #99/, { selector: ".ant-select-item-option-content span" }));
-    expect(screen.getByText("所沿用报价：")).toHaveTextContent("剩 3 天");
+    expect(screen.getByText("所沿用报价：")).toHaveTextContent("有效报价");
     await openLine("PN-2");
     fireEvent.click(within(screen.getByRole("radiogroup", { name: "PN-2处理方式" })).getByRole("radio", { name: "无货 / 不报" }));
     expect(screen.getByRole("button", { name: "回复给销售" })).toBeDisabled();
@@ -112,7 +112,7 @@ describe("r6 采购逐行三选一", () => {
     expect(mocks.replyInquiry).not.toHaveBeenCalled();
   });
 
-  it("沿用报价在原有效期结束后显示已失效", async () => {
+  it("沿用报价不随时间失效（D-0046）", async () => {
     inquiry.lines = [inquiry.lines![0]];
     inquiry.work_items![0].status = "done";
     inquiry.line_responses = [{ line_id: 11, mode: "reuse", ref_offer_id: 99, created_by: 7, work_item_id: 71,
@@ -121,9 +121,11 @@ describe("r6 采购逐行三选一", () => {
     await openLine("PN-1");
     await openLine("PN-1");
     const reused = await screen.findByText("所沿用报价：");
-    expect(reused).toHaveTextContent("剩 3 天");
-    vi.mocked(Date.now).mockReturnValue(Date.parse("2026-10-27T16:00:00Z"));
-    await waitFor(() => expect(reused).toHaveTextContent("已失效"), { timeout: 2500 });
+    expect(reused).toHaveTextContent("有效报价");
+    vi.mocked(Date.now).mockReturnValue(Date.parse("2027-10-27T16:00:00Z"));
+    await new Promise((done) => setTimeout(done, 1200));
+    expect(reused).toHaveTextContent("有效报价");
+    expect(reused).not.toHaveTextContent("已失效");
   });
 
   it("改选沿用报价更新原报价人，切换不报后不再显示沿用信息", async () => {
@@ -305,32 +307,29 @@ it("主动报价编辑跨单旧行关联时先读当前报价，不以钉快照�
   expect(screen.queryByText(/该报价已更新为/)).not.toBeInTheDocument();
 });
 
-it("有效报价清单的更多报价也在原有效期到点后移除", async () => {
+it("有效报价清单的更多报价不随时间移除（D-0046）", async () => {
   inquiry.lines = [inquiry.lines![0]];
-  mocks.library.mockResolvedValue({ 1: [{ ...activeQuote(), more: [{ ...activeQuote(), id: 100, unit_price: "140.00", valid_until: "2026-10-25T04:00:01Z" }] }] });
+  mocks.library.mockResolvedValue({ 1: [{ ...activeQuote(), more: [{ ...activeQuote(), id: 100, unit_price: "140.00" }] }] });
   process();
     await openLine("PN-1");
   await openLine("PN-1");
   const offers = await screen.findByRole("table", { name: "PN-1有效报价" });
 
   expect(screen.getByText(/有效报价 ¥140/)).toBeInTheDocument();
-  vi.mocked(Date.now).mockReturnValue(Date.parse("2026-10-25T04:00:02Z"));
-  await waitFor(() => expect(screen.queryByText(/报价 ¥140/)).not.toBeInTheDocument(), { timeout: 2500 });
+  vi.mocked(Date.now).mockReturnValue(Date.parse("2027-10-25T04:00:02Z"));
+  await new Promise((done) => setTimeout(done, 1200));
+  expect(screen.getByText(/有效报价 ¥140/)).toBeInTheDocument();
 });
 
-it("最新报价先到期时保留同组仍有效的旧报价供沿用", async () => {
+it("最新报价不可用时保留同组仍有效的其他报价供沿用", async () => {
   inquiry.lines = [inquiry.lines![0]];
-  mocks.library.mockResolvedValue({ 1: [{ ...activeQuote(), valid_until: "2026-10-25T04:00:01Z",
+  mocks.library.mockResolvedValue({ 1: [{ ...activeQuote(), expired: true,
     more: [{ ...activeQuote(), id: 10, unit_price: "140.00", valid_from: "2026-10-24T00:00:00Z" }] }] });
   process();
     await openLine("PN-1");
   await openLine("PN-1");
-  expect(await screen.findByText(/有效报价 ¥120/)).toBeInTheDocument();
-  vi.mocked(Date.now).mockReturnValue(Date.parse("2026-10-25T04:00:02Z"));
-  await waitFor(() => {
-    expect(screen.queryByText(/报价 ¥120/)).not.toBeInTheDocument();
-    expect(screen.getByText(/有效报价 ¥140/)).toBeInTheDocument();
-  }, { timeout: 2500 });
+  expect(await screen.findByText(/有效报价 ¥140/)).toBeInTheDocument();
+  expect(screen.queryByText(/报价 ¥120/)).not.toBeInTheDocument();
   fireEvent.click(within(screen.getByRole("radiogroup", { name: "PN-1处理方式" })).getByRole("radio", { name: "沿用有效报价" }));
   fireEvent.mouseDown(screen.getByRole("combobox", { name: "PN-1沿用报价" }));
   fireEvent.click(await screen.findByText(/报价 #10/, { selector: ".ant-select-item-option-content span" }));

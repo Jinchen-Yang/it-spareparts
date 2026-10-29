@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({ suppliers: vi.fn() }));
 vi.mock("../../../api/presales", () => ({ presales: mocks }));
 vi.mock("../../../api/audience", () => ({ listAudiencePeople: vi.fn(async () => []), listAudienceGroups: vi.fn(async () => []) }));
 const offer: Offer = { id: 8, inquiry_id: 1, line_id: 2, part_id: 3, version: 4, revision_no: 1,
-  status: "published", valid_from: null, valid_until: null, unit_price: "15", supplier_id: 9, notes: "原备注",
+  status: "published", valid_from: null, unit_price: "15", supplier_id: 9, notes: "原备注",
   reporter: { id: 7, name: "采购甲" },
   supplier_audience: { mode: "include", users: [{ id: "sale-a", name: "销售甲" }], groups: [{ id: 99, name: "原分组" }] },
   reporter_audience: { mode: "private", users: [], groups: [] },
