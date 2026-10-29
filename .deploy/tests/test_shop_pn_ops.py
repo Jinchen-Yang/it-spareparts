@@ -145,6 +145,29 @@ class ShopOpsTests(unittest.TestCase):
                 release.recover_freeze()
             path.unlink()
 
+    def test_recover_refuses_completed_freeze_before_starting_any_writer(self):
+        release=self.recovery_fixture()
+        release.inspect=Mock()
+        (self.root/'freeze.json').write_text('{"phase":"freeze","status":"PASS"}')
+        with self.assertRaisesRegex(RuntimeError,'not an incomplete freeze'):
+            release.recover_freeze()
+        release.inspect.assert_not_called()
+        release.run.assert_not_called()
+        release.http.assert_not_called()
+
+    def test_completed_phase_cannot_execute_when_intent_is_missing(self):
+        release=self.release
+        release.m['controller_sha256']='reviewed'
+        (self.root/'.shop-pn-active-owner.json').write_text(json.dumps({
+            'release':release.release,'manifest_sha256':ops.sha(release.raw)}))
+        (self.root/'freeze.json').write_text('{"phase":"freeze","status":"PASS"}')
+        release.freeze=Mock()
+        with patch.object(ops,'BASE',self.root),patch.object(ops,'artifact',return_value={'sha256':'reviewed'}),patch.object(ops,'save') as save:
+            with self.assertRaisesRegex(RuntimeError,'phase already completed'):
+                release.execute('freeze')
+            save.assert_not_called()
+        release.freeze.assert_not_called()
+
     def test_recover_does_not_start_changed_old_container(self):
         release=self.release
         release.mark=Mock(return_value={'entry':{}})

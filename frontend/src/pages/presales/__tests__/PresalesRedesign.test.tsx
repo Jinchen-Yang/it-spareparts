@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
-import { cleanupAntd, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
+import { act, cleanupAntd, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import type { Inquiry, Offer } from "../../../api/presales";
 import type { WorkItem } from "../../../api/workItems";
 
@@ -96,8 +96,55 @@ describe("报价页", () => {
     fireEvent.change(screen.getByRole("spinbutton", { name: "PN-1 单价" }), { target: { value: "120" } });
     const row = screen.getByRole("spinbutton", { name: "PN-1 单价" }).closest("tr")!;
     fireEvent.click(within(row).getByRole("button", { name: /^保\s?存$/ }));
-    await waitFor(() => expect(mocks.saveOffer).toHaveBeenCalledWith(1, 11, expect.objectContaining({ unit_price: 120, is_tax_inclusive: true, work_item_id: 71, expected_version: 4 })));
+    await waitFor(() => expect(mocks.saveOffer).toHaveBeenCalledWith(1, 11, expect.objectContaining({ unit_price: 120, work_item_id: 71, expected_version: 4 })));
+    expect(mocks.saveOffer.mock.calls[0][2]).not.toHaveProperty("is_tax_inclusive");
+    expect(mocks.saveOffer.mock.calls[0][2]).not.toHaveProperty("price_basis");
     expect(mocks.replyInquiry).not.toHaveBeenCalled();
+  });
+
+  it("新行默认只回显；保存草稿后仅改价格仍省略，明确点选默认才发送", async () => {
+    mocks.saveOffer.mockImplementation(async (_inquiryId, lineId, input) => {
+      const saved = offer({ ...input, id: 81, line_id: lineId, status: "draft", price_basis: "sale", valid_from: null,
+        version: input.offer_id ? input.expected_version + 1 : 1 });
+      inquiry = { ...inquiry, offers: [saved] };
+      return saved;
+    });
+    renderQuote();
+    const input = await screen.findByRole("spinbutton", { name: "PN-1 单价" });
+    const row = input.closest("tr")!;
+    expect(within(row).getByRole("combobox", { name: "PN-1 含税" }).closest(".ant-select")).toHaveTextContent("含税");
+    expect(within(row).getByRole("combobox", { name: "PN-1 价格性质" }).closest(".ant-select")).toHaveTextContent("售价");
+    for (const [index, price] of [100, 110].entries()) {
+      fireEvent.change(input, { target: { value: String(price) } });
+      fireEvent.click(within(row).getByRole("button", { name: /^保\s?存$/ }));
+      await waitFor(() => expect(mocks.saveOffer).toHaveBeenCalledTimes(index + 1));
+      await screen.findByText("已填，待回复");
+      expect(mocks.saveOffer.mock.calls[index][2]).not.toHaveProperty("is_tax_inclusive");
+      expect(mocks.saveOffer.mock.calls[index][2]).not.toHaveProperty("price_basis");
+      await waitFor(() => expect(within(row).getByRole("button", { name: /^保\s?存$/ })).toBeEnabled());
+    }
+    fireEvent.mouseDown(within(row).getByRole("combobox", { name: "PN-1 含税" }));
+    fireEvent.click(screen.getByText("含税", { selector: ".ant-select-item-option-content" }));
+    fireEvent.mouseDown(within(row).getByRole("combobox", { name: "PN-1 价格性质" }));
+    fireEvent.click(screen.getByText("售价", { selector: ".ant-select-item-option-content" }));
+    fireEvent.click(within(row).getByRole("button", { name: /^保\s?存$/ }));
+    await waitFor(() => expect(mocks.saveOffer).toHaveBeenLastCalledWith(1, 11,
+      expect.objectContaining({ is_tax_inclusive: true, price_basis: "sale", expected_version: 2, offer_id: 81 })));
+  });
+
+  it("新报价页存量草稿的未声明与成本价按现值回显，只改价格继续省略这两个字段", async () => {
+    inquiry.offers = [offer({ status: "draft", is_tax_inclusive: null, price_basis: "cost", valid_from: null })];
+    mocks.saveOffer.mockResolvedValue(inquiry.offers[0]);
+    renderQuote();
+    const input = await screen.findByRole("spinbutton", { name: "PN-1 单价" });
+    const row = input.closest("tr")!;
+    expect(within(row).getByRole("combobox", { name: "PN-1 含税" }).closest(".ant-select")).toHaveTextContent("未声明");
+    expect(within(row).getByRole("combobox", { name: "PN-1 价格性质" }).closest(".ant-select")).toHaveTextContent("成本价");
+    fireEvent.change(input, { target: { value: "130" } });
+    fireEvent.click(within(row).getByRole("button", { name: /^保\s?存$/ }));
+    await waitFor(() => expect(mocks.saveOffer).toHaveBeenCalledWith(1, 11, expect.objectContaining({ unit_price: 130, offer_id: 81 })));
+    expect(mocks.saveOffer.mock.calls[0][2]).not.toHaveProperty("is_tax_inclusive");
+    expect(mocks.saveOffer.mock.calls[0][2]).not.toHaveProperty("price_basis");
   });
 
   it("读取待办后续页，第 101 条紧急催办询价仍显示在报价行", async () => {
@@ -132,6 +179,60 @@ describe("报价页", () => {
     fireEvent.click(within(row).getByRole("button", { name: /^保\s?存$/ }));
     await waitFor(() => expect(mocks.saveOffer).toHaveBeenCalledWith(1, 11,
       expect.objectContaining({ unit_price: "120.00", is_tax_inclusive: false, price_basis: "cost" })));
+  });
+
+  it("201 个不同型号分为 200 和 1 两批读报价库，两批有效报价都可沿用", async () => {
+    inquiry.lines = Array.from({ length: 200 }, (_, index) => ({ ...inquiry.lines![0],
+      id: index + 11, part_id: index + 1, pn_raw: `PN-${index + 1}`, line_key: `line-${index + 1}`, seq: index + 1 }));
+    const other: Inquiry = { ...inquiry, id: 2, inquiry_no: "XJ-2", priority: "urgent",
+      lines: [{ ...inquiry.lines[0], id: 211, inquiry_id: 2, part_id: 201, pn_raw: "PN-201" }],
+      work_items: [{ ...inquiry.work_items![0], id: 72 }] };
+    mocks.getInquiry.mockImplementation(async (id: number) => id === 2 ? other : inquiry);
+    mocks.listWorkItems.mockImplementation(async ({ tab }: { tab: string }) => ({
+      items: tab === "claimed" ? [task, { ...task, id: 72, subject_id: 2 }] : [],
+      total: tab === "claimed" ? 2 : 0, page: 1, page_size: 100, can_supervise: false,
+    }));
+    mocks.library.mockImplementation(async (ids: number[]) => {
+      if (ids.length > 200) throw { response: { status: 422 } };
+      return Object.fromEntries(ids.filter((id) => id === 1 || id === 201).map((id) => [id,
+        [offer({ id: id + 500, line_id: 999, part_id: id, unit_price: String(id + 100),
+          price_basis: "cost", is_tax_inclusive: false })]]));
+    });
+    renderQuote();
+    await waitFor(() => expect(mocks.library).toHaveBeenCalledTimes(2));
+    expect(mocks.library).toHaveBeenNthCalledWith(1, Array.from({ length: 200 }, (_, index) => index + 1));
+    expect(mocks.library).toHaveBeenNthCalledWith(2, [201]);
+    for (const id of [1, 201]) {
+      const input = await screen.findByRole("spinbutton", { name: `PN-${id} 单价` });
+      const row = input.closest("tr")!;
+      fireEvent.click(within(row).getByRole("button", { name: "Expand row" }));
+      fireEvent.click(await within(row.nextElementSibling as HTMLElement).findByRole("button", { name: "沿用" }));
+      expect(Number((input as HTMLInputElement).value)).toBe(id + 100);
+      expect(within(row).getByText("成本价")).toBeInTheDocument();
+      expect(within(row).getByText("不含税")).toBeInTheDocument();
+    }
+  });
+
+  it.each(["resolve", "reject"])("刷新后的报价库不被取消请求的迟到 %s 覆盖", async (result) => {
+    let resolveOld!: (data: Record<number, Offer[]>) => void;
+    let rejectOld!: (error: Error) => void;
+    mocks.library.mockImplementationOnce(() => new Promise((resolve, reject) => { resolveOld = resolve; rejectOld = reject; }))
+      .mockResolvedValue({ 1: [offer({ line_id: 999, unit_price: "250" })] });
+    renderQuote();
+    await waitFor(() => expect(mocks.library).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: /^刷\s?新$/ }));
+    await waitFor(() => expect(mocks.library).toHaveBeenCalledTimes(2));
+    const input = await screen.findByRole("spinbutton", { name: "PN-1 单价" });
+    fireEvent.click(within(input.closest("tr")!).getByRole("button", { name: "Expand row" }));
+    await screen.findByText(/同型号已有 ¥250/);
+    await act(async () => {
+      if (result === "resolve") resolveOld({ 1: [offer({ line_id: 999, unit_price: "100" })] });
+      else rejectOld(new Error("旧请求失败"));
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "沿用" }));
+    await waitFor(() => expect(Number((input as HTMLInputElement).value)).toBe(250));
+    expect(screen.getByText(/同型号已有 ¥250/)).toBeInTheDocument();
+    expect(mocks.library).toHaveBeenCalledTimes(2);
   });
 
   it("最后一行标为不报后自动整单回复，不报原因随回复提交", async () => {
@@ -302,6 +403,25 @@ describe("无单据主动报价", () => {
     expect(mocks.createInquiry).not.toHaveBeenCalled();
     expect(mocks.saveOffer).not.toHaveBeenCalled();
     expect(screen.getByRole("spinbutton", { name: "主动报价单价" })).toHaveValue("50.00");
+  });
+
+  it("主动报价明确点选默认含税售价，更新既有未声明成本价时保留用户选择", async () => {
+    mocks.suggestParts.mockResolvedValue([{ part_id: 1, pn_std: "PN-1", description: "型号", match_type: "exact_pn", match_reason: "", matched_terms: [] }]);
+    mocks.directOffer.mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: "existing_offer",
+      existing_offers: [offer({ version: 3, is_tax_inclusive: null, price_basis: "cost" })] } } } })
+      .mockResolvedValueOnce(offer({ inquiry_id: null, line_id: null, unit_price: "50", version: 4, is_tax_inclusive: true, price_basis: "sale" }));
+    render(<MemoryRouter><OfferNewPage /></MemoryRouter>);
+    fireEvent.change(screen.getByRole("combobox", { name: "主动报价 PN" }), { target: { value: "PN" } });
+    fireEvent.click(await screen.findByText(/^PN-1/, { selector: ".ant-select-item-option-content > span" }));
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "主动报价含税" }));
+    fireEvent.click(screen.getByText("含税", { selector: ".ant-select-item-option-content" }));
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "主动报价价格性质" }));
+    fireEvent.click(screen.getByText("售价", { selector: ".ant-select-item-option-content" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "主动报价单价" }), { target: { value: "50" } });
+    fireEvent.click(screen.getByRole("button", { name: /^保\s?存$/ }));
+    await screen.findByText(/PN-1 已更新为 ¥50/);
+    expect(mocks.directOffer).toHaveBeenLastCalledWith(expect.objectContaining({ existing_offer_id: 81, expected_version: 3,
+      is_tax_inclusive: true, price_basis: "sale" }));
   });
 });
 

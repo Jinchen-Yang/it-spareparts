@@ -390,7 +390,8 @@ class Release:
     def recover_freeze(self):
         # 只处理尚未迁移/创建/暴露的部分停服。不会恢复 dump 或删除 receipt。
         self.mark('preflight')
-        need((self.root/'freeze.intent.json').exists(),'freeze never started')
+        need((self.root/'freeze.intent.json').exists() and not (self.root/'freeze.json').exists(),
+             'not an incomplete freeze')
         need(not any((self.root/(name+'.intent.json')).exists() for name in ('migrate','create','activate'))
              and not (self.root/'exposure-started.json').exists(),'migration/activation may have begun; forward-only')
         need(self.entry()==self.mark('preflight')['entry'],'entry changed during partial freeze')
@@ -442,6 +443,7 @@ class Release:
         need(not owner.is_symlink() and json.loads(owner.read_bytes())=={'release':self.release,'manifest_sha256':sha(self.raw)},'other release owns shop')
         receipt=self.root/((phase+'-'+now() if phase=='verify' else phase)+'.json')
         if phase!='verify':
+            need(not receipt.exists(),'phase already completed')
             save(self.root/(phase+'.intent.json'),{'at':now(),'phase':phase})
         result=self.backup(phase.split('-')[1]) if phase.startswith('backup-') else getattr(self,phase.replace('-','_'))()
         save(receipt,{'phase':phase,'status':'PASS','manifest_sha256':sha(self.raw),'at':now(),**result})

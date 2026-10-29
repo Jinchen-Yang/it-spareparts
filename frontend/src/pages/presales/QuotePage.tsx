@@ -84,8 +84,10 @@ function canAct(source: Source) {
   return source.inquiry.status === "submitted" && !task.paused && (source.pool ? task.status === "pending" : ["pending", "in_progress"].includes(task.status));
 }
 
+// 草稿税价口径只回显现值；明确选择或沿用后才进入待保存数据。
 function valueOf(offer?: Offer): RowValue {
-  return { unit_price: offer?.unit_price ?? null, is_tax_inclusive: offer ? offer.is_tax_inclusive ?? null : true, price_basis: offer?.price_basis ?? "sale", lead_time: offer?.lead_time ?? "",
+  return { unit_price: offer?.unit_price ?? null,
+    ...(offer && offer.status !== "draft" ? { is_tax_inclusive: offer.is_tax_inclusive ?? null, price_basis: offer.price_basis ?? "sale" } : {}), lead_time: offer?.lead_time ?? "",
     qty_available: offer?.qty_available ?? null, stock_location: offer?.stock_location ?? "", notes: offer?.notes ?? "" };
 }
 
@@ -150,8 +152,8 @@ export function DirectQuote({ onDone, onClose }: { onDone: (text: string) => voi
       onSelect={(_, option) => { const picked = options.find((row) => String(row.part_id) === option.key); if (picked) { setPart(picked); setText(picked.pn_std); } }}
       options={options.map((row) => ({ key: String(row.part_id), value: row.pn_std, label: <span>{row.pn_std} <span className="presales-muted">{row.summary || row.description}</span></span> }))} /></label>
     <label>单价（元）<InputNumber aria-label="主动报价单价" min={0} precision={2} style={{ width: "100%" }} value={price} onChange={(value) => setPrice(value)} /></label>
-    <label>税<Select aria-label="主动报价含税" value={tax == null ? "unknown" : tax ? "inc" : "ex"} onChange={(value) => { taxChanged.current = true; setTax(value === "unknown" ? null : value === "inc"); }} options={[{ value: "inc", label: "含税" }, { value: "ex", label: "不含税" }, ...(tax == null ? [{ value: "unknown", label: "未声明" }] : [])]} /></label>
-    <label>价格性质<Select aria-label="主动报价价格性质" value={basis} onChange={(value) => { basisChanged.current = true; setBasis(value); }} options={[{ value: "sale", label: "售价" }, { value: "cost", label: "成本价" }]} /></label>
+    <label>税<Select aria-label="主动报价含税" value={tax == null ? "unknown" : tax ? "inc" : "ex"} onSelect={(value) => { taxChanged.current = true; setTax(value === "unknown" ? null : value === "inc"); }} options={[{ value: "inc", label: "含税" }, { value: "ex", label: "不含税" }, ...(tax == null ? [{ value: "unknown", label: "未声明" }] : [])]} /></label>
+    <label>价格性质<Select aria-label="主动报价价格性质" value={basis} onSelect={(value) => { basisChanged.current = true; setBasis(value); }} options={[{ value: "sale", label: "售价" }, { value: "cost", label: "成本价" }]} /></label>
     <Space><Button type="primary" loading={busy} disabled={!part || price == null} onClick={() => void save()}>保存</Button><Button onClick={onClose}>收起</Button></Space>
     {text && !part && <span className="presales-wide presales-muted">请从下拉中选择已建档的型号{canCreatePart && <Button type="link" disabled={busy} onClick={() => setCreating(true)}>新建 PN 档案</Button>}</span>}
     {creating && <CreatePartModal compact pn={text.trim()} onClose={() => setCreating(false)} onSelected={(selected) => { setPart(selected); setText(selected.pn_std); }} />}
@@ -219,7 +221,18 @@ export default function QuotePage() {
   useEffect(() => {
     let cancelled = false;
     if (!partKey) { setLibrary({}); return; }
-    presales.library(partKey.split(",").map(Number)).then((data) => { if (!cancelled) setLibrary(data); }).catch(() => { if (!cancelled) setLibrary({}); });
+    const partIds = partKey.split(",").map(Number);
+    const loadLibrary = async () => {
+      const merged: Record<number, Offer[]> = {};
+      // quote-library 与后端 _part_ids 契约一致：单次最多 200 个型号。
+      for (let offset = 0; offset < partIds.length; offset += 200) {
+        const data = await presales.library(partIds.slice(offset, offset + 200));
+        if (cancelled) return;
+        Object.assign(merged, data);
+      }
+      setLibrary(merged);
+    };
+    void loadLibrary().catch(() => { if (!cancelled) setLibrary({}); });
     return () => { cancelled = true; };
   }, [partKey, sources]);
 
@@ -237,6 +250,8 @@ export default function QuotePage() {
   const replace = (inquiry: Inquiry, task?: WorkItem) => setSources((previous) => previous.map((source) => source.inquiry.id === inquiry.id
     ? { ...source, inquiry, ...(task ? { task, pool: false } : {}) } : source));
   const valueFor = (row: QuoteRow) => values[row.key] ?? valueOf(row.own);
+  const taxFor = (row: QuoteRow) => valueFor(row).is_tax_inclusive !== undefined ? valueFor(row).is_tax_inclusive : row.own ? row.own.is_tax_inclusive ?? null : true;
+  const basisFor = (row: QuoteRow) => valueFor(row).price_basis ?? row.own?.price_basis ?? "sale";
   const change = (row: QuoteRow, patch: Partial<RowValue>) => setValues((previous) => ({ ...previous, [row.key]: { ...valueFor(row), ...patch } }));
   const done = (row: QuoteRow) => {
     setValues((previous) => { const next = { ...previous }; delete next[row.key]; return next; });
@@ -371,12 +386,12 @@ export default function QuotePage() {
         onChange={(value) => change(row, { unit_price: value })} onPressEnter={() => void save(row)} />
       : <b>{row.state === "quoted" ? moneyExact(Number(row.displayOffer?.unit_price)) : "—"}</b> },
     { title: "税", key: "tax", width: 104, render: (_, row) => editable(row)
-      ? <Select aria-label={`${row.line.pn_raw} 含税`} style={{ width: "100%" }} value={valueFor(row).is_tax_inclusive == null ? "unknown" : valueFor(row).is_tax_inclusive ? "inc" : "ex"}
-        onChange={(value) => change(row, { is_tax_inclusive: value === "unknown" ? null : value === "inc" })} options={[{ value: "inc", label: "含税" }, { value: "ex", label: "不含税" }, ...(valueFor(row).is_tax_inclusive == null ? [{ value: "unknown", label: "未声明" }] : [])]} />
+      ? <Select aria-label={`${row.line.pn_raw} 含税`} style={{ width: "100%" }} value={taxFor(row) == null ? "unknown" : taxFor(row) ? "inc" : "ex"}
+        onSelect={(value) => change(row, { is_tax_inclusive: value === "unknown" ? null : value === "inc" })} options={[{ value: "inc", label: "含税" }, { value: "ex", label: "不含税" }, ...(taxFor(row) == null ? [{ value: "unknown", label: "未声明" }] : [])]} />
       : row.state === "quoted" ? taxLabel(row.displayOffer?.is_tax_inclusive) : "—" },
     { title: "价格性质", key: "basis", width: 100, render: (_, row) => editable(row)
-      ? <Select aria-label={`${row.line.pn_raw} 价格性质`} style={{ width: "100%" }} value={valueFor(row).price_basis ?? "sale"}
-        onChange={(value) => change(row, { price_basis: value })} options={[{ value: "sale", label: "售价" }, { value: "cost", label: "成本价" }]} />
+      ? <Select aria-label={`${row.line.pn_raw} 价格性质`} style={{ width: "100%" }} value={basisFor(row)}
+        onSelect={(value) => change(row, { price_basis: value })} options={[{ value: "sale", label: "售价" }, { value: "cost", label: "成本价" }]} />
       : row.state === "quoted" ? basisLabel(row.displayOffer ?? {}) : "—" },
     { title: "状态", key: "state", width: 130, render: (_, row) => {
       const offer = row.state === "quoted" ? row.displayOffer : undefined;

@@ -109,6 +109,29 @@ async function makeProactiveDraft() {
 }
 
 describe("采购待办与询价处理", () => {
+  it("旧入口新草稿两次只改价格后选择更新既有报价，不把默认税和性质发送为明确覆盖", async () => {
+    currentInquiry.lines = [currentInquiry.lines![0]];
+    mocks.replyInquiry.mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: "existing_offer", line_id: 11,
+      draft_offer_id: 81, existing_offers: [quote({ id: 99, status: "published", is_tax_inclusive: null, price_basis: "cost" })] } } } });
+    processPage();
+    await openLine("PN-1");
+    for (const [index, price] of [100, 110].entries()) {
+      fireEvent.change(await screen.findByLabelText("PN-1单价"), { target: { value: String(price) } });
+      fireEvent.click(screen.getByRole("button", { name: "保存该行报价" }));
+      await waitFor(() => expect(mocks.saveOffer).toHaveBeenCalledTimes(index + 1));
+      await waitFor(() => expect(screen.getByRole("button", { name: "回复给销售" })).toBeEnabled());
+      expect(mocks.saveOffer.mock.calls[index][2]).not.toHaveProperty("is_tax_inclusive");
+      expect(mocks.saveOffer.mock.calls[index][2]).not.toHaveProperty("price_basis");
+      expect(screen.getByRole("combobox", { name: "PN-1含税口径" }).closest(".ant-select")).toHaveTextContent("含税");
+      expect(screen.getByRole("combobox", { name: "PN-1价格性质" }).closest(".ant-select")).toHaveTextContent("售价");
+    }
+    await closeLine();
+    fireEvent.click(screen.getByRole("button", { name: "回复给销售" }));
+    fireEvent.click(await screen.findByRole("button", { name: "更新那条" }));
+    await waitFor(() => expect(mocks.replyInquiry).toHaveBeenLastCalledWith(1, expect.objectContaining({
+      existing_choices: { 81: { on_existing: "update", existing_offer_id: 99 } },
+    })));
+  });
   it("报价通知进入只读询价详情并显示通知报价，不请求采购参考接口", async () => {
     currentInquiry = { ...baseInquiry(), kind: "proactive_offer", created_by: undefined,
       offers: [quote({ status: "published", unit_price: "567.89", valid_from: "2026-10-25T00:00:00Z" })] };
@@ -416,6 +439,32 @@ describe("采购待办与询价处理", () => {
 });
 
 describe("采购主动报价", () => {
+  it("历史主动报价草稿保留未声明成本价回显，保存和发布都不重申未改税价口径", async () => {
+    currentInquiry = { ...baseInquiry(), kind: "proactive_offer", status: "draft", created_by: 7,
+      lines: [baseInquiry().lines![0]], offers: [quote({ is_tax_inclusive: null, price_basis: "cost" })] };
+    mocks.publishInquiry.mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: "existing_offer", line_id: 11,
+      draft_offer_id: 81, existing_offers: [quote({ id: 99, status: "published", is_tax_inclusive: null, price_basis: "cost" })] } } } }).mockResolvedValueOnce(currentInquiry);
+    render(<MemoryRouter initialEntries={["/presales/offers/new?draft=1"]}><OfferNewPage /></MemoryRouter>);
+    await openLine("PN-1");
+    expect(screen.getByRole("combobox", { name: "PN-1含税口径" }).closest(".ant-select")).toHaveTextContent("未声明");
+    expect(screen.getByRole("combobox", { name: "PN-1价格性质" }).closest(".ant-select")).toHaveTextContent("成本价");
+    fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "150" } });
+    await closeLine();
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+    await waitFor(() => expect(mocks.saveOffer).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole("button", { name: "发布主动报价" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "发布主动报价" }));
+    fireEvent.click(await screen.findByRole("button", { name: "更新那条" }));
+    await screen.findByText("主动报价已发布");
+    expect(mocks.saveOffer).toHaveBeenCalledTimes(2);
+    for (const call of mocks.saveOffer.mock.calls) {
+      expect(call[2]).not.toHaveProperty("is_tax_inclusive");
+      expect(call[2]).not.toHaveProperty("price_basis");
+    }
+    expect(mocks.publishInquiry).toHaveBeenLastCalledWith(1, expect.objectContaining({
+      existing_choices: { 81: { on_existing: "update", existing_offer_id: 99 } },
+    }));
+  });
   it("主动报价版本冲突保留价格，确认重新加载后才采用服务端报价", async () => {
     currentInquiry = { ...currentInquiry, kind: "proactive_offer", status: "draft", created_by: 7,
       lines: [currentInquiry.lines![0]], offers: [quote({ version: 5 })] };

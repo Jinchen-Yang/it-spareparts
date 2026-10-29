@@ -131,7 +131,7 @@ def test_workbook_update_refuses_changed_target_and_page_edit_clears_choice(db, 
         offers.reply(db, inquiry.id, users.buyer.id, expected_version=inquiry.version)
     offers.save_draft(db, inquiry.id, lines[0].id, users.buyer.id, {"unit_price": "66.00"},
                       offer_id=draft.id, expected_version=draft.version)
-    assert draft.workbook_choice == {}
+    assert not {"on_existing", "existing_offer_id", "existing_version"}.intersection(draft.workbook_choice)
     with pytest.raises(Conflict, match="你已有有效报价"):
         offers.reply(db, inquiry.id, users.buyer.id, expected_version=inquiry.version)
 

@@ -23,6 +23,39 @@ EDITABLE = {
     "lead_time", "source_key", "supplier_id", "notes", "price_basis",
     "supplier_audience", "reporter_audience", "notes_audience",
 }
+_BASIS_FIELDS = {"is_tax_inclusive", "price_basis"}
+_PUBLICATION_CHOICE_FIELDS = {"on_existing", "existing_offer_id", "existing_version"}
+
+
+def _implicit_basis_fields(offer):
+    metadata = (offer.workbook_choice or {}).get("_draft_input", {})
+    if metadata.get("version") != 1:
+        # Legacy drafts did not record input presence. Protect the live quote
+        # from ambiguous defaults, while retaining stored null/false/cost.
+        return ({"is_tax_inclusive"} if offer.is_tax_inclusive is True else set()) | (
+            {"price_basis"} if offer.price_basis == "sale" else set())
+    return _BASIS_FIELDS.intersection(metadata.get("implicit_defaults", []))
+
+
+def _draft_input_choice(offer, data, *, new_draft):
+    # The update target may only be selected at /reply. Persist input presence,
+    # including an explicit value equal to a default, across separate requests.
+    choice = dict(offer.workbook_choice or {})
+    metadata = dict(choice.get("_draft_input", {}))
+    implicit = (_BASIS_FIELDS if new_draft else _implicit_basis_fields(offer)) - data.keys()
+    # Keep an explicit empty provenance record: otherwise an explicit true/sale
+    # would become indistinguishable from an unmarked legacy default next save.
+    metadata["version"] = 1
+    if implicit:
+        metadata["implicit_defaults"] = sorted(implicit)
+    else:
+        metadata.pop("implicit_defaults", None)
+    choice["_draft_input"] = metadata
+    # Retain the existing page-edit reconfirmation contract without discarding
+    # other internal metadata namespaces.
+    for key in _PUBLICATION_CHOICE_FIELDS:
+        choice.pop(key, None)
+    return choice
 
 
 def _json(value):
@@ -217,7 +250,8 @@ def save_draft(db, inquiry_id, line_id, actor, data, *, expected_version,
             raise Conflict("该行货源已有草稿，请指定 offer_id 和报价版本进行更新",
                            offer_id=offer.id, version=offer.version)
         common.check_version(inquiry, expected_version)
-    if offer is None:
+    new_draft = offer is None
+    if new_draft:
         offer = PresalesOffer(
             inquiry_id=inquiry.id, line_id=line.id, part_id=line.part_id,
             work_item_id=task.id if task else None, created_by=user.id,
@@ -230,7 +264,7 @@ def save_draft(db, inquiry_id, line_id, actor, data, *, expected_version,
         offer.version += 1
     _apply(db, offer, data, ctx)
     # 页面重新编辑草稿后，旧 Excel 的发布选择须重新确认。
-    offer.workbook_choice = {}
+    offer.workbook_choice = _draft_input_choice(offer, data, new_draft=new_draft)
     previous = db.scalar(select(PresalesLineResponse).where(
         PresalesLineResponse.line_id == line.id, PresalesLineResponse.created_by == user.id,
         PresalesLineResponse.is_draft.is_(True)))
@@ -259,8 +293,10 @@ def _publish(db, offer, actor, published_at, reason="发布报价"):
 
 def _copy_quote(target, source):
     target.part_id = source.part_id
+    implicit = _implicit_basis_fields(source)
     for field in EDITABLE - {"supplier_audience", "reporter_audience", "notes_audience"}:
-        setattr(target, field, getattr(source, field))
+        if field not in implicit:
+            setattr(target, field, getattr(source, field))
     for field in ("supplier_audience_rule_id", "reporter_audience_rule_id", "notes_audience_rule_id"):
         setattr(target, field, getattr(source, field))
 
@@ -324,15 +360,15 @@ def save_line_decision(db, inquiry_id, line_id, actor, *, expected_version, mode
             raise InvalidTransition("报价必须填写单价；无货请选择不报并填写原因")
         targets = _publication_plans(db, [draft], inquiry, ctx, on_existing, existing_offer_id, None)
         target = targets[0][1]
-        if target is not None and old is None:
-            # 新建的是更新原报价所需的草稿；未选择新口径不能把默认售价/含税覆盖原值。
-            # 已有草稿保留其原值，明确填写的成本/售价或税口径仍按输入更新。
-            for key in ("price_basis", "is_tax_inclusive"):
-                if key not in (data or {}):
-                    setattr(draft, key, getattr(target, key))
-        draft.workbook_choice = ({"on_existing": "update", "existing_offer_id": target.id,
-                                  "existing_version": target.version} if target else
-                                 {"on_existing": "new"} if on_existing == "new" else {})
+        if target is not None:
+            # 新旧草稿均保留未明确输入的原口径；标记保留至最终发布，
+            # 页面重新编辑/重新选择目标后仍不能把默认值当成用户选择。
+            for key in _implicit_basis_fields(draft):
+                setattr(draft, key, getattr(target, key))
+        selection = ({"on_existing": "update", "existing_offer_id": target.id,
+                      "existing_version": target.version} if target else
+                     {"on_existing": "new"} if on_existing == "new" else {})
+        draft.workbook_choice = {**(draft.workbook_choice or {}), **selection}
         response = db.scalar(select(PresalesLineResponse).where(
             PresalesLineResponse.line_id == line.id, PresalesLineResponse.created_by == user.id))
         if response is not None:
