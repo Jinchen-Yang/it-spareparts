@@ -1,31 +1,8 @@
-.presales-page { min-width: 0; max-width: 100%; }
-.presales-panel { min-width: 0; max-width: 100%; padding: 20px; background: var(--mb-surface); border-radius: 12px; }
-.presales-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; max-width: 100%; }
-.presales-toolbar > * { min-width: 0; max-width: 100%; }
+.presales-page { min-width: 0; }
+.presales-panel { padding: 20px; background: var(--mb-surface); border-radius: 12px; }
+.presales-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
 .presales-muted { color: var(--mb-text-3); font-size: 13px; }
-.presales-page .ant-table-wrapper,
-.presales-page .ant-table-container,
-.presales-page .ant-table-content { max-width: 100%; }
-.presales-page .ant-table-content { overflow-x: auto; }
 .presales-page .ant-table-cell { overflow-wrap: anywhere; }
-/* 列宽按容器分配：表头保持一行，单元格内容不得把页面撑出视口。 */
-.presales-inquiry-list { max-width: 100%; }
-.presales-inquiry-list table { width: 100%; table-layout: fixed; }
-.presales-clip { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
-.presales-inquiry-list .ant-table-cell { padding-inline: 8px; }
-.presales-inquiry-list .ant-btn-link { padding-inline: 4px; height: auto; }
-.presales-inquiry-list .ant-table-thead .ant-table-cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
-.presales-inquiry-list .ant-table-tbody .ant-table-cell { overflow: hidden; overflow-wrap: normal; word-break: normal; }
-.presales-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 2px 4px; max-width: 100%; min-width: 0; }
-.presales-actions .ant-btn { max-width: 100%; height: auto; white-space: nowrap; }
-.presales-line-nest { display: flex; flex-direction: column; align-items: stretch; gap: 8px; max-width: 100%; min-width: 0; box-sizing: border-box; padding: 4px 0 4px 28px; border-left: 2px solid var(--mb-border); }
-.presales-line-quote { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 16px; max-width: 100%; min-width: 0; text-align: center; }
-.presales-line-quote > * { flex: 0 1 auto; min-width: 0; max-width: 100%; text-align: center; overflow-wrap: anywhere; }
-.presales-price-bubble { flex: 0 1 auto; display: inline-flex; align-items: center; justify-content: center; max-width: 100%; padding: 0 10px; border-radius: 999px; line-height: 22px; border: 1px solid transparent; white-space: normal; }
-.presales-price-bubble.is-quoted { color: var(--mb-success); background: color-mix(in srgb, var(--mb-success) 14%, transparent); border-color: color-mix(in srgb, var(--mb-success) 45%, transparent); }
-.presales-price-bubble.is-missing { color: var(--mb-danger); background: color-mix(in srgb, var(--mb-danger) 12%, transparent); border-color: color-mix(in srgb, var(--mb-danger) 42%, transparent); }
-.presales-stamp { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.35; white-space: nowrap; }
-.presales-stamp span + span { color: var(--mb-text-3); }
 .presales-footer { position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 16px 20px; margin-top: 16px; background: var(--mb-surface); border-top: 1px solid var(--mb-border); }
 .presales-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 24px; }
 .presales-wide { grid-column: 1 / -1; }

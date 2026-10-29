@@ -22,7 +22,7 @@ export default function QuoteWorkbenchPage() {
   const legacyId = Number(params.get("id"));
   if (legacyId > 0) return <Navigate replace to={`/presales/workbench/${legacyId}`} state={location.state} />;
   return <section className="presales-page">
-    <PageHeader title="报价" subtitle="领取询价、填写报价，或主动报出已有货源" extra={<Link to="/presales/offers/new">主动报价</Link>} />
+    <PageHeader title="报价工作台" subtitle="领取采购询价，跟进报价与通知" extra={<Link to="/presales/offers/new">主动报价</Link>} />
     <div className="presales-panel">
       <Tabs activeKey={subjectType} onChange={(value) => { setSubjectType(value); setSelected([]); }} items={[
         { key: "presales_inquiry", label: "采购询价" }, { key: "presales_offer_notice", label: "报价通知" },
@@ -37,10 +37,7 @@ export default function QuoteWorkbenchPage() {
         onSelectionChange={subjectType === "presales_inquiry" ? setSelected : undefined}
         isRowSelectable={(item) => !item.paused && ["pending", "in_progress"].includes(item.status)
           && (item.assignee_id != null || item.claimed_by != null) && item.allowed_actions.some((action) => ["start", "release", "complete"].includes(action))}
-        renderRow={(item) => <div>
-          <div>{String(item.summary.created_by_name ?? "业务人员")}</div>
-          <div className="presales-muted">{formatBusinessDateTime(String(item.summary.created_at ?? item.created_at))}</div>
-        </div>}
+        renderRow={(item) => <><span>{String(item.summary.created_by_name ?? "业务人员")}</span><div className="presales-muted">{formatBusinessDateTime(String(item.summary.created_at ?? item.created_at))}</div></>}
         onOpen={(item) => navigate(item.subject_type === "presales_offer_notice"
           ? `/presales/inquiries/${item.subject_id}` : `/presales/workbench/${item.subject_id}`, { state: { workItem: item } })} />
     </div>

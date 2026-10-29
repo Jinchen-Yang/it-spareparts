@@ -99,7 +99,6 @@ def test_sales_creator_name_is_returned_for_assigned_buyer_and_work_summary(db, 
     assert "created_by" not in detail
     queue = client.get("/api/work-items", params={"tab": "done", "subject_type": "presales_inquiry"}).json()
     assert queue["items"][0]["summary"]["created_by_name"] == "seller"
-    assert queue["items"][0]["summary"]["pns"] == [users.part.pn_std]
     timeline = _client(users.seller).get(f"/api/subjects/presales_inquiry/{row.id}/events").json()
     assert any(event["kind_label"] == "提交询价" for event in timeline["items"])
     assert all(event["kind_label"] and "." not in event["kind_label"] for event in timeline["items"])

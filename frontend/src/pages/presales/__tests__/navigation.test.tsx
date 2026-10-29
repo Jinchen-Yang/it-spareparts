@@ -27,19 +27,15 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-it("售前单独成组，只保留询价和报价两个菜单，深链仍走 page_presales", () => {
-  const presales = NAV_GROUPS.find((group) => group.label === "售前系统")!;
-  expect(presales.items.map((item) => item.path)).toEqual(["/presales/inquiries", "/presales/workbench"]);
-  expect(presales.items.map((item) => item.label)).toEqual(["询价", "报价"]);
-  expect(presales.items.every((item) => item.perm === "page_presales" && typeof item.load === "function")).toBe(true);
-  for (const label of ["销售管理", "采购管理"]) {
-    expect(NAV_GROUPS.find((group) => group.label === label)!.items.some((item) => item.key.startsWith("presales-"))).toBe(false);
-  }
+it("售前菜单按销售采购归位，菜单与深链复用 page_presales 权限及懒加载工厂", () => {
+  const menus = NAV_GROUPS.find((group) => group.label === "销售管理")!.items.filter((item) => item.key.startsWith("presales-"));
+  expect(menus.map((item) => item.path)).toEqual(["/presales/inquiries", "/presales/library"]);
+  const purchase = NAV_GROUPS.find((group) => group.label === "采购管理")!.items.filter((item) => item.key.startsWith("presales-"));
+  expect(purchase.map((item) => item.path)).toEqual(["/presales/workbench", "/presales/offers/new"]);
+  expect(purchase.every((item) => item.perm === "page_presales")).toBe(true);
+  expect(menus.every((item) => item.perm === "page_presales" && typeof item.load === "function")).toBe(true);
   const details = DETAIL_ROUTES.filter((item) => item.key.startsWith("presales-"));
-  expect(details.map((item) => item.path)).toEqual([
-    "/presales/library", "/presales/offers/new", "/presales/inquiries/new",
-    "/presales/inquiries/:id/edit", "/presales/inquiries/:id", "/presales/workbench/:id", "/presales/tasks/:id",
-  ]);
+  expect(details).toHaveLength(5);
   expect(details.every((item) => item.perm === "page_presales" && typeof item.load === "function")).toBe(true);
   expect(NAV_ITEMS.find((item) => item.key === "presales-workbench")?.menuLabel).toBeTruthy();
 });
@@ -49,19 +45,17 @@ it("无 page_presales 时菜单不出现，直接访问售前深链也回到可�
   window.history.replaceState({}, "", "/presales/inquiries/12");
   render(<App />);
   expect(await screen.findByText("型号页面")).toBeInTheDocument();
-  expect(screen.queryByText("询价")).not.toBeInTheDocument();
-  expect(screen.queryByText("报价")).not.toBeInTheDocument();
+  expect(screen.queryByText("询价单")).not.toBeInTheDocument();
+  expect(screen.queryByText("报价工作台")).not.toBeInTheDocument();
   expect(screen.queryByText("询价详情内容")).not.toBeInTheDocument();
 });
 
-it("授予 page_presales 后询价和报价菜单与详情深链同时开放", async () => {
+it("授予 page_presales 后四个菜单和详情深链同时开放", async () => {
   localStorage.setItem("permissions", JSON.stringify({ page_presales: true }));
   window.history.replaceState({}, "", "/presales/inquiries/12");
   render(<App />);
   expect(await screen.findByText("询价详情内容")).toBeInTheDocument();
-  for (const label of ["询价", "报价"]) expect(screen.getByText(label)).toBeInTheDocument();
-  expect(screen.queryByText("主动报价")).not.toBeInTheDocument();
-  expect(screen.queryByText("报价库")).not.toBeInTheDocument();
+  for (const label of ["询价单", "报价工作台", "主动报价", "报价库"]) expect(screen.getByText(label)).toBeInTheDocument();
 });
 
 

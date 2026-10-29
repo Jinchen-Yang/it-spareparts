@@ -116,11 +116,10 @@ it("PN 状态按报价和版本去重，采购明确不报的行显示原因而�
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
   await screen.findByText("PN-QUOTED · PN-SKIPPED");
   fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
-  expect(screen.getByText("¥100")).toBeVisible();
-  expect(screen.getByText("含税")).toBeVisible();
-  expect(screen.queryByText(/条有效报价/)).not.toBeInTheDocument();
+  expect(screen.getByText("已引用 · 1 条有效报价")).toBeVisible();
+  expect(screen.queryByText(/2 条有效报价|3 条有效报价|4 条有效报价/)).not.toBeInTheDocument();
   expect(screen.getByText(/不报.*已停产，无法供货/)).toBeVisible();
-  expect(screen.queryByText("未报价", { exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByText("待报价", { exact: true })).not.toBeInTheDocument();
 });
 
 it("列表摘要使用本行钉住版本，报价更新不能续期已过期的引用", async () => {
@@ -136,8 +135,7 @@ it("列表摘要使用本行钉住版本，报价更新不能续期已过期的�
   await screen.findByText("PN-PINNED");
   fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
   expect(screen.queryByText(/条有效报价/)).not.toBeInTheDocument();
-  expect(screen.queryByText("¥50")).not.toBeInTheDocument();
-  expect(screen.getByText("未报价", { exact: true })).toBeVisible();
+  expect(screen.getByText("待报价", { exact: true })).toBeVisible();
 });
 
 it("引用快照在毫秒截止边界刷新摘要，不等待当前报价的续期截止", async () => {
@@ -155,10 +153,10 @@ it("引用快照在毫秒截止边界刷新摘要，不等待当前报价的续�
     await act(async () => {});
     fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(499); });
-    expect(screen.getByText("¥100")).toBeVisible();
+    expect(screen.getByText("已引用 · 1 条有效报价")).toBeVisible();
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-    expect(screen.queryByText("¥100")).not.toBeInTheDocument();
-    expect(screen.getByText("未报价", { exact: true })).toBeVisible();
+    expect(screen.queryByText(/条有效报价/)).not.toBeInTheDocument();
+    expect(screen.getByText("待报价", { exact: true })).toBeVisible();
   } finally {
     view.unmount();
     vi.useRealTimers();
