@@ -220,15 +220,15 @@ describe("报价页", () => {
       if (ids.includes(201)) throw { response: { status: 503 } };
       return { 1: [offer({ line_id: 999, unit_price: "250" })] };
     });
-    renderQuote();
-    await screen.findByText("部分型号的已有报价未能加载，请刷新重试。");
+    await act(async () => { renderQuote(); });
+    const warning = await screen.findByText("部分型号的已有报价未能加载，请刷新重试。");
     const input = await screen.findByRole("spinbutton", { name: "PN-1 单价" });
     fireEvent.click(within(input.closest("tr")!).getByRole("button", { name: "Expand row" }));
-    fireEvent.click(await screen.findByRole("button", { name: "沿用" }));
+    fireEvent.click(await within(input.closest("tr")!.nextElementSibling as HTMLElement).findByRole("button", { name: "沿用" }));
     expect(Number((input as HTMLInputElement).value)).toBe(250);
     mocks.library.mockImplementation(async (ids: number[]) => Object.fromEntries(ids.filter((id) => id === 1 || id === 201)
       .map((id) => [id, [offer({ line_id: 999, part_id: id, unit_price: "250" })]])));
-    fireEvent.click(screen.getByRole("button", { name: "刷新已有报价" }));
+    fireEvent.click(within(warning.closest('[role="alert"]') as HTMLElement).getByRole("button", { name: "刷新已有报价" }));
     await waitFor(() => expect(mocks.library).toHaveBeenCalledTimes(4));
     await waitFor(() => expect(screen.queryByText("部分型号的已有报价未能加载，请刷新重试。")).not.toBeInTheDocument());
     expect(Number((screen.getByRole("spinbutton", { name: "PN-1 单价" }) as HTMLInputElement).value)).toBe(250);
