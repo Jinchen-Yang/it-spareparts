@@ -1,11 +1,13 @@
 """D49 state-machine failure paths; execute only on jinchen-dev."""
 import copy
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
 
 
@@ -122,6 +124,46 @@ class HandoffTests(unittest.TestCase):
                 method()
         self.source.inspect.assert_not_called()
         self.source.run.assert_not_called()
+
+    def test_recover_legacy_without_docker_health_probes_each_exact_instance_twice(self):
+        self.intent()
+        for row in self.rows.values():
+            del row['State']['Health']
+        probes = []
+        def command(argv, **kwargs):
+            if argv[:2] == ['docker', 'start']:
+                self.rows[argv[2].removesuffix('-id')]['State']['Running'] = True
+                return b''
+            self.assertEqual(argv[:2], ['docker', 'exec'])
+            self.assertEqual(argv[3:], ['python', '-c', itsp.ORIGINAL_HEALTH_PROBE])
+            self.assertEqual(kwargs, {'timeout': 8})
+            probes.append(argv[2])
+            return b'true\n'
+        self.source.run.side_effect = command
+        result = self.source.recover_hold_source()
+        self.assertTrue(result['restored_original_processes'])
+        self.assertEqual(probes, [row['Id'] for row in self.rows.values()] * 2)
+        self.source.wait_http.assert_called_once_with('https://ybwznt.com/health/db')
+        self.assertTrue(all('Health' not in row['State'] for row in self.rows.values()))
+
+    def test_legacy_probe_failure_never_claims_recovered(self):
+        self.intent()
+        for row in self.rows.values():
+            row['State']['Running'] = True
+            del row['State']['Health']
+        self.source.run.return_value = b'false\n'
+        with patch.object(itsp.time, 'sleep'), self.assertRaisesRegex(RuntimeError, 'health timeout'):
+            self.source.recover_hold_source()
+        self.source.wait_http.assert_not_called()
+
+    def test_legacy_final_health_drift_blocks_recovery(self):
+        self.intent()
+        for row in self.rows.values():
+            row['State']['Running'] = True
+            del row['State']['Health']
+        self.source.run.side_effect = [b'true\n'] * 4 + [b'false\n']
+        with self.assertRaisesRegex(RuntimeError, 'final original health changed'):
+            self.source.recover_hold_source()
 
     def test_source_migration_unknown_result_forbids_resume(self):
         self.intent()
@@ -241,6 +283,55 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(release.http.call_count, 5)
         release.protected.assert_not_called()
         self.assertEqual(result['seal_sha256'], 'frozen')
+
+
+class OriginalHealthTests(unittest.TestCase):
+    def setUp(self):
+        self.source = itsp.Release.__new__(itsp.Release)
+        self.source.run = Mock(return_value=b'true\n')
+        self.row = container('original', True)
+
+    def test_configured_health_never_falls_back(self):
+        for status in ('starting', 'unhealthy', 'healthy'):
+            self.row['State']['Health']['Status'] = status
+            self.assertEqual(self.source.original_healthy(self.row), status == 'healthy')
+        self.source.run.assert_not_called()
+
+    def test_missing_configured_health_is_rejected(self):
+        del self.row['State']['Health']
+        self.row['Config'] = {'Healthcheck': {'Test': ['CMD', 'health']}}
+        self.assertFalse(self.source.original_healthy(self.row))
+        self.source.run.assert_not_called()
+
+    def test_legacy_exec_errors_and_unexpected_output_rejected(self):
+        del self.row['State']['Health']
+        for value in (b'false', b'{"status":"ok"}', b'true\nextra', b''):
+            self.source.run.return_value = value
+            self.assertFalse(self.source.original_healthy(self.row))
+        self.source.run.side_effect = RuntimeError('exec failed')
+        self.assertFalse(self.source.original_healthy(self.row))
+
+    def test_probe_requires_bounded_200_database_health(self):
+        for status, body, expected in (
+            (200, b'{"status":"ok","db":"reachable"}', True),
+            (503, b'{"status":"ok","db":"reachable"}', False),
+            (200, b'{"status":"error","db":"unreachable"}', False),
+            (200, b'{"status":"ok"}', False),
+            (200, b'[]', False),
+            (200, b'bad-json', False),
+            (200, b'x' * 4097, False),
+        ):
+            with self.subTest(status=status, body=body[:50]):
+                response = SimpleNamespace(status=status, read=Mock(return_value=body))
+                connection = Mock()
+                connection.getresponse.return_value = response
+                output = io.StringIO()
+                with patch('http.client.HTTPConnection', return_value=connection) as factory, redirect_stdout(output):
+                    exec(itsp.ORIGINAL_HEALTH_PROBE, {})
+                factory.assert_called_once_with('127.0.0.1', 8000, timeout=3)
+                connection.request.assert_called_once_with('GET', '/health/db')
+                response.read.assert_called_once_with(4097)
+                self.assertIs(json.loads(output.getvalue()), expected)
 
 
 if __name__ == '__main__':

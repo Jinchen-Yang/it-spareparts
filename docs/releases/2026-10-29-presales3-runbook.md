@@ -87,7 +87,7 @@ job 137 仅作为未完成的孤儿账本保留：其完整行及唯一关联 sa
 
 迁移 `f1a3c5e7b9d2` 允许报价没有来源单据，并新增独立受众。已有独立报价时 downgrade 明确拒绝，不能删除报价、伪造 BJ 或恢复旧 dump 覆盖新业务数据。
 
-控制器 `.deploy/presales3_ops.py` 的每阶段由 manifest SHA256、控制器 SHA256、意图与完成回执绑定。D-0049 恢复仅走 `recover-hold-source`，且仅限**商城首次可变阶段 intent（最早 freeze）之前**：包括 hold 部分 stop 失败或 hold 已 PASS，但必须原 schema/Caddy/全保护指纹/四源 ID/image/StartedAt/导入门禁仍一致。恢复后逐实例 Running 与 Docker health、主站数据库健康及保护/导入门禁复核通过才写 PASS，不还原数据库。恢复 intent 一旦出现，该 hold 不能再被商城接受；不得删除任何 intent/receipt 伪造可重跑状态。
+控制器 `.deploy/presales3_ops.py` 的每阶段由 manifest SHA256、控制器 SHA256、意图与完成回执绑定。D-0049 恢复仅走 `recover-hold-source`，且仅限**商城首次可变阶段 intent（最早 freeze）之前**：包括 hold 部分 stop 失败或 hold 已 PASS，但必须原 schema/Caddy/全保护指纹/四源 ID/image/StartedAt/导入门禁仍一致。恢复后逐实例 Running 与健康、主站数据库健康及保护/导入门禁复核通过才写 PASS，不还原数据库。配置 Docker Healthcheck 的实例必须 healthy，不能降级；现场四旧源均没有该配置，仅此类实例在精确 CID 内读取 loopback `/health/db`，要求 HTTP 200、status=ok、db=reachable，并在结束前再次逐实例检查。探针不走代理、不跟随重定向、响应最多4096字节，HTTP限3秒、exec限8秒，重试段最多120秒加在途单次探针；不伪造 Docker Health 字段。恢复 intent 一旦出现，该 hold 不能再被商城接受；不得删除任何 intent/receipt 伪造可重跑状态。
 
 商城 freeze intent 已出现（即使失败、超时或结果不明）、商城任何后续可变阶段已可能发生，或 ITSP 迁移/暴露已可能发生，均禁止自动恢复旧源。ITSP `recover-freeze` 与 `rollback` 同受此限制；保留冻结并受控前滚。商城自身未完成 freeze 的受审窄恢复不授予恢复旧源的权限。
 
@@ -96,6 +96,8 @@ job 137 仅作为未完成的孤儿账本保留：其完整行及唯一关联 sa
 - SSH 结果不明时先重新读取实际状态和回执，不盲目重复备份、迁移、切流或清理。
 
 ## 已知保守选择
+
+2026-10-29 23:01 UTC 再次只读核验：126个生产容器指纹、四源身份/StartedAt、两库schema、Caddy/NGINX及导入指纹未漂移。四旧源均未配置Docker Healthcheck，修复恢复确认对此旧形态的误判，未更改正常发布路径。jinchen-dev独占 `d49-ops-01a188b2/legacy-health-final` 完整104项全部通过、无skip、118.737秒，受管进程exit0；新增真实官方Python3.10容器无Healthcheck时loopback200接受、503拒绝，network-none且不发布端口，精确归属清理完成。其他真实PG15恢复和部分停源恢复再次通过；独立gpt-6.1-sol静态PASS。仍须最终精确提交CI，不以该演练替代生产门禁。
 
 D-0049 控制实现开发验证：`jinchen-dev:/home/cloudlay/work/d49-ops-01a188b2/tests-final.log`，89 项全部通过、无 skip，受管执行真实退出码0。包括既有15项商城阶段守卫、源/商城交接失败路径、真实PG15元数据只读SQL与两系统旧/新头恢复、实际Docker配置克隆，以及4个独占network-none进程真实部分stop失败/恢复。停源演练中的schema/Caddy/导入/TCP/HTTP为合成seam，未连接生产；SQL和恢复由独立真实PG15用例覆盖。日志SHA256 `6afd2ed5d2e53fbbf7fd04429d911a16c452b95baf096907c3c124534fb7514b`。这不代表生产门禁已执行或最终提交已通过CI；控制器最终字节仍须跨模型独立复审。
 

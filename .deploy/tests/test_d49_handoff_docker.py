@@ -28,6 +28,50 @@ def run(argv):
 
 @unittest.skipUnless(os.environ.get('D49_HANDOFF_DOCKER_DRILL') == '1', 'explicit owned Docker drill only')
 class DockerHoldDrill(unittest.TestCase):
+    def test_real_legacy_without_healthcheck_uses_bounded_loopback_database_probe(self):
+        self.assertEqual(socket.gethostname(), 'jinchen-dev')
+        owner = 'd49-legacy-' + secrets.token_hex(8)
+        image = 'python@sha256:6ff506466f8b1e981719b468cc0023b8ef000b983cdec0eafe119d01f379e31d'
+        server = '''from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        healthy = self.path == "/health/db" and not Path("/tmp/fail").exists()
+        self.send_response(200 if healthy else 503)
+        self.end_headers()
+        self.wfile.write(b'{"status":"ok","db":"reachable"}')
+    def log_message(self, *args):
+        pass
+HTTPServer(("127.0.0.1", 8000), Handler).serve_forever()
+'''
+        cid = run(['docker', 'run', '-d', '--pull=never', '--name', owner, '--network', 'none',
+                   '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=1m', '--memory', '128m',
+                   '--cpus', '0.25', '--pids-limit', '32', '--label', 'codex.d49-hold=' + owner,
+                   '--entrypoint', 'python', image, '-c', server]).decode().strip()
+        try:
+            release = ops.Release.__new__(ops.Release)
+            for attempt in range(20):
+                row = release.inspect(cid)
+                self.assertFalse(row['Config'].get('Healthcheck'))
+                self.assertNotIn('Health', row['State'])
+                if release.original_healthy(row):
+                    break
+                time.sleep(0.2)
+            else:
+                self.fail('real legacy loopback probe never became healthy')
+            self.assertEqual(row['Id'], cid)
+            self.assertEqual(row['HostConfig']['NetworkMode'], 'none')
+            self.assertFalse(row['HostConfig'].get('PortBindings'))
+            run(['docker', 'exec', cid, 'python', '-c', 'from pathlib import Path; Path("/tmp/fail").touch()'])
+            self.assertFalse(release.original_healthy(release.inspect(cid)))
+            self.assertNotIn('Health', release.inspect(cid)['State'])
+        finally:
+            row = json.loads(run(['docker', 'inspect', cid]))[0]
+            self.assertEqual(row['Id'], cid)
+            self.assertEqual(row['Config']['Labels'].get('codex.d49-hold'), owner)
+            run(['docker', 'rm', '-f', '-v', cid])
+            self.assertEqual(run(['docker', 'ps', '-aq', '--filter', 'label=codex.d49-hold=' + owner]).strip(), b'')
+
     def test_real_partial_stop_recovery_and_shop_intent_boundary(self):
         self.assertEqual(socket.gethostname(), 'jinchen-dev')
         owner = 'd49-hold-' + secrets.token_hex(8)

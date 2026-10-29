@@ -32,6 +32,20 @@ BASE = Path("/data/spareparts/releases")
 HOSTS = {"ybwznt.com", "www.ybwznt.com"}
 CATALOG_SYNC_URL = "https://shop.ybwznt.com/api/integrations/catalog/parts/sync"
 CATALOG_SYNC_KEYS = {"SHOP_CATALOG_SYNC_ENABLED", "SHOP_CATALOG_SYNC_URL", "SHOP_CATALOG_SYNC_TOKEN"}
+ORIGINAL_HEALTH_PROBE = '''import http.client, json
+try:
+    conn = http.client.HTTPConnection("127.0.0.1", 8000, timeout=3)
+    conn.request("GET", "/health/db")
+    response = conn.getresponse()
+    body = response.read(4097)
+    value = json.loads(body) if len(body) <= 4096 else None
+    healthy = (response.status == 200 and isinstance(value, dict)
+        and value.get("status") == "ok" and value.get("db") == "reachable")
+    conn.close()
+except Exception:
+    healthy = False
+print(json.dumps(healthy))
+'''
 SHOP_BASE = Path('/data/shop/releases')
 SOURCE_HEAD = 'a3c5e7f9b2d4'
 # 只导入配置模型，不导入 app.main/db、不连接网络；任何验证错误只输出布尔值。
@@ -447,18 +461,34 @@ class Release:
              and not (peer.root / 'exposure-started.json').exists(), 'shop may have changed; source forward-only')
         need(not any((self.root / name).exists() for name in ('migrate.intent.json', 'migrate.json', 'bluegreen.intent.json', 'cutover.intent.json', 'exposure-started.json')), 'source migration/exposure may have begun; forward-only')
 
+    def original_healthy(self, row):
+        """Keep configured Docker health strict; probe legacy instances directly."""
+        health = row['State'].get('Health')
+        if health is not None:
+            return isinstance(health, dict) and health.get('Status') == 'healthy'
+        # A configured but missing health result is not a legacy exemption.
+        if row.get('Config', {}).get('Healthcheck'):
+            return False
+        try:
+            return self.run(['docker', 'exec', row['Id'], 'python', '-c', ORIGINAL_HEALTH_PROBE],
+                            timeout=8).strip() == b'true'
+        except Exception:
+            return False
+
     def recover_hold_source(self):
         self.may_resume_source()
         before = self.hold_state(stopped=False, full=True)
         for writer in before['writers']:
             if not self.inspect(writer['id'])['State']['Running']:
                 self.run(['docker', 'start', writer['id']])
+        health_deadline = time.monotonic() + 120
         for attempt in range(60):
             healthy = True
             for writer in before['writers']:
+                need(time.monotonic() < health_deadline, 'held original health timeout')
                 row = self.inspect(writer['name'])
                 need(row['Id'] == writer['id'] and row['Image'] == writer['image'] and row['State']['Running'], 'held original failed after restart')
-                healthy = healthy and row['State'].get('Health', {}).get('Status') == 'healthy'
+                healthy = self.original_healthy(row) and healthy
             if healthy:
                 self.wait_http('https://ybwznt.com/health/db')
                 need(self.schema() == before['schema'], 'recovery schema changed')
@@ -474,7 +504,7 @@ class Release:
                 for writer in before['writers']:
                     row = self.inspect(writer['name'])
                     need(row['Id'] == writer['id'] and row['Image'] == writer['image'] and row['State']['Running']
-                         and row['State'].get('Health', {}).get('Status') == 'healthy', 'recovery final original health changed')
+                         and self.original_healthy(row), 'recovery final original health changed')
                 return {'restored_original_processes': True, 'database_restored': False,
                         'containers': {r['name']: fingerprint(self.inspect(r['name'])) for r in before['writers']}}
             time.sleep(1)
