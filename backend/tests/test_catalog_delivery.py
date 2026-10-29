@@ -16,6 +16,7 @@ from pydantic import SecretStr, ValidationError
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 
+from app import config
 from app.config import Settings, get_settings
 from app.db import SessionLocal, engine
 from app.main import app
@@ -333,13 +334,51 @@ def test_by_ids_database_failure_is_retryable_and_never_logs_sql(catalog_client,
     assert "secret-token" not in caplog.text and "raw-SQL" not in caplog.text
 
 
-def test_status_read_only_permission_and_no_secret(db, actors):
+@pytest.mark.parametrize("rbac_enabled", [False, True])
+@pytest.mark.parametrize("credential", ["anonymous", "invalid", "inactive", "revoked"])
+def test_status_requires_valid_login_with_rbac_on_or_off(db, actors, monkeypatch, rbac_enabled, credential):
+    monkeypatch.setattr(config, "ENABLE_RBAC", rbac_enabled)
     created = _create(db)
     path = f"/api/parts/master/{created['id']}/catalog-sync"
-    assert TestClient(app).get(path).status_code == 403  # Existing HTTPBearer missing-header contract.
-    assert _client(actors.seller).get(path).status_code == 403
+    if credential == "anonymous":
+        client = TestClient(app)
+    elif credential == "invalid":
+        client = TestClient(app, headers={"Authorization": "Bearer invalid"})
+    else:
+        client = _client(actors.buyer)
+        if credential == "inactive":
+            actors.buyer.is_active = False
+        else:
+            actors.buyer.token_version += 1
+        db.commit()
+
+    read_status = Mock(side_effect=AssertionError("unauthenticated requests must not read sync status"))
+    monkeypatch.setattr(svc, "read_status", read_status)
+    assert client.get(path).status_code == 401
+    read_status.assert_not_called()
+
+
+@pytest.mark.parametrize("rbac_enabled", [False, True])
+@pytest.mark.parametrize("actor,allowed", [("buyer", False), ("seller", True)])
+def test_status_honors_current_user_page_permission(db, actors, monkeypatch, rbac_enabled, actor, allowed):
+    monkeypatch.setattr(config, "ENABLE_RBAC", rbac_enabled)
+    user = getattr(actors, actor)
+    user.perm_overrides = {"page_master_data": allowed}
+    db.commit()
+    created = _create(db)
+    response = _client(user).get(f"/api/parts/master/{created['id']}/catalog-sync")
+    assert response.status_code == (200 if allowed or not rbac_enabled else 403)
+
+
+@pytest.mark.parametrize("rbac_enabled", [False, True])
+def test_status_read_only_permission_and_no_secret(db, actors, monkeypatch, rbac_enabled):
+    monkeypatch.setattr(config, "ENABLE_RBAC", rbac_enabled)
+    created = _create(db)
+    path = f"/api/parts/master/{created['id']}/catalog-sync"
+    assert _client(actors.seller).get(path).status_code == (403 if rbac_enabled else 200)
     response = _client(actors.buyer).get(path)
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     assert response.json()["status"] == "pending" and response.json()["enabled"] is False
     assert not {"lease_token", "token", "url"} & set(response.json())
     assert db.scalar(select(CatalogDelivery.attempts)) == 0

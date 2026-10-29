@@ -396,6 +396,7 @@ def master_catalog_sync_status(
     part_id: int,
     response: Response,
     db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
     _: None = Depends(require_page("page_master_data")),
 ) -> dict:
     from app.config import get_settings

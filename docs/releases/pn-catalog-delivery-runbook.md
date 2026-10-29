@@ -39,7 +39,7 @@ itsp 迁移 `c6e8a1b3d5f7` 只新增技术出站表及两个部分索引，不�
 
 至少一次投递：断网、错误HTTP、错回执和超时指数退避5秒起至1小时，不有限次静默丢弃。过期租约可重领，每次产生新lease token；旧消费者和过期回执CAS失败，不得覆盖新状态。进程退出等当前有界请求结束并回执；强制中断的未回执任务在租约到期后恢复。同deliveryId重试须依赖商城幂等回执，不得重新建品或产生库存流水。
 
-有主数据页面权限的实名用户可只读查询 `GET /api/parts/master/{part_id}/catalog-sync`，没有放宽原权限。`enabled=false`与`pending`可同时出现，表示已排队但投递关闭；`not_queued`仅说明没有本能力创建的任务，不证明商城缺失。`delivering`是尝试中；`succeeded`附带`applied|unchanged`；`conflict`是需人工核对。状态附尝试次数、时间和安全错误码，不返回URL、凭据、lease token或原响应。
+有主数据页面权限的实名用户可只读查询 `GET /api/parts/master/{part_id}/catalog-sync`，没有放宽原权限。接口沿相邻主数据读面使用硬鉴权，即使 `ENABLE_RBAC=false` 也拒绝匿名、无效或被撤销身份；RBAC开启时另校验页面权限。`enabled=false`与`pending`可同时出现，表示已排队但投递关闭；`not_queued`仅说明没有本能力创建的任务，不证明商城缺失。`delivering`是尝试中；`succeeded`附带`applied|unchanged`；`conflict`是需人工核对。状态附尝试次数、时间和安全错误码，不返回URL、凭据、lease token或原响应。
 
 安全错误码为 `transport_error`、`deadline_exceeded`、`remote_http_error`、`invalid_receipt`、`manual_conflict`。运行日志只记录结果码和CAS是否接受，数据库异常只记 `worker_error`，不记录异常堆栈、SQL、参数、令牌、PN原文或业务响应。人工冲突处理沿用现有人工目录流程，本候选不提供改业务状态或强制重放的写接口。
 

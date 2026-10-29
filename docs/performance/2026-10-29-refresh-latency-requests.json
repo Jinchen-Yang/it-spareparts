@@ -1,4 +1,7 @@
 {
+  "evidence_status": "legacy_mixed_sources_not_valid_for_current_production_ranking",
+  "review_note": "Includes 22379 requests from frontend-1 whose traffic purpose is unverified. Exclude this source from current production conclusions. Per-source endpoint distributions were not retained; corrected seven-day endpoint counts and percentiles cannot be derived from this artifact. Original aggregate numbers below are preserved for audit only.",
+  "current_version_evidence": "2026-10-29-r142-independent-evidence.json",
   "window_start": "2026-10-22T17:56:33.170721+00:00",
   "window_end": "2026-10-29T17:56:33.170721+00:00",
   "quantiles": "nearest-rank",
