@@ -6,7 +6,7 @@ import { releaseWorkItem, type WorkItem } from "../../api/workItems";
 import GalleryPicker from "../../components/gallery/GalleryPicker";
 import Timeline from "../../components/workflow/Timeline";
 import { refreshWorkBadges } from "../../components/workflow/useWorkBadge";
-import { offerInput, quoteComplete } from "./QuoteEditor";
+import QuoteEditor, { offerInput, quoteComplete } from "./QuoteEditor";
 import { usePresalesError, isOfferActive, useNow, flattenOffers } from "./shared";
 import QuoteGrid, { type QuoteGridRow } from "./QuoteGrid";
 import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
@@ -244,7 +244,8 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
   const rows: QuoteGridRow[] = lines.map((line) => {
     const current = currentFor(line);
     const response = responseFor(line.id);
-    const canEdit = !refreshRequired && (current?.status === "published"
+    const canEditPublished = current?.status === "published" && (proactive || !line.ref_offer_id);
+    const canEdit = !refreshRequired && (canEditPublished
       || (editable && !proactive && !line.ref_offer_id && active));
     return { line, current, value: valueFor(line), response, reused: reusedOffer(line),
       responseDraft: !!responses[line.id] || !!savedResponse(line.id)?.is_draft,
@@ -255,10 +256,15 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
       binding: !line.part_id && canProcess && active ? <PartBinding line={line} onBound={setInquiry} refresh={refresh} disabled={busy || refreshRequired} /> : undefined,
       details: <>
         {inquiry.line_answers && <p>当前答复：<CurrentAnswer inquiry={inquiry} line={line} /></p>}
+        {!proactive && canEditPublished && response.mode !== "quote" && <>
+          <h3>更新本人当前报价</h3>
+          <QuoteEditor label={line.pn_raw} value={valueFor(line)} existing={current} disabled={!canEdit || busy}
+            onChange={(value) => changeValue(line.id, value)} />
+        </>}
         {proactive && (!current || current.status !== "published") && <Alert type="info" message="当前报价不可更新，可新建主动报价"
           action={<Link to="/presales/offers/new">新建主动报价</Link>} />}
       </>,
-      actions: canEdit && (proactive || response.mode === "quote") && <span className="presales-toolbar">
+      actions: canEdit && (proactive || response.mode === "quote" || canEditPublished) && <span className="presales-toolbar">
         <Button size="small" loading={busy} disabled={!quoteComplete(valueFor(line)) || (!line.part_id && !valueFor(line).no_stock)}
           onClick={() => void save(line)}>{current?.status === "published" ? "更新报价" : "保存该行报价"}</Button>
         {current?.status === "published" && <Button size="small" danger disabled={busy} onClick={() => { setReason(""); setWithdrawOffer(current); }}>撤销报价</Button>}

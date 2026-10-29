@@ -34,10 +34,12 @@ def test_downgrade_with_standalone_quote_is_refused_without_losing_quote_or_snap
     db.commit()
     engine, cfg = db.get_bind(), _alembic_cfg()
     db.close()
+    with engine.connect() as connection:
+        previous_head = connection.scalar(text("SELECT version_num FROM alembic_version"))
     with pytest.raises(RuntimeError, match="禁止破坏性降级"):
         command.downgrade(cfg, "e9b3d5f7a1c4")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "f1a3c5e7b9d2"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == previous_head
         assert connection.scalar(text("SELECT count(*) FROM presales_offer WHERE id=:id AND inquiry_id IS NULL AND line_id IS NULL"), {"id": quote_id}) == 1
         assert connection.scalar(text("SELECT count(*) FROM presales_offer_revision WHERE offer_id=:id"), {"id": quote_id}) == 1
     command.check(cfg)

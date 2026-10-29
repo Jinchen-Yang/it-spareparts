@@ -592,10 +592,14 @@ it("旧深链跨询价更新时使用当前授权版本，既有成本性质随�
   const current = { ...historical, inquiry_id: 2, line_id: 21, version: 5, unit_price: "200", expired: false,
     price_basis: "cost" as const, is_tax_inclusive: null };
   currentInquiry = { ...currentInquiry, lines: [currentInquiry.lines![0]], offers: [historical],
-    line_answers: [{ line_id: 11, state: "quoted", responded: true, offer: current }] };
+    line_answers: [{ line_id: 11, state: "quoted", responded: true, offer: current }],
+    line_responses: [{ line_id: 11, work_item_id: 71, mode: "reuse", ref_offer_id: current.id, created_by: 7,
+      offer: historical, current_offer: current, expired: true }] };
   mocks.updateOffer.mockResolvedValue({ ...current, unit_price: 250, version: 6 });
   processPage();
   await openLine("PN-1");
+  expect(await screen.findByText("更新本人当前报价")).toBeVisible();
+  expect(screen.getByText("所沿用报价：")).toHaveTextContent("¥100");
   expect(Number((await screen.findByLabelText("PN-1单价") as HTMLInputElement).value)).toBe(200);
   expect(screen.getByRole("combobox", { name: "PN-1价格性质" }).closest(".ant-select")).toHaveTextContent("成本价");
   fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "250" } });
