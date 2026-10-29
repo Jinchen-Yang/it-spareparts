@@ -147,10 +147,10 @@ describe("r6 采购逐行三选一", () => {
     expect(screen.queryByText("沿用报价当前不可见或已失效")).not.toBeInTheDocument();
   });
 
-  it("销售详情回读沿用的当前报价，过期保留失效提示及不报原因", async () => {
+  it("销售详情回读沿用的当前报价，被取代时保留失效提示及不报原因", async () => {
     vi.mocked(Date.now).mockReturnValue(Date.parse("2026-10-28T00:00:00Z"));
     inquiry.line_responses = [{ line_id: 11, mode: "reuse", ref_offer_id: 99, created_by: 7, work_item_id: 71,
-      offer: activeQuote(), expired: true }, { line_id: 12, mode: "skip", reason: "暂不报价", created_by: 7, work_item_id: 71, expired: false }];
+      offer: { ...activeQuote(), expired: true }, expired: true }, { line_id: 12, mode: "skip", reason: "暂不报价", created_by: 7, work_item_id: 71, expired: false }];
     render(<MemoryRouter initialEntries={["/presales/inquiries/1"]}><Routes>
       <Route path="/presales/inquiries/:id" element={<InquiryDetailPage />} /></Routes></MemoryRouter>);
     expect(await screen.findByText("沿用报价 #99")).toBeInTheDocument();
