@@ -4,6 +4,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 import { MemoryRouter, useLocation, useNavigationType, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SESSION_EXPIRED_MESSAGE } from "../../../../utils/session";
 
 const tagLayout = vi.hoisted(() => ({ showCustomerTags: false }));
 vi.mock("antd", async (importOriginal) => {
@@ -653,6 +654,44 @@ describe("图表层（Q-A-01 / D-39 补图表）", () => {
       { key: TODAY, label: null, orders: 4, lines: 11, amount_inc: 1030, amount_ex: 910, amount_paid: 955 },
     ],
   };
+
+  it("按日表格与趋势同筛选时共享在途读取，重挂载仍重新读取", async () => {
+    let resolve!: (value: { data: typeof DAY_SUMMARY }) => void;
+    fetchPurchaseAnalyticsSummary.mockImplementation(() => new Promise((done) => { resolve = done; }));
+    const first = renderPage("/purchases/analytics?group_by=day");
+    expect(fetchPurchaseAnalyticsSummary).toHaveBeenCalledTimes(1);
+    await act(async () => { resolve({ data: DAY_SUMMARY }); });
+    expect(await screen.findByRole("button", { name: /模拟点击采购趋势/ })).toBeInTheDocument();
+    expect(screen.getByText("采购单数")).toBeInTheDocument();
+    first.unmount();
+    renderPage("/purchases/analytics?group_by=day");
+    expect(fetchPurchaseAnalyticsSummary).toHaveBeenCalledTimes(2);
+    await act(async () => { resolve({ data: DAY_SUMMARY }); });
+  });
+
+  it("合并读取失败后重试发起一次新请求，不复用失败结果", async () => {
+    fetchPurchaseAnalyticsSummary.mockRejectedValueOnce(new Error("offline"));
+    renderPage("/purchases/analytics?group_by=day");
+    const retry = (await screen.findAllByRole("button", { name: /重试/ }))[0];
+    expect(fetchPurchaseAnalyticsSummary).toHaveBeenCalledTimes(1);
+    fetchPurchaseAnalyticsSummary.mockResolvedValue({ data: DAY_SUMMARY });
+    fireEvent.click(retry);
+    expect(await screen.findByRole("button", { name: /模拟点击采购趋势/ })).toBeInTheDocument();
+    expect(fetchPurchaseAnalyticsSummary).toHaveBeenCalledTimes(2);
+  });
+
+  it("合并的在途读取换账号后同时丢弃，不把共享结果带到新会话", async () => {
+    localStorage.setItem("token", "account-a");
+    let resolve!: (value: { data: typeof DAY_SUMMARY }) => void;
+    fetchPurchaseAnalyticsSummary.mockImplementation(() => new Promise((done) => { resolve = done; }));
+    renderPage("/purchases/analytics?group_by=day");
+    expect(fetchPurchaseAnalyticsSummary).toHaveBeenCalledTimes(1);
+    localStorage.setItem("token", "account-b");
+    await act(async () => { resolve({ data: DAY_SUMMARY }); });
+    expect(await screen.findByText(SESSION_EXPIRED_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /模拟点击采购趋势/ })).toBeNull();
+    expect(fetchPurchaseAnalyticsSummary).toHaveBeenCalledTimes(1);
+  });
 
   it("默认今天（1 天）趋势按日：同端点第二次请求 group_by=day；切按月再请求 group_by=month", async () => {
     renderPage();

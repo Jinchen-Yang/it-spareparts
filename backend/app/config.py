@@ -23,7 +23,7 @@ _DEFAULT_MANIFEST_KEY = "change-me-maintenance-manifest-key-dev-v1"
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        env_file=".env", env_file_encoding="utf-8", extra="ignore", hide_input_in_errors=True
     )
 
     app_name: str = "IT 备件智能管理系统"
@@ -54,6 +54,56 @@ class Settings(BaseSettings):
     # 两个字段任一为空时图库代理接口整组 503。
     shop_gallery_base_url: str = ""
     shop_gallery_token: SecretStr = SecretStr("")
+    # PN 创建通知独立凭据；未启用时只保留 durable outbox，不发网络请求。
+    shop_catalog_sync_enabled: bool = False
+    shop_catalog_sync_url: str = ""
+    shop_catalog_sync_token: SecretStr = SecretStr("")
+
+    @field_validator("shop_catalog_sync_url")
+    @classmethod
+    def validate_shop_catalog_sync_url(cls, value: str) -> str:
+        if not value:
+            return ""
+        if value != value.strip() or any(ord(c) <= 32 or ord(c) >= 127 for c in value):
+            raise ValueError("SHOP_CATALOG_SYNC_URL 格式无效")
+        parsed = urlsplit(value)
+        try:
+            port = parsed.port
+        except ValueError:
+            raise ValueError("SHOP_CATALOG_SYNC_URL 端口无效") from None
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None
+                or parsed.query or parsed.fragment or "?" in value or "#" in value
+                or "\\" in value or (port is not None and not 1 <= port <= 65535)
+                or parsed.path != "/api/integrations/catalog/parts/sync"):
+            raise ValueError("SHOP_CATALOG_SYNC_URL 必须是无凭据、无查询串的目录通知地址")
+        return value
+
+    @field_validator("shop_catalog_sync_token")
+    @classmethod
+    def validate_shop_catalog_sync_token(cls, value: SecretStr) -> SecretStr:
+        token = value.get_secret_value()
+        if token and (not 32 <= len(token) <= 256
+                      or any(not 0x21 <= ord(c) <= 0x7E for c in token)):
+            raise ValueError("SHOP_CATALOG_SYNC_TOKEN 必须为32至256位无空白ASCII")
+        return value
+
+    @model_validator(mode="after")
+    def validate_catalog_sync_configuration(self):
+        if self.shop_catalog_sync_url:
+            parsed = urlsplit(self.shop_catalog_sync_url)
+            if parsed.scheme != "https" and (
+                self.environment == "prod" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+            ):
+                raise ValueError("目录通知必须使用 HTTPS（开发环境仅允许回环 HTTP）")
+        if self.shop_catalog_sync_enabled and (
+            not self.shop_catalog_sync_url or not self.shop_catalog_sync_token.get_secret_value()
+        ):
+            raise ValueError("启用目录通知需要独立地址和服务凭据")
+        if (self.shop_catalog_sync_token.get_secret_value()
+                and self.shop_catalog_sync_token.get_secret_value() == self.shop_gallery_token.get_secret_value()):
+            raise ValueError("目录通知凭据不能复用图库凭据")
+        return self
     # M1 资料召回在分档、字段打分前截断；PN/别名和报价加权候选另走车道。
     part_search_candidate_limit: int = Field(default=300, ge=1)
 

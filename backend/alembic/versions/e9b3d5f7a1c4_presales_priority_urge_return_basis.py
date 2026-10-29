@@ -1,7 +1,7 @@
 """售前询价优先级、催办、坏件是否返回与报价价格性质（D-0047）。
 
 Revision ID: e9b3d5f7a1c4
-Revises: d6e8f0a2b4c6
+Revises: c6e8a1b3d5f7
 """
 
 from alembic import op
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 
 
 revision = "e9b3d5f7a1c4"
-down_revision = "d6e8f0a2b4c6"
+down_revision = "c6e8a1b3d5f7"
 branch_labels = None
 depends_on = None
 

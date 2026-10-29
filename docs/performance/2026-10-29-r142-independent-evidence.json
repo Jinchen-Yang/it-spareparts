@@ -1,0 +1,43 @@
+{
+  "source": "supervisor_existing_read_only_aggregate_perf-independent-review.md",
+  "source_observed_at_utc": "2026-10-29T17:36:00Z/2026-10-29T17:44:00Z",
+  "container": "it-spareparts-frontend-r142",
+  "revision": "99e8a43ee6a544df2f990e7782bace0749445c7f",
+  "window_start": "2026-10-28T07:24:14.988Z",
+  "window_end": "2026-10-29T17:40:04.626Z",
+  "quantiles": "nearest-rank",
+  "units": "seconds",
+  "complete_endpoint_ranking": false,
+  "null_semantics": "not retained in the existing independent aggregate; not inferred from mixed-source data",
+  "scope_note": "Only these retained endpoint aggregates are reproduced. The independent API/health total differs from the other collector's API-only/prefix-excluded window and is not combined. No further production query was made.",
+  "endpoints": [
+    {"method":"POST","route":"/api/presales/lines/{line_id}/create-part","n":31,"p50_s":2.163,"p95_s":19.522,"max_s":32.468,"status":{"200":30,"504":1}},
+    {"method":"POST","route":"/api/maintenance/projects/stable/{project_id}/master-workbook/apply","n":32,"p50_s":null,"p95_s":13.590,"max_s":14.123},
+    {"method":"POST","route":"/api/maintenance/projects/stable/{project_id}/master-workbook/validate","n":35,"p50_s":null,"p95_s":12.884,"max_s":13.488},
+    {"method":"GET","route":"/api/presales/inquiries","n":1119,"p50_s":1.666,"p95_s":5.550,"max_s":26.078,"status":{"200":1109,"499":2,"401":8}},
+    {"method":"GET","route":"/api/maintenance/projects/stable/{project_id}/master-workbook.xlsx","n":52,"p50_s":null,"p95_s":5.337,"max_s":14.625},
+    {"method":"POST","route":"/api/integrations/resale/parts/resolve","n":426,"p50_s":null,"p95_s":4.506,"max_s":null},
+    {"method":"POST","route":"/api/presales/lines/{line_id}/bind-part","n":16,"p50_s":1.102,"p95_s":2.645,"max_s":2.645},
+    {"method":"GET","route":"/api/presales/lines/{line_id}/part-check","n":63,"p50_s":0.993,"p95_s":2.474,"max_s":2.707},
+    {"method":"GET","route":"/api/presales/inquiries/{inquiry_id}","n":13672,"p50_s":1.019,"p95_s":1.485,"max_s":4.741,"total_s":12458.557,"status":{"200":13652,"499":20}},
+    {"method":"GET","route":"/api/parts/search","n":850,"p50_s":0.886,"p95_s":1.209,"max_s":1.884},
+    {"method":"GET","route":"/api/parts/suggest","n":1046,"p50_s":0.121,"p95_s":0.298,"max_s":2.785},
+    {"method":"GET","route":"/api/presales/library","n":4944,"p50_s":0.179,"p95_s":0.298,"max_s":1.434},
+    {"method":"POST","route":"/api/integrations/pn-master/parts/batch-get","n":58,"p50_s":0.025,"p95_s":0.041,"max_s":0.181},
+    {"method":"GET","route":"/api/integrations/pn-master/changes","n":412,"p50_s":0.015,"p95_s":0.023,"max_s":4.450}
+  ],
+  "separate_non_endpoint_group": {
+    "description":"gallery write requests; exact method/route grouping unavailable",
+    "n":288,
+    "p95_s":7.063
+  },
+  "h6z27a_record_timestamps": {
+    "source":"existing redacted SQL aggregate receipts in codex-perf.log; no new production query",
+    "itsp_dim_part_created_at_utc":"2026-10-29T05:47:50.933251Z",
+    "itsp_dim_part_updated_at_utc":"2026-10-29T05:47:50.933251Z",
+    "shop_pn_created_at_utc":"2026-10-29T10:01:22.802510Z",
+    "record_time_difference_seconds":15211.869259,
+    "causal_limit":"Database record time difference is not the user's measured wait. No request/commit or per-PN cursor trace proves that the entire difference was caused by this full scan.",
+    "upstream_updated_at_semantics":"source data version, not a creation event"
+  }
+}

@@ -284,6 +284,8 @@ def create_part_in_transaction(db: Session, *, pn_std: str, operated_by: str | N
                        operated_by=operated_by)
     db.add(audit)
     db.flush()
+    from app.services.catalog_delivery import enqueue
+    enqueue(db, part.id)
     return {"created": True, "id": part.id, "pn_std": pn, "near_duplicates": near,
             "audit_id": audit.id, "edit_state": _edit_state(db, part)}
 

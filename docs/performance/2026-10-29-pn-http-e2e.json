@@ -1,0 +1,50 @@
+{
+  "status": "completed",
+  "failure_code": null,
+  "result": {
+    "measurement": "synthetic_jinchen_dev_real_http_tls",
+    "normal_samples": 20,
+    "barrier_warmup": {
+      "create_response_ms": 180.25,
+      "notification_held_after_response_ms": 1000,
+      "create_completed_before_remote_release": true
+    },
+    "create_http": {
+      "n": 20,
+      "p50_ms": 71.73,
+      "p95_ms": 100.37,
+      "max_ms": 112.15
+    },
+    "create_response_to_observed_succeeded": {
+      "n": 20,
+      "p50_ms": 210.98,
+      "p95_ms": 230.81,
+      "max_ms": 625.94
+    },
+    "request_start_to_observed_succeeded": {
+      "n": 20,
+      "p50_ms": 282.42,
+      "p95_ms": 342.96,
+      "max_ms": 725.6
+    },
+    "poll_resolution_ms": 20,
+    "exact_commit_timestamp_measured": false,
+    "counts": {
+      "pn": 21,
+      "sku": 42,
+      "stock_txn": 0,
+      "agent_job": 0,
+      "catalog_delivery_receipt": 21,
+      "catalog_import_run": 0
+    },
+    "batch_cursor_unchanged": true,
+    "stock_quantity_total": 0,
+    "replay_receipt_preserved": true,
+    "delivery_id_collision_rejected": true
+  },
+  "cleanup": {
+    "processes_stopped": 2,
+    "databases_removed": 2,
+    "temporary_files_removed": true
+  }
+}

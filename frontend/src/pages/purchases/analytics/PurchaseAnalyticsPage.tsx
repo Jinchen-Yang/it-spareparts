@@ -164,6 +164,9 @@ export default function PurchaseAnalyticsPage() {
   const summarySeq = useRef(0);
   const ordersSeq = useRef(0);
   const trendSeq = useRef(0);
+  // 仅合并本页所属会话中同筛选、分组与重试代次的在途请求；完成即删除，
+  // 不缓存已完成结果，重试和后续刷新仍真实读取服务端。
+  const summaryRequests = useRef(new Map<string, ReturnType<typeof fetchPurchaseAnalyticsSummary>>());
 
   // 客户已选ID额外补姓名最多200项；超出部分仍保留ID筛选，不扩大后端候选上限。
   const selectedCustomerKey = effectiveState.customerIds.slice(0, 200).join(",");
@@ -210,13 +213,26 @@ export default function PurchaseAnalyticsPage() {
   );
   const filterKey = JSON.stringify(apiFilters);
 
+  const requestSummary = (groupBy: string) => {
+    const key = JSON.stringify([filterKey, groupBy, retryTick]);
+    const existing = summaryRequests.current.get(key);
+    if (existing) return existing;
+    const pending = fetchPurchaseAnalyticsSummary({ ...apiFilters, group_by: groupBy });
+    summaryRequests.current.set(key, pending);
+    const clear = () => {
+      if (summaryRequests.current.get(key) === pending) summaryRequests.current.delete(key);
+    };
+    void pending.then(clear, clear);
+    return pending;
+  };
+
   useEffect(() => {
     if (sessionExpired()) return;
     const seq = ++summarySeq.current;
     const token = readSessionToken();
     setSummaryLoading(true);
     setSummaryError(null);
-    fetchPurchaseAnalyticsSummary({ ...apiFilters, group_by: effectiveGroupBy })
+    requestSummary(effectiveGroupBy)
       .then(({ data }) => {
         if (seq !== summarySeq.current) return;
         if (sessionStale(token)) { notifyOwnerStale(); return; }
@@ -244,7 +260,7 @@ export default function PurchaseAnalyticsPage() {
     const token = readSessionToken();
     setTrendLoading(true);
     setTrendError(null);
-    fetchPurchaseAnalyticsSummary({ ...apiFilters, group_by: trendGran })
+    requestSummary(trendGran)
       .then(({ data }) => {
         if (seq !== trendSeq.current) return;
         if (sessionStale(token)) { notifyOwnerStale(); return; }
