@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, App, AutoComplete, Button, Form, Input, Select, Space, Typography } from "antd";
+import { Alert, App, AutoComplete, Button, Collapse, Form, Input, Select, Space, Typography } from "antd";
 import { masterCategories, type CategoryNode, type MasterCreateInput, type MasterSpecField } from "../../api";
 import type { PartSuggestion } from "../../api/search";
 import LivePartSearch from "./LivePartSearch";
@@ -13,6 +13,7 @@ interface Props {
   initialDescription?: string | null;
   submitLabel: string;
   disabled?: boolean;
+  compact?: boolean;
   onCheck: (pn: string) => Promise<Duplicate[]>;
   onCreate: (input: MasterCreateInput, specFields: MasterSpecField[]) => Promise<void>;
   onSelect: (part: PartSuggestion) => Promise<void>;
@@ -21,7 +22,7 @@ interface Props {
 }
 
 /** 两种建档入口共用资料表单，各自保留原有提交、权限与事务边界。 */
-export default function PartRegistrationForm({ initialPn, initialDescription, submitLabel, disabled = false, onCheck, onCreate, onSelect, onBusyChange, onRefresh }: Props) {
+export default function PartRegistrationForm({ initialPn, initialDescription, submitLabel, compact = false, disabled = false, onCheck, onCreate, onSelect, onBusyChange, onRefresh }: Props) {
   const handleError = useApiError();
   const { modal } = App.useApp();
   const [draft, setDraft] = useState<MasterCreateInput>({ pn_std: initialPn, description: initialDescription ?? "", brand: "", machine_or_part: "备件" });
@@ -110,6 +111,7 @@ export default function PartRegistrationForm({ initialPn, initialDescription, su
     </div> : <Alert type="success" showIcon message="查重无命中，可新建主数据" style={{ marginBottom: 16 }} />)}
     <Form.Item label="描述"><Input.TextArea aria-label={`${initialPn}建档描述`} value={draft.description ?? ""} rows={2}
       placeholder="完整型号描述、用途或适配信息" onChange={(event) => change({ description: event.target.value })} /></Form.Item>
+    <Collapse ghost defaultActiveKey={compact ? [] : ["more"]} items={[{ key: "more", label: "更多资料（品牌、类别、参数）", children: <>
     <Form.Item label="简介"><Input.TextArea aria-label={`${initialPn}建档简介`} value={draft.summary ?? ""} rows={2}
       placeholder="便于快速识别的一段简介" onChange={(event) => change({ summary: event.target.value })} /></Form.Item>
     <div className="presales-form">
@@ -148,6 +150,8 @@ export default function PartRegistrationForm({ initialPn, initialDescription, su
           onClick={() => setRows((previous) => [...previous, { id: ++nextRow.current, name: "", value: "" }])}>添加参数</Button>
       </Space>
     </Form.Item>
+    </> }]} />
+    {loadFailed && compact && <Alert type="error" message="建档资料加载失败，请重试" action={<Button onClick={() => setReload((value) => value + 1)}>重试加载</Button>} />}
     {validation && <Alert type="warning" showIcon message={validation} style={{ marginBottom: 16 }} />}
     {duplicates?.length === 0 && <Button type="primary" loading={busy} disabled={disabled || loading || loadFailed} onClick={create}>{submitLabel}</Button>}
   </Form>;

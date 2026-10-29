@@ -9,6 +9,7 @@ import Timeline from "../../components/workflow/Timeline";
 import PageHeader from "../../components/PageHeader";
 import { hasValue, FieldValues, OfferPrice, offersForLine, OfferDetails, historyFields, displayValue } from "./InquiryOffers";
 import "./presales.css";
+import { answerSentence, lineAnswer } from "./answers";
 import { formatBusinessDateTime } from "../../utils/date";
 import { formatMoney } from "../../utils/format";
 import { usePresalesError, isOfferActive, OfferBadge, taxLabel, useNow, OfferUpdates } from "./shared";
@@ -183,6 +184,7 @@ function InquiryDetailContent({ id }: { id: number }) {
       <Table aria-label="询价比价矩阵" rowKey="id" dataSource={lines} loading={loading} tableLayout="fixed" pagination={{ defaultPageSize: 20 }} columns={[
         { title: "PN / 描述", key: "pn", render: (_, line) => <><Space>{line.part_id && <PartThumb partId={line.part_id} pn={line.pn_raw} size={24} />}{line.pn_raw}{line.require_exact_pn && <Tag>一致</Tag>}</Space><div className="presales-muted">{line.description}</div></> },
         { title: "数量 / 期望交期", key: "quantity", width: 150, render: (_, line) => <>{line.qty}<div className="presales-muted">{line.expected_delivery || "—"}</div></> },
+        ...(inquiry.line_answers ? [{ title: "当前答复", key: "answer", render: (_: unknown, line: InquiryLine) => answerSentence(line, lineAnswer(inquiry, line)) }] : []),
         { title: "报价对比", key: "offers", render: (_, line) => <>{(lineOffers.get(line.id) ?? []).filter((offer) => !referenceIds(line).has(offer.id)).map((offer) => <div key={offer.id}>{offer.reporter?.name}{renderOffer(line, offer)}</div>)}
           {(inquiry.line_responses ?? []).filter((response) => response.line_id === line.id && response.mode !== "quote").map((response) => <div key={`${response.created_by}:${response.line_id}`}>
             {response.is_draft ? `草稿（未回复） · ${response.mode === "skip" ? `不报：${response.reason}` : `沿用报价 #${response.ref_offer_id}`}` : response.mode === "skip" ? `不报：${response.reason}` : `沿用报价 #${response.ref_offer_id}`}

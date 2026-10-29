@@ -18,7 +18,7 @@ def test_skipped_line_must_be_handled_again_after_withdraw_and_edit(db, r6_actor
                 for viewer in (users.sales, users.buyer, users.boss)]
     for ctx in contexts:
         assert visibility.inquiry_view(db, inquiry, ctx)["progress"] == {
-            "quoted_lines": 1, "line_count": 1}
+            "quoted_lines": 1, "line_count": 1, "effective_quoted_lines": 0}
 
     inquiries.withdraw(db, inquiry.id, users.sales.id, inquiry.version)
     inquiries.update_draft(db, inquiry.id, users.sales.id, inquiry.version,
@@ -28,9 +28,9 @@ def test_skipped_line_must_be_handled_again_after_withdraw_and_edit(db, r6_actor
     for ctx in contexts:
         for detail in (True, False):
             assert visibility.inquiry_view(db, inquiry, ctx, detail=detail)["progress"] == {
-                "quoted_lines": 0, "line_count": 1}
+                "quoted_lines": 0, "line_count": 1, "effective_quoted_lines": 0}
 
     inquiries.resubmit(db, inquiry.id, users.sales.id, inquiry.version)
     for ctx in contexts:
         assert visibility.inquiry_view(db, inquiry, ctx)["progress"] == {
-            "quoted_lines": 0, "line_count": 1}
+            "quoted_lines": 0, "line_count": 1, "effective_quoted_lines": 0}

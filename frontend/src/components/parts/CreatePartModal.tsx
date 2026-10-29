@@ -6,8 +6,8 @@ import PartRegistrationForm from "./PartRegistrationForm";
 import { createdPartSuggestion } from "./partCreate";
 import { useApiError } from "../ApiErrorFeedback";
 
-export default function CreatePartModal({ pn, description, onClose, onSelected }: {
-  pn: string; description?: string | null; onClose: () => void; onSelected: (part: PartSuggestion) => void;
+export default function CreatePartModal({ pn, description, compact = false, onClose, onSelected }: {
+  pn: string; description?: string | null; compact?: boolean; onClose: () => void; onSelected: (part: PartSuggestion) => void;
 }) {
   const { message } = App.useApp();
   const handleError = useApiError();
@@ -17,7 +17,7 @@ export default function CreatePartModal({ pn, description, onClose, onSelected }
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   return <Modal open title="新建 PN 档案" width={680} footer={null} onCancel={onClose}
     maskClosable={!busy} keyboard={!busy} closable={!busy} destroyOnHidden>
-    <PartRegistrationForm initialPn={pn} initialDescription={description} submitLabel="新建并加入当前单据" onBusyChange={setBusy}
+    <PartRegistrationForm compact={compact} initialPn={pn} initialDescription={description} submitLabel="新建并加入当前单据" onBusyChange={setBusy}
       onCheck={async (value) => (await masterCheck(value)).data.near_duplicates}
       onSelect={async (part) => { onSelected(part); onClose(); }}
       onCreate={async (input, fields) => {

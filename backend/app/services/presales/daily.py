@@ -52,7 +52,8 @@ def rebuild(db, *, since=None):
     from app.services.workflow import events
     from app.services.workflow.registry import Subject
     register_subjects()
-    for inquiry_id in sorted({snapshot["inquiry_id"] for snapshot in latest.values()}):
+    for inquiry_id in sorted({snapshot["inquiry_id"] for snapshot in latest.values()
+                              if snapshot.get("inquiry_id") is not None}):
         events.record(db, Subject("presales_inquiry", inquiry_id), "offer.daily_rebuilt", None,
                       {"since": since.isoformat() if since else None})
     db.add(SysAccessLog(username=None, role="system", action="presales.daily.rebuild",

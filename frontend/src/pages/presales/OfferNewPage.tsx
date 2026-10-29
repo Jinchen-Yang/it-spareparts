@@ -22,6 +22,7 @@ import QuoteGrid from "./QuoteGrid";
 import PageHeader from "../../components/PageHeader";
 import "./presales.css";
 import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
+import { DirectQuote } from "./QuotePage";
 
 function DraftFields({ level, partId, value, onChange }: {
   level: FieldLevel; partId?: number; value: CustomFieldValue[]; onChange: (next: CustomFieldValue[]) => void;
@@ -46,7 +47,14 @@ function DraftFields({ level, partId, value, onChange }: {
 export default function OfferNewPage() {
   const [params] = useSearchParams();
   const draftId = Number(params.get("draft"));
-  return <OfferNewContent key={params.get("draft") ?? "new"} draftId={draftId} />;
+  return draftId > 0 ? <OfferNewContent key={draftId} draftId={draftId} /> : <DirectOfferPage />;
+}
+
+function DirectOfferPage() {
+  const [result, setResult] = useState("");
+  return <section className="presales-page presales-stack"><PageHeader title="主动报价" subtitle="直接发布或更新本人报价，保存后留在本页" />
+    <div className="presales-panel"><DirectQuote onDone={setResult} onClose={() => setResult("")} /></div>
+    {result && <Alert type="success" showIcon message={result} />}<Link to="/presales/quote">返回报价页</Link></section>;
 }
 
 function OfferNewContent({ draftId }: { draftId: number }) {

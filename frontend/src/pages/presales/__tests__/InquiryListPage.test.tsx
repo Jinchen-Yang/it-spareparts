@@ -114,7 +114,8 @@ it("PN 状态按报价和版本去重，采购明确不报的行显示原因而�
     { line_id: 12, mode: "skip", created_by: 2, reason: "已停产，无法供货" },
   ], work_items: [{ id: 11, assignee_id: 2, status: "done", paused: false, version: 1 }] });
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
-  await screen.findByText("PN-QUOTED · PN-SKIPPED");
+  await screen.findByText("PN-QUOTED");
+  expect(screen.getByText("PN-SKIPPED")).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
   expect(screen.getByText("已引用 · 1 条有效报价")).toBeVisible();
   expect(screen.queryByText(/2 条有效报价|3 条有效报价|4 条有效报价/)).not.toBeInTheDocument();
@@ -180,10 +181,26 @@ it("草稿沿用和不报标为未回复，不显示为有效报价或正式不�
     line_responses: [{ line_id: 11, mode: "reuse", ref_offer_id: 90, offer: reused, is_draft: true, created_by: 2 },
       { line_id: 12, mode: "skip", reason: "草稿无货", is_draft: true, created_by: 2 }] });
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
-  await screen.findByText("DRAFT-11 · DRAFT-12");
+  await screen.findByText("DRAFT-11");
+  expect(screen.getByText("DRAFT-12")).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
   expect(screen.getAllByText("草稿（未回复）")).toHaveLength(2);
   expect(screen.queryByText(/条有效报价/)).not.toBeInTheDocument();
   expect(screen.queryByText(/不报 · 草稿无货/)).not.toBeInTheDocument();
   expect(screen.getByText("处理中「已回复 0/1」")).toBeVisible();
+});
+
+it("当前答复失效时列表和概览一致，不把历史引用价计入有效价格合计", async () => {
+  const historical: Offer = { id: 71, inquiry_id: 1, line_id: 11, part_id: 1, version: 1, revision_no: 1,
+    status: "published", unit_price: "100", is_tax_inclusive: true, valid_from: "2020-01-01T00:00:00Z" };
+  mocks.getInquiry.mockResolvedValue({ ...row, lines: [
+    { id: 11, inquiry_id: 1, line_key: "historical", seq: 1, pn_raw: "PN-HISTORY", qty: 1, status: "active", version: 1,
+      ref_offer_id: historical.id, ref_offer: historical },
+  ], line_answers: [{ line_id: 11, state: "unavailable", responded: true, reason: "已回复，当前无有效报价" }] });
+  render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
+  await screen.findByText("PN-HISTORY 已回复，当前无有效报价");
+  fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
+  expect(screen.getAllByText("PN-HISTORY 已回复，当前无有效报价")).toHaveLength(2);
+  expect(screen.queryByText(/条有效报价/)).not.toBeInTheDocument();
+  expect(screen.getByText("最低报价合计（含税）：—")).toBeVisible();
 });

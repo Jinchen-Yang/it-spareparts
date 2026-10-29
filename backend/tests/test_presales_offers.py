@@ -364,7 +364,7 @@ def test_concurrent_draft_creates_do_not_overwrite_the_winner(db, actors):
     assert db.get(PresalesOffer, results[0][1]).version == 1
 
 
-def test_draft_other_actor_version_conflict_and_closed_update_are_rejected(db, actors, monkeypatch):
+def test_other_actor_and_stale_version_rejected_but_owner_can_update_closed_quote(db, actors, monkeypatch):
     inquiry, offer = _published(db, actors, monkeypatch)
     with pytest.raises(Forbidden):
         offers.update_offer(db, offer.id, actors.buyer2.id, {"unit_price": "1.00"}, expected_version=offer.version)
@@ -372,10 +372,10 @@ def test_draft_other_actor_version_conflict_and_closed_update_are_rejected(db, a
         offers.update_offer(db, offer.id, actors.buyer.id, {"unit_price": "1.00"}, expected_version=1)
     inquiry.status = "closed"
     db.flush()
-    with pytest.raises(InvalidTransition):
-        offers.update_offer(db, offer.id, actors.buyer.id, {"unit_price": "1.00"}, expected_version=offer.version)
-    with pytest.raises(InvalidTransition):
-        offers.withdraw(db, offer.id, actors.buyer.id, "撤销", expected_version=offer.version)
+    offers.update_offer(db, offer.id, actors.buyer.id, {"unit_price": "1.00"}, expected_version=offer.version)
+    assert offer.unit_price == Decimal("1.00") and inquiry.status == "closed"
+    offers.withdraw(db, offer.id, actors.buyer.id, "撤销", expected_version=offer.version)
+    assert offer.status == "withdrawn" and inquiry.status == "closed"
 
 
 def test_repeat_quote_does_not_change_closed_inquiry(db, actors, monkeypatch):

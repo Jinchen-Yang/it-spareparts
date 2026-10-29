@@ -12,7 +12,7 @@ from app.models.presales import (
 )
 from app.models.system import SysUser
 from app.services import audience, field_pool
-from app.services.presales.common import author_name, bypass, resolve_actor
+from app.services.presales.common import author_name, bypass, offer_effective, resolve_actor
 from app.services.workflow import work_items
 from app.services.workflow.registry import Forbidden, Subject
 
@@ -56,7 +56,15 @@ def _offer_batch(db, offers, ctx, *, fields):
     inquiries = {row.id: row for row in db.scalars(select(PresalesInquiry).where(
         PresalesInquiry.id.in_({offer.inquiry_id for offer in offers})))}
     def inquiry_for(offer):
-        return getattr(offer, "_inquiry_snapshot", None) or inquiries.get(offer.inquiry_id)
+        snapshot = getattr(offer, "_inquiry_snapshot", None)
+        if snapshot is not None:
+            return snapshot
+        if offer.inquiry_id is None:
+            # 仅用于复用既有记录/字段权限判断，不创建任何来源业务单据。
+            return SimpleNamespace(id=None, kind="proactive_offer", created_by=offer.created_by,
+                offer_audience_rule_id=getattr(offer, "offer_audience_rule_id", None),
+                status="submitted", submitted_at=offer.valid_from)
+        return inquiries.get(offer.inquiry_id)
     owner_ids = {offer.created_by for offer in offers} | {row.created_by for row in inquiries.values()}
     owner_ids.update(inquiry_for(offer).created_by for offer in offers if inquiry_for(offer) is not None)
     authors = {row.id: row for row in db.scalars(select(SysUser).where(SysUser.id.in_(owner_ids)))}
@@ -66,7 +74,7 @@ def _offer_batch(db, offers, ctx, *, fields):
     def shared(inquiry):
         return inquiry.submitted_at is not None and (
             shared_sales or (inquiry.kind == "proactive_offer" and shared_buyer))
-    needed = {offer.inquiry_id for offer in offers if inquiry_for(offer) is not None
+    needed = {offer.inquiry_id for offer in offers if offer.inquiry_id is not None and inquiry_for(offer) is not None
         and not bypassed and offer.created_by != user.id and offer.status != "draft"
         and inquiry_for(offer).created_by != user.id
         and inquiry_for(offer).status != "draft" and not shared(inquiry_for(offer))}
@@ -75,7 +83,7 @@ def _offer_batch(db, offers, ctx, *, fields):
     # valid_until / validity_days 已停用（D-0046），不再对外输出。
     omitted = {"created_by", "work_item_id", "supplier_audience_rule_id",
                "reporter_audience_rule_id", "notes_audience_rule_id", "workbook_choice",
-               "valid_until", "validity_days"}
+               "valid_until", "validity_days", "offer_audience_rule_id"}
     for index, offer in enumerate(offers):
         inquiry = inquiry_for(offer)
         if inquiry is None:
@@ -148,6 +156,8 @@ def offer_view(db, offer, ctx):
 
 def _snapshot_offer(revision):
     values = {column.name: revision.snapshot.get(column.name) for column in PresalesOffer.__table__.columns}
+    # D-0047 上线前的不可变历史没有价格性质；存量按售价解释，不改写快照。
+    values["price_basis"] = revision.snapshot.get("price_basis", "sale")
     for key in ("valid_from", "valid_until", "created_at", "updated_at"):
         if isinstance(values[key], str):
             values[key] = datetime.fromisoformat(values[key])
@@ -179,6 +189,17 @@ def pinned_offer_view(db, offer_id, revision_no, ctx):
     superseded = current.status != "withdrawn" and (
         not offer_effective(current) or current.unit_price != snapshot.unit_price
         or current.is_tax_inclusive != snapshot.is_tax_inclusive)
+    if not superseded and current.revision_no > revision_no:
+        later = db.scalars(select(PresalesOfferRevision).where(
+            PresalesOfferRevision.offer_id == offer_id,
+            PresalesOfferRevision.revision_no > revision_no,
+            PresalesOfferRevision.revision_no <= current.revision_no))
+        # 曾经改价/改税/无货/失效即已取代；之后恢复旧值不能让旧引用重新生效。
+        superseded = any(
+            item.status == "stale" or item.no_stock or item.unit_price is None
+            or item.unit_price != snapshot.unit_price
+            or item.is_tax_inclusive != snapshot.is_tax_inclusive
+            for item in (_snapshot_offer(row) for row in later))
     view["expired"] = not offer_effective(snapshot) or superseded
     view["original_withdrawn"] = current.status == "withdrawn"
     if current.revision_no > revision_no:
@@ -257,6 +278,49 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
                    and (owner or bypass(ctx) or row.created_by == user.id))
     handled.update(line_id for (line_id, _), view in link_references.items() if view is not None)
     result["progress"] = {"quoted_lines": len(handled), "line_count": len(lines)}
+    # D-0048：历史引用仍是不可变快照；“当前答复”独立读取同一报价的当前权限和状态。
+    current_views = {view["id"]: view for view in offer_views(db, offer_models, ctx)}
+    current_models = {offer.id: offer for offer in offer_models}
+    line_answers = []
+    for line in lines:
+        visible_responses = [row for row in responses if row.line_id == line.id
+            and not row.is_draft and row.line_version == line.version
+            and (owner or bypass(ctx) or row.created_by == user.id)]
+        ids = {offer.id for offer in offer_models if offer.line_id == line.id}
+        if line_references.get(line.id) is not None:
+            ids.add(line.ref_offer_id)
+        ids.update(row.ref_offer_id for row in visible_responses
+                   if row.ref_offer_id is not None and response_references.get(row.id) is not None)
+        ids.update(link.offer_id for link in links if link.line_id == line.id
+                   and link_references.get((line.id, link.offer_id)) is not None)
+        candidates = [current_views[key] for key in ids if key in current_views
+                      and offer_effective(current_models[key])]
+        answered = line.id in handled
+        answer = {"line_id": line.id, "responded": answered}
+        if candidates:
+            latest = max(candidates, key=lambda row: (row["valid_from"], row["id"]))
+            answer.update(state="quoted", offer=latest,
+                          reporter=latest.get("reporter", {}).get("name", "采购"))
+        else:
+            skipped = next((row for row in visible_responses if row.mode == "skip"), None)
+            no_stock = next((current_views[key] for key in ids if key in current_views
+                and current_models[key].status == "published" and current_models[key].no_stock), None)
+            if skipped is not None:
+                reporter = db.get(SysUser, skipped.created_by)
+                answer.update(state="skip", reason=skipped.reason,
+                    reporter=(reporter.display_name or reporter.username) if reporter else "采购")
+            elif no_stock is not None:
+                answer.update(state="skip", reason=no_stock.get("notes") or "无货",
+                    reporter=no_stock.get("reporter", {}).get("name", "采购"))
+            else:
+                answer["state"] = "unavailable" if answered else "pending"
+        line_answers.append(answer)
+    result["line_answers"] = line_answers
+    result["progress"]["effective_quoted_lines"] = sum(row["state"] == "quoted" for row in line_answers)
+    subject_tasks = work_items.list_by_subject(db, Subject("presales_inquiry", inquiry.id), ctx)
+    result["can_urge"] = (owner and inquiry.kind == "sales_inquiry" and inquiry.status == "submitted"
+                          and work_items.has_permission(ctx, "action_presales_inquire")
+                          and any(item.status in work_items.ACTIVE and not item.paused for item in subject_tasks))
     if detail:
         result.update(audience.read_rules(db, {
             "offer_audience": (inquiry.offer_audience_rule_id, author),
@@ -312,12 +376,14 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
             row["original_withdrawn"] = bool(offer and offer["original_withdrawn"])
             if offer is not None:
                 row["offer"] = offer
+                if response.ref_offer_id in current_views:
+                    row["current_offer"] = current_views[response.ref_offer_id]
                 owner_view = pinned_offer_view(db, response.ref_offer_id, response.ref_offer_revision_no,
                                               resolve_actor(db, inquiry.created_by)[1])
                 row["reporter_label"] = (owner_view or {}).get("reporter", {}).get("name", "其他采购")
             result["line_responses"].append(row)
         result["work_items"] = []
-        for item in work_items.list_by_subject(db, Subject("presales_inquiry", inquiry.id), ctx):
+        for item in subject_tasks:
             row = {"id": item.id, "assignee_id": item.assignee_id, "claimed_by": item.claimed_by,
                    "status": item.status, "paused": item.paused, "version": item.version}
             hidden = hidden_reporters.get(item.assignee_id)
@@ -336,16 +402,17 @@ def revision_views(db, offer_id, ctx):
     if offer is None:
         raise NotFound("报价不存在")
     user, ctx = resolve_actor(db, ctx)
-    inquiry = db.get(PresalesInquiry, offer.inquiry_id)
+    inquiry = db.get(PresalesInquiry, offer.inquiry_id) if offer.inquiry_id is not None else None
     if not can_view_offer(db, offer, ctx) or not (
-        bypass(ctx) or user.id in {offer.created_by, inquiry.created_by}
+        bypass(ctx) or user.id == offer.created_by or (inquiry is not None and user.id == inquiry.created_by)
     ):
         raise Forbidden("无权查看报价历史")
     current = offer_view(db, offer, ctx)
     result = []
     for revision in db.scalars(select(PresalesOfferRevision).where(
         PresalesOfferRevision.offer_id == offer_id).order_by(PresalesOfferRevision.revision_no)):
-        snapshot = SimpleNamespace(**revision.snapshot, __table__=PresalesOffer.__table__)
+        snapshot = SimpleNamespace(**{"price_basis": "sale", **revision.snapshot},
+                                   __table__=PresalesOffer.__table__)
         view = offer_view(db, snapshot, ctx)
         if view is None:
             continue

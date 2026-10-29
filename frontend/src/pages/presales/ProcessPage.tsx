@@ -17,6 +17,7 @@ import PartBinding from "./PartBinding";
 import PageHeader from "../../components/PageHeader";
 import { findOwnTask, loadInquiry } from "./quoteData";
 import "./presales.css";
+import { answerSentence, lineAnswer } from "./answers";
 
 export default function ProcessPage() {
   const { id } = useParams();
@@ -244,8 +245,8 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
   const rows: QuoteGridRow[] = lines.map((line) => {
     const current = currentFor(line);
     const response = responseFor(line.id);
-    const canEdit = editable && (proactive ? current?.status === "published"
-      : !line.ref_offer_id && (active || current?.status === "published"));
+    const canEdit = !refreshRequired && (current?.status === "published"
+      || (editable && !proactive && !line.ref_offer_id && active));
     return { line, current, value: valueFor(line), response, reused: reusedOffer(line),
       responseDraft: !!responses[line.id] || !!savedResponse(line.id)?.is_draft,
       reporterLabel: savedResponse(line.id)?.ref_offer_id === response.ref_offer_id ? savedResponse(line.id)?.reporter_label : undefined,
@@ -254,6 +255,7 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
       referenced: !!line.ref_offer_id && !proactive,
       binding: !line.part_id && canProcess && active ? <PartBinding line={line} onBound={setInquiry} refresh={refresh} disabled={busy || refreshRequired} /> : undefined,
       details: <>
+        {inquiry.line_answers && <p>当前答复：{answerSentence(line, lineAnswer(inquiry, line))}</p>}
         {proactive && (!current || current.status !== "published") && <Alert type="info" message="当前报价不可更新，可新建主动报价"
           action={<Link to="/presales/offers/new">新建主动报价</Link>} />}
       </>,
@@ -297,7 +299,7 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
     {libraryError && <Alert type="warning" message="已有有效报价加载失败，请刷新后重试；仍可报新价或不报" />}
     <QuoteGrid id="presales-workbench-lines" rows={rows} now={now} proactive={proactive} onChange={changeValue}
       onResponse={(lineId, patch) => {
-        setResponses((previous) => ({ ...previous, [lineId]: { ...responseFor(lineId), ...patch } }));
+        setResponses((previous) => ({ ...previous, [lineId]: { ...(previous[lineId] ?? savedResponse(lineId) ?? { line_id: lineId, mode: "quote" as const }), ...patch } }));
       }} />
     </div>
     <footer className="presales-footer"><span>填写完成 <b>{handledRows.length}</b> / {required.length} 行（报价 {count("quote")} · 沿用 {count("reuse")} · 不报 {count("skip")}）</span>

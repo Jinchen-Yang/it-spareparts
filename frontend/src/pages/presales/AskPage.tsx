@@ -8,6 +8,8 @@ import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
 import { suggestParts, type PartSuggestion } from "../../api/search";
 import AudiencePicker, { PUBLIC_AUDIENCE } from "../../components/audience/AudiencePicker";
 import PageHeader from "../../components/PageHeader";
+import PartThumb from "../../components/gallery/PartThumb";
+import CreatePartModal from "../../components/parts/CreatePartModal";
 import { readPermissionMap } from "../../nav";
 import { formatBusinessDateTime } from "../../utils/date";
 import CandidateSelect from "./CandidateSelect";
@@ -70,6 +72,9 @@ function NewInquiry({ onCreated }: { onCreated: () => void }) {
   const { message } = App.useApp();
   const handleError = usePresalesError();
   const customerVisible = localStorage.getItem("role") === "admin" || readPermissionMap().data_customer !== false;
+  const canCreatePart = localStorage.getItem("role") === "admin" || readPermissionMap().page_master_data === true;
+  const [creating, setCreating] = useState<Row>();
+  const [savedDraft, setSavedDraft] = useState<Inquiry>();
   const nextKey = useRef(2);
   const [exactPref, setExactPref] = useState(readExact);
   const blank = (key: number): Row => ({ key, pn: "", qty: 1, exact: exactPref, returnDefective: true, note: "" });
@@ -98,6 +103,7 @@ function NewInquiry({ onCreated }: { onCreated: () => void }) {
   });
   const filled = rows.filter((row) => row.pn.trim());
   const save = async (submit: boolean) => {
+    if (savedDraft) return;
     if (!filled.length) { void message.warning("请至少填写一行 PN"); return; }
     if (filled.some((row) => !(row.qty > 0))) { void message.warning("数量必须大于 0"); return; }
     setBusy(true);
@@ -108,7 +114,12 @@ function NewInquiry({ onCreated }: { onCreated: () => void }) {
           description: row.part ? row.part.summary || row.part.description || null : null, qty: row.qty, require_exact_pn: row.exact,
           return_defective: row.returnDefective,
           notes: row.note.trim() || null, expected_delivery: delivery || null })) });
-      if (submit) await presales.submitInquiry(created.id, { expected_version: created.version });
+      // 创建成功但提交失败时保留真实草稿，防止再次点击创建重复询价。
+      if (submit) {
+        setSavedDraft(created);
+        await presales.submitInquiry(created.id, { expected_version: created.version });
+        setSavedDraft(undefined);
+      }
       void message.success(submit ? `询价 ${created.inquiry_no} 已提交，进入采购报价` : `草稿 ${created.inquiry_no} 已保存`);
       setRows([blank(nextKey.current++)]); setCustomerId(undefined); setNotes(""); setDelivery(""); setAssigneeIds([]); setAudience(PUBLIC_AUDIENCE); setPriority("normal");
       onCreated();
@@ -128,7 +139,8 @@ function NewInquiry({ onCreated }: { onCreated: () => void }) {
       { title: "PN / 型号", key: "pn", width: 240, render: (_, row) => <PnInput row={row} onChange={(patch) => update(row.key, patch)} onPasteMany={(pns) => pasteMany(row.key, pns)} /> },
       { title: "描述（自动带出）", key: "desc", render: (_, row) => <span className="presales-option">
         <span className="presales-muted" title={row.part?.description ?? undefined}>
-          {row.part ? row.part.summary || row.part.description || row.part.pn_std : row.pn.trim() ? "未建档 · 提交后由采购补全" : ""}</span>
+          {row.part ? row.part.summary || row.part.description || row.part.pn_std : row.pn.trim() ? "未建档 · 可按原文提交后补全" : ""}</span>
+        {!row.part && row.pn.trim() && canCreatePart && <Button type="link" size="small" disabled={busy || !!savedDraft} onClick={() => setCreating(row)}>新建 PN 档案</Button>}
         {row.part && <LatestPriceTag offer={row.latest} />}</span> },
       { title: "数量", key: "qty", width: 96, render: (_, row) => <InputNumber aria-label={`第 ${row.key} 行数量`} min={0.001} max={99999999999.999} style={{ width: "100%" }}
         value={row.qty} onChange={(qty) => update(row.key, { qty: qty ?? 0 })} /> },
@@ -151,10 +163,14 @@ function NewInquiry({ onCreated }: { onCreated: () => void }) {
       <Button onClick={() => setRows((previous) => [...previous, blank(nextKey.current++)])}>+ 添加一行</Button>
       <span className="presales-muted">{filled.length} 行 · 可从 Excel 直接粘贴多行 PN</span>
       <Space style={{ marginLeft: "auto" }}>
-        <Button loading={busy} onClick={() => void save(false)}>存草稿</Button>
-        <Button type="primary" loading={busy} onClick={() => void save(true)}>提交询价</Button>
+        <Button loading={busy} disabled={!!savedDraft} onClick={() => void save(false)}>存草稿</Button>
+        <Button type="primary" loading={busy} disabled={!!savedDraft} onClick={() => void save(true)}>提交询价</Button>
       </Space>
     </div>
+    {savedDraft && <Alert type="warning" message={`草稿 ${savedDraft.inquiry_no} 已保存，提交尚未确认。请打开已有草稿继续处理。`}
+      action={<Link to={`/presales/inquiries/${savedDraft.id}/edit`}>打开已有草稿</Link>} />}
+    {creating && <CreatePartModal compact pn={creating.pn.trim()} onClose={() => setCreating(undefined)}
+      onSelected={(part) => update(creating.key, { pn: part.pn_std, part, latest: undefined })} />}
   </div>;
 }
 
@@ -168,18 +184,22 @@ function statusChip(inquiry: Inquiry, lines: InquiryLine[]) {
 }
 
 function AnswerLine({ inquiry, line }: { inquiry: Inquiry; line: InquiryLine }) {
+  const { message } = App.useApp();
   const [copied, setCopied] = useState(false);
   const answer = lineAnswer(inquiry, line);
   const sentence = answerSentence(line, answer);
   return <div className="presales-answer">
-    <span className="presales-answer-pn">{line.pn_raw} <span className="presales-muted">× {Number(line.qty)}</span></span>
-    <b className={`presales-say is-${answer.state}`}>{answer.state === "quoted" ? priceText(answer.offer) : answer.state === "skip" ? `不报：${answer.reason}` : "待报价"}</b>
+    <span className="presales-answer-pn">{line.part_id && <PartThumb partId={line.part_id} pn={line.pn_raw} size={32} />} {line.pn_raw} <span className="presales-muted">× {Number(line.qty)}</span></span>
+    <b className={`presales-say is-${answer.state}`}>{answer.state === "quoted" ? priceText(answer.offer) : answer.state === "skip" ? `不报：${answer.reason}` : answer.state === "unavailable" ? answer.reason : "待报价"}</b>
     {answer.state === "quoted" && <Tag color={answer.offer.price_basis === "cost" ? "purple" : undefined}>{basisLabel(answer.offer)}</Tag>}
-    {!line.return_defective && <Tag>坏件不返回</Tag>}
+    <Tag>{line.return_defective === false ? "坏件不返回" : "坏件返回"}</Tag>
     <span className="presales-muted">{answer.state === "quoted" ? `${answer.reporter} · ${formatBusinessDateTime(answer.at)}` : answer.state === "skip" ? answer.reporter
-      : inquiry.status === "submitted" ? "已进采购报价" : ""}</span>
+      : answer.state === "pending" && inquiry.status === "submitted" ? "已进采购报价" : ""}</span>
     {answer.state === "quoted" && <Button type="link" size="small" style={{ marginLeft: "auto" }} aria-label={`复制 ${line.pn_raw} 报价给客户`}
-      onClick={() => { void navigator.clipboard?.writeText(sentence).catch(() => undefined); setCopied(true); }}>{copied ? "已复制" : "复制给客户"}</Button>}
+      onClick={async () => {
+        try { if (!navigator.clipboard) throw new Error("clipboard unavailable"); await navigator.clipboard.writeText(sentence); setCopied(true); }
+        catch { void message.warning("复制失败，请选中报价文字手动复制"); }
+      }}>{copied ? "已复制" : "复制给客户"}</Button>}
   </div>;
 }
 
@@ -243,7 +263,7 @@ function MyInquiries({ refreshKey }: { refreshKey: number }) {
             <span className="presales-muted">{formatBusinessDateTime(inquiry.submitted_at ?? inquiry.updated_at)}</span>
             {!!inquiry.urge_count && <span className="presales-muted">已催 {inquiry.urge_count} 次 · 最近 {formatBusinessDateTime(inquiry.last_urged_at)}</span>}
             {["draft", "revising"].includes(inquiry.status) && <Link style={{ marginLeft: "auto" }} to={`/presales/inquiries/${inquiry.id}/edit`}>继续编辑</Link>}
-            {inquiry.status === "submitted" && lines.some((line) => lineAnswer(inquiry, line).state === "pending") && <span style={{ marginLeft: "auto" }}>
+            {(inquiry.can_urge ?? (inquiry.status === "submitted" && inquiry.is_owner !== false && inquiry.work_items?.some((task) => !task.paused && ["pending", "in_progress"].includes(task.status)) && lines.some((line) => lineAnswer(inquiry, line).state === "pending"))) && <span style={{ marginLeft: "auto" }}>
               <UrgeButton inquiry={inquiry} onUrged={(urged) => setItems((previous) => previous.map((item) => item.id === urged.id ? urged : item))} /></span>}
           </div>
           {lines.length ? lines.map((line) => <AnswerLine key={line.id} inquiry={inquiry} line={line} />)

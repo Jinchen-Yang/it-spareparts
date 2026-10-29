@@ -60,6 +60,15 @@ it("D-0046：报价不随时间失效，跨日后仍可引用", async () => {
   expect(screen.getByText(/报价一直有效，直到报价人更新或撤回/)).toBeInTheDocument();
 });
 
+it("独立主动报价没有来源单，不请求或导航到null来源，仍可引用", async () => {
+  api.searchLibrary.mockResolvedValue([{ part_id: 1, pn_std: "PN-A", offers: [offer({ inquiry_id: null, line_id: null })], offer_count: 1 } as LibraryPart]);
+  await search();
+  expect(api.getInquiry).not.toHaveBeenCalled();
+  expect(screen.getByText("来源：主动报价")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "查看来源单" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "用这条报价建询价单" })).toBeEnabled();
+});
+
 it("旧搜索的迟到结果不会覆盖新的查询", async () => {
   let resolve!: (value: LibraryPart[]) => void;
   api.searchLibrary.mockReturnValueOnce(new Promise<LibraryPart[]>((done) => { resolve = done; }));

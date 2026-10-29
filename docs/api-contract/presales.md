@@ -24,7 +24,8 @@
 | POST | `/inquiries/{inquiry_id}/lines/{line_id}/offers` | 创建或保存报价草稿；采购需 `action_presales_quote` 且为本单处理人，主动报价需 `action_presales_offer` |
 | POST | `/inquiries/{inquiry_id}/reply` | 独立回复；所有未引用活动行必须报新价、沿用或不报，锁定本人草稿、发布快照并完成本人待办 |
 | POST | `/inquiries/{inquiry_id}/publish` | 主动报价发布；notice_user_ids 可定向通知在职且有 page_presales 的账号 |
-| PATCH | `/offers/{offer_id}` | 发布报价更新并续期、追加完整快照；报价本人或主管，需对应 quote/offer 动作权限 |
+| POST | `/offers/direct` | D-0048 单 PN 直接发布或更新本人报价；需 `action_presales_offer`，不创建 BJ 单据、询价行或通知待办 |
+| PATCH | `/offers/{offer_id}` | 更新发布报价、追加完整快照；报价本人或主管，需对应 quote/offer 动作权限 |
 | POST | `/offers/{offer_id}/withdraw` | 立即下架，reason 必填且非空白；追加撤销快照 |
 | GET | `/offers/{offer_id}/revisions` | 仅发起人、报价本人、主管；历史和当前可见性取交集，屏蔽作者旁路和私密字段 |
 | GET | `/lines/{line_id}/part-check?pn_std=` | 待建档查重，复用 master_edit.find_near_duplicates |
@@ -60,6 +61,32 @@ q 为空时返回权限范围内的候选，非空时对原始名称、归一化
 未绑定 salesperson_name 时仅返回本人询价中用过的客户。
 客户与供应商字段组的可见性均复用 `is_field_hidden`，与 `apply_field_visibility` 使用同一判定来源。
 客户端使用售前专用候选接口，不复用分析页 options；没有对应字段权限时不展示客户或供应商选择器。
+
+## 无单据主动报价与当前行答复（D-0048）
+
+`POST /offers/direct` 接受报价字段及 `part_id`、`on_existing=update|new`（默认 update）、
+`existing_offer_id`、`expected_version`、仅新建时的 `offer_audience`。
+首次报价无需版本；已有本人同 PN 已发布报价时，必须携带明确报价 ID 和当前版本，缺失版本返回
+409 `existing_offer` 和经权限过滤的 `existing_offers`（最新在前）。客户端可明确选最新条并带
+ID/版本重试一次；版本冲突不能继续自动覆盖。`new` 明确另报时不可同时传既有 ID/版本。
+新报价默认含税；显式 null 保留未声明。更新仅改传入字段，既有来源和整条受众不变。
+该接口返回一条 Offer；无单据报价 `inquiry_id`、`line_id` 都为 null，有源报价仍返回真实 ID。
+独立报价的整条可见性仍走同一个受众出口，字段受众与供应商字段权限不变。
+报价本人更新/撤回不再受来源询价 closed/revising 限制；权限、CAS 版本和成交钉住版本不变。
+原 `/inquiries/.../publish` 只保留旧草稿兼容；新增主动报价入口使用 `/offers/direct`。
+
+询价列表和详情增加 `line_answers`：每项包含 `line_id`、`responded` 和
+`state=quoted|skip|pending|unavailable`。quoted 带当前有效、当前可见的完整 `offer` 及
+`reporter`；skip 带可见的 `reason`/`reporter`；unavailable 表示已回复而当前没有有效报价。
+其当前价格不替换 `ref_offer`、`line_responses[].offer`、`won_offer` 中的历史快照。
+沿用响应可另附 `current_offer`，客户端必须检查其 status/no_stock，不可把撤回或无货当成有效价。
+`progress.quoted_lines` 保持已处理行数，新增 `effective_quoted_lines` 仅计当前有效价；
+`can_urge` 与后端催办前提一致（发起人、已提交销售询价、存在未完成待办），30 分钟频控仍由
+催办写接口检查。不因旧报价失效自动重开已完成待办。
+
+迁移 `f1a3c5e7b9d2` 放宽报价来源为空并保留成对约束，新增独立报价整条受众外键。
+空库可升降升；已有独立报价时 downgrade 明确拒绝删除数据或伪造 BJ 来源，发布回滚须
+使用兼容新 schema 的代码或经批准的备份恢复方案，禁止强制降级。
 
 ## 输入与版本
 

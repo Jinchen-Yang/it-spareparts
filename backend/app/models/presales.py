@@ -107,8 +107,10 @@ class PresalesOffer(Base):
     __tablename__ = "presales_offer"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    inquiry_id: Mapped[int] = mapped_column(ForeignKey("presales_inquiry.id"))
-    line_id: Mapped[int] = mapped_column(ForeignKey("presales_inquiry_line.id"))
+    inquiry_id: Mapped[int | None] = mapped_column(ForeignKey("presales_inquiry.id"))
+    line_id: Mapped[int | None] = mapped_column(ForeignKey("presales_inquiry_line.id"))
+    # 无单据主动报价的整条受众；有来源单据的报价继续使用来源单受众。
+    offer_audience_rule_id: Mapped[int | None] = mapped_column(ForeignKey("audience_rule.id"))
     work_item_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("work_item.id"))
     part_id: Mapped[int | None] = mapped_column(ForeignKey("dim_part.id"))
     unit_price: Mapped[Decimal | None] = mapped_column(Money)
@@ -139,6 +141,7 @@ class PresalesOffer(Base):
     updated_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
+        CheckConstraint("(inquiry_id IS NULL) = (line_id IS NULL)", name="ck_presales_offer_origin_pair"),
         CheckConstraint("status IN ('draft', 'published', 'withdrawn', 'stale')", name="ck_presales_offer_status"),
         CheckConstraint("price_basis IN ('sale', 'cost')", name="ck_presales_offer_price_basis"),
         CheckConstraint("revision_no >= 0 AND version >= 1 AND validity_days >= 1", name="ck_presales_offer_version"),

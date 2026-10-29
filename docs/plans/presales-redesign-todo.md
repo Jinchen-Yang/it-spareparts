@@ -1,5 +1,7 @@
 # 售前询价/报价重设计 · 待办
 
+> 2026-10-29 接管更新：以下勾选为原交接快照，不能代替当前验收。当前范围与执行见 [接管计划](2026-10-29-presales-release-takeover.md)、[D-0048](../decisions/0028-售前发布接管与保守收口.md) 和 [进行中交接](../handoff/2026-10-29-release-takeover.md)。主动报价无 BJ、图片与快速建档已纳入本轮；第 4/5/7 条不再等待问答，按 D-0048 保守实施。原始群聊已明确库存三库属于氚云系统。本系统不据此过滤库存。已领取单其他采购可见范围保持原权限。
+
 - 口径：[D-0046](../decisions/0026-售前报价长期有效与主动报价简化.md)（草稿，部分确认）
 - 设计原型：Artifact 画布「售前询价报价重设计」中的「推荐方案」画板（https://claude.ai/artifact/EPrRBaxJHWJnbsa18SLHum）
 - 进行中的 PR：Jinchen-Yang/it-spareparts#492（分支 `claude/epic-keller-xv29cb`）

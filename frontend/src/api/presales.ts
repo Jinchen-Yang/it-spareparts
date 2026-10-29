@@ -86,8 +86,8 @@ export interface Offer extends Omit<OfferInput, "supplier_audience" | "reporter_
   reporter_audience?: AudienceRuleRead;
   notes_audience?: AudienceRuleRead;
   id: number;
-  inquiry_id: number;
-  line_id: number;
+  inquiry_id: number | null;
+  line_id: number | null;
   part_id: number | null;
   version: number;
   revision_no: number;
@@ -111,6 +111,15 @@ export interface InquiryWorkItem {
   version: number;
 }
 
+export interface CurrentLineAnswer {
+  line_id: number;
+  state: "quoted" | "skip" | "pending" | "unavailable";
+  offer?: Offer;
+  reporter?: string;
+  reason?: string;
+  responded: boolean;
+}
+
 export interface LineResponseInput {
   line_id: number;
   mode: "quote" | "reuse" | "skip";
@@ -124,6 +133,7 @@ export interface LineResponse extends LineResponseInput {
   work_item_id: number | null;
   offer?: Offer;
   expired: boolean;
+  current_offer?: Offer;
   ref_offer_revision_no?: number | null;
   reporter_label?: string;
 }
@@ -167,7 +177,9 @@ export interface Inquiry {
   won_offer_revision_no?: number | null;
   won_offer?: Offer;
   line_count: number;
-  progress: { quoted_lines: number; line_count: number };
+  progress: { quoted_lines: number; line_count: number; effective_quoted_lines?: number };
+  can_urge?: boolean;
+  line_answers?: CurrentLineAnswer[];
   lines?: InquiryLine[];
   offers?: Offer[];
   work_items?: InquiryWorkItem[];
@@ -252,6 +264,9 @@ export const presales = {
   },
   async saveOffer(inquiryId: number, lineId: number, body: OfferInput & VersionInput & { offer_id?: number; work_item_id?: number }) {
     return (await api.post<Offer>(`${root}/inquiries/${inquiryId}/lines/${lineId}/offers`, body)).data;
+  },
+  async directOffer(body: OfferInput & { part_id: number; on_existing?: "update" | "new"; existing_offer_id?: number; expected_version?: number }) {
+    return (await api.post<Offer>(`${root}/offers/direct`, body)).data;
   },
   async updateOffer(id: number, body: OfferInput & VersionInput) {
     return (await api.patch<Offer>(`${root}/offers/${id}`, body)).data;

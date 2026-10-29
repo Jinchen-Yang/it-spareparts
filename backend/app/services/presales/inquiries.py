@@ -483,7 +483,7 @@ def close(db, inquiry_id, actor, expected_version, *, outcome, won_offer_id=None
         raise InvalidTransition("关单状态或结果无效")
     if won_offer_id is not None:
         offer = db.get(PresalesOffer, won_offer_id)
-        line = db.get(PresalesInquiryLine, offer.line_id) if offer else None
+        line = db.get(PresalesInquiryLine, offer.line_id) if offer and offer.line_id is not None else None
         own = (offer is not None and offer.inquiry_id == inquiry.id and
                offer.status == "published" and not offer.no_stock and
                line is not None and line.status == "active")
@@ -556,7 +556,7 @@ def urge(db, inquiry_id, actor):
     if inquiry.kind != "sales_inquiry" or inquiry.status != "submitted":
         raise InvalidTransition("只能催办已提交的销售询价")
     open_items = [item for item in work_items.subject_items(db, subject(inquiry), user.id)
-                  if item.status in work_items.ACTIVE]
+                  if item.status in work_items.ACTIVE and not item.paused]
     if not open_items:
         raise InvalidTransition("采购已全部回复，无需催办")
     current = common.now()

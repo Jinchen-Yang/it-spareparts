@@ -37,9 +37,12 @@ def append_revision(db, offer, actor, changed_fields, reason=None):
     db.flush()
     snapshot = {column.name: _json(getattr(offer, column.name))
                 for column in PresalesOffer.__table__.columns}
-    inquiry = common.get_inquiry(db, offer.inquiry_id)
-    snapshot["_inquiry"] = {key: _json(getattr(inquiry, key)) for key in (
+    inquiry = common.get_inquiry(db, offer.inquiry_id) if offer.inquiry_id is not None else None
+    snapshot["_inquiry"] = ({key: _json(getattr(inquiry, key)) for key in (
         "id", "kind", "created_by", "offer_audience_rule_id", "status", "submitted_at")}
+        if inquiry is not None else {"id": None, "kind": "proactive_offer",
+            "created_by": offer.created_by, "offer_audience_rule_id": offer.offer_audience_rule_id,
+            "status": "submitted", "submitted_at": _json(offer.valid_from)})
     if offer.status == "published":
         snapshot["_inquiry"].update(status="submitted", submitted_at=_json(offer.valid_from))
     revision = PresalesOfferRevision(
@@ -59,8 +62,9 @@ def mark_stale(db, offer, actor, reason):
     offer.version += 1
     offer.updated_at = common.now()
     append_revision(db, offer, actor, ["status"], reason)
-    inquiry = common.get_inquiry(db, offer.inquiry_id)
-    common.event(db, inquiry, actor, "offer.stale", {"offer_id": offer.id})
+    if offer.inquiry_id is not None:
+        inquiry = common.get_inquiry(db, offer.inquiry_id)
+        common.event(db, inquiry, actor, "offer.stale", {"offer_id": offer.id})
     common.audit(db, actor, "presales.offer.stale", offer.id)
     return offer
 
@@ -464,16 +468,16 @@ def _editable(db, offer_id, actor, expected_version):
     initial = db.get(PresalesOffer, offer_id)
     if initial is None:
         raise NotFound("报价不存在")
-    inquiry = common.lock_inquiry(db, initial.inquiry_id)
+    inquiry = common.lock_inquiry(db, initial.inquiry_id) if initial.inquiry_id is not None else None
     _serialize_source(db, initial.created_by, initial.part_id, initial.source_key)
     offer = db.scalar(select(PresalesOffer).where(PresalesOffer.id == offer_id)
                       .with_for_update().execution_options(populate_existing=True))
+    if offer.inquiry_id != (inquiry.id if inquiry is not None else None):
+        raise Conflict("报价来源已变化，请刷新后重试")
     common.check_version(offer, expected_version)
-    common.require(ctx, "action_presales_offer" if inquiry.kind == "proactive_offer" else "action_presales_quote")
+    common.require(ctx, "action_presales_offer" if inquiry is None or inquiry.kind == "proactive_offer" else "action_presales_quote")
     if offer.created_by != user.id and not common.bypass(ctx):
         raise Forbidden("只能修改自己的报价")
-    if inquiry.status != "submitted":
-        raise InvalidTransition("询价已撤回或关单，不能更新报价")
     if offer.status != "published":
         raise InvalidTransition("只能更新或撤销已发布报价")
     return offer, inquiry, ctx
@@ -496,7 +500,8 @@ def update_offer(db, offer_id, actor, data, *, expected_version):
     offer.updated_at = published_at
     offer.version += 1
     append_revision(db, offer, actor, changed + ["valid_from"], "更新报价")
-    common.event(db, inquiry, actor, "offer.updated", {"offer_id": offer.id})
+    if inquiry is not None:
+        common.event(db, inquiry, actor, "offer.updated", {"offer_id": offer.id})
     common.audit(db, actor, "presales.offer.updated", offer.id)
     return offer
 
@@ -509,8 +514,58 @@ def withdraw(db, offer_id, actor, reason, *, expected_version):
     offer.version += 1
     offer.updated_at = common.now()
     append_revision(db, offer, actor, ["status"], reason.strip())
-    common.event(db, inquiry, actor, "offer.withdrawn", {"offer_id": offer.id})
+    if inquiry is not None:
+        common.event(db, inquiry, actor, "offer.withdrawn", {"offer_id": offer.id})
     common.audit(db, actor, "presales.offer.withdrawn", offer.id)
+    return offer
+
+
+def direct_offer(db, actor, part_id, data, *, on_existing="update", existing_offer_id=None,
+                 expected_version=None, offer_audience=None):
+    """单 PN 直接发布；不创建询价、询价行、BJ 编号或通知待办。"""
+    from app.services.presales import visibility
+
+    user, ctx = common.resolve_actor(db, actor)
+    common.require(ctx, "page_presales")
+    common.require(ctx, "action_presales_offer")
+    part = db.get(DimPart, part_id)
+    if part is None or part.status != "active":
+        raise InvalidTransition("请选择已建档的有效型号")
+    if on_existing not in {"update", "new"}:
+        raise InvalidTransition("请选择更新原报价或另报一条")
+    if on_existing == "new" and (existing_offer_id is not None or expected_version is not None):
+        raise InvalidTransition("另报一条不能同时指定原报价版本")
+    _serialize_source(db, user.id, part_id, "")
+    candidates = list(db.scalars(select(PresalesOffer).where(
+        PresalesOffer.created_by == user.id, PresalesOffer.part_id == part_id,
+        PresalesOffer.status == "published",
+    ).order_by(PresalesOffer.valid_from.desc(), PresalesOffer.id.desc())))
+    if on_existing == "update" and (candidates or existing_offer_id is not None):
+        target = next((row for row in candidates if row.id == existing_offer_id), None) \
+            if existing_offer_id is not None else candidates[0]
+        if target is None:
+            raise Conflict("原报价已变化，请刷新后重试")
+        if expected_version is None:
+            raise Conflict("请确认最新报价后更新", code="existing_offer",
+                           existing_offers=visibility.offer_views(db, candidates, ctx))
+        if existing_offer_id is None:
+            raise InvalidTransition("更新已有报价必须指定 existing_offer_id 和 expected_version")
+        if offer_audience is not None:
+            raise InvalidTransition("更新报价保留原整条可见范围，请勿同时变更受众")
+        if target.inquiry_id is not None:
+            _lock_merge_inquiry(db, target.inquiry_id)
+        return update_offer(db, target.id, actor, data, expected_version=expected_version)
+    if expected_version is not None:
+        raise Conflict("原报价已变化，请刷新后重试")
+    offer = PresalesOffer(inquiry_id=None, line_id=None, part_id=part_id,
+        created_by=user.id, source_key="", status="draft", no_stock=False,
+        version=1, revision_no=0, is_tax_inclusive=True,
+        offer_audience_rule_id=common.rule_id(db, offer_audience, ctx, default="public"),
+        supplier_audience_rule_id=common.rule_id(db, None, ctx, default="private"))
+    db.add(offer)
+    _apply(db, offer, data, ctx)
+    _publish(db, offer, actor, common.now(), "直接发布主动报价")
+    common.audit(db, actor, "presales.offer.direct_published", offer.id)
     return offer
 
 
@@ -594,13 +649,11 @@ def _publication_plans(db, drafts, inquiry, ctx, on_existing, existing_offer_id,
             raise InvalidTransition("只能更新本人对同一 PN 的有效报价")
         if target.id in updating:
             raise InvalidTransition("同一有效报价不能在一批中被更新两次，请分别选择或另报一条")
-        origin = _lock_merge_inquiry(db, target.inquiry_id)
-        if origin is None or origin.status != "submitted":
-            raise InvalidTransition("原报价单已撤回或关单，请另报一条")
+        origin = _lock_merge_inquiry(db, target.inquiry_id) if target.inquiry_id is not None else None
         target = db.scalar(select(PresalesOffer).where(PresalesOffer.id == target.id)
                            .with_for_update().execution_options(populate_existing=True))
         # 旧单锁取得后重新核验，避免等待时旧单撤回使报价变更失效。
-        if target.inquiry_id != origin.id or not common.offer_effective(target):
+        if target.inquiry_id != (origin.id if origin else None) or not common.offer_effective(target):
             raise Conflict("原报价已变化，请刷新后重试")
         if use_saved and saved.get("existing_version") is not None and target.version != saved["existing_version"]:
             raise Conflict("Excel 选择的原报价已更新，请重新选择更新或另报")
@@ -615,7 +668,7 @@ def _publish_choice(db, draft, target, inquiry, actor, published_at, task_id=Non
         _publish(db, draft, actor, published_at)
         return draft
     # 报价归属迁至本次单据，整单 M8 立即使用最新规则；旧单只保留实时受控关联。
-    old_line = db.get(PresalesInquiryLine, target.line_id)
+    old_line = db.get(PresalesInquiryLine, target.line_id) if target.line_id is not None else None
     if old_line is not None and old_line.id != draft.line_id:
         if db.get(PresalesOfferLineLink, (old_line.id, target.id)) is None:
             db.add(PresalesOfferLineLink(line_id=old_line.id, offer_id=target.id,

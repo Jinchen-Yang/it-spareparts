@@ -132,6 +132,14 @@ class UpdateOffer(OfferData, VersionInput):
     pass
 
 
+class DirectOffer(OfferData):
+    part_id: int = Field(gt=0)
+    on_existing: Literal["update", "new"] = "update"
+    existing_offer_id: int | None = Field(default=None, gt=0)
+    expected_version: int | None = Field(default=None, ge=1)
+    offer_audience: AudienceInput | None = None
+
+
 class WithdrawOffer(VersionInput):
     reason: str = Field(min_length=1)
 
@@ -415,6 +423,17 @@ def reply(inquiry_id: int, body: ReplyInput, db: Db, ctx: Ctx):
 def publish(inquiry_id: int, body: PublishInput, db: Db, ctx: Ctx):
     return _call(db, lambda: [visibility.offer_view(db, row, ctx) for row in offers.publish_proactive(
         db, inquiry_id, ctx, **body.model_dump())], write=True)
+
+
+@router.post("/offers/direct")
+def direct_offer(body: DirectOffer, db: Db, ctx: Ctx):
+    control = {"part_id", "on_existing", "existing_offer_id", "expected_version", "offer_audience"}
+    data = body.model_dump(exclude_unset=True, exclude=control)
+    audience = body.offer_audience.model_dump() if body.offer_audience is not None else None
+    return _call(db, lambda: visibility.offer_view(db, offers.direct_offer(
+        db, ctx, body.part_id, data, on_existing=body.on_existing,
+        existing_offer_id=body.existing_offer_id, expected_version=body.expected_version,
+        offer_audience=audience), ctx), write=True)
 
 
 @router.patch("/offers/{offer_id}")

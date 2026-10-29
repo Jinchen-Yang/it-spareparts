@@ -100,13 +100,11 @@ function processPage(withNavigationTask = true) {
     <Routes><Route path="/presales/tasks/:id" element={<ProcessPage />} /></Routes>
   </MemoryRouter>);
 }
-function offerPage() { return render(<MemoryRouter><OfferNewPage /></MemoryRouter>); }
+function offerPage() {
+  currentInquiry = { ...baseInquiry(), kind: "proactive_offer", status: "draft", created_by: 7 };
+  return render(<MemoryRouter initialEntries={["/presales/offers/new?draft=1"]}><OfferNewPage /></MemoryRouter>);
+}
 async function makeProactiveDraft() {
-  mocks.createInquiry.mockImplementation(async () => ({ ...baseInquiry(), kind: "proactive_offer", status: "draft", created_by: 7 }));
-  fireEvent.click(screen.getByRole("button", { name: "加入 PN-1" }));
-  fireEvent.click(screen.getByRole("button", { name: "加入 PN-2" }));
-  await openLine("PN-1");
-  fireEvent.click(screen.getByRole("button", { name: "生成报价草稿" }));
   await screen.findByRole("button", { name: "发布主动报价" });
 }
 
@@ -467,15 +465,11 @@ describe("采购主动报价", () => {
     expect(mocks.saveOffer).toHaveBeenCalledTimes(2);
   });
 
-  it("多选建主动报价草稿，字段按 PN 取模板，逐行保存后发布", async () => {
+  it("历史多行主动报价草稿仍可逐行保存后发布，不重复建单", async () => {
     mocks.publishInquiry.mockResolvedValue([]);
     offerPage();
     await makeProactiveDraft();
-    expect(mocks.createInquiry).toHaveBeenCalledWith(expect.objectContaining({ kind: "proactive_offer", lines: [
-      { part_id: 1, pn_raw: "PN-1", description: "型号 1", qty: 1, field_values: [] },
-      { part_id: 2, pn_raw: "PN-2", description: "型号 2", qty: 1, field_values: [] },
-    ] }));
-    await waitFor(() => expect(mocks.getFieldTemplate).toHaveBeenCalledWith("presales_inquiry", "line", "part:1", expect.any(AbortSignal)));
+    expect(mocks.createInquiry).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "发布主动报价" })).toBeDisabled();
     await openLine("PN-1");
     fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "300" } });
@@ -525,7 +519,8 @@ describe("采购主动报价", () => {
     await openLine("PN-1");
     await screen.findByLabelText("PN-1单价");
     fireEvent.click(screen.getByRole("button", { name: "打开全新主动报价" }));
-    expect(await screen.findByRole("button", { name: "加入 PN-1" })).toBeInTheDocument();
+    expect(await screen.findByRole("combobox", { name: "主动报价 PN" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "生成报价草稿" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("PN-1单价")).not.toBeInTheDocument();
   });
 
