@@ -45,7 +45,6 @@ QUOTE_SCHEMA = WorkbookSchema("presales_quote_sheet", 1, [
         ColumnSpec("source_key", "货源", "text", "optional", "货源标识，最多 128 字", max_len=128, field_group="data_supplier"),
         ColumnSpec("stock_location", "所在地", "text", "optional", "所在地，最多 256 字", max_len=256),
         ColumnSpec("lead_time", "交期", "text", "optional", "交期说明，最多 256 字", max_len=256),
-        ColumnSpec("validity_days", "有效天数", "int", "optional", "1–36500 个自然日；当前无单头统一值时默认为 1"),
         ColumnSpec("supplier", "供应商", "text", "optional", "按供应商档案名称精确匹配；不唯一或找不到时报错", field_group="data_supplier"),
         ColumnSpec("notes", "采购备注", "text", "optional", "沿用草稿中已有的可见性规则"),
         ColumnSpec("ref_offer_id", "沿用报价编号", "int", "optional", "沿用时必填，必须是所有来源单所有人可见的有效报价"),
@@ -60,7 +59,7 @@ QUOTE_SCHEMA = WorkbookSchema("presales_quote_sheet", 1, [
     "合并来源已有草稿的值不一致时显示空白；未改动的字段按每个来源保留，修改后统一分发。",
 ])
 
-_DATA_KEYS = {"unit_price", "is_tax_inclusive", "qty_available", "source_key", "stock_location", "lead_time", "validity_days", "notes"}
+_DATA_KEYS = {"unit_price", "is_tax_inclusive", "qty_available", "source_key", "stock_location", "lead_time", "notes"}
 
 
 def _source_ids(entity_id):
@@ -273,7 +272,7 @@ def _load(db, ids, ctx):
 def _state(db, line, drafts, responses, ctx):
     own = [draft for draft in drafts if draft.line_id == line.id]
     response = next((row for row in responses if row.line_id == line.id and row.line_version == line.version), None)
-    result = {"validity_days": 1}
+    result = {}
     if len(own) == 1:
         draft = own[0]
         view = visibility.offer_view(db, draft, ctx) or {}
@@ -352,7 +351,7 @@ def _row(db, data, refs=None):
                        if entry["id"] in locked_offer_ids}
             active = visible if active is None else {key: value for key, value in active.items() if key in visible}
         # 预览后沿用价或可更新的本人报价发生变化时，必须重新确认。
-        active_versions = [(offer.id, offer.version, offer.revision_no, str(offer.valid_until))
+        active_versions = [(offer.id, offer.version, offer.revision_no)
             for offer in library._active(db, [part.id])
             if offer.id in locked_offer_ids and (offer.created_by == user.id or offer.id in (active or {}))]
         # 摘要不显示报价人，避免不同来源所有人的报价人字段可见性不一致。
@@ -511,12 +510,8 @@ def apply_quotes(db, plan, ctx):
                 payload["source_key"] = ""
             if "supplier" in changes:
                 payload["supplier_id"] = supplier_id
-            if "validity_days" in payload and payload["validity_days"] is None:
-                payload["validity_days"] = 1
             if mode == "quote":
                 payload["no_stock"] = False
-                if not any(draft.line_id == line.id for draft in drafts):
-                    payload.setdefault("validity_days", chosen("validity_days") or 1)
             result = offers.save_line_decision(db, line.inquiry_id, line.id, ctx,
                 expected_version=inquiries[line.inquiry_id].version, work_item_id=tasks[line.inquiry_id].id,
                 mode=mode, data=payload if mode == "quote" else None,

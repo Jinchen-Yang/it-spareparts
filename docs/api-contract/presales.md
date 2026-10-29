@@ -64,9 +64,11 @@ q 为空时返回权限范围内的候选，非空时对原始名称、归一化
 未建档行可仅传 pn_raw。行 qty 为正数、最多三位小数。每次 HTTP 提交最多 200 行。
 
 报价接受 unit_price、is_tax_inclusive、no_stock、qty_available、stock_location、lead_time、source_key、supplier_id、
-validity_days、notes、supplier_audience、reporter_audience、notes_audience。金额是 Money(14,2)，不转换税基。
-validity_days 为 1–36500 的自然日数；截止时刻为上海发布日期加 N−1 天的 23:59:59.999999，存 UTC。
-实时有效判断为 `valid_from <= now < valid_until`，截止微秒本身无效。
+notes、supplier_audience、reporter_audience、notes_audience。金额是 Money(14,2)，不转换税基。
+按 [D-0046](../decisions/0026-售前报价长期有效与主动报价简化.md)，报价不设有效期：不再接受 validity_days，
+响应不再返回 valid_until / validity_days；`valid_from` 即发布或最近一次更新的时间。
+实时有效判断为「已发布、未标无货、有单价且 `valid_from <= now`」，不看时间截止；直到更新、撤回或标为失效前一直有效。
+旧 Excel 中的「有效天数」列按未知列忽略。
 
 除创建外，所有业务写动作要求 expected_version。询价动作校验询价 version；绑定/建档校验行 version；
 更新、撤销、指定 offer_id 保存草稿校验报价 version；新报价草稿校验询价 version。
@@ -128,8 +130,8 @@ M5 注册 presales_inquiry（池 action_presales_quote，主管 action_presales_
 销售引用保存 `line.ref_offer_id` 和 `line.ref_offer_revision_no`；采购沿用保存
 `line_response.ref_offer_id` 和 `line_response.ref_offer_revision_no`；成交保存
 `won_offer_id` 和 `won_offer_revision_no`；跨单更新的原行关联保存 `offer_revision_no`。
-版本由服务端确定，客户端不能自行提交版本号。后续续期不能延长原引用的有效期。
-价格、含税口径、数量、货源、有效期及受众均读取所钉版本的 `presales_offer_revision.snapshot`，
+版本由服务端确定，客户端不能自行提交版本号。
+价格、含税口径、数量、货源及受众均读取所钉版本的 `presales_offer_revision.snapshot`，
 不取当前报价覆盖。新快照保存当时整单准入所需信息；内部准入信息不出现在业务响应中。
 单据详情返回行级 `ref_offer`、跨单原行级 `linked_offers`、成交级 `won_offer` 和沿用结果中的 `offer` 快照；
 不可读快照返回 null 或省略 offer，不用当前报价补全。
@@ -138,7 +140,8 @@ M5 注册 presales_inquiry（池 action_presales_quote，主管 action_presales_
 快照可见性仍通过 M8 和查看者当前字段组权限过滤；分组成员变更仍按 M8 的实时成员规则生效。
 当前版本较新且查看者对当前版本也有权限时，快照视图额外包含
 `latest={unit_price, is_tax_inclusive, revision_no}`；否则整个省略 latest，不能透露新价或更新版本号。
-前端以 latest 显示「该报价已更新为 ¥x」。有效性按快照的 valid_until 判断，当前撤销另标「原报价已撤销」。
+前端以 latest 显示「该报价已更新为 ¥x」。钉住版本直到原报价下一次更新前有效（D-0046）：原报价改价、改含税口径、
+标无货或标为失效后 `expired=true`；只改备注、货源等其他字段或可见范围不算取代；撤销另标「原报价已撤销」。
 快照视图返回 `expired` 与 `original_withdrawn`，行及沿用结果同步返回这两个标志。
 沿用行显示原报价人和报价时间；`reporter_label` 依据所有人权限返回姓名或「其他采购」，不泄露身份。
 

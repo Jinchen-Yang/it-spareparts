@@ -30,7 +30,7 @@ def test_workbook_quote_stays_draft_until_explicit_reply(db, r6_actors):
     users = r6_actors
     inquiry, lines = _pending(db, users)
     result = _save(db, users, inquiry, lines[0], mode="quote",
-                   data={"unit_price": "88.00", "validity_days": 3})
+                   data={"unit_price": "88.00"})
     draft = db.get(PresalesOffer, result["offer_id"])
     assert draft.status == "draft" and draft.revision_no == 0
     assert _item(db, inquiry, users, users.buyer).status == "pending"
@@ -81,7 +81,7 @@ def test_workbook_reuse_checks_owner_visibility_and_reply_validity(db, r6_actors
         _save(db, users, inquiry, lines[0], mode="reuse", ref_offer_id=private.id)
     _, _, _, public = _publish(db, users, on_existing="new")
     _save(db, users, inquiry, lines[0], mode="reuse", ref_offer_id=public.id)
-    monkeypatch.setattr(common, "now", lambda: public.valid_until + timedelta(microseconds=1))
+    offers.withdraw(db, public.id, users.buyer.id, "停止供货", expected_version=public.version)
     with pytest.raises(InvalidTransition, match="失效"):
         offers.reply(db, inquiry.id, users.buyer.id, expected_version=inquiry.version)
     assert _item(db, inquiry, users, users.buyer).status == "pending"

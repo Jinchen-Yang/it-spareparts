@@ -113,7 +113,6 @@ class OfferData(Input):
     lead_time: str | None = Field(default=None, max_length=256)
     source_key: str = Field(default="", max_length=128)
     supplier_id: int | None = Field(default=None, gt=0)
-    validity_days: int = Field(default=1, ge=1, le=36500)
     notes: str | None = None
     supplier_audience: AudienceInput | None = None
     reporter_audience: AudienceInput | None = None

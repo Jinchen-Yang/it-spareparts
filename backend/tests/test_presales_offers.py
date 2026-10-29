@@ -17,7 +17,7 @@ from app.models.presales import (
     OfferPriceDaily, PresalesInquiry, PresalesInquiryLine, PresalesOffer, PresalesOfferRevision,
 )
 from app.models.system import SysUser
-from app.services.presales import common, daily, library, offers
+from app.services.presales import common, daily, library, offers, visibility
 from app.services.presales.registration import register_subjects
 from app.services.workflow import work_items
 from app.services.workflow.registry import Conflict, Forbidden, InvalidTransition, Subject
@@ -59,7 +59,7 @@ def _inquiry(db, actors, *, kind="proactive_offer", line_count=1):
 
 def _draft(db, inquiry, line, actor, **data):
     return offers.save_draft(db, inquiry.id, line.id, actor.id,
-        {"unit_price": "100.25", "validity_days": 3,
+        {"unit_price": "100.25", 
          **({"notes": "供应商暂无货"} if data.get("no_stock") else {}), **data},
         expected_version=inquiry.version)
 
@@ -73,38 +73,32 @@ def _published(db, actors, monkeypatch, **data):
     return inquiry, result[0]
 
 
-@pytest.mark.parametrize("days", [1, 3, 30])
-def test_offer_validity_is_shanghai_natural_day_and_strict_boundary(days):
-    # UTC 16:30 已经是上海次日，不能按 UTC 日期计算。
-    published = datetime(2026, 10, 24, 16, 30, tzinfo=timezone.utc)
-    expected_day = date(2026, 10, 25) + timedelta(days=days - 1)
-    local = offers.offer_valid_until(published, days).astimezone(offers.SHANGHAI)
-    assert local.date() == expected_day
-    assert (local.hour, local.minute, local.second, local.microsecond) == (23, 59, 59, 999999)
-    assert local.tzinfo == offers.SHANGHAI
+def test_published_offer_has_no_expiry_and_stays_effective_until_changed(db, actors, monkeypatch):
+    # D-0046：报价不设有效期，不随时间失效，直到更新、撤回或标为失效。
+    _, offer = _published(db, actors, monkeypatch)
+    assert offer.valid_from == FIXED and offer.valid_until is None
+    ids = [actors.part.id]
+    for later in (FIXED + timedelta(days=1), FIXED + timedelta(days=3650)):
+        assert library.batch(db, ids, actors.sales.id, now=later)[actors.part.id]
+    view = visibility.offer_view(db, offer, actors.buyer.id)
+    assert "valid_until" not in view and "validity_days" not in view
 
 
-@pytest.mark.parametrize("days", [0, -1, True, 1.5])
-def test_offer_validity_rejects_invalid_day_counts(days):
-    with pytest.raises(ValueError):
-        offers.offer_valid_until(FIXED, days)
-
-
-def test_offer_validity_requires_explicit_timezone():
-    with pytest.raises(ValueError):
-        offers.offer_valid_until(datetime(2026, 10, 25), 1)
+def test_validity_days_is_no_longer_an_editable_quote_field(db, actors, monkeypatch):
+    inquiry, lines = _inquiry(db, actors)
+    with pytest.raises(InvalidTransition, match="不可修改"):
+        _draft(db, inquiry, lines[0], actors.buyer, validity_days=3)
 
 
 def test_publish_update_renew_withdraw_appends_complete_snapshots(db, actors, monkeypatch):
     inquiry, offer = _published(db, actors, monkeypatch, supplier_id=actors.supplier.id,
                               notes="原备注", qty_available="3.500", is_tax_inclusive=True)
     assert offer.revision_no == 1 and offer.status == "published"
-    first_until = offer.valid_until
     renewed = FIXED + timedelta(days=2)
     monkeypatch.setattr(common, "now", lambda: renewed)
     offers.update_offer(db, offer.id, actors.buyer.id,
-        {"unit_price": "102.50", "validity_days": 3}, expected_version=offer.version)
-    assert offer.revision_no == 2 and offer.valid_until == first_until + timedelta(days=2)
+        {"unit_price": "102.50"}, expected_version=offer.version)
+    assert offer.revision_no == 2 and offer.valid_from == renewed and offer.valid_until is None
     history = list(db.scalars(select(PresalesOfferRevision).where(
         PresalesOfferRevision.offer_id == offer.id).order_by(PresalesOfferRevision.revision_no)))
     assert history[0].snapshot["unit_price"] == "100.25"
@@ -121,15 +115,6 @@ def test_publish_update_renew_withdraw_appends_complete_snapshots(db, actors, mo
     offers.withdraw(db, offer.id, actors.buyer.id, "价格填写有误", expected_version=offer.version)
     assert offer.status == "withdrawn" and offer.revision_no == 3
     assert library.batch(db, [actors.part.id], actors.sales.id, now=renewed)[actors.part.id] == []
-
-
-@pytest.mark.parametrize("days", [1, 3, 30])
-def test_library_expires_at_end_microsecond_and_next_midnight(db, actors, monkeypatch, days):
-    _, offer = _published(db, actors, monkeypatch, validity_days=days)
-    ids = [actors.part.id]
-    assert library.batch(db, ids, actors.sales.id, now=offer.valid_until - timedelta(microseconds=1))[actors.part.id]
-    assert library.batch(db, ids, actors.sales.id, now=offer.valid_until)[actors.part.id] == []
-    assert library.batch(db, ids, actors.sales.id, now=offer.valid_until + timedelta(microseconds=1))[actors.part.id] == []
 
 
 def test_explicit_repeat_update_keeps_identity_and_explicit_new_keeps_other_sources(db, actors, monkeypatch):

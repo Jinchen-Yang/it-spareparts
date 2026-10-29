@@ -72,8 +72,10 @@ def _offer_batch(db, offers, ctx, *, fields):
         and inquiry_for(offer).status != "draft" and not shared(inquiry_for(offer))}
     participation = work_items.participation_batch(db, "presales_inquiry", needed, ctx) if needed else {}
     flat, rules, candidates = {}, {}, []
+    # valid_until / validity_days 已停用（D-0046），不再对外输出。
     omitted = {"created_by", "work_item_id", "supplier_audience_rule_id",
-               "reporter_audience_rule_id", "notes_audience_rule_id", "workbook_choice"}
+               "reporter_audience_rule_id", "notes_audience_rule_id", "workbook_choice",
+               "valid_until", "validity_days"}
     for index, offer in enumerate(offers):
         inquiry = inquiry_for(offer)
         if inquiry is None:
@@ -171,11 +173,13 @@ def pinned_offer_view(db, offer_id, revision_no, ctx):
     view = offer_view(db, snapshot, ctx)
     if view is None:
         return None
-    from app.services.presales.common import now
-    moment = now()
-    view["expired"] = (snapshot.status != "published" or snapshot.no_stock or snapshot.unit_price is None
-        or snapshot.valid_until is None or snapshot.valid_until <= moment
-        or snapshot.valid_from is None or snapshot.valid_from > moment)
+    from app.services.presales.common import offer_effective
+    # D-0046：报价直到下一次更新前一直有效。钉住的版本在原报价改价、改税口径、
+    # 标无货或失效后即被取代；只改备注或可见范围不算取代。撤回仍由 original_withdrawn 单独表达。
+    superseded = current.status != "withdrawn" and (
+        not offer_effective(current) or current.unit_price != snapshot.unit_price
+        or current.is_tax_inclusive != snapshot.is_tax_inclusive)
+    view["expired"] = not offer_effective(snapshot) or superseded
     view["original_withdrawn"] = current.status == "withdrawn"
     if current.revision_no > revision_no:
         latest = offer_view(db, current, ctx)

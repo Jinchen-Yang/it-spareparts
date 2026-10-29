@@ -69,7 +69,7 @@ function InquiryEditorContent() {
   const [candidateError, setCandidateError] = useState(false);
   const [library, setLibrary] = useState<Record<number, Offer[]>>({});
   const now = useNow([...Object.values(library).flatMap(flattenOffers), ...lines.flatMap((line) => line.ref_offer ? [line.ref_offer] : [])]
-    .flatMap((offer) => [offer.valid_from, offer.valid_until]));
+    .map((offer) => offer.valid_from));
   const referencedOffer = (line: DraftLine) => line.ref_offer_revision_no != null && line.ref_offer?.id === line.ref_offer_id
     ? line.ref_offer : flattenOffers(library[line.part_id || 0] ?? []).find((offer) => offer.id === line.ref_offer_id);
   const [loading, setLoading] = useState(!!id);

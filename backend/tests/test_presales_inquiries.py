@@ -60,7 +60,7 @@ def _offer(db, inquiry, line, buyer, *, valid_until=None, with_snapshot=False):
     offer = PresalesOffer(inquiry_id=inquiry.id, line_id=line.id, part_id=line.part_id,
         created_by=buyer.id, unit_price=Decimal("12.34"), is_tax_inclusive=True,
         status="published", no_stock=False, valid_from=datetime.now(timezone.utc),
-        valid_until=valid_until or datetime.now(timezone.utc) + timedelta(days=2),
+        valid_until=valid_until,
         revision_no=0, version=1, source_key="test")
     db.add(offer)
     db.flush()
@@ -144,7 +144,7 @@ def test_pn_change_stales_but_notes_only_resubmit_does_not_reopen_done(db, presa
     assert all(item.status == "pending" for item in _items(db, inquiry, users))
 
 
-def test_effective_reference_skips_dispatch_and_expired_is_rejected(db, presales_users, presales_parts):
+def test_effective_reference_skips_dispatch_and_withdrawn_is_rejected(db, presales_users, presales_parts):
     users, parts = presales_users, presales_parts
     original = _create(db, users, parts)
     line = inquiries.lines_for(db, original.id)[0]
@@ -155,9 +155,13 @@ def test_effective_reference_skips_dispatch_and_expired_is_rejected(db, presales
     assert _items(db, reused, users) == []
     inquiries.append_lines(db, reused.id, users.sales.id, reused.version, [{"part_id": parts[1].id}])
     assert len(_items(db, reused, users)) == 1
-    offer.valid_until = datetime.now(timezone.utc) - timedelta(microseconds=1)
+    # D-0046：已停用的 valid_until 即使早已过去，也不会让报价失效。
+    offer.valid_until = datetime.now(timezone.utc) - timedelta(days=30)
     db.flush()
-    with pytest.raises(InvalidTransition, match="有效期"), db.begin_nested():
+    inquiries.create_draft(db, users.sales.id, lines=[{"part_id": parts[0].id, "ref_offer_id": offer.id}])
+    offer.status = "withdrawn"
+    db.flush()
+    with pytest.raises(InvalidTransition, match="有效"), db.begin_nested():
         inquiries.create_draft(db, users.sales.id, lines=[{"part_id": parts[0].id, "ref_offer_id": offer.id}])
 
 
@@ -309,7 +313,7 @@ def test_null_field_values_and_future_reference_are_safe(db, presales_users, pre
     offer = _offer(db, inquiry, inquiries.lines_for(db, inquiry.id)[0], users.buyer)
     offer.valid_from = datetime.now(timezone.utc) + timedelta(hours=1)
     db.flush()
-    with pytest.raises(InvalidTransition, match="有效期"), db.begin_nested():
+    with pytest.raises(InvalidTransition, match="有效"), db.begin_nested():
         inquiries.create_draft(db, users.sales.id, lines=[{"part_id": parts[0].id, "ref_offer_id": offer.id}])
 
 

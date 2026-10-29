@@ -113,6 +113,7 @@ class PresalesOffer(Base):
     lead_time: Mapped[str | None] = mapped_column(String(256))
     source_key: Mapped[str] = mapped_column(String(128), default="", server_default="")
     supplier_id: Mapped[int | None] = mapped_column(ForeignKey("dim_supplier.id"))
+    # D-0046 起报价不设有效期：validity_days / valid_until 停用，仅为回滚保留，不参与任何判断。
     validity_days: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     # Excel 草稿保留采购明确选择；发布时清空，业务可见性出口不返回此内部数据。
     workbook_choice: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))

@@ -1,4 +1,6 @@
-"""成交采纳支持本单关联的有效报价，并实时核验有效期与受众。"""
+"""成交采纳支持本单关联的有效报价，并实时核验报价状态与受众（D-0046 起不看时间）。"""
+
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import delete
@@ -34,14 +36,24 @@ def test_close_can_adopt_current_visible_linked_offer(db, r6_actors, kind):
 
 
 @pytest.mark.parametrize("kind", ["sales-reference", "buyer-reuse"])
-@pytest.mark.parametrize("invalid", ["expired", "invisible", "withdrawn", "no-stock"])
+def test_close_can_adopt_linked_offer_long_after_publication(db, r6_actors, monkeypatch, kind):
+    # D-0046：报价不设有效期，时间流逝不会让已关联的报价不可采纳。
+    users = r6_actors
+    inquiry, _, offer = _linked(db, users, kind)
+    later = common.now() + timedelta(days=3650)
+    monkeypatch.setattr(common, "now", lambda: later)
+    closed = inquiries.close(db, inquiry.id, users.sales.id, inquiry.version,
+        outcome="won", won_offer_id=offer.id)
+    assert closed.won_offer_id == offer.id
+
+
+@pytest.mark.parametrize("kind", ["sales-reference", "buyer-reuse"])
+@pytest.mark.parametrize("invalid", ["invisible", "withdrawn", "no-stock"])
 def test_close_rejects_linked_offer_that_is_no_longer_usable(
-        db, r6_actors, monkeypatch, kind, invalid):
+        db, r6_actors, kind, invalid):
     users = r6_actors
     inquiry, source, offer = _linked(db, users, kind)
-    if invalid == "expired":
-        monkeypatch.setattr(common, "now", lambda: offer.valid_until)
-    elif invalid == "invisible":
+    if invalid == "invisible":
         viewer = common.resolve_actor(db, users.buyer.id)[1]
         source.offer_audience_rule_id = common.rule_id(db, {"mode": "private"}, viewer)
         db.flush()

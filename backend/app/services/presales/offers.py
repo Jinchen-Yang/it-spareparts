@@ -1,7 +1,7 @@
 """报价草稿、独立回复和只追加的发布历史；事务由调用方持有。"""
 
 import hashlib
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
@@ -20,19 +20,9 @@ from app.services.workflow.registry import Conflict, Forbidden, InvalidTransitio
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 EDITABLE = {
     "unit_price", "is_tax_inclusive", "no_stock", "qty_available", "stock_location",
-    "lead_time", "source_key", "supplier_id", "validity_days", "notes",
+    "lead_time", "source_key", "supplier_id", "notes",
     "supplier_audience", "reporter_audience", "notes_audience",
 }
-
-
-def offer_valid_until(published_at: datetime, days: int) -> datetime:
-    """上海自然日末尾转换为 UTC；截止瞬间本身已失效。"""
-    if published_at.tzinfo is None or published_at.utcoffset() is None:
-        raise ValueError("published_at 必须包含时区")
-    if type(days) is not int or days < 1:
-        raise ValueError("有效天数必须为正整数")
-    day = published_at.astimezone(SHANGHAI).date() + timedelta(days=days - 1)
-    return datetime.combine(day, time.max, SHANGHAI).astimezone(timezone.utc)
 
 
 def _json(value):
@@ -130,9 +120,6 @@ def _apply(db, offer, data, ctx):
             value = common.rule_id(db, value, ctx, default="private" if key == "supplier_audience" else "public")
         elif key in {"unit_price", "qty_available"}:
             value = _decimal(value, "单价" if key == "unit_price" else "可供数量", 2 if key == "unit_price" else 3) if value is not None else None
-        elif key == "validity_days":
-            if type(value) is not int or not 1 <= value <= 36500:
-                raise InvalidTransition("有效天数必须为 1–36500 的整数")
         elif key == "no_stock":
             if type(value) is not bool:
                 raise InvalidTransition("无货标记必须为布尔值")
@@ -227,7 +214,7 @@ def save_draft(db, inquiry_id, line_id, actor, data, *, expected_version,
         offer = PresalesOffer(
             inquiry_id=inquiry.id, line_id=line.id, part_id=line.part_id,
             work_item_id=task.id if task else None, created_by=user.id,
-            source_key="", status="draft", no_stock=False, validity_days=1,
+            source_key="", status="draft", no_stock=False,
             version=1, revision_no=0,
             supplier_audience_rule_id=common.rule_id(db, None, ctx, default="private"),
         )
@@ -256,7 +243,7 @@ def _publish(db, offer, actor, published_at, reason="发布报价"):
     _publishable(db, offer)
     offer.status = "published"
     offer.valid_from = published_at
-    offer.valid_until = offer_valid_until(published_at, offer.validity_days)
+    offer.valid_until = None
     offer.version += 1
     offer.updated_at = published_at
     offer.workbook_choice = {}
@@ -502,10 +489,10 @@ def update_offer(db, offer_id, actor, data, *, expected_version):
     _publishable(db, offer)
     published_at = common.now()
     offer.valid_from = published_at
-    offer.valid_until = offer_valid_until(published_at, offer.validity_days)
+    offer.valid_until = None
     offer.updated_at = published_at
     offer.version += 1
-    append_revision(db, offer, actor, changed + ["valid_from", "valid_until"], "更新报价")
+    append_revision(db, offer, actor, changed + ["valid_from"], "更新报价")
     common.event(db, inquiry, actor, "offer.updated", {"offer_id": offer.id})
     common.audit(db, actor, "presales.offer.updated", offer.id)
     return offer
@@ -610,9 +597,7 @@ def _publication_plans(db, drafts, inquiry, ctx, on_existing, existing_offer_id,
         target = db.scalar(select(PresalesOffer).where(PresalesOffer.id == target.id)
                            .with_for_update().execution_options(populate_existing=True))
         # 旧单锁取得后重新核验，避免等待时旧单撤回使报价变更失效。
-        if (target.inquiry_id != origin.id or target.status != "published" or target.no_stock
-                or target.valid_from is None or target.valid_from > common.now()
-                or target.valid_until is None or target.valid_until <= common.now()):
+        if target.inquiry_id != origin.id or not common.offer_effective(target):
             raise Conflict("原报价已变化，请刷新后重试")
         if use_saved and saved.get("existing_version") is not None and target.version != saved["existing_version"]:
             raise Conflict("Excel 选择的原报价已更新，请重新选择更新或另报")

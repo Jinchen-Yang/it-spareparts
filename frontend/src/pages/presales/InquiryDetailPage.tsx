@@ -47,7 +47,7 @@ function InquiryDetailContent({ id }: { id: number }) {
   const historyGeneration = useRef(0);
   const now = useNow([...(inquiry?.offers ?? []), ...(inquiry?.lines ?? []).flatMap((line) => [...(line.linked_offers ?? []), ...(line.ref_offer ? [line.ref_offer] : [])]),
     ...(inquiry?.line_responses ?? []).flatMap((row) => row.offer ? [row.offer] : [])]
-    .flatMap((offer) => [offer.valid_from, offer.valid_until]));
+    .map((offer) => offer.valid_from));
 
   const load = useCallback(async () => {
     const current = ++generation.current;
@@ -135,7 +135,7 @@ function InquiryDetailContent({ id }: { id: number }) {
     const lowest = active && !offer.no_stock && typeof offer.is_tax_inclusive === "boolean" && hasValue(offer.unit_price)
       && Number(offer.unit_price) === Math.min(...candidates.map((candidate) => Number(candidate.unit_price)));
     const detail = [offer.reporter?.name || `报价 #${offer.id}`, offer.stock_location, offer.lead_time,
-      offer.valid_until ? `有效至 ${formatBusinessDateTime(offer.valid_until)}` : ""].filter(Boolean).join(" · ");
+      offer.valid_from ? `报价于 ${formatBusinessDateTime(offer.valid_from)}` : ""].filter(Boolean).join(" · ");
     return <span key={offer.id} className="presales-quote-cell">
       <button type="button" aria-label={`采纳 ${line.pn_raw} 报价 ${offer.id}`} aria-pressed={wonOfferId === offer.id}
         className={`presales-offer-choice ${wonOfferId === offer.id ? "is-selected" : lowest ? "is-lowest" : ""}`}
@@ -207,7 +207,7 @@ function InquiryDetailContent({ id }: { id: number }) {
       <Table aria-label="报价历史" rowKey="revision_no" dataSource={history} loading={historyLoading} tableLayout="fixed" pagination={{ pageSize: 5 }} columns={[
         { title: "版本 / 时间", key: "version", width: 160, render: (_, revision) => <>第 {revision.revision_no} 版<div>{formatBusinessDateTime(revision.created_at)}</div>{revision.reason && <p>原因：{revision.reason}</p>}</> },
         { title: "报价内容", key: "details", render: (_, revision) => <><Descriptions column={1} size="small" items={historyFields.filter((field) => hasValue(revision.snapshot[field.key])).map((field) => ({ key: field.key, label: field.label,
-          children: field.key === "is_tax_inclusive" ? taxLabel(revision.snapshot.is_tax_inclusive) : field.key === "valid_from" || field.key === "valid_until" ? formatBusinessDateTime(revision.snapshot[field.key]) : displayValue(revision.snapshot[field.key]),
+          children: field.key === "is_tax_inclusive" ? taxLabel(revision.snapshot.is_tax_inclusive) : field.key === "valid_from" ? formatBusinessDateTime(revision.snapshot[field.key]) : displayValue(revision.snapshot[field.key]),
         }))} />{revision.snapshot.reporter?.name && <p>报价人：{revision.snapshot.reporter.name}</p>}{!!revision.changed_fields.length && <Typography.Text type="secondary">变更：{revision.changed_fields.map((field) => historyFields.find((entry) => entry.key === field)?.label ?? field).join("、")}</Typography.Text>}</> },
       ]} locale={{ emptyText: "暂无报价历史" }} />
     </Drawer>

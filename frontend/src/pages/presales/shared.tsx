@@ -37,32 +37,22 @@ export function useNow(deadlines: (string | null | undefined)[] = []) {
   return now;
 }
 
+/** D-0046：报价不设有效期，直到更新、撤回、标无货或被取代（服务端 expired）前一直有效。 */
 export function isOfferActive(offer: Offer, now = Date.now()) {
-  return !offer.original_withdrawn && offer.status === "published" && !offer.no_stock && offer.unit_price != null
-    && !!offer.valid_from && offerDeadline(offer.valid_from) <= now
-    && offerDeadline(offer.valid_until) > now;
+  return !offer.original_withdrawn && !offer.expired && offer.status === "published" && !offer.no_stock
+    && offer.unit_price != null && !!offer.valid_from && offerDeadline(offer.valid_from) <= now;
 }
 
 export function taxLabel(value: boolean | null | undefined) {
   return value === true ? "含税" : value === false ? "不含税" : "未声明税基";
 }
 
-export function expiryLabel(days: number, now = Date.now()) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
-  }).formatToParts(new Date(now));
-  const value = (type: string) => Number(parts.find((part) => part.type === type)?.value);
-  const end = new Date(Date.UTC(value("year"), value("month") - 1, value("day") + days - 1));
-  return `将于 ${end.getUTCMonth() + 1}月${end.getUTCDate()}日 23:59 失效（上海时间）`;
-}
-
 export function OfferBadge({ offer }: { offer: Offer }) {
-  const now = useNow([offer.valid_from, offer.valid_until]);
+  const now = useNow([offer.valid_from]);
   const active = isOfferActive(offer, now);
-  const days = Math.max(0, Math.ceil((offerDeadline(offer.valid_until) - now) / 86_400_000));
   return <Space wrap size={4}><Tag color={active ? "green" : undefined} style={{ color: active ? undefined : "var(--mb-text-3)" }}>
     {active ? "有效报价" : "已失效"} {moneyExact(offer.unit_price == null ? null : Number(offer.unit_price))} · {taxLabel(offer.is_tax_inclusive)}
-    {active && ` · 剩 ${days} 天`}{offer.reporter && ` · ${offer.reporter.name}`}
+    {offer.reporter && ` · ${offer.reporter.name}`}
   </Tag><OfferUpdates offer={offer} /></Space>;
 }
 
@@ -78,7 +68,7 @@ export function flattenOffers(offers: Offer[]): Offer[] {
   return offers.flatMap((offer) => [offer, ...(offer.more ?? [])]);
 }
 
-/** 主报价先过期时，仍有效的历史报价继续作为该报价人的候选。 */
+/** 主报价不可用（撤回、无货、被取代）时，仍有效的其他报价继续作为该报价人的候选。 */
 export function activeOfferGroups(offers: Offer[], now: number): Offer[] {
   return offers.flatMap((group) => {
     const active = flattenOffers([group]).filter((offer) => isOfferActive(offer, now));

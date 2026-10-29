@@ -154,7 +154,7 @@ def _reference(db, line, ctx, *, allow_new=False):
         from app.services.presales.visibility import pinned_offer_view
         view = pinned_offer_view(db, line.ref_offer_id, line.ref_offer_revision_no, ctx)
         if view is None or view["expired"] or view["original_withdrawn"]:
-            raise InvalidTransition("只能引用有效期内且可见的报价版本")
+            raise InvalidTransition("只能引用有效且可见的报价版本")
         if line.part_id != view["part_id"]:
             raise InvalidTransition("引用报价的 PN 与询价行不一致")
         return
@@ -162,11 +162,8 @@ def _reference(db, line, ctx, *, allow_new=False):
         raise InvalidTransition("原引用缺少历史版本，请先取消引用再重新选择")
     offer = db.scalar(select(PresalesOffer).where(PresalesOffer.id == line.ref_offer_id)
                       .with_for_update().execution_options(populate_existing=True))
-    now = common.now()
-    if (offer is None or offer.status != "published" or offer.no_stock or
-            offer.valid_from is None or now < offer.valid_from or
-            offer.valid_until is None or now >= offer.valid_until):
-        raise InvalidTransition("只能引用有效期内的报价")
+    if offer is None or not common.offer_effective(offer):
+        raise InvalidTransition("只能引用有效的报价")
     if line.part_id is None or offer.part_id != line.part_id:
         raise InvalidTransition("引用报价的 PN 与询价行不一致")
     from app.services.presales.visibility import can_view_offer

@@ -19,10 +19,10 @@ def test_appending_another_line_does_not_repin_existing_reuse(db, r6_actors, mon
     inquiry, lines = _pending(db, users)
     old_line = lines[0]
     _reply(db, inquiry, users.buyer, [{"line_id": old_line.id, "mode": "reuse", "ref_offer_id": source.id}])
-    original_until = source.valid_until
-    monkeypatch.setattr(common, "now", lambda: original_until + timedelta(seconds=1))
+    later = common.now() + timedelta(days=1)
+    monkeypatch.setattr(common, "now", lambda: later)
     offers.update_offer(db, source.id, users.buyer.id,
-        {"unit_price": "500.00", "validity_days": 30}, expected_version=source.version)
+        {"unit_price": "500.00"}, expected_version=source.version)
     inquiries.append_lines(db, inquiry.id, users.sales.id, inquiry.version,
         [{"part_id": users.other_part.id}])
     added_line = inquiries.lines_for(db, inquiry.id)[-1]
@@ -34,7 +34,8 @@ def test_appending_another_line_does_not_repin_existing_reuse(db, r6_actors, mon
     assert response.ref_offer_revision_no == 1
     view = _response_view(db, inquiry, users.sales, old_line.id)
     assert view["offer"]["unit_price"] == Decimal("100.00")
-    assert view["expired"] is True
+    # D-0046：改价即取代钉住版本，并给出最新价。
+    assert view["expired"] is True and view["offer"]["latest"]["unit_price"] == Decimal("500.00")
 
 
 def test_notes_only_edit_keeps_reference_pin_when_current_scope_is_narrower(db, r6_actors):
@@ -46,7 +47,8 @@ def test_notes_only_edit_keeps_reference_pin_when_current_scope_is_narrower(db, 
         lines=[{"part_id": users.part.id, "ref_offer_id": source.id}])
     inquiries.submit(db, inquiry.id, users.sales.id, inquiry.version)
     line = inquiries.lines_for(db, inquiry.id)[0]
-    _publish(db, users, whole={"mode": "private"}, price="500.00",
+    # 同价只收窄范围，不取代钉住版本（D-0046 只按价格、税口径或可用状态判定取代）。
+    _publish(db, users, whole={"mode": "private"}, price="100.00",
         on_existing="update", existing_offer_id=source.id)
     inquiries.withdraw(db, inquiry.id, users.sales.id, inquiry.version)
     inquiries.update_draft(db, inquiry.id, users.sales.id, inquiry.version,

@@ -57,7 +57,7 @@ export default function InquiryListPage() {
   const [reload, setReload] = useState(0);
   const conflictRetried = useRef(false);
   const now = useNow(Object.values(details).flatMap((detail) => (detail.lines || []).flatMap((line) => lineOffers(detail, line)
-    .flatMap((offer) => [offer.valid_from, offer.valid_until]))));
+    .map((offer) => offer.valid_from))));
   useEffect(() => {
     const timer = setTimeout(() => { setSearch(query.trim()); setPage(1); }, 300);
     return () => clearTimeout(timer);

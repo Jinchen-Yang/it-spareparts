@@ -3,7 +3,6 @@ import type { Offer, OfferInput } from "../../api/presales";
 import type { AudienceRule } from "../../api/audience";
 import AudienceLock from "../../components/audience/AudienceLock";
 import { PUBLIC_AUDIENCE } from "../../components/audience/AudiencePicker";
-import { expiryLabel, useNow } from "./shared";
 import { presales } from "../../api/presales";
 import { readPermissionMap } from "../../nav";
 import { changedAudience } from "../../components/audience/rules";
@@ -11,10 +10,10 @@ import CandidateSelect from "./CandidateSelect";
 
 const PRIVATE_AUDIENCE: AudienceRule = { mode: "private", user_ids: [], group_ids: [] };
 const editableFields = ["unit_price", "is_tax_inclusive", "no_stock", "qty_available", "stock_location",
-  "lead_time", "source_key", "supplier_id", "validity_days", "notes"] as const;
+  "lead_time", "source_key", "supplier_id", "notes"] as const;
 
 export function offerInput(offer?: Offer): OfferInput {
-  if (!offer) return { no_stock: false, validity_days: 1, supplier_audience: PRIVATE_AUDIENCE,
+  if (!offer) return { no_stock: false, supplier_audience: PRIVATE_AUDIENCE,
     reporter_audience: PUBLIC_AUDIENCE, notes_audience: PUBLIC_AUDIENCE };
   // 返回中缺失的字段保持缺失，避免保存时把不可见内容清空或改为公开。
   return Object.fromEntries(editableFields.filter((field) => field in offer)
@@ -36,7 +35,6 @@ interface Props {
 }
 
 export default function QuoteEditor({ value, onChange, existing, disabled = false, label = "报价", allowNoStock = true }: Props) {
-  const now = useNow();
   const permissions = readPermissionMap();
   const supplierVisible = localStorage.getItem("role") === "admin"
     || (permissions.data_supplier !== false && !!(permissions.action_presales_quote || permissions.action_presales_offer));
@@ -52,7 +50,7 @@ export default function QuoteEditor({ value, onChange, existing, disabled = fals
     { key: "price", label: "单价", children: value.no_stock ? "无货" : value.unit_price ?? "待填写" },
     { key: "tax", label: "含税口径", children: value.is_tax_inclusive === true ? "含税" : value.is_tax_inclusive === false ? "不含税" : "未声明" },
     ...([ ["qty_available", "可供数量"], ["stock_location", "货物所在地"], ["lead_time", "交期"],
-      ["validity_days", "有效天数"], ["supplier_id", "供应商"], ["source_key", "货源标识"], ["notes", "采购备注"] ] as const)
+      ["supplier_id", "供应商"], ["source_key", "货源标识"], ["notes", "采购备注"] ] as const)
       .filter(([key]) => key in value).map(([key, title]) => ({ key, label: title, children: String(value[key] ?? "—") })),
   ]} />;
   return <Form layout="vertical" component="div" className="presales-form">
@@ -84,18 +82,7 @@ export default function QuoteEditor({ value, onChange, existing, disabled = fals
           onChange={(event) => change({ lead_time: event.target.value })} />
       </Form.Item>
     </div>
-    <Form.Item className="presales-wide" label="有效天数（自然日）" required>
-      <Space wrap>
-        <Select aria-label={`${label}有效天数预设`} style={{ width: 150 }} disabled={disabled}
-          value={[1, 3, 7, 15, 30].includes(value.validity_days ?? 1) ? value.validity_days ?? 1 : "custom"}
-          options={[1, 3, 7, 15, 30].map((days) => ({ value: days as number | string, label: `${days} 天` }))
-            .concat([{ value: "custom", label: "自定义" }])}
-          onChange={(next) => change({ validity_days: next === "custom" ? 2 : Number(next) })} />
-        <InputNumber aria-label={`${label}有效天数`} min={1} max={36500} precision={0} disabled={disabled}
-          value={value.validity_days ?? 1} onChange={(next) => change({ validity_days: next ?? 1 })} />
-        <Typography.Text type="secondary" role="status">{expiryLabel(value.validity_days ?? 1, now)}</Typography.Text>
-      </Space>
-    </Form.Item>
+    <Typography.Text className="presales-wide" type="secondary">报价不设有效期，一直有效，直到你更新或撤回。</Typography.Text>
     {supplierVisible && fieldVisible("supplier_id") && <Form.Item label={<Space>供应商{lock("supplier_audience", "供应商")}</Space>}>
       <CandidateSelect label={`${label}供应商`} load={presales.suppliers} disabled={disabled} value={value.supplier_id}
         onChange={(next) => change({ supplier_id: next ?? null })} />

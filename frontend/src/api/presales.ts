@@ -68,7 +68,6 @@ export interface OfferInput {
   lead_time?: string | null;
   source_key?: string;
   supplier_id?: number | null;
-  validity_days?: number;
   notes?: string | null;
   supplier_audience?: AudienceRule;
   reporter_audience?: AudienceRule;
@@ -87,7 +86,6 @@ export interface Offer extends Omit<OfferInput, "supplier_audience" | "reporter_
   revision_no: number;
   status: "draft" | "published" | "stale" | "withdrawn";
   valid_from: string | null;
-  valid_until: string | null;
   reporter?: { id: number; name: string };
   created_at?: string;
   updated_at?: string;

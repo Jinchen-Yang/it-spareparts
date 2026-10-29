@@ -7,7 +7,7 @@ import { isOfferActive, OfferBadge, useNow } from "./shared";
 /** 供实时检索插槽使用：仅从受众过滤后的报价库读取角标。 */
 export default function PartQuoteBadges({ partId }: { partId: number }) {
   const [offers, setOffers] = useState<Offer[]>([]);
-  const now = useNow(offers.flatMap((offer) => [offer.valid_from, offer.valid_until]));
+  const now = useNow(offers.map((offer) => offer.valid_from));
   useEffect(() => {
     let disposed = false;
     setOffers([]);

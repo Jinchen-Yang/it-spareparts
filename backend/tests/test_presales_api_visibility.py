@@ -61,7 +61,7 @@ def _quoted(db, users, *, rule=None, whole=None):
         assignee_ids=[users.buyer.id, users.peer.id], offer_audience=whole)
     inquiries.submit(db, inquiry.id, users.seller.id, inquiry.version)
     data = {"unit_price": "50.25", "supplier_id": users.supplier.id,
-            "notes": "采购机密", "stock_location": "北京", "validity_days": 3}
+            "notes": "采购机密", "stock_location": "北京"}
     if rule:
         data.update(supplier_audience=rule, reporter_audience=rule, notes_audience=rule)
     offer = offers.save_draft(db, inquiry.id, inquiries.lines_for(db, inquiry.id)[0].id,
@@ -176,7 +176,7 @@ def test_http_two_buyers_reply_compare_close_and_audit(db, users):
     first_offer = None
     for client, price in ((buyer, "25.50"), (peer, "24.50")):
         quote = client.post(path + f"/lines/{inquiry['lines'][0]['id']}/offers", json={
-            "expected_version": inquiry["version"], "unit_price": price, "validity_days": 3})
+            "expected_version": inquiry["version"], "unit_price": price})
         assert quote.status_code == 200, quote.text
         first_offer = first_offer or quote.json()["id"]
         reply = client.post(path + "/reply", json={"expected_version": inquiry["version"]})
@@ -223,7 +223,7 @@ def test_http_proactive_notice_reference_library_and_revisions(db, users):
     assert published.status_code == 200, published.text
     offer = published.json()[0]
     quote = buyer.patch(f"/api/presales/offers/{offer['id']}", json={
-        "expected_version": offer["version"], "unit_price": "90.00", "validity_days": 30})
+        "expected_version": offer["version"], "unit_price": "90.00"})
     assert quote.status_code == 200 and quote.json()["revision_no"] == 2, quote.text
     history = buyer.get(f"/api/presales/offers/{offer['id']}/revisions")
     assert history.status_code == 200 and len(history.json()) == 2, history.text
@@ -319,13 +319,13 @@ def test_referenced_proactive_offer_keeps_identity_when_renewed(db, users):
                                      lines=[{"part_id": users.part.id}])
     source_line = inquiries.lines_for(db, source.id)[0]
     offer = offers.save_draft(db, source.id, source_line.id, users.buyer.id,
-        {"unit_price": "10", "validity_days": 3}, expected_version=source.version)
+        {"unit_price": "10"}, expected_version=source.version)
     offers.publish_proactive(db, source.id, users.buyer.id, expected_version=source.version)
     target = inquiries.create_draft(db, users.seller.id, lines=[{
         "part_id": users.part.id, "ref_offer_id": offer.id}])
     inquiries.submit(db, target.id, users.seller.id, target.version)
     assert work_items.list_by_subject(db, Subject("presales_inquiry", target.id), users.seller.id) == []
-    offers.update_offer(db, offer.id, users.buyer.id, {"unit_price": "12", "validity_days": 30},
+    offers.update_offer(db, offer.id, users.buyer.id, {"unit_price": "12"},
                         expected_version=offer.version)
     assert inquiries.lines_for(db, target.id)[0].ref_offer_id == offer.id
     visible = library.batch(db, [users.part.id], _ctx(db, users.seller))[users.part.id][0]

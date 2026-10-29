@@ -7,7 +7,7 @@ import GalleryPicker from "../../components/gallery/GalleryPicker";
 import Timeline from "../../components/workflow/Timeline";
 import { refreshWorkBadges } from "../../components/workflow/useWorkBadge";
 import { offerInput, quoteComplete } from "./QuoteEditor";
-import { usePresalesError, isOfferActive, useNow, flattenOffers, expiryLabel } from "./shared";
+import { usePresalesError, isOfferActive, useNow, flattenOffers } from "./shared";
 import QuoteGrid, { type QuoteGridRow } from "./QuoteGrid";
 import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
 import { WorkbookExportButton } from "../../components/workbook";
@@ -47,7 +47,6 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
   const [gallery, setGallery] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [values, setValues] = useState<Record<number, { key: string; value: OfferInput }>>({});
-  const [validity, setValidity] = useState(1);
   const [withdrawOffer, setWithdrawOffer] = useState<Offer>();
   const [releaseOpen, setReleaseOpen] = useState(false);
   const [reason, setReason] = useState("");
@@ -71,7 +70,7 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
   };
   useEffect(() => { onDirtyChange?.(Object.values(dirty).some(Boolean) || Object.keys(responses).length > 0); }, [dirty, responses, onDirtyChange]);
   const now = useNow([...Object.values(library).flatMap(flattenOffers), ...(inquiry?.line_responses ?? []).flatMap((row) => row.offer ? [row.offer] : [])]
-    .flatMap((offer) => [offer.valid_from, offer.valid_until]));
+    .map((offer) => offer.valid_from));
   const partKey = (inquiry?.lines ?? []).filter((line) => line.part_id).map((line) => line.part_id).join(",");
   const refresh = useCallback(async () => {
     const latest = await loadInquiry(inquiryId);
@@ -93,7 +92,7 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
     setTask(currentTask);
     loadInquiry(inquiryId).then(async (data) => {
       const ownTask = currentTask ?? (data.kind === "proactive_offer" ? undefined : await findOwnTask(inquiryId));
-      if (!cancelled) { setInquiry(data); setTask(ownTask); setValidity(data.offers?.[0]?.validity_days ?? 1); }
+      if (!cancelled) { setInquiry(data); setTask(ownTask); }
     })
       .catch((error) => { if (!cancelled) { setLoadError(true); handlePresalesError(error); } })
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -273,19 +272,13 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
   });
   const count = (mode: LineResponseInput["mode"]) => handledRows.filter((line) => responseFor(line.id).mode === mode).length;
 
-  const dayValues = (proactive ? lines : required).map((line) => valueFor(line).validity_days ?? 1);
-  const uniformDays = dayValues.length ? dayValues.every((days) => days === dayValues[0]) ? dayValues[0] : undefined : validity;
 
   return <section className="presales-page">
     <PageHeader title={`询价人：${inquiry.created_by_name ?? "业务人员"}`} subtitle="逐行填写报价，保存草稿后回复给销售" extra={<Button onClick={back}>返回列表</Button>} />
     <div className="presales-panel">
     <div className="presales-toolbar">
       {"notes" in inquiry && <span className="presales-muted" title={inquiry.notes ?? undefined}>{inquiry.notes || "无客户补充要求"}</span>}
-      <div className="presales-toolbar"><span>统一有效期</span>{!editable ? <span>{uniformDays ?? "各行不同"} 天</span> : <InputNumber aria-label="统一有效期" min={1} max={36500} precision={0}
-        value={uniformDays ?? null} placeholder="多值" title="修改后应用到本单所有待处理报价行" disabled={!editable || busy} onChange={(days) => {
-          const next = days ?? 1; setValidity(next);
-          for (const line of proactive ? lines : required) changeValue(line.id, { ...valueFor(line), validity_days: next });
-        }} />}<span role="status">{uniformDays === undefined ? "各行有效期不同；修改后统一应用" : expiryLabel(uniformDays, now)}</span></div>
+      <span className="presales-muted">报价不设有效期，一直有效，直到更新或撤回</span>
       {!proactive && <><WorkbookExportButton size="small" label="下载报价表" schemaName="presales_quote_sheet" disabled={busy || !editable || !active}
         fetchSchema={() => presalesWorkbooks.getQuoteSheetSchema()} onExport={(visible) => presalesWorkbooks.exportQuoteSheet([inquiry.id], visible)}
         filename="采购报价表.xlsx" />

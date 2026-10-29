@@ -73,19 +73,24 @@ def test_part_history_pages_multiple_inquiries_before_building_details(db, users
     assert detail_ids == []
 
 
-def test_part_history_ignores_expired_quotes_and_keeps_tax_bases_separate(db, users):
+def test_part_history_ignores_unusable_quotes_and_keeps_tax_bases_separate(db, users):
     row, offer = _quoted(db, users)
     offer.is_tax_inclusive = True
     line = inquiries.lines_for(db, row.id)[0]
     second = offers.save_draft(db, row.id, line.id, users.peer.id,
-        {"unit_price": "40", "is_tax_inclusive": False, "validity_days": 3}, expected_version=row.version)
+        {"unit_price": "40", "is_tax_inclusive": False}, expected_version=row.version)
     offers.reply(db, row.id, users.peer.id, expected_version=row.version, on_existing="new")
     db.commit()
     path = f"/api/presales/parts/{users.part.id}/inquiries"
     result = _client(users.seller).get(path).json()["items"][0]
     assert {quote["is_tax_inclusive"] for quote in result["lowest_valid_quotes"]} == {True, False}
-    offer.valid_until = common.now() - timedelta(seconds=1)
-    second.valid_until = common.now() - timedelta(seconds=1)
+    # D-0046：已停用的 valid_until 不再让报价失效；标无货等状态变化才会。
+    offer.valid_until = common.now() - timedelta(days=30)
+    second.valid_until = common.now() - timedelta(days=30)
+    db.commit()
+    result = _client(users.seller).get(path).json()["items"][0]
+    assert {quote["is_tax_inclusive"] for quote in result["lowest_valid_quotes"]} == {True, False}
+    offer.no_stock = second.no_stock = True
     db.commit()
     result = _client(users.seller).get(path).json()["items"][0]
     assert result["has_quote"] is True and result["lowest_valid_quotes"] == []

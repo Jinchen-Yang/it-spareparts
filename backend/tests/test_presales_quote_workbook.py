@@ -76,7 +76,7 @@ def _published(db, data, *, private=False):
         lines=[{"part_id": data.parts[0].id, "qty": 1}])
     line = inquiries.lines_for(db, inquiry.id)[0]
     offers.save_draft(db, inquiry.id, line.id, data.buyer.id,
-        {"unit_price": "19.00", "validity_days": 3}, expected_version=inquiry.version)
+        {"unit_price": "19.00"}, expected_version=inquiry.version)
     return offers.publish_proactive(db, inquiry.id, data.buyer.id,
         expected_version=inquiry.version, on_existing="new")[0]
 
@@ -312,7 +312,7 @@ def test_price_only_patch_preserves_different_source_drafts_and_hidden_columns(d
         line = inquiries.lines_for(db, inquiry.id)[0]
         drafts.append(offers.save_draft(db, inquiry.id, line.id, data.buyer.id,
             {"unit_price": str(10 + index), "supplier_id": data.supplier.id,
-             "notes": f"来源备注{index}", "stock_location": f"仓库{index}", "validity_days": 3},
+             "notes": f"来源备注{index}", "stock_location": f"仓库{index}"},
             expected_version=inquiry.version))
     content = quote_workbook.export_quote_sheet(db, [row.id for row in sources], data.buyer.id,
         visible_columns={"lines": ["unit_price"]})
@@ -320,7 +320,7 @@ def test_price_only_patch_preserves_different_source_drafts_and_hidden_columns(d
     assert [row.unit_price for row in drafts] == [Decimal("25.00"), Decimal("25.00")]
     assert [row.notes for row in drafts] == ["来源备注0", "来源备注1"]
     assert [row.stock_location for row in drafts] == ["仓库0", "仓库1"]
-    assert all(row.supplier_id == data.supplier.id and row.validity_days == 3 for row in drafts)
+    assert all(row.supplier_id == data.supplier.id for row in drafts)
 
 
 def test_historical_scope_replay_rechecks_task_ownership(db, quote_data):

@@ -17,7 +17,7 @@ import type { AudienceRule } from "../../api/audience";
 import { refreshWorkBadges } from "../../components/workflow/useWorkBadge";
 import { offerInput, quoteComplete } from "./QuoteEditor";
 import PartQuoteBadges from "./PartQuoteBadges";
-import { usePresalesError, isOfferActive, useNow, expiryLabel, flattenOffers } from "./shared";
+import { usePresalesError, isOfferActive, useNow, flattenOffers } from "./shared";
 import QuoteGrid from "./QuoteGrid";
 import PageHeader from "../../components/PageHeader";
 import "./presales.css";
@@ -53,7 +53,6 @@ function OfferNewContent({ draftId }: { draftId: number }) {
   const handlePresalesError = usePresalesError();
   const { choose, dialog } = useExistingOfferChoice();
   const { message, modal } = App.useApp();
-  const [validity, setValidity] = useState(1);
   const [extra, setExtra] = useState(false);
   const [selected, setSelected] = useState<PartSuggestion[]>([]);
   const [creatingPn, setCreatingPn] = useState<string>();
@@ -76,7 +75,7 @@ function OfferNewContent({ draftId }: { draftId: number }) {
   const [published, setPublished] = useState(false);
   const [draftLoading, setDraftLoading] = useState(!!draftId);
   const [draftError, setDraftError] = useState(false);
-  const now = useNow(Object.values(library).flatMap(flattenOffers).flatMap((offer) => [offer.valid_from, offer.valid_until]));
+  const now = useNow(Object.values(library).flatMap(flattenOffers).map((offer) => offer.valid_from));
   const partKey = selected.map((part) => part.part_id).join(",");
 
   useEffect(() => {
@@ -92,7 +91,6 @@ function OfferNewContent({ draftId }: { draftId: number }) {
         match_type: "exact_pn", match_reason: "报价草稿", matched_terms: [],
       })));
       const offers = draft.offers ?? [];
-      setValidity(offers[0]?.validity_days ?? 1);
       setSaved(Object.fromEntries(offers.map((offer) => [offer.line_id, offer])));
       setValues(Object.fromEntries((draft.lines ?? []).map((line) => [line.id,
         offerInput(offers.find((offer) => offer.line_id === line.id))])));
@@ -125,7 +123,7 @@ function OfferNewContent({ draftId }: { draftId: number }) {
         field_values: headerFields, lines: selected.map((part) => ({ part_id: part.part_id, pn_raw: part.pn_std,
           description: part.description, qty: 1, field_values: lineFields[part.part_id] ?? [] })) });
       setInquiry(draft);
-      setValues(Object.fromEntries((draft.lines ?? []).map((line) => [line.id, values[-line.part_id!] ?? { ...offerInput(), validity_days: validity }])));
+      setValues(Object.fromEntries((draft.lines ?? []).map((line) => [line.id, values[-line.part_id!] ?? offerInput()])));
       message.success("报价草稿已生成，请逐行填写后发布");
     } catch (error) { await handlePresalesError(error); }
     finally { setBusy(false); }
@@ -208,8 +206,6 @@ function OfferNewContent({ draftId }: { draftId: number }) {
     pn_raw: part.pn_std, description: part.description, qty: 1, status: "active", version: 0,
   }));
   const changeValue = (lineId: number, value: OfferInput) => setValues((previous) => ({ ...previous, [lineId]: value }));
-  const dayValues = lines.map((line) => values[line.id]?.validity_days ?? validity);
-  const uniformDays = dayValues.length ? dayValues.every((days) => days === dayValues[0]) ? dayValues[0] : undefined : validity;
   return <section className="presales-page">
     <PageHeader title="主动报价" subtitle="选择型号并逐行填写报价，发布后进入报价库" extra={<Link to="/presales/workbench">报价工作台</Link>} />
     <div className="presales-panel">
@@ -219,12 +215,7 @@ function OfferNewContent({ draftId }: { draftId: number }) {
         onOk: async () => { try { await refresh(); } catch (error) { await handlePresalesError(error); } },
       })}>重新加载最新报价</Button>} />}
     <div className="presales-toolbar">
-      <div className="presales-toolbar"><span>统一有效期</span><InputNumber size="small" aria-label="统一有效期" min={1} max={36500} precision={0}
-        value={uniformDays ?? null} placeholder="多值" title="修改后应用到所有报价行" disabled={busy} onChange={(days) => {
-          const next = days ?? 1; setValidity(next);
-          setValues((previous) => ({ ...previous, ...Object.fromEntries(lines.map((line) => [line.id,
-            { ...(previous[line.id] ?? offerInput()), validity_days: next }])) }));
-        }} /><span role="status">{uniformDays === undefined ? "各行有效期不同；修改后统一应用" : expiryLabel(uniformDays, now)}</span></div>
+      <span className="presales-muted">报价不设有效期，一直有效，直到更新或撤回</span>
       <Button size="small" onClick={() => setExtra(!extra)}>{extra ? "收起单头信息" : "单头备注 / 自定义字段"}</Button>
     </div>
     {!inquiry && <div className="presales-toolbar"><LivePartSearch mode="multiple" value={selected}
@@ -238,7 +229,7 @@ function OfferNewContent({ draftId }: { draftId: number }) {
       <Input.TextArea aria-label="主动报价单头备注" value={notes} onChange={(event) => setNotes(event.target.value)} />
       <DraftFields level="header" value={headerFields} onChange={setHeaderFields} /></div>}
     <QuoteGrid id="presales-proactive-lines" proactive rows={lines.map((line) => ({ line,
-      value: values[line.id] ?? { ...offerInput(), validity_days: validity }, current: saved[line.id], disabled: busy,
+      value: values[line.id] ?? offerInput(), current: saved[line.id], disabled: busy,
       existing: library[line.part_id!] ?? [],
       details: <>{!inquiry && <DraftFields level="line" partId={line.part_id!} value={lineFields[line.part_id!] ?? []}
         onChange={(next) => setLineFields((previous) => ({ ...previous, [line.part_id!]: next }))} />}
