@@ -29,7 +29,7 @@ from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.schemas.resale_price_reference import ResalePriceReferenceResponse
 from app.services.resale_pn_lookup import canonical_part as _canonical
-from app.services.resale_pn_lookup import find_pn_candidates
+from app.services.resale_pn_lookup import find_pn_candidates_batch
 from app.services.resale_price_reference import (
     PriceReferenceAmbiguous,
     PriceReferenceUnavailable,
@@ -92,6 +92,11 @@ class ListRequest(BaseModel):
     limit: int = Field(default=200, ge=1, le=500)
 
 
+class ByIdsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    partIds: list[Annotated[int, Field(strict=True, gt=0, le=2**31 - 1)]] = Field(min_length=1, max_length=100)
+
+
 def _safe_specs(db: Session, part_ids: list[int]) -> dict[int, list[dict]]:
     specs: dict[int, list[dict]] = {part_id: [] for part_id in part_ids}
     if part_ids:
@@ -145,10 +150,11 @@ def resolve_parts(
     response.headers["Cache-Control"] = "no-store"
     items = []
     cache: dict[str, dict] = {}
+    candidates_by_raw = find_pn_candidates_batch(db, [item.pnRaw.strip() for item in body.items])
     for candidate in body.items:
         raw = candidate.pnRaw.strip()
         if raw not in cache:
-            matches, pending = find_pn_candidates(db, raw)
+            matches, pending = candidates_by_raw[raw]
             bound = list(matches.values())
             if pending or len(bound) > 1:
                 result = {
@@ -256,30 +262,10 @@ def _decode_list_cursor(token: str) -> tuple[datetime, int]:
     return updated_at, part_id
 
 
-@router.post("/list")
-def list_parts(
-    body: ListRequest, response: Response, _key: CatalogKey, db: DbSession
-) -> dict:
-    """D-36 PR1: full-catalog keyset listing — a live read, not a v2 snapshot."""
-    response.headers["Cache-Control"] = "no-store"
-    target = aliased(DimPart)
-    statement = (
-        select(DimPart, target.pn_std)
-        .outerjoin(target, target.id == DimPart.merged_into_id)
-        .order_by(DimPart.updated_at.asc(), DimPart.id.asc())
-        .limit(body.limit + 1)
-    )
-    if body.cursor is not None:
-        cursor_at, cursor_id = _decode_list_cursor(body.cursor)
-        # 行值比较：同一 updated_at 的并列由 id 决胜，翻页不漏行。
-        statement = statement.where(
-            tuple_(DimPart.updated_at, DimPart.id) > tuple_(cursor_at, cursor_id)
-        )
-    fetched = db.execute(statement).all()
-    has_more = len(fetched) > body.limit
-    page = fetched[: body.limit]
+def _identity_items(db: Session, page) -> list[dict]:
+    """Single whitelist shared by /list and /by-ids; never resolve tombstones."""
     specs = _safe_specs(db, [part.id for part, _ in page])
-    items = [
+    return [
         {
             "partId": part.id,
             "pnStd": part.pn_std,
@@ -303,9 +289,50 @@ def list_parts(
         }
         for part, merged_pn_std in page
     ]
+
+
+@router.post("/by-ids")
+def parts_by_ids(
+    body: ByIdsRequest, response: Response, _key: CatalogKey, db: DbSession
+) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    target = aliased(DimPart)
+    try:
+        page = db.execute(
+            select(DimPart, target.pn_std)
+            .outerjoin(target, target.id == DimPart.merged_into_id)
+            .where(DimPart.id.in_(body.partIds)).order_by(DimPart.id)
+        ).all()
+        # Missing IDs are omitted. Never synthesize zero/empty identities or redirect.
+        return {"schemaVersion": 1, "items": _identity_items(db, page)}
+    except SQLAlchemyError:
+        db.rollback()
+        _logger.warning("Catalog by-ids unavailable")
+        raise HTTPException(503, "PN 目录暂不可用", headers={"Cache-Control": "no-store"}) from None
+
+
+@router.post("/list")
+def list_parts(
+    body: ListRequest, response: Response, _key: CatalogKey, db: DbSession
+) -> dict:
+    """D-36 PR1: full-catalog keyset listing — a live read, not a v2 snapshot."""
+    response.headers["Cache-Control"] = "no-store"
+    target = aliased(DimPart)
+    statement = (
+        select(DimPart, target.pn_std)
+        .outerjoin(target, target.id == DimPart.merged_into_id)
+        .order_by(DimPart.updated_at.asc(), DimPart.id.asc())
+        .limit(body.limit + 1)
+    )
+    if body.cursor is not None:
+        cursor_at, cursor_id = _decode_list_cursor(body.cursor)
+        statement = statement.where(tuple_(DimPart.updated_at, DimPart.id) > tuple_(cursor_at, cursor_id))
+    fetched = db.execute(statement).all()
+    has_more = len(fetched) > body.limit
+    page = fetched[: body.limit]
     return {
         "schemaVersion": 1,
-        "items": items,
+        "items": _identity_items(db, page),
         "hasMore": has_more,
         # 非空页总给末行游标（即使 hasMore=false）：商城追平末尾后保存续传水位，
         # 下次只拉新变更；仅空页为 null。hasMore 仍只表示是否还有后续行。

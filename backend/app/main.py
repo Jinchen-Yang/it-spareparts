@@ -1,6 +1,7 @@
 """FastAPI 入口。"""
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -83,6 +84,7 @@ from app.http_controls import MigrationHttpControlsMiddleware
 from app.maintenance_beta import require_maintenance_beta
 from app.maintenance_boss import require_maintenance_boss
 from app.request_diagnostics import RequestDiagnosticsMiddleware
+from app.services.catalog_delivery import DeliveryWorker
 
 _log = logging.getLogger("startup")
 settings = get_settings()
@@ -97,7 +99,17 @@ if _sec_warns:
             "[安全告警] %s（部署到生产前务必在 .env 覆盖，并设 ENVIRONMENT=prod）", w
         )
 
-app = FastAPI(title=settings.app_name)
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    worker = DeliveryWorker(settings)
+    await worker.start()
+    try:
+        yield
+    finally:
+        await worker.close()
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 app.add_middleware(
     RequestDiagnosticsMiddleware,
