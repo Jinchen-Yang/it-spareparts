@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app import permissions
+from app.api import part_gallery
 from app.api.part_gallery import get_gallery_client
 from app.auth import _make_token, current_role
 from app.db import get_db
@@ -132,12 +133,26 @@ def test_download_audit_validates_payload(client, db, payload):
     assert db.scalar(select(SysAccessLog).where(SysAccessLog.action == "gallery_download")) is None
 
 
-def test_download_audit_write_failure_does_not_block_request(client, monkeypatch):
+def test_download_audit_write_failure_does_not_block_request(client, db, monkeypatch):
+    failed_audit_connections = 0
+    record_access_log = part_gallery.record_access_log
+
     def unavailable_session():
+        nonlocal failed_audit_connections
+        failed_audit_connections += 1
         raise RuntimeError("审计连接不可用")
 
-    monkeypatch.setattr("app.db.SessionLocal", unavailable_session)
+    def record_with_unavailable_audit_session(*args, **kwargs):
+        # 只破坏审计自己的连接，不能把此前执行的真实短会话鉴权也替换掉。
+        # 仍调用真实审计实现，验证其 best-effort 异常处理而非绕过写入。
+        with monkeypatch.context() as audit_patch:
+            audit_patch.setattr("app.db.SessionLocal", unavailable_session)
+            return record_access_log(*args, **kwargs)
+
+    monkeypatch.setattr(part_gallery, "record_access_log", record_with_unavailable_audit_session)
     response = client.post(
         "/api/parts/gallery/download-audit", headers=_headers(), json=_payload()
     )
     assert response.status_code == 204
+    assert failed_audit_connections == 1
+    assert db.scalar(select(SysAccessLog).where(SysAccessLog.action == "gallery_download")) is None
