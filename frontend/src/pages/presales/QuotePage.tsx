@@ -174,9 +174,11 @@ export default function QuotePage() {
   const [filter, setFilter] = useState<Filter>("pending");
   const [query, setQuery] = useState("");
   const [values, setValues] = useState<Record<string, RowValue>>({});
+  const valuesRef = useRef<Record<string, RowValue>>({});
   const [editing, setEditing] = useState<Record<string, boolean>>({});
   const [skips, setSkips] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string>();
+  const busyRef = useRef(false);
   const [direct, setDirect] = useState(false);
   const [toast, setToast] = useState("");
   const [binding, setBinding] = useState<QuoteRow>();
@@ -264,12 +266,18 @@ export default function QuotePage() {
 
   const replace = (inquiry: Inquiry, task?: WorkItem) => setSources((previous) => previous.map((source) => source.inquiry.id === inquiry.id
     ? { ...source, inquiry, ...(task ? { task, pool: false } : {}) } : source));
-  const valueFor = (row: QuoteRow) => values[row.key] ?? valueOf(row.own);
+  const valueFor = (row: QuoteRow) => valuesRef.current[row.key] ?? valueOf(row.own);
   const taxFor = (row: QuoteRow) => valueFor(row).is_tax_inclusive !== undefined ? valueFor(row).is_tax_inclusive : row.own ? row.own.is_tax_inclusive ?? null : true;
   const basisFor = (row: QuoteRow) => valueFor(row).price_basis ?? row.own?.price_basis ?? "sale";
-  const change = (row: QuoteRow, patch: Partial<RowValue>) => setValues((previous) => ({ ...previous, [row.key]: { ...valueFor(row), ...patch } }));
-  const done = (row: QuoteRow) => {
-    setValues((previous) => { const next = { ...previous }; delete next[row.key]; return next; });
+  const change = (row: QuoteRow, patch: Partial<RowValue>) => {
+    if (busyRef.current) return;
+    valuesRef.current = { ...valuesRef.current, [row.key]: { ...valueFor(row), ...patch } };
+    setValues(valuesRef.current);
+  };
+  const done = (row: QuoteRow, savedValue?: RowValue) => {
+    if (savedValue && valuesRef.current[row.key] && valuesRef.current[row.key] !== savedValue) return;
+    const next = { ...valuesRef.current }; delete next[row.key];
+    valuesRef.current = next; setValues(next);
     setEditing((previous) => { const next = { ...previous }; delete next[row.key]; return next; });
   };
 
@@ -287,7 +295,7 @@ export default function QuotePage() {
   };
 
   /** 整单每行都已报价或不报时自动回复销售（现行后端以整单回复完成待办）。 */
-  const replyIfComplete = async (source: Source, localSkips: Record<string, string>) => {
+  const replyIfComplete = async (source: Source, localSkips: Record<string, string>, saved?: { key: string; value: RowValue }) => {
     const inquiry = await presales.getInquiry(source.inquiry.id);
     const latest = { ...source, inquiry };
     replace(inquiry);
@@ -299,6 +307,12 @@ export default function QuotePage() {
       : row.state === "draft" || row.own?.status === "published" ? [{ line_id: row.line.id, mode: "quote" }] : []);
     const choices: Record<number, ExistingChoice> = {};
     for (;;) {
+      // 服务端草稿齐全不代表页面已保存；包括选择既有报价后的重试，也只豁免本次实际保存的值。
+      if (Object.entries(valuesRef.current).some(([key, value]) => key.startsWith(`${inquiry.id}:`)
+        && !(saved && key === saved.key && value === saved.value))) {
+        message.warning(`${inquiry.inquiry_no} 还有未保存的修改，保存这些行后会自动回复给销售`);
+        return -1;
+      }
       try {
         await presales.replyInquiry(inquiry.id, { expected_version: inquiry.version, work_item_id: source.task.id,
           expected_work_item_version: liveTask(latest).version, line_responses: lineResponses,
@@ -321,23 +335,23 @@ export default function QuotePage() {
     return 0;
   };
 
-  const afterChange = async (source: Source, localSkips: Record<string, string>) => {
-    const left = await replyIfComplete(source, localSkips);
+  const afterChange = async (source: Source, localSkips: Record<string, string>, saved?: { key: string; value: RowValue }) => {
+    const left = await replyIfComplete(source, localSkips, saved);
     if (left > 0) message.success(`已保存；${source.inquiry.inquiry_no} 还有 ${left} 行未填，填完自动回复给销售`);
   };
 
   const save = async (row: QuoteRow) => {
-    if (refreshRequired || loadError || busy) return;
+    if (refreshRequired || loadError || busyRef.current) return;
     const value = valueFor(row);
     if (value.unit_price == null || value.unit_price === "") return;
-    setBusy(row.key);
+    busyRef.current = true; setBusy(row.key);
     try {
       if (row.own?.status === "published") {
         await presales.updateOffer(row.own.id, { ...value, no_stock: false, expected_version: row.own.version });
         setRefreshRequired(true);
         replace(await presales.getInquiry(row.source.inquiry.id));
         setRefreshRequired(false);
-        done(row);
+        done(row, value);
         message.success(`${row.line.pn_raw} 报价已更新，销售那边同步看到新价`);
         return;
       }
@@ -346,16 +360,16 @@ export default function QuotePage() {
       await presales.saveOffer(source.inquiry.id, row.line.id, { ...value, no_stock: false,
         expected_version: own ? own.version : source.inquiry.version, ...(own ? { offer_id: own.id } : {}), work_item_id: source.task.id });
       setRefreshRequired(true);
-      await afterChange(source, skips);
+      await afterChange(source, skips, { key: row.key, value });
       setRefreshRequired(false);
-      done(row);
+      done(row, value);
     } catch (error) { await handleError(error, load); }
-    finally { setBusy(undefined); }
+    finally { busyRef.current = false; setBusy(undefined); }
   };
 
   const skip = async (row: QuoteRow, reason: string) => {
-    if (refreshRequired || loadError || busy) return;
-    setBusy(row.key);
+    if (refreshRequired || loadError || busyRef.current) return;
+    busyRef.current = true; setBusy(row.key);
     const next = { ...skips, [row.key]: reason };
     try {
       const source = await ensureTask(row.source);
@@ -363,7 +377,7 @@ export default function QuotePage() {
       done(row);
       await afterChange(source, next);
     } catch (error) { await handleError(error, load); }
-    finally { setBusy(undefined); }
+    finally { busyRef.current = false; setBusy(undefined); }
   };
 
   const siblingOf = (row: QuoteRow) => {
@@ -390,22 +404,22 @@ export default function QuotePage() {
     { title: "PN / 描述", key: "pn", render: (_, row) => <div className="presales-cell">
       <Space>{row.line.part_id && <PartThumb partId={row.line.part_id} pn={row.line.pn_raw} size={32} />}<b>{row.line.pn_raw}</b></Space>
       <span className="presales-muted presales-ellipsis" title={row.line.description ?? undefined}>{row.line.description || "—"}</span>
-      {!row.line.part_id && <Space size={4}><Tag color="warning">待建档</Tag>{canAct(row.source) && <Button type="link" size="small" onClick={() => setBinding(row)}>建档</Button>}</Space>}
+      {!row.line.part_id && <Space size={4}><Tag color="warning">待建档</Tag>{canAct(row.source) && <Button type="link" size="small" disabled={!!busy} onClick={() => setBinding(row)}>建档</Button>}</Space>}
     </div> },
     { title: "数量", key: "qty", width: 70, render: (_, row) => Number(row.line.qty) },
     { title: "PN 一致", key: "exact", width: 84, render: (_, row) => row.line.require_exact_pn ? "要求一致" : "—" },
     { title: "坏件", key: "return", width: 72, render: (_, row) => row.line.return_defective === false ? <Tag>不返回</Tag> : "返回" },
     { title: "单价（元）", key: "price", width: 140, render: (_, row) => editable(row)
-      ? <InputNumber aria-label={`${row.line.pn_raw} 单价`} min={0} max={999999999999.99} precision={2} style={{ width: "100%" }} placeholder="单价"
+      ? <InputNumber aria-label={`${row.line.pn_raw} 单价`} disabled={!!busy} min={0} max={999999999999.99} precision={2} style={{ width: "100%" }} placeholder="单价"
         value={valueFor(row).unit_price == null || valueFor(row).unit_price === "" ? null : Number(valueFor(row).unit_price)}
         onChange={(value) => change(row, { unit_price: value })} onPressEnter={() => void save(row)} />
       : <b>{row.state === "quoted" ? moneyExact(Number(row.displayOffer?.unit_price)) : "—"}</b> },
     { title: "税", key: "tax", width: 104, render: (_, row) => editable(row)
-      ? <Select aria-label={`${row.line.pn_raw} 含税`} style={{ width: "100%" }} value={taxFor(row) == null ? "unknown" : taxFor(row) ? "inc" : "ex"}
+      ? <Select aria-label={`${row.line.pn_raw} 含税`} disabled={!!busy} style={{ width: "100%" }} value={taxFor(row) == null ? "unknown" : taxFor(row) ? "inc" : "ex"}
         onSelect={(value) => change(row, { is_tax_inclusive: value === "unknown" ? null : value === "inc" })} options={[{ value: "inc", label: "含税" }, { value: "ex", label: "不含税" }, ...(taxFor(row) == null ? [{ value: "unknown", label: "未声明" }] : [])]} />
       : row.state === "quoted" ? taxLabel(row.displayOffer?.is_tax_inclusive) : "—" },
     { title: "价格性质", key: "basis", width: 100, render: (_, row) => editable(row)
-      ? <Select aria-label={`${row.line.pn_raw} 价格性质`} style={{ width: "100%" }} value={basisFor(row)}
+      ? <Select aria-label={`${row.line.pn_raw} 价格性质`} disabled={!!busy} style={{ width: "100%" }} value={basisFor(row)}
         onSelect={(value) => change(row, { price_basis: value })} options={[{ value: "sale", label: "售价" }, { value: "cost", label: "成本价" }]} />
       : row.state === "quoted" ? basisLabel(row.displayOffer ?? {}) : "—" },
     { title: "状态", key: "state", width: 130, render: (_, row) => {
@@ -421,10 +435,10 @@ export default function QuotePage() {
         <Button type="primary" size="small" loading={busy === row.key} disabled={!!busy || valueFor(row).unit_price == null || !row.line.part_id}
           onClick={() => void save(row)}>保存</Button>
         {!editing[row.key] && <SkipButton disabled={!!busy} onConfirm={(reason) => void skip(row, reason)} />}
-        {editing[row.key] && <Button size="small" onClick={() => done(row)}>取消</Button>}
+        {editing[row.key] && <Button size="small" disabled={!!busy} onClick={() => { if (!busyRef.current) done(row); }}>取消</Button>}
       </Space>;
-      if (canUpdate(row)) return <Button type="link" disabled={refreshRequired || loadError} onClick={() => setEditing((previous) => ({ ...previous, [row.key]: true }))}>更新报价</Button>;
-      if (skips[row.key] != null) return <Button type="link" onClick={() => setSkips((previous) => { const next = { ...previous }; delete next[row.key]; return next; })}>改为报价</Button>;
+      if (canUpdate(row)) return <Button type="link" disabled={!!busy || refreshRequired || loadError} onClick={() => setEditing((previous) => ({ ...previous, [row.key]: true }))}>更新报价</Button>;
+      if (skips[row.key] != null) return <Button type="link" disabled={!!busy} onClick={() => { if (!busyRef.current) setSkips((previous) => { const next = { ...previous }; delete next[row.key]; return next; }); }}>改为报价</Button>;
       return null;
     } },
   ];
@@ -439,7 +453,7 @@ export default function QuotePage() {
         {([["pending", `待报价 ${counts.pending + counts.draft}`], ["quoted", `已报价 ${counts.quoted}`], ["skip", `不报 ${counts.skip}`], ["unavailable", `暂无有效价 ${counts.unavailable}`], ["all", `全部 ${allRows.length}`]] as [Filter, string][])
           .map(([key, label]) => <Button key={key} aria-pressed={filter === key} type={filter === key ? "primary" : "default"} ghost={filter === key} onClick={() => setFilter(key)}>{label}</Button>)}
         <Input.Search aria-label="筛选报价行" allowClear placeholder="按询价人、PN、客户筛选" style={{ width: 260, marginLeft: "auto" }} value={query} onChange={(event) => setQuery(event.target.value)} />
-        <Button onClick={() => void load()} disabled={loading}>刷新</Button>
+        <Button onClick={() => void load()} disabled={loading || !!busy}>刷新</Button>
       </div>
       {direct && <DirectQuote onClose={() => setDirect(false)} onDone={(text) => { setDirect(false); setToast(text); void load(); }} />}
       {toast && <Alert type="success" showIcon closable message={toast} onClose={() => setToast("")} />}
@@ -455,7 +469,7 @@ export default function QuotePage() {
           expandable={{
             expandedRowRender: (row) => {
               const value = valueFor(row);
-              const on = editable(row);
+              const on = editable(row) && !busy;
               const sibling = siblingOf(row);
               return <div className="presales-stack">
                 {sibling && <div className="presales-hint">同型号已有 {priceText(sibling)}（{sibling.reporter?.name ?? "其他采购"} · {formatBusinessDateTime(sibling.valid_from)}）

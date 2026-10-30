@@ -219,6 +219,13 @@ function UrgeButton({ inquiry, onUrged }: { inquiry: Inquiry; onUrged: (inquiry:
   }}>催办</Button>;
 }
 
+/** 详情不附客户名称；仅沿用同一询价、同一仍可见客户的已授权名称。 */
+function retainCustomerName(detail: Inquiry, previous: Inquiry): Inquiry {
+  if (detail.id !== previous.id || detail.customer_id == null || detail.customer_id !== previous.customer_id
+    || "customer_name" in detail) return detail;
+  return { ...detail, customer_name: previous.customer_name };
+}
+
 function MyInquiries({ refreshKey }: { refreshKey: number }) {
   const handleError = usePresalesError();
   const [page, setPage] = useState(1);
@@ -235,7 +242,8 @@ function MyInquiries({ refreshKey }: { refreshKey: number }) {
       const result = await presales.listInquiries({ kind: "sales_inquiry", scope: "mine", page, page_size: PAGE_SIZE, sort: "updated_at", dir: "desc", ...(query.trim() ? { q: query.trim() } : {}) });
       const details = await Promise.allSettled(result.items.map((item) => presales.getInquiry(item.id)));
       if (current !== generation.current) return;
-      setItems(details.map((detail, index) => detail.status === "fulfilled" ? detail.value : result.items[index]));
+      setItems(details.map((detail, index) => detail.status === "fulfilled"
+        ? retainCustomerName(detail.value, result.items[index]) : result.items[index]));
       setTotal(result.total);
     } catch (error) {
       if (current === generation.current) { setFailed(true); await handleError(error); }
@@ -264,7 +272,7 @@ function MyInquiries({ refreshKey }: { refreshKey: number }) {
             {!!inquiry.urge_count && <span className="presales-muted">已催 {inquiry.urge_count} 次 · 最近 {formatBusinessDateTime(inquiry.last_urged_at)}</span>}
             {["draft", "revising"].includes(inquiry.status) && <Link style={{ marginLeft: "auto" }} to={`/presales/inquiries/${inquiry.id}/edit`}>继续编辑</Link>}
             {(inquiry.can_urge ?? (inquiry.status === "submitted" && inquiry.is_owner !== false && inquiry.work_items?.some((task) => !task.paused && ["pending", "in_progress"].includes(task.status)) && lines.some((line) => lineAnswer(inquiry, line).state === "pending"))) && <span style={{ marginLeft: "auto" }}>
-              <UrgeButton inquiry={inquiry} onUrged={(urged) => setItems((previous) => previous.map((item) => item.id === urged.id ? urged : item))} /></span>}
+              <UrgeButton inquiry={inquiry} onUrged={(urged) => setItems((previous) => previous.map((item) => item.id === urged.id ? retainCustomerName(urged, item) : item))} /></span>}
           </div>
           {lines.length ? lines.map((line) => <AnswerLine key={line.id} inquiry={inquiry} line={line} />)
             : <span className="presales-muted">{inquiry.line_count} 行</span>}
