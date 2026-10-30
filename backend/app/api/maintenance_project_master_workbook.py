@@ -11,13 +11,16 @@
 权限沿用既有键：查看金额 `data_profit`，回填上传
 `action_maintenance_expense_collection_upload`（AB-3 已建，不再新增动作键）。
 """
+import asyncio
 import hashlib
 import logging
 import re
 import uuid
 from datetime import date
 from decimal import Decimal
+from functools import partial
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -25,6 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.date_validation import validate_from_to_query
+from app.api.maintenance import _wait_for_roundtrip_task_terminal
 from app.api.maintenance_expense_collection_workbook import (
     _ACTION_KEY,
     _XLSX_MEDIA,
@@ -67,6 +71,28 @@ _log = logging.getLogger(__name__)
 
 _MASTER = "/projects/stable/{project_id}/master-workbook"
 _GLOBAL = "/spare-part-lines"
+
+
+async def _wait_for_master_workbook_worker(work) -> dict:
+    """Keep the request Session alive until its sole worker has really finished.
+
+    Dependencies finish before this handoff; the route must not use its Session
+    concurrently with the worker. The entire synchronous operation (including
+    rollback and write-time reauthorization) runs in that worker. Shielding and
+    draining repeated cancellation also keeps get_db's finalizer from closing
+    the Session while a PostgreSQL lock wait or apply still owns it.
+    """
+    worker = asyncio.create_task(anyio.to_thread.run_sync(work, abandon_on_cancel=False))
+    cancellation = await _wait_for_roundtrip_task_terminal(worker)
+    try:
+        result = worker.result()
+    except BaseException as exc:
+        if cancellation is not None:
+            raise cancellation from exc
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 
 class MilestoneRestoreItem(BaseModel):
@@ -812,6 +838,17 @@ async def validate_project_master(
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
     data, force_takeover = await _read_upload_with_takeover(request)
+    return await _wait_for_master_workbook_worker(partial(
+        _validate_project_master_in_worker,
+        db, project_id=project_id, data=data, force_takeover=force_takeover,
+        ident=ident, ctx=ctx,
+    ))
+
+
+def _validate_project_master_in_worker(
+    db: Session, *, project_id: str, data: bytes, force_takeover: bool,
+    ident: dict, ctx: UserContext,
+) -> dict:
     try:
         if get_settings().maintenance_project_master_v2_enabled:
             # force_takeover 必须透传：接管预检要让用户在按下「强制接管」之前
@@ -921,6 +958,20 @@ async def apply_project_master(
     """
     response.headers["Cache-Control"] = "no-store"
     data, force_takeover = await _read_upload_with_takeover(request)
+    # _read_upload_with_takeover has already parsed and cached the form. Read
+    # request-owned async input before handing the Session to the worker.
+    merge_token = str((await request.form()).get("site_issue_merge_token") or "")
+    return await _wait_for_master_workbook_worker(partial(
+        _apply_project_master_in_worker,
+        db, project_id=project_id, data=data, force_takeover=force_takeover,
+        ident=ident, ctx=ctx, merge_token=merge_token,
+    ))
+
+
+def _apply_project_master_in_worker(
+    db: Session, *, project_id: str, data: bytes, force_takeover: bool,
+    ident: dict, ctx: UserContext, merge_token: str,
+) -> dict:
     try:
         if get_settings().maintenance_project_master_v2_enabled:
             file_sha256 = hashlib.sha256(data).hexdigest()
@@ -955,7 +1006,6 @@ async def apply_project_master(
                     ctx, ident, db=db, project_id=project_id)
             operator = (_project_note_operator(db, ident, ctx)
                         if plan.project_note_change is not None else _operator(ident))
-            merge_token = str((await request.form()).get("site_issue_merge_token") or "")
             master.verify_site_issue_merge_token(plan, operator, merge_token)
             if plan.conflicts and not force_takeover:
                 record_access_log(

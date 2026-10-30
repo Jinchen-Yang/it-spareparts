@@ -3,7 +3,7 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
@@ -346,7 +346,7 @@ def health() -> dict:
 
 
 @app.get("/health/db")
-def health_db() -> dict:
+def health_db(response: Response) -> dict:
     """数据库连通性探针。"""
     try:
         with engine.connect() as conn:
@@ -355,4 +355,5 @@ def health_db() -> dict:
     except Exception as exc:  # noqa: BLE001
         # 不向客户端泄露连接串/主机/驱动等细节，详细错误写服务端日志
         _log.error("DB health check failed: %s", exc)
+        response.status_code = 503
         return {"status": "error", "db": "unreachable"}
