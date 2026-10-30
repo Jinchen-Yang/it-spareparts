@@ -5,7 +5,7 @@ import type { Inquiry, Offer, OfferInput } from "../../../api/presales";
 import type { WorkItem } from "../../../api/workItems";
 
 const mocks = vi.hoisted(() => ({ getInquiry: vi.fn(), library: vi.fn(), listWorkItems: vi.fn(),
-  saveOffer: vi.fn(), replyInquiry: vi.fn(), claimWorkItem: vi.fn(), refreshWorkBadges: vi.fn() }));
+  saveOffer: vi.fn(), updateOffer: vi.fn(), replyInquiry: vi.fn(), claimWorkItem: vi.fn(), refreshWorkBadges: vi.fn() }));
 vi.mock("../../../api/presales", () => ({ presales: mocks }));
 vi.mock("../../../api/workItems", () => ({ listWorkItems: mocks.listWorkItems, claimWorkItem: mocks.claimWorkItem }));
 vi.mock("../../../components/workflow/useWorkBadge", () => ({ refreshWorkBadges: mocks.refreshWorkBadges }));
@@ -56,7 +56,9 @@ beforeEach(() => {
   mocks.saveOffer.mockImplementation(async (id: number, lineId: number, input: OfferInput) => persist(id, lineId, input));
   mocks.replyInquiry.mockImplementation(async (id: number) => {
     const inquiry = inquiries[id];
-    inquiries[id] = { ...inquiry, offers: inquiry.offers?.map((offer) => ({ ...offer, status: "published", valid_from: "2026-10-25T01:00:00Z" })),
+    const publishLineIds = new Set(inquiry.lines?.filter((line) => line.status === "active" && !line.ref_offer_id).map((line) => line.id));
+    inquiries[id] = { ...inquiry, offers: inquiry.offers?.map((offer) => offer.status === "draft" && offer.line_id != null && publishLineIds.has(offer.line_id)
+      ? { ...offer, status: "published" as const, valid_from: "2026-10-25T01:00:00Z" } : offer),
       work_items: inquiry.work_items?.map((item) => ({ ...item, status: "done" })) };
     return [];
   });
@@ -112,6 +114,50 @@ describe("报价页未保存行保护", () => {
     expect(mocks.replyInquiry.mock.calls[0][0]).toBe(1);
     expect(Number((priceInput("OTHER-PN") as HTMLInputElement).value)).toBe(999);
     expect(mocks.saveOffer).toHaveBeenCalledOnce();
+  });
+
+  it.each(["save", "skip"] as const)("已发布报价独立编辑不阻止末行 %s 回复，原价和本地输入分别保留", async (action) => {
+    inquiries[1].offers = [{ ...draft(1, 11, 120), status: "published", valid_from: "2026-10-25T01:00:00Z" }];
+    await renderQuote();
+    fireEvent.click(screen.getByRole("button", { name: "全部 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "更新报价" }));
+    setPrice("PN-1", 180);
+    if (action === "save") {
+      setPrice("PN-2", 220); fireEvent.click(saveButton("PN-2"));
+    } else {
+      fireEvent.click(within(priceInput("PN-2").closest("tr")!).getByRole("button", { name: /^不\s?报$/ }));
+      fireEvent.click(await screen.findByRole("button", { name: "确定不报" }));
+    }
+    await waitFor(() => expect(mocks.replyInquiry).toHaveBeenCalledWith(1, expect.objectContaining({ line_responses: [
+      { line_id: 11, mode: "quote" }, action === "save" ? { line_id: 12, mode: "quote" } : { line_id: 12, mode: "skip", reason: "无货源" },
+    ] })));
+    await waitFor(() => expect(priceInput("PN-1")).toBeEnabled());
+    expect(Number((priceInput("PN-1") as HTMLInputElement).value)).toBe(180);
+    expect(inquiries[1].offers?.find((offer) => offer.line_id === 11)?.unit_price).toBe(120);
+    expect(mocks.updateOffer).not.toHaveBeenCalled();
+    expect(mocks.saveOffer).toHaveBeenCalledTimes(action === "save" ? 1 : 0);
+    expect(mocks.replyInquiry).toHaveBeenCalledOnce();
+  });
+
+  it.each(["deleted", "removed", "referenced"] as const)("刷新后不参与回复的 %s 行遗留输入不阻止剩余草稿发布", async (state) => {
+    inquiries[1].offers = [draft(1, 11, 120)];
+    await renderQuote();
+    setPrice("PN-1", 180);
+    inquiries[1] = { ...inquiries[1], lines: inquiries[1].lines!.flatMap((line) => {
+      if (line.id !== 11) return [line];
+      if (state === "removed") return [];
+      return [state === "deleted" ? { ...line, status: "deleted" as const } : { ...line, ref_offer_id: 987 }];
+    }) };
+    fireEvent.click(screen.getByRole("button", { name: /^刷\s?新$/ }));
+    await waitFor(() => expect(screen.queryByRole("spinbutton", { name: "PN-1 单价" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: /^刷\s?新$/ })).toBeEnabled());
+    setPrice("PN-2", 220); fireEvent.click(saveButton("PN-2"));
+    await waitFor(() => expect(mocks.replyInquiry).toHaveBeenCalledWith(1, expect.objectContaining({ line_responses: [
+      { line_id: 12, mode: "quote" },
+    ] })));
+    expect(mocks.saveOffer).toHaveBeenCalledOnce();
+    expect(mocks.saveOffer).toHaveBeenCalledWith(1, 12, expect.objectContaining({ unit_price: 220 }));
+    expect(inquiries[1].offers?.find((offer) => offer.line_id === 11)).toMatchObject({ unit_price: 120, status: "draft" });
   });
 
   it("保存和自动回复在途时禁用行输入，防止确认过程中继续编辑价税字段", async () => {

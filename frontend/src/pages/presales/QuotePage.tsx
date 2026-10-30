@@ -307,9 +307,10 @@ export default function QuotePage() {
       : row.state === "draft" || row.own?.status === "published" ? [{ line_id: row.line.id, mode: "quote" }] : []);
     const choices: Record<number, ExistingChoice> = {};
     for (;;) {
-      // 服务端草稿齐全不代表页面已保存；包括选择既有报价后的重试，也只豁免本次实际保存的值。
-      if (Object.entries(valuesRef.current).some(([key, value]) => key.startsWith(`${inquiry.id}:`)
-        && !(saved && key === saved.key && value === saved.value))) {
+      // 仅保护本次待发布的草稿；已发布报价独立编辑，已删除/引用行不参与本次回复。
+      // 包括选择既有报价后的重试，也只豁免本次实际保存的同一份值。
+      if (lines.some((row) => row.state === "draft" && valuesRef.current[row.key] !== undefined
+        && !(saved && row.key === saved.key && valuesRef.current[row.key] === saved.value))) {
         message.warning(`${inquiry.inquiry_no} 还有未保存的修改，保存这些行后会自动回复给销售`);
         return -1;
       }
