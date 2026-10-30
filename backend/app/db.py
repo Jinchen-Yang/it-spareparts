@@ -1,5 +1,6 @@
 """数据库 engine / session / Base（SQLAlchemy 2.0 声明式）。"""
 from collections.abc import Generator
+from contextlib import contextmanager
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine, event
@@ -12,9 +13,10 @@ from app.config import get_settings
 _settings = get_settings()
 
 # 这是单条 SQL（包括锁等待）的预算，不是整个请求的总时长预算。
-# 仅在 get_db 的请求会话生效，不影响显式 SessionLocal 创建的导入/后台会话。
+# 仅在 HTTP 请求/短鉴权会话生效，不影响显式 SessionLocal 创建的导入/后台会话。
 REQUEST_STATEMENT_TIMEOUT_MS = 30_000
 POOL_TIMEOUT_SECONDS = 5
+AUTH_IDLE_TRANSACTION_TIMEOUT_MS = 60_000
 
 # engine 是惰性连接：创建时不会真正连库，服务可在无 DB 时启动。
 # 池显式配置：AI 对话流式期间存在 worker 线程并行连接（见 api/chat_sessions），
@@ -69,3 +71,45 @@ def get_db() -> Generator[Session, None, None]:
     finally:
         db.close()
         event.remove(db, "after_begin", _set_request_statement_timeout)
+
+
+def _set_auth_timeouts(
+    session: Session, transaction: SessionTransaction, connection: Connection,
+) -> None:
+    _set_request_statement_timeout(session, transaction, connection)
+    if not transaction.nested:
+        connection.exec_driver_sql(
+            f"SET LOCAL idle_in_transaction_session_timeout = '{AUTH_IDLE_TRANSACTION_TIMEOUT_MS}ms'"
+        )
+
+
+@contextmanager
+def auth_db_session() -> Generator[Session, None, None]:
+    """只包围身份快照读取，不跨越业务处理/外部等待；不提交或回滚业务 Session。"""
+    db = SessionLocal()
+    event.listen(db, "after_begin", _set_auth_timeouts)
+    try:
+        yield db
+    except DBAPIError as exc:
+        sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+        if sqlstate == "25P03" or exc.connection_invalidated:
+            # PostgreSQL 已终止此连接；即使驱动未识别断连也不得放回池里复用。
+            db.invalidate()
+        else:
+            try:
+                db.rollback()
+            except DBAPIError:
+                db.invalidate()
+        if sqlstate == "57014":
+            raise HTTPException(status_code=504, detail="数据库查询超时，请稍后重试") from exc
+        raise HTTPException(status_code=503, detail="数据库暂时不可用，请稍后重试") from exc
+    except PoolTimeoutError as exc:
+        raise HTTPException(status_code=503, detail="数据库连接繁忙，请稍后重试") from exc
+    finally:
+        try:
+            db.close()
+        except DBAPIError as exc:
+            db.invalidate()
+            raise HTTPException(status_code=503, detail="数据库暂时不可用，请稍后重试") from exc
+        finally:
+            event.remove(db, "after_begin", _set_auth_timeouts)

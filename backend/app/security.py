@@ -74,7 +74,6 @@ def is_scoped_maintenance(user_ctx: UserContext | None) -> bool:
 
 def get_current_user_context(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer_optional),
-    db: Session = Depends(get_db),
 ) -> UserContext:
     """身份上下文钩子。RBAC 关 → 临时全量；RBAC 开 → 从服务端校验的 token 取真实身份。
 
@@ -87,17 +86,18 @@ def get_current_user_context(
     # RBAC 开启：解析 token，失败/被吊销兜底 GUEST（绝不默认 admin）
     if creds is not None:
         try:
-            from app.auth import verify_token_db
-            data = verify_token_db(creds.credentials, db)
+            from app.auth import verify_request_token
+            data = verify_request_token(creds.credentials)
             return UserContext(user_id=data.get("sub"), role=data.get("role", config.GUEST_ROLE),
                                salesperson_name=data.get("name"),
                                permissions=data.get("perms"), is_authenticated=True)
         except (DBAPIError, PoolTimeoutError):
-            # 数据库不可用不是无效身份；交给 get_db 回滚并返回 504/503，
+            # 数据库不可用不是无效身份；
             # 不能把鉴权查询超时降级成 guest 后误报页面权限不足。
             raise
-        except Exception:  # noqa: BLE001
-            pass
+        except HTTPException as exc:
+            if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+                raise
     return UserContext(user_id=None, role=config.GUEST_ROLE, is_authenticated=False)
 
 

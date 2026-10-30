@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app import permissions, security
 from app.beta_access import beta_feature_availability
 from app.config import get_settings
-from app.db import get_db
+from app.db import auth_db_session, get_db
 from app.models.system import SysAuditLog, SysUser
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -147,6 +147,12 @@ def verify_token_db(token: str, db: Session) -> dict:
                     permissions.effective_for_user(user)
                 )
     return data
+
+
+def verify_request_token(token: str) -> dict:
+    """在独立短事务里完成鉴权；返回已物化的身份，不携带 ORM/连接。"""
+    with auth_db_session() as db:
+        return verify_token_db(token, db)
 
 
 def _client_ip(request: Request) -> str | None:
@@ -285,11 +291,10 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
 
 
 # ---------- 依赖 ----------
-def current_identity(creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
-                     db: Session = Depends(get_db)) -> dict:
+def current_identity(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> dict:
     if creds is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "缺少凭证")
-    return verify_token_db(creds.credentials, db)
+    return verify_request_token(creds.credentials)
 
 
 @router.get("/beta-features", response_model=dict[str, bool])

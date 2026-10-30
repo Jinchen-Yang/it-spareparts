@@ -5,18 +5,18 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import permissions
+from app import config, permissions
 from app.api.maintenance_demands import _real_operator
 from app.api.maintenance_project_scope import (
     enforce_maintenance_project_access,
     require_maintenance_project_access,
 )
-from app.auth import current_identity, current_role
+from app.auth import current_identity, current_role, verify_token_db
 from app.db import get_db
 from app.maintenance_boss import require_maintenance_boss
 from app.models.system import SysUser
 from app.security import (
-    get_current_user_context,
+    UserContext,
     record_access_log,
     require_action,
     require_page,
@@ -90,12 +90,18 @@ def confirm(project_id: str, batch_id: int, source_order_id: str,
 
     def reauthorize():
         nonlocal audit_ctx
-        fresh_identity = current_identity(creds, db)
+        if creds is None:
+            raise HTTPException(401, "缺少凭证")
+        # 写前复核属于当前业务事务；请求入口鉴权的独立短 Session 不参与此处。
+        fresh_identity = verify_token_db(creds.credentials, db)
         if _real_operator(db, fresh_identity) != operator:
             raise HTTPException(403, "实名身份已变化，请重新登录")
         user = db.scalar(select(SysUser).where(SysUser.username == operator)
                          .execution_options(populate_existing=True))
-        ctx = get_current_user_context(creds, db)
+        ctx = UserContext(
+            user_id=fresh_identity.get("sub") if config.ENABLE_RBAC else None,
+            role=user.role, is_authenticated=config.ENABLE_RBAC,
+        )
         # Re-read account permissions too: an earlier dependency's token/context
         # must not authorize a command after waiting on a project/data lock.
         ctx.role, ctx.salesperson_name = user.role, user.salesperson_name
