@@ -16,6 +16,13 @@ def now():
     return datetime.now(timezone.utc)
 
 
+def offer_effective(offer, moment=None):
+    """D-0046：报价不设有效期。已发布、未标无货、有单价即一直有效，直到更新、撤回或标为失效。"""
+    moment = moment or now()
+    return (offer.status == "published" and not offer.no_stock and offer.unit_price is not None
+            and offer.valid_from is not None and offer.valid_from <= moment)
+
+
 def resolve_actor(db, actor):
     return work_items.actor_context(db, actor)
 

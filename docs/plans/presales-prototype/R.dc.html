@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>推荐方案</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;background:#F4F5F7;color:#1D2129;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;font-size:14px}
+a{color:#1D4ED8}a:hover{color:#1E3A8A}
+input,select,button{font:inherit;color:inherit}
+.in{box-sizing:border-box;width:100%;height:36px;padding:0 10px;border:1px solid #D0D4DA;border-radius:6px;background:#fff}
+.in:focus{outline:2px solid #1D4ED8;outline-offset:-1px;border-color:#1D4ED8}
+.in::placeholder{color:#6B7280}
+.btn{height:36px;padding:0 14px;border:1px solid #D0D4DA;border-radius:6px;background:#fff;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:#1D4ED8;color:#1D4ED8}
+.pri{height:36px;padding:0 16px;border:1px solid #1D4ED8;border-radius:6px;background:#1D4ED8;color:#fff;cursor:pointer;white-space:nowrap;font-weight:600}
+.pri:hover{background:#1E40AF}
+.ghost{height:32px;padding:0 10px;border:0;border-radius:6px;background:transparent;color:#1D4ED8;cursor:pointer;white-space:nowrap;font-weight:600}
+.ghost:hover{background:#EEF3FF}
+.tab{height:36px;padding:0 16px;border:0;border-radius:6px;cursor:pointer;font-size:15px;display:flex;align-items:center;gap:8px}
+.ck{width:18px;height:18px;accent-color:#1D4ED8}
+summary{cursor:pointer;color:#1D4ED8;font-weight:600}
+</style>
+</helmet>
+<div style="min-height:100vh;background:#F4F5F7">
+  <header style="display:flex;align-items:center;gap:24px;flex-wrap:wrap;padding:10px 24px;background:#FFFFFF;border-bottom:1px solid #E3E5E8">
+    <strong style="font-size:16px">售前</strong>
+    <nav aria-label="售前" style="display:flex;gap:4px">
+      <button class="tab" aria-pressed="{{askOn}}" onClick="{{toAsk}}" style="{{askTabStyle}}">询价</button>
+      <button class="tab" aria-pressed="{{quoteOn}}" onClick="{{toQuote}}" style="{{quoteTabStyle}}">报价<span style="min-width:20px;height:20px;padding:0 6px;box-sizing:border-box;border-radius:10px;background:#B45309;color:#FFFFFF;font-size:12px;display:inline-flex;align-items:center;justify-content:center">{{pendingCount}}</span></button>
+    </nav>
+    <span style="margin-left:auto;color:#6B7280;font-size:13px">推荐方案 · 报价长期有效 · 示例数据</span>
+  </header>
+
+  <main style="max-width:1440px;margin:0 auto;padding:24px;box-sizing:border-box;display:flex;flex-direction:column;gap:24px">
+    <sc-if value="{{askOn}}" hint-placeholder-val="{{ true }}">
+      <section style="background:#FFFFFF;border:1px solid #E3E5E8;border-radius:10px;padding:20px;display:flex;flex-direction:column;gap:16px">
+        <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+          <h2 style="margin:0;font-size:18px">新建询价</h2>
+          <label style="display:flex;align-items:center;gap:8px">客户<input class="in" style="width:220px" value="{{customer}}" onChange="{{onCustomer}}" placeholder="选择或输入客户"></label>
+          <span style="margin-left:auto;font-size:13px;color:#6B7280">数量默认 1；「PN 一致」按你上次的习惯预选</span>
+        </div>
+        <div style="overflow-x:auto;border:1px solid #E3E5E8;border-radius:8px">
+          <div style="min-width:900px">
+            <div style="display:grid;grid-template-columns:44px minmax(200px,1.2fr) minmax(220px,1.6fr) 80px 90px minmax(180px,1.2fr) 56px;background:#F7F8FA;border-bottom:1px solid #E3E5E8;font-size:13px;color:#4E5969;font-weight:600">
+              <div style="padding:10px 12px">#</div><div style="padding:10px 8px">PN / 型号</div><div style="padding:10px 8px">描述（自动带出）</div><div style="padding:10px 8px">数量</div><div style="padding:10px 8px">PN 一致</div><div style="padding:10px 8px">备注</div><div></div>
+            </div>
+            <sc-for list="{{lines}}" as="l" hint-placeholder-count="3">
+              <div style="display:grid;grid-template-columns:44px minmax(200px,1.2fr) minmax(220px,1.6fr) 80px 90px minmax(180px,1.2fr) 56px;align-items:center;border-bottom:1px solid #EEF0F2">
+                <div style="padding:6px 12px;color:#6B7280">{{l.no}}</div>
+                <div style="padding:6px 8px"><input class="in" aria-label="第 {{l.no}} 行 PN" value="{{l.pn}}" onChange="{{l.onPn}}" placeholder="输入或粘贴 PN"></div>
+                <div style="padding:6px 8px;font-size:13px;color:#4E5969;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{l.desc}}</div>
+                <div style="padding:6px 8px"><input class="in" aria-label="第 {{l.no}} 行数量" inputmode="numeric" value="{{l.qty}}" onChange="{{l.onQty}}"></div>
+                <div style="padding:6px 8px;display:flex;justify-content:center"><input class="ck" type="checkbox" aria-label="第 {{l.no}} 行要求 PN 一致" checked="{{l.exact}}" onChange="{{l.onExact}}"></div>
+                <div style="padding:6px 8px"><input class="in" aria-label="第 {{l.no}} 行备注" value="{{l.note}}" onChange="{{l.onNote}}" placeholder="可选"></div>
+                <div style="padding:6px 8px;display:flex;justify-content:center"><button class="ghost" aria-label="删除第 {{l.no}} 行" onClick="{{l.remove}}" style="color:#B42318;width:32px;padding:0"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 4h10M6 4V2.5h4V4M4.5 4l.7 9.5h5.6l.7-9.5"/></svg></button></div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <details style="font-size:13px;color:#4E5969"><summary>更多选项（很少用，默认收起）</summary><p style="margin:8px 0 0">期望交期、客户要求、指定处理人（留空进公共池）、报价可见范围（默认公开）、引用已有报价。</p></details>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <button class="btn" onClick="{{addLine}}">+ 添加一行</button>
+          <span style="color:#4E5969">{{lineSummary}}</span>
+          <span style="margin-left:auto;display:flex;gap:8px"><button class="btn">存草稿</button><button class="pri" onClick="{{submit}}">提交询价</button></span>
+        </div>
+      </section>
+
+      <section style="background:#FFFFFF;border:1px solid #E3E5E8;border-radius:10px;padding:20px;display:flex;flex-direction:column;gap:4px">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px">
+          <h2 style="margin:0;font-size:18px">我的询价</h2>
+          <span style="font-size:13px;color:#6B7280">每行一句可以直接说给客户的话；报价一直有效，直到采购更新</span>
+        </div>
+        <sc-for list="{{inquiries}}" as="q" hint-placeholder-count="3">
+          <div style="border-top:1px solid #E3E5E8;padding:14px 0;display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+              <strong>{{q.no}}</strong><span style="color:#4E5969">{{q.customer}}</span>
+              <span style="{{q.chipStyle}}">{{q.status}}</span>
+            </div>
+            <sc-for list="{{q.lines}}" as="x" hint-placeholder-count="2">
+              <div style="display:flex;align-items:center;gap:8px 16px;flex-wrap:wrap;padding:8px 12px;border:1px solid #E3E5E8;border-radius:8px">
+                <span style="font-weight:600;min-width:130px">{{x.pn}} <span style="font-weight:400;color:#6B7280">× {{x.qty}}</span></span>
+                <span style="{{x.sayStyle}}">{{x.say}}</span>
+                <span style="font-size:12px;color:#6B7280">{{x.who}}</span>
+                <sc-if value="{{x.canCopy}}" hint-placeholder-val="{{ true }}"><button class="ghost" style="margin-left:auto" aria-label="复制 {{x.pn}} 报价给客户" onClick="{{x.copy}}">{{x.copyLabel}}</button></sc-if>
+              </div>
+            </sc-for>
+          </div>
+        </sc-for>
+      </section>
+    </sc-if>
+
+    <sc-if value="{{quoteOn}}" hint-placeholder-val="{{ false }}">
+      <section style="background:#FFFFFF;border:1px solid #E3E5E8;border-radius:10px;padding:20px;display:flex;flex-direction:column;gap:16px">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <h2 style="margin:0;font-size:18px">报价</h2>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">
+            <sc-for list="{{filters}}" as="f" hint-placeholder-count="4"><button class="btn" aria-pressed="{{f.on}}" onClick="{{f.pick}}" style="{{f.style}}">{{f.label}}</button></sc-for>
+          </div>
+          <input class="in" style="width:240px;margin-left:auto" aria-label="筛选报价行" value="{{q}}" onChange="{{onQ}}" placeholder="按询价人、PN、客户筛选">
+          <button class="btn" onClick="{{toggleDirect}}">主动报价</button>
+        </div>
+
+        <sc-if value="{{directOpen}}" hint-placeholder-val="{{ false }}">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;align-items:end;padding:16px;border:1px solid #C7D2FE;background:#F5F8FF;border-radius:8px">
+            <p style="margin:0;grid-column:1 / -1;font-size:13px;color:#4E5969">主动报价＝直接更新你对这个型号的价。不生成单据、不产生待办，保存后询这个型号的销售马上能看到。</p>
+            <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#4E5969">PN<input class="in" value="{{direct.pn}}" onChange="{{onDirectPn}}" placeholder="输入 PN"></label>
+            <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#4E5969">单价（元）<input class="in" inputmode="decimal" value="{{direct.price}}" onChange="{{onDirectPrice}}" placeholder="单价"></label>
+            <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#4E5969">税<select class="in" value="{{direct.tax}}" onChange="{{onDirectTax}}"><option>含税</option><option>不含税</option></select></label>
+            <div style="display:flex;gap:6px"><button class="pri" onClick="{{saveDirect}}">保存</button><button class="btn" onClick="{{toggleDirect}}">收起</button></div>
+          </div>
+        </sc-if>
+        <sc-if value="{{hasToast}}" hint-placeholder-val="{{ false }}"><div role="status" style="padding:10px 14px;border-radius:8px;background:#ECFDF3;color:#15803D;font-weight:600">{{toast}}</div></sc-if>
+
+        <div style="overflow-x:auto;border:1px solid #E3E5E8;border-radius:8px">
+          <div style="min-width:1140px">
+            <div style="display:grid;grid-template-columns:150px minmax(240px,1.6fr) 64px 80px 130px 110px 120px 170px;background:#F7F8FA;border-bottom:1px solid #E3E5E8;font-size:13px;color:#4E5969;font-weight:600">
+              <div style="padding:10px 12px">询价人</div><div style="padding:10px 8px">PN / 描述</div><div style="padding:10px 8px">数量</div><div style="padding:10px 8px">PN 一致</div><div style="padding:10px 8px">单价（元）</div><div style="padding:10px 8px">税</div><div style="padding:10px 8px">状态</div><div style="padding:10px 8px">操作</div>
+            </div>
+            <sc-for list="{{rows}}" as="r" hint-placeholder-count="5">
+              <div style="border-bottom:1px solid #EEF0F2;{{r.bg}}">
+                <div style="display:grid;grid-template-columns:150px minmax(240px,1.6fr) 64px 80px 130px 110px 120px 170px;align-items:center">
+                  <div style="padding:8px 12px;display:flex;flex-direction:column;gap:2px"><span style="font-weight:700;font-size:15px">{{r.sales}}</span><span style="font-size:12px;color:#6B7280">{{r.inq}} · {{r.customer}}</span></div>
+                  <div style="padding:8px;display:flex;flex-direction:column;gap:2px;min-width:0"><span style="font-weight:600">{{r.pn}}</span><span style="font-size:12px;color:#6B7280;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{r.desc}}</span></div>
+                  <div style="padding:8px">{{r.qty}}</div>
+                  <div style="padding:8px">{{r.exactText}}</div>
+                  <div style="padding:6px 8px">
+                    <sc-if value="{{r.editable}}" hint-placeholder-val="{{ true }}"><input class="in" aria-label="{{r.pn}} 单价" inputmode="decimal" value="{{r.price}}" onChange="{{r.onPrice}}" placeholder="单价"></sc-if>
+                    <sc-if value="{{r.readonly}}" hint-placeholder-val="{{ false }}"><span style="font-weight:700">{{r.priceText}}</span></sc-if>
+                  </div>
+                  <div style="padding:6px 8px">
+                    <sc-if value="{{r.editable}}" hint-placeholder-val="{{ true }}"><select class="in" aria-label="{{r.pn}} 含税" value="{{r.tax}}" onChange="{{r.onTax}}"><option>含税</option><option>不含税</option></select></sc-if>
+                    <sc-if value="{{r.readonly}}" hint-placeholder-val="{{ false }}"><span>{{r.taxText}}</span></sc-if>
+                  </div>
+                  <div style="padding:8px;display:flex;flex-direction:column;gap:2px"><span style="{{r.chipStyle}}">{{r.statusText}}</span><span style="font-size:12px;color:#6B7280">{{r.statusNote}}</span></div>
+                  <div style="padding:6px 8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+                    <sc-if value="{{r.editable}}" hint-placeholder-val="{{ true }}"><button class="pri" onClick="{{r.save}}">保存</button></sc-if>
+                    <sc-if value="{{r.canSkip}}" hint-placeholder-val="{{ true }}"><button class="btn" onClick="{{r.skip}}">不报</button></sc-if>
+                    <sc-if value="{{r.editingExisting}}" hint-placeholder-val="{{ false }}"><button class="btn" onClick="{{r.cancel}}">取消</button></sc-if>
+                    <sc-if value="{{r.readonly}}" hint-placeholder-val="{{ false }}"><button class="ghost" onClick="{{r.edit}}">{{r.editLabel}}</button></sc-if>
+                  </div>
+                </div>
+                <sc-if value="{{r.hasHint}}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 12px 10px 162px;padding:6px 10px;border-radius:6px;background:#F7F8FA;font-size:13px;color:#4E5969">{{r.hint}}<button class="ghost" onClick="{{r.reuse}}">沿用</button></div>
+                </sc-if>
+              </div>
+            </sc-for>
+            <sc-if value="{{noRows}}" hint-placeholder-val="{{ false }}"><div style="padding:32px;text-align:center;color:#6B7280">没有符合条件的报价行</div></sc-if>
+          </div>
+        </div>
+      </section>
+    </sc-if>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1100}}'>
+var CATALOG = {
+  "P06571-B21": "HPE 32GB 2Rx8 DDR4-3200 RDIMM 内存",
+  "872479-B21": "HPE 1.2TB SAS 12G 10K SFF 硬盘",
+  "SFP-10G-SR": "Cisco 10GBASE-SR SFP+ 光模块",
+  "MZ7L3960HCJR": "Samsung PM893 960GB SATA SSD",
+  "C9300-48P-E": "Cisco Catalyst 9300 48 口 PoE+ 交换机"
+};
+function money(v) { var n = Number(v); return isNaN(n) ? "—" : "¥" + n.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function chip(bg, fg) { return "display:inline-flex;align-self:flex-start;align-items:center;height:22px;padding:0 8px;border-radius:11px;font-size:12px;font-weight:600;background:" + bg + ";color:" + fg; }
+function descOf(pn) { var k = (pn || "").trim().toUpperCase(); if (!k) return ""; return CATALOG[k] || "未建档 · 提交后由采购补全"; }
+
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = {
+      view: "quote", customer: "", filter: "pending", q: "", editing: {}, nextId: 3, seq: 4, copied: null,
+      directOpen: false, direct: { pn: "", price: "", tax: "含税" }, toast: "", myExact: true,
+      lines: [
+        { id: 1, pn: "P06571-B21", qty: "1", exact: true, note: "" },
+        { id: 2, pn: "", qty: "1", exact: true, note: "" }
+      ],
+      rows: [
+        { id: 101, inq: "XJ-1028-003", customer: "示例客户 A", sales: "张三", pn: "P06571-B21", qty: 4, exact: true, status: "pending", price: "", tax: "含税" },
+        { id: 102, inq: "XJ-1028-003", customer: "示例客户 A", sales: "张三", pn: "872479-B21", qty: 1, exact: false, status: "pending", price: "", tax: "含税" },
+        { id: 106, inq: "XJ-1028-015", customer: "示例客户 D", sales: "王五", pn: "SFP-10G-SR", qty: 2, exact: true, status: "pending", price: "", tax: "含税" },
+        { id: 103, inq: "XJ-1027-011", customer: "示例客户 B", sales: "李四", pn: "SFP-10G-SR", qty: 20, exact: false, status: "quoted", price: "260", tax: "含税", by: "赵六", at: "10-27 16:20" },
+        { id: 104, inq: "XJ-1026-007", customer: "示例客户 C", sales: "张三", pn: "MZ7L3960HCJR", qty: 2, exact: true, status: "quoted", price: "1350", tax: "含税", by: "我", at: "10-26 11:05" },
+        { id: 105, inq: "XJ-1025-002", customer: "示例客户 B", sales: "李四", pn: "C9300-48P-E", qty: 1, exact: false, status: "skip", reason: "原厂停产", price: "", tax: "含税", by: "我" }
+      ]
+    };
+  }
+  updLine(id, key) { return (e) => { var v = key === "exact" ? e.target.checked : e.target.value; this.setState((s) => ({ lines: s.lines.map((x) => x.id === id ? Object.assign({}, x, { [key]: v }) : x), myExact: key === "exact" ? v : s.myExact })); }; }
+  updRow(id, key) { return (e) => { var v = e.target.value; this.setState((s) => ({ rows: s.rows.map((x) => x.id === id ? Object.assign({}, x, { [key]: v }) : x) })); }; }
+  patchRow(id, patch) { this.setState((s) => ({ rows: s.rows.map((x) => x.id === id ? Object.assign({}, x, patch) : x) })); }
+  setEditing(id, on) { this.setState((s) => { var e = Object.assign({}, s.editing); if (on) e[id] = Object.assign({}, s.rows.find((x) => x.id === id)); else delete e[id]; return { editing: e }; }); }
+  say(r) {
+    if (r.status === "quoted") return r.pn + " " + money(r.price) + " " + r.tax + "，" + r.by + " " + r.at + " 报价";
+    if (r.status === "skip") return "不报：" + (r.reason || "无货源");
+    return "待报价";
+  }
+  submit() {
+    var s = this.state, filled = s.lines.filter((l) => l.pn.trim());
+    if (!filled.length) return;
+    var no = "XJ-1028-0" + String(s.seq).padStart(2, "0");
+    var rows = filled.map((l, i) => ({ id: Date.now() + i, inq: no, customer: s.customer || "未填客户", sales: "张三", pn: l.pn.trim().toUpperCase(), qty: Number(l.qty) || 1, exact: l.exact, status: "pending", price: "", tax: "含税" }));
+    this.setState({ rows: rows.concat(s.rows), lines: [{ id: s.nextId, pn: "", qty: "1", exact: s.myExact, note: "" }], nextId: s.nextId + 1, seq: s.seq + 1, customer: "" });
+  }
+  saveDirect() {
+    var d = this.state.direct, pn = d.pn.trim().toUpperCase();
+    if (!pn || !String(d.price).trim()) return;
+    var hit = 0;
+    this.setState((s) => ({
+      rows: s.rows.map((r) => { if (r.pn !== pn || r.status === "pending") return r; if (r.by !== "我" && r.status === "quoted") return r; hit += 1; return Object.assign({}, r, { status: "quoted", price: d.price, tax: d.tax, by: "我", at: "刚刚" }); }),
+      directOpen: false, direct: { pn: "", price: "", tax: "含税" },
+      toast: pn + " 已更新为 " + money(d.price) + " " + d.tax + "。没有生成单据或待办，询这个型号的销售可以直接看到。"
+    }));
+  }
+  renderVals() {
+    var s = this.state, ask = s.view === "ask";
+    var tabOn = "background:#EEF3FF;color:#1D4ED8;font-weight:600", tabOff = "background:transparent;color:#4E5969";
+    var lines = s.lines.map((l, i) => Object.assign({}, l, { no: i + 1, desc: descOf(l.pn),
+      onPn: this.updLine(l.id, "pn"), onQty: this.updLine(l.id, "qty"), onExact: this.updLine(l.id, "exact"), onNote: this.updLine(l.id, "note"),
+      remove: () => this.setState((st) => ({ lines: st.lines.length > 1 ? st.lines.filter((x) => x.id !== l.id) : st.lines })) }));
+    var filled = s.lines.filter((l) => l.pn.trim());
+
+    var groups = [];
+    s.rows.filter((r) => r.sales === "张三").forEach((r) => {
+      var g = groups.find((x) => x.no === r.inq);
+      if (!g) { g = { no: r.inq, customer: r.customer, rows: [] }; groups.push(g); }
+      g.rows.push(r);
+    });
+    var inquiries = groups.map((g) => {
+      var done = g.rows.filter((r) => r.status !== "pending").length, n = g.rows.length;
+      return { no: g.no, customer: g.customer,
+        status: done === 0 ? "待报价" : done < n ? "已答复 " + done + "/" + n : "全部已答复",
+        chipStyle: done === 0 ? chip("#FFF4E5", "#B45309") : done < n ? chip("#EEF3FF", "#1D4ED8") : chip("#ECFDF3", "#15803D"),
+        lines: g.rows.map((r) => {
+          var text = this.say(r);
+          return { pn: r.pn, qty: r.qty,
+            say: r.status === "quoted" ? money(r.price) + " " + r.tax : text,
+            who: r.status === "quoted" ? r.by + " · " + r.at : r.status === "skip" ? r.by : "已进公共池",
+            sayStyle: "font-weight:700;color:" + (r.status === "quoted" ? "#15803D" : r.status === "skip" ? "#4E5969" : "#B45309"),
+            canCopy: r.status === "quoted", copyLabel: s.copied === r.id ? "已复制" : "复制给客户",
+            copy: () => { try { navigator.clipboard.writeText(text); } catch (e) {} this.setState({ copied: r.id }); } };
+        }) };
+    });
+
+    var counts = { pending: 0, quoted: 0, skip: 0 };
+    s.rows.forEach((r) => { counts[r.status] += 1; });
+    var filters = [["pending", "待报价 " + counts.pending], ["quoted", "已报价 " + counts.quoted], ["skip", "不报 " + counts.skip], ["all", "全部 " + s.rows.length]].map((f) => ({
+      label: f[1], on: s.filter === f[0], pick: () => this.setState({ filter: f[0] }),
+      style: s.filter === f[0] ? "border-color:#1D4ED8;color:#1D4ED8;background:#EEF3FF;font-weight:600" : "" }));
+    var kw = s.q.trim().toUpperCase();
+    var rows = s.rows.filter((r) => (s.filter === "all" || r.status === s.filter || s.editing[r.id]) && (!kw || (r.sales + r.pn + r.customer + r.inq).toUpperCase().indexOf(kw) >= 0)).map((r) => {
+      var editingExisting = !!s.editing[r.id], editable = r.status === "pending" || editingExisting;
+      var sib = r.status === "pending" ? s.rows.find((o) => o.id !== r.id && o.pn === r.pn && o.status === "quoted") : null;
+      return Object.assign({}, r, {
+        desc: descOf(r.pn), exactText: r.exact ? "要求一致" : "—",
+        editable: editable, readonly: !editable, editingExisting: editingExisting, canSkip: r.status === "pending",
+        priceText: r.status === "quoted" ? money(r.price) : "—", taxText: r.status === "quoted" ? r.tax : "—",
+        statusText: editingExisting ? "修改中" : r.status === "quoted" ? "已报价" : r.status === "skip" ? "不报" : "待报价",
+        chipStyle: r.status === "quoted" ? chip("#ECFDF3", "#15803D") : r.status === "skip" ? chip("#F2F3F5", "#4E5969") : chip("#FFF4E5", "#B45309"),
+        statusNote: r.status === "quoted" ? r.by + " " + r.at : r.status === "skip" ? (r.reason || "") : "",
+        editLabel: r.status === "skip" ? "改为报价" : "更新报价",
+        bg: editable ? "background:#FBFCFF" : "background:#FFFFFF",
+        hasHint: !!sib, hint: sib ? "同型号在 " + sib.inq + "（" + sib.sales + "）已有 " + money(sib.price) + " " + sib.tax + "，" + sib.by + " 报" : "",
+        reuse: () => sib && this.patchRow(r.id, { price: sib.price, tax: sib.tax }),
+        onPrice: this.updRow(r.id, "price"), onTax: this.updRow(r.id, "tax"),
+        save: () => { if (!String(r.price).trim()) return; this.patchRow(r.id, { status: "quoted", at: "刚刚", by: "我" }); this.setEditing(r.id, false); },
+        skip: () => this.patchRow(r.id, { status: "skip", reason: "无货源", by: "我" }),
+        cancel: () => { var o = s.editing[r.id]; if (o) this.patchRow(r.id, o); this.setEditing(r.id, false); },
+        edit: () => { if (r.status === "skip") this.patchRow(r.id, { status: "pending", reason: "" }); else this.setEditing(r.id, true); }
+      });
+    });
+
+    return {
+      askOn: ask, quoteOn: !ask, toAsk: () => this.setState({ view: "ask" }), toQuote: () => this.setState({ view: "quote" }),
+      askTabStyle: ask ? tabOn : tabOff, quoteTabStyle: ask ? tabOff : tabOn, pendingCount: counts.pending,
+      customer: s.customer, onCustomer: (e) => this.setState({ customer: e.target.value }),
+      lines: lines, addLine: () => this.setState((st) => ({ lines: st.lines.concat([{ id: st.nextId, pn: "", qty: "1", exact: st.myExact, note: "" }]), nextId: st.nextId + 1 })),
+      lineSummary: filled.length + " 行", submit: () => this.submit(), inquiries: inquiries,
+      filters: filters, q: s.q, onQ: (e) => this.setState({ q: e.target.value }), rows: rows, noRows: rows.length === 0,
+      directOpen: s.directOpen, toggleDirect: () => this.setState((st) => ({ directOpen: !st.directOpen, toast: "" })), direct: s.direct,
+      onDirectPn: (e) => { var v = e.target.value; this.setState((st) => ({ direct: Object.assign({}, st.direct, { pn: v }) })); },
+      onDirectPrice: (e) => { var v = e.target.value; this.setState((st) => ({ direct: Object.assign({}, st.direct, { price: v }) })); },
+      onDirectTax: (e) => { var v = e.target.value; this.setState((st) => ({ direct: Object.assign({}, st.direct, { tax: v }) })); },
+      saveDirect: () => this.saveDirect(), hasToast: !!s.toast, toast: s.toast
+    };
+  }
+}
+</script>
+</body>
+</html>

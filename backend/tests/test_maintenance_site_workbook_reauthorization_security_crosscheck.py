@@ -86,7 +86,9 @@ def _reject_after_wait(case, change, *, lock_kind="global_advisory", status=403,
                         WHERE datname=current_database()
                           AND :blocker = ANY(pg_blocking_pids(pid))
                     """), {"blocker": blocker_pid}).mappings().one_or_none()
-                    if row:
+                    # Activity sampling and lock-manager inspection can briefly disagree.
+                    # Require both observations before revoking rights; keep the deadline.
+                    if row and row["wait_event_type"] == "Lock":
                         assert row["wait_event_type"] == "Lock"
                         assert expected_query in row["query"], row
                         waiter_pid = row["pid"]

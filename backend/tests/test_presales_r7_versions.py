@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select
 
-from app.models.presales import PresalesLineResponse
+from app.models.presales import PresalesLineResponse, PresalesOfferRevision
 from app.services.presales import common, inquiries, library, offers, visibility
 from app.services.workflow.registry import InvalidTransition
 from tests.test_presales_api_visibility import _client
@@ -24,7 +24,7 @@ def _refer(db, users, original):
     return inquiry, inquiries.lines_for(db, inquiry.id)[0]
 
 
-def test_reference_keeps_price_tax_source_and_field_audience_after_update(db, r6_actors):
+def test_reference_keeps_pinned_price_tax_source_and_field_audience_but_is_superseded_after_update(db, r6_actors):
     u = r6_actors
     _, _, _, original = _publish(db, u, fields={"is_tax_inclusive": True,
         "supplier_audience": {"mode": "public"}, "notes_audience": {"mode": "public"}})
@@ -37,9 +37,9 @@ def test_reference_keeps_price_tax_source_and_field_audience_after_update(db, r6
     ref = visibility.inquiry_view(db, inquiry, _ctx(db, u.sales))["lines"][0]["ref_offer"]
     assert ref["unit_price"] == Decimal("100.00") and ref["is_tax_inclusive"] is True
     assert ref["source_key"] == "source-A" and ref["notes"] == "报价备注"
-    assert ref["latest"] == {"unit_price": Decimal("75.00"), "is_tax_inclusive": False, "revision_no": 2}
+    assert ref["latest"] == {"unit_price": Decimal("75.00"), "is_tax_inclusive": False, "revision_no": 2, "price_basis": "sale"}
     assert "_inquiry" not in ref
-    assert ref["expired"] is False and ref["original_withdrawn"] is False
+    assert ref["expired"] is True and ref["original_withdrawn"] is False
 
 
 def test_reference_keeps_snapshot_scope_and_hides_latest_when_new_scope_denies_viewer(db, r6_actors):
@@ -54,19 +54,67 @@ def test_reference_keeps_snapshot_scope_and_hides_latest_when_new_scope_denies_v
     assert library.batch(db, [u.part.id], u.sales.id)[u.part.id] == []
 
 
-def test_reference_expiry_never_revives_after_source_renewal_and_withdrawn_is_separate(db, r6_actors, monkeypatch):
+def test_reference_is_superseded_by_price_update_never_by_time_and_withdrawn_is_separate(db, r6_actors, monkeypatch):
+    # D-0046：钉住的引用不随时间失效；原报价改价即被取代且不会复活；撤回单独表达。
     u = r6_actors
     _, _, _, original = _publish(db, u)
-    expiry = original.valid_until
     inquiry, _ = _refer(db, u, original)
-    monkeypatch.setattr(common, "now", lambda: expiry + timedelta(seconds=1))
-    offers.update_offer(db, original.id, u.buyer.id, {"validity_days": 30}, expected_version=original.version)
-    assert original.valid_until > expiry
+    later = common.now() + timedelta(days=3650)
+    monkeypatch.setattr(common, "now", lambda: later)
     ref = visibility.inquiry_view(db, inquiry, _ctx(db, u.sales))["lines"][0]["ref_offer"]
-    assert ref["valid_until"] == expiry and ref["expired"] is True and ref["original_withdrawn"] is False
+    assert ref["expired"] is False and "valid_until" not in ref
+    offers.update_offer(db, original.id, u.buyer.id, {"notes": "只改备注"}, expected_version=original.version)
+    ref = visibility.inquiry_view(db, inquiry, _ctx(db, u.sales))["lines"][0]["ref_offer"]
+    assert ref["expired"] is False
+    offers.update_offer(db, original.id, u.buyer.id, {"unit_price": "90.00"}, expected_version=original.version)
+    ref = visibility.inquiry_view(db, inquiry, _ctx(db, u.sales))["lines"][0]["ref_offer"]
+    assert ref["expired"] is True and ref["original_withdrawn"] is False
+    offers.update_offer(db, original.id, u.buyer.id, {"unit_price": "100.00"}, expected_version=original.version)
+    ref = visibility.inquiry_view(db, inquiry, _ctx(db, u.sales))["lines"][0]["ref_offer"]
+    assert ref["expired"] is True
     offers.withdraw(db, original.id, u.buyer.id, "报错价", expected_version=original.version)
     ref = visibility.inquiry_view(db, inquiry, _ctx(db, u.sales))["lines"][0]["ref_offer"]
-    assert ref["expired"] is True and ref["original_withdrawn"] is True
+    assert ref["original_withdrawn"] is True
+
+
+@pytest.mark.parametrize(("changed", "restored"), [
+    ({"is_tax_inclusive": False}, {"is_tax_inclusive": True}),
+    ({"no_stock": True, "notes": "暂时无货"}, {"no_stock": False, "unit_price": "100.00"}),
+])
+def test_superseded_reference_stays_superseded_after_quote_values_return(db, r6_actors, changed, restored):
+    u = r6_actors
+    _, _, _, original = _publish(db, u, fields={"is_tax_inclusive": True})
+    inquiry, _ = _refer(db, u, original)
+    offers.update_offer(db, original.id, u.buyer.id, changed, expected_version=original.version)
+    offers.update_offer(db, original.id, u.buyer.id, restored, expected_version=original.version)
+    ref = visibility.inquiry_view(db, inquiry, _ctx(db, u.sales))["lines"][0]["ref_offer"]
+    assert ref["expired"] is True and ref["original_withdrawn"] is False
+
+
+def test_legacy_revision_without_price_basis_defaults_to_sale_in_history_and_reference(db, r6_actors):
+    u = r6_actors
+    _, _, _, original = _publish(db, u)
+    latest = db.scalar(select(PresalesOfferRevision).where(
+        PresalesOfferRevision.offer_id == original.id,
+        PresalesOfferRevision.revision_no == original.revision_no))
+    # 只追加升级前格式的快照，既不改写已有历史，也不依赖迁移回填 JSON。
+    original.revision_no += 1
+    legacy_snapshot = {key: value for key, value in latest.snapshot.items() if key != "price_basis"}
+    legacy_snapshot["revision_no"] = original.revision_no
+    db.add(PresalesOfferRevision(offer_id=original.id, revision_no=original.revision_no,
+        snapshot=legacy_snapshot, changed_fields=[], actor=u.buyer.id))
+    db.flush()
+    history = visibility.revision_views(db, original.id, _ctx(db, u.buyer))
+    assert history[-1]["snapshot"]["price_basis"] == "sale"
+    inquiry, _ = _refer(db, u, original)
+    ref = visibility.inquiry_view(db, inquiry, _ctx(db, u.sales))["lines"][0]["ref_offer"]
+    assert ref["price_basis"] == "sale" and ref["expired"] is False
+    db.commit()
+    response = _client(u.buyer).get(f"/api/presales/offers/{original.id}/revisions")
+    assert response.status_code == 200
+    assert response.json()[-1]["snapshot"]["price_basis"] == "sale"
+    assert all("validity_days" not in row["snapshot"] and "valid_until" not in row["snapshot"]
+               for row in response.json())
 
 
 def test_reuse_requires_owner_visibility_even_when_purchaser_can_see_private_quote(db, r6_actors):
@@ -195,7 +243,7 @@ def test_same_offer_returning_to_inquiry_keeps_original_line_snapshot_distinct_f
     inquiries.append_lines(db, original.id, u.sales.id, original.version, [{"part_id": u.part.id}])
     new_line = inquiries.lines_for(db, original.id)[-1]
     offers.save_draft(db, original.id, new_line.id, u.buyer.id,
-        {"unit_price": "60.00", "validity_days": 3}, expected_version=original.version)
+        {"unit_price": "60.00"}, expected_version=original.version)
     offers.reply(db, original.id, u.buyer.id, expected_version=original.version,
                  on_existing="update", existing_offer_id=offer.id)
     view = visibility.inquiry_view(db, original, _ctx(db, u.sales))

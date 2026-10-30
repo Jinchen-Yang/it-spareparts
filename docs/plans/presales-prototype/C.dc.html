@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>方向 C 型号为中心</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;background:#F4F5F7;color:#1D2129;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Noto Sans SC",sans-serif;font-size:14px}
+a{color:#1D4ED8}a:hover{color:#1E3A8A}
+input,select,button{font:inherit;color:inherit}
+.in{box-sizing:border-box;width:100%;height:36px;padding:0 10px;border:1px solid #D0D4DA;border-radius:6px;background:#fff}
+.in:focus{outline:2px solid #1D4ED8;outline-offset:-1px;border-color:#1D4ED8}
+.in::placeholder{color:#6B7280}
+.btn{height:36px;padding:0 14px;border:1px solid #D0D4DA;border-radius:6px;background:#fff;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:#1D4ED8;color:#1D4ED8}
+.pri{height:36px;padding:0 16px;border:1px solid #1D4ED8;border-radius:6px;background:#1D4ED8;color:#fff;cursor:pointer;white-space:nowrap;font-weight:600}
+.pri:hover{background:#1E40AF}
+.ghost{height:32px;padding:0 10px;border:0;border-radius:6px;background:transparent;color:#1D4ED8;cursor:pointer;white-space:nowrap;font-weight:600}
+.ghost:hover{background:#EEF3FF}
+.tab{height:36px;padding:0 16px;border:0;border-radius:6px;cursor:pointer;font-size:15px;display:flex;align-items:center;gap:8px}
+.fl{display:flex;flex-direction:column;gap:4px;font-size:12px;color:#4E5969}
+</style>
+</helmet>
+<div style="min-height:100vh;background:#F4F5F7">
+  <header style="display:flex;align-items:center;gap:24px;flex-wrap:wrap;padding:10px 24px;background:#FFFFFF;border-bottom:1px solid #E3E5E8">
+    <strong style="font-size:16px">售前</strong>
+    <nav aria-label="售前" style="display:flex;gap:4px">
+      <button class="tab" aria-pressed="{{askOn}}" onClick="{{toAsk}}" style="{{askTabStyle}}">询价</button>
+      <button class="tab" aria-pressed="{{quoteOn}}" onClick="{{toQuote}}" style="{{quoteTabStyle}}">报价<span style="min-width:20px;height:20px;padding:0 6px;box-sizing:border-box;border-radius:10px;background:#B45309;color:#FFFFFF;font-size:12px;display:inline-flex;align-items:center;justify-content:center">{{pendingPns}}</span></button>
+    </nav>
+    <span style="margin-left:auto;color:#6B7280;font-size:13px">方向 C · 型号为中心 · 示例数据</span>
+  </header>
+
+  <main style="max-width:1440px;margin:0 auto;padding:24px;box-sizing:border-box">
+    <sc-if value="{{askOn}}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start">
+        <div style="flex:999 1 560px;min-width:0;display:flex;flex-direction:column;gap:16px">
+          <label style="display:flex;align-items:center;gap:10px;background:#FFFFFF;border:1px solid #D0D4DA;border-radius:10px;padding:6px 14px;height:56px;box-sizing:border-box">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="#4E5969" stroke-width="1.8" aria-hidden="true"><circle cx="9" cy="9" r="6"/><path d="M13.5 13.5 18 18"/></svg>
+            <input aria-label="搜索型号" value="{{q}}" onChange="{{onQ}}" placeholder="搜索 PN、描述、品牌，先看有没有现成报价" style="flex:1;min-width:0;border:0;outline:0;font-size:16px;background:transparent">
+          </label>
+          <sc-for list="{{results}}" as="p" hint-placeholder-count="4">
+            <div style="background:#FFFFFF;border:1px solid #E3E5E8;border-radius:10px;padding:14px 16px;display:flex;flex-wrap:wrap;gap:12px 20px;align-items:center">
+              <div style="flex:2 1 260px;min-width:0;display:flex;flex-direction:column;gap:2px"><strong style="font-size:15px">{{p.pn}}</strong><span style="font-size:13px;color:#4E5969">{{p.desc}}</span></div>
+              <div style="flex:2 1 240px;display:flex;flex-direction:column;gap:2px"><span style="{{p.quoteStyle}}">{{p.quoteMain}}</span><span style="font-size:12px;color:#6B7280">{{p.quoteSub}}</span></div>
+              <sc-if value="{{p.inBasket}}" hint-placeholder-val="{{ false }}"><span style="color:#15803D;font-weight:600">已在询价篮</span></sc-if>
+              <sc-if value="{{p.canAdd}}" hint-placeholder-val="{{ true }}"><button class="btn" onClick="{{p.add}}">+ 加入询价</button></sc-if>
+            </div>
+          </sc-for>
+          <sc-if value="{{noResults}}" hint-placeholder-val="{{ false }}">
+            <div style="background:#FFFFFF;border:1px dashed #D0D4DA;border-radius:10px;padding:20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span style="color:#4E5969">库里没有「{{q}}」。</span><button class="btn" onClick="{{addRaw}}">按原文加入询价（待建档）</button></div>
+          </sc-if>
+
+          <section style="background:#FFFFFF;border:1px solid #E3E5E8;border-radius:10px;padding:16px 20px">
+            <h2 style="margin:0 0 8px;font-size:16px">我的询价进度</h2>
+            <sc-for list="{{progress}}" as="x" hint-placeholder-count="4">
+              <div style="display:flex;flex-wrap:wrap;gap:8px 20px;align-items:center;padding:10px 0;border-top:1px solid #EEF0F2">
+                <span style="flex:0 0 110px;font-weight:600">{{x.inq}}</span>
+                <span style="flex:0 0 110px;color:#4E5969">{{x.customer}}</span>
+                <span style="flex:1 1 140px;font-weight:600">{{x.pn}} <span style="font-weight:400;color:#6B7280">× {{x.qty}}</span></span>
+                <span style="{{x.quoteStyle}}">{{x.quoteText}}</span>
+              </div>
+            </sc-for>
+          </section>
+        </div>
+
+        <aside style="flex:1 1 320px;max-width:420px;min-width:0;background:#FFFFFF;border:1px solid #E3E5E8;border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px">
+          <h2 style="margin:0;font-size:16px">询价篮 · {{basketCount}} 个 PN</h2>
+          <label class="fl">客户<input class="in" value="{{customer}}" onChange="{{onCustomer}}" placeholder="选择或输入客户"></label>
+          <sc-for list="{{basket}}" as="b" hint-placeholder-count="2">
+            <div style="border:1px solid #E3E5E8;border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:8px"><strong style="flex:1;min-width:0">{{b.pn}}</strong><button class="ghost" style="color:#B42318" aria-label="移出 {{b.pn}}" onClick="{{b.remove}}">移出</button></div>
+              <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px">
+                <label class="fl">数量<input class="in" inputmode="numeric" value="{{b.qty}}" onChange="{{b.onQty}}"></label>
+                <label class="fl">期望交期<input class="in" type="date" value="{{b.date}}" onChange="{{b.onDate}}"></label>
+              </div>
+            </div>
+          </sc-for>
+          <sc-if value="{{basketEmpty}}" hint-placeholder-val="{{ false }}"><p style="margin:0;color:#6B7280">从左侧搜索结果加入 PN。</p></sc-if>
+          <button class="pri" onClick="{{submit}}">提交询价</button>
+        </aside>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{quoteOn}}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <h2 style="margin:0;font-size:18px">按型号报价</h2>
+          <sc-for list="{{filters}}" as="f" hint-placeholder-count="2"><button class="btn" aria-pressed="{{f.on}}" onClick="{{f.pick}}" style="{{f.style}}">{{f.label}}</button></sc-for>
+          <span style="margin-left:auto;font-size:13px;color:#6B7280">同一个 PN 报一次价，所有询这个 PN 的单子一起收到；改价即「更新报价」</span>
+        </div>
+        <sc-for list="{{pns}}" as="p" hint-placeholder-count="4">
+          <div style="background:#FFFFFF;border:1px solid #E3E5E8;border-radius:10px;padding:16px 20px;display:flex;flex-direction:column;gap:12px">
+            <div style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:center">
+              <div style="flex:2 1 240px;min-width:0;display:flex;flex-direction:column;gap:2px"><strong style="font-size:15px">{{p.pn}}</strong><span style="font-size:13px;color:#4E5969">{{p.desc}}</span></div>
+              <div style="flex:2 1 260px;display:flex;flex-direction:column;gap:4px">
+                <span style="{{p.demandStyle}}">{{p.demandText}}</span>
+                <span style="display:flex;flex-wrap:wrap;gap:6px"><sc-for list="{{p.inqs}}" as="i" hint-placeholder-count="2"><span style="font-size:12px;padding:2px 8px;border-radius:4px;background:#F2F3F5;color:#4E5969">{{i.label}}</span></sc-for></span>
+              </div>
+              <div style="flex:1 1 200px;display:flex;flex-direction:column;gap:2px"><span style="{{p.quoteStyle}}">{{p.quoteMain}}</span><span style="font-size:12px;color:#6B7280">{{p.quoteSub}}</span></div>
+              <sc-if value="{{p.closed}}" hint-placeholder-val="{{ true }}"><button class="{{p.btnClass}}" onClick="{{p.open}}">{{p.btnLabel}}</button></sc-if>
+            </div>
+            <sc-if value="{{p.opened}}" hint-placeholder-val="{{ false }}">
+              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;align-items:end;padding-top:12px;border-top:1px solid #EEF0F2">
+                <label class="fl">单价（元）<input class="in" inputmode="decimal" value="{{p.f.price}}" onChange="{{p.onPrice}}" placeholder="单价"></label>
+                <label class="fl">税<select class="in" value="{{p.f.tax}}" onChange="{{p.onTax}}"><option>含税</option><option>不含税</option></select></label>
+                <label class="fl">货期<input class="in" value="{{p.f.lead}}" onChange="{{p.onLead}}" placeholder="现货 / 3 天"></label>
+                <label class="fl">有效至<input class="in" type="date" value="{{p.f.valid}}" onChange="{{p.onValid}}"></label>
+                <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="pri" onClick="{{p.save}}">{{p.saveLabel}}</button><button class="btn" onClick="{{p.close}}">取消</button></div>
+              </div>
+            </sc-if>
+          </div>
+        </sc-for>
+      </div>
+    </sc-if>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1100}}'>
+var CATALOG = [
+  { pn: "P06571-B21", desc: "HPE 32GB 2Rx8 DDR4-3200 RDIMM 内存" },
+  { pn: "872479-B21", desc: "HPE 1.2TB SAS 12G 10K SFF 硬盘" },
+  { pn: "SFP-10G-SR", desc: "Cisco 10GBASE-SR SFP+ 光模块" },
+  { pn: "MZ7L3960HCJR", desc: "Samsung PM893 960GB SATA SSD" },
+  { pn: "C9300-48P-E", desc: "Cisco Catalyst 9300 48 口 PoE+ 交换机" }
+];
+function money(v) { var n = Number(v); return isNaN(n) ? "—" : "¥" + n.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function descOf(pn) { var c = CATALOG.find((x) => x.pn === pn); return c ? c.desc : "未建档 · 待采购补全"; }
+var FULL = "font-weight:700;color:";
+
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.state = {
+      view: "ask", q: "", customer: "", filter: "need", open: {}, form: {}, seq: 4,
+      basket: [{ pn: "P06571-B21", qty: "4", date: "2026-11-05" }],
+      quotes: {
+        "SFP-10G-SR": { price: "260", tax: "含税", lead: "现货", valid: "2026-11-27", at: "10-27 16:20", by: "李四" },
+        "MZ7L3960HCJR": { price: "1350", tax: "不含税", lead: "3 天", valid: "2026-11-20", at: "10-26 11:05", by: "李四" }
+      },
+      skips: { "C9300-48P-E": "原厂停产" },
+      rows: [
+        { id: 101, inq: "Q-1028-003", customer: "示例客户 A", pn: "P06571-B21", qty: 4, date: "2026-11-05" },
+        { id: 102, inq: "Q-1028-003", customer: "示例客户 A", pn: "872479-B21", qty: 8, date: "2026-11-05" },
+        { id: 106, inq: "Q-1027-015", customer: "示例客户 D", pn: "P06571-B21", qty: 2, date: "2026-11-08" },
+        { id: 103, inq: "Q-1027-011", customer: "示例客户 B", pn: "SFP-10G-SR", qty: 20, date: "2026-11-10" },
+        { id: 104, inq: "Q-1026-007", customer: "示例客户 C", pn: "MZ7L3960HCJR", qty: 2, date: "2026-11-01" },
+        { id: 105, inq: "Q-1025-002", customer: "示例客户 B", pn: "C9300-48P-E", qty: 1, date: "2026-11-15" }
+      ]
+    };
+  }
+  quoteOf(pn) {
+    var s = this.state, q = s.quotes[pn];
+    if (q) return { main: money(q.price) + " " + q.tax, sub: q.lead + " · 有效至 " + q.valid.slice(5) + " · " + q.by + " " + q.at, style: FULL + "#15803D", state: "quoted" };
+    if (s.skips[pn]) return { main: "不报 · " + s.skips[pn], sub: "", style: FULL + "#4E5969", state: "skip" };
+    return { main: "暂无有效报价", sub: "", style: FULL + "#B45309", state: "none" };
+  }
+  updBasket(pn, key) { return (e) => { var v = e.target.value; this.setState((s) => ({ basket: s.basket.map((b) => b.pn === pn ? Object.assign({}, b, { [key]: v }) : b) })); }; }
+  updForm(pn, key) { return (e) => { var v = e.target.value; this.setState((s) => ({ form: Object.assign({}, s.form, { [pn]: Object.assign({}, s.form[pn], { [key]: v }) }) })); }; }
+  addToBasket(pn) { this.setState((s) => s.basket.some((b) => b.pn === pn) ? null : { basket: s.basket.concat([{ pn: pn, qty: "1", date: "" }]) }); }
+  submit() {
+    var s = this.state; if (!s.basket.length) return;
+    var no = "Q-1028-0" + String(s.seq).padStart(2, "0");
+    var rows = s.basket.map((b, i) => ({ id: Date.now() + i, inq: no, customer: s.customer || "未填客户", pn: b.pn, qty: Number(b.qty) || 1, date: b.date }));
+    this.setState({ rows: rows.concat(s.rows), basket: [], customer: "", seq: s.seq + 1 });
+  }
+  renderVals() {
+    var s = this.state, ask = s.view === "ask";
+    var tabOn = "background:#EEF3FF;color:#1D4ED8;font-weight:600", tabOff = "background:transparent;color:#4E5969";
+    var kw = s.q.trim().toUpperCase();
+    var results = CATALOG.filter((c) => !kw || (c.pn + c.desc).toUpperCase().indexOf(kw) >= 0).map((c) => {
+      var q = this.quoteOf(c.pn), inB = s.basket.some((b) => b.pn === c.pn);
+      return { pn: c.pn, desc: c.desc, quoteMain: q.state === "quoted" ? "现有报价 " + q.main : q.main, quoteSub: q.sub, quoteStyle: q.style,
+        inBasket: inB, canAdd: !inB, add: () => this.addToBasket(c.pn) };
+    });
+    var progress = s.rows.map((r) => { var q = this.quoteOf(r.pn); return { inq: r.inq, customer: r.customer, pn: r.pn, qty: r.qty, quoteText: q.state === "none" ? "等待报价" : q.main, quoteStyle: q.style }; });
+    var basket = s.basket.map((b) => Object.assign({}, b, { onQty: this.updBasket(b.pn, "qty"), onDate: this.updBasket(b.pn, "date"),
+      remove: () => this.setState((st) => ({ basket: st.basket.filter((x) => x.pn !== b.pn) })) }));
+
+    var byPn = [];
+    s.rows.forEach((r) => { var g = byPn.find((x) => x.pn === r.pn); if (!g) { g = { pn: r.pn, rows: [] }; byPn.push(g); } g.rows.push(r); });
+    var pendingPns = byPn.filter((g) => this.quoteOf(g.pn).state === "none").length;
+    var pns = byPn.filter((g) => s.filter === "all" || this.quoteOf(g.pn).state === "none").map((g) => {
+      var q = this.quoteOf(g.pn), total = g.rows.reduce((n, r) => n + r.qty, 0);
+      var earliest = g.rows.map((r) => r.date).filter(Boolean).sort()[0];
+      var opened = !!s.open[g.pn], f = s.form[g.pn] || {};
+      return {
+        pn: g.pn, desc: descOf(g.pn),
+        demandText: g.rows.length + " 张询价 · 共 " + total + " 件" + (earliest ? " · 最早要 " + earliest.slice(5) : ""),
+        demandStyle: "font-weight:600;color:" + (q.state === "none" ? "#B45309" : "#1D2129"),
+        inqs: g.rows.map((r) => ({ label: r.inq + " " + r.customer + " ×" + r.qty })),
+        quoteMain: q.main, quoteSub: q.sub, quoteStyle: q.style,
+        opened: opened, closed: !opened, f: f,
+        btnLabel: q.state === "quoted" ? "更新报价" : q.state === "skip" ? "改为报价" : "报价",
+        btnClass: q.state === "none" ? "pri" : "btn",
+        saveLabel: "保存并通知 " + g.rows.length + " 张询价",
+        open: () => this.setState((st) => ({ open: Object.assign({}, st.open, { [g.pn]: true }), form: Object.assign({}, st.form, { [g.pn]: Object.assign({ tax: "含税", lead: "", valid: "" }, st.quotes[g.pn] || {}) }) })),
+        close: () => this.setState((st) => { var o = Object.assign({}, st.open); delete o[g.pn]; return { open: o }; }),
+        onPrice: this.updForm(g.pn, "price"), onTax: this.updForm(g.pn, "tax"), onLead: this.updForm(g.pn, "lead"), onValid: this.updForm(g.pn, "valid"),
+        save: () => {
+          if (!String(f.price || "").trim()) return;
+          this.setState((st) => {
+            var o = Object.assign({}, st.open); delete o[g.pn];
+            var sk = Object.assign({}, st.skips); delete sk[g.pn];
+            return { open: o, skips: sk, quotes: Object.assign({}, st.quotes, { [g.pn]: { price: f.price, tax: f.tax || "含税", lead: f.lead || "现货", valid: f.valid || "2026-11-28", at: "刚刚", by: "我" } }) };
+          });
+        }
+      };
+    });
+    var filters = [["need", "需要报价 " + pendingPns], ["all", "全部型号 " + byPn.length]].map((x) => ({ label: x[1], on: s.filter === x[0], pick: () => this.setState({ filter: x[0] }),
+      style: s.filter === x[0] ? "border-color:#1D4ED8;color:#1D4ED8;background:#EEF3FF;font-weight:600" : "" }));
+    return {
+      askOn: ask, quoteOn: !ask, toAsk: () => this.setState({ view: "ask" }), toQuote: () => this.setState({ view: "quote" }),
+      askTabStyle: ask ? tabOn : tabOff, quoteTabStyle: ask ? tabOff : tabOn, pendingPns: pendingPns,
+      q: s.q, onQ: (e) => this.setState({ q: e.target.value }), results: results, noResults: results.length === 0 && !!kw,
+      addRaw: () => { this.addToBasket(s.q.trim().toUpperCase()); this.setState({ q: "" }); },
+      progress: progress, customer: s.customer, onCustomer: (e) => this.setState({ customer: e.target.value }),
+      basket: basket, basketCount: s.basket.length, basketEmpty: s.basket.length === 0, submit: () => this.submit(),
+      filters: filters, pns: pns
+    };
+  }
+}
+</script>
+</body>
+</html>

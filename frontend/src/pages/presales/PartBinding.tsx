@@ -1,10 +1,10 @@
 import { presales, type Inquiry, type InquiryLine } from "../../api/presales";
 import PartRegistrationForm from "../../components/parts/PartRegistrationForm";
 
-export default function PartBinding({ line, onBound, refresh, disabled }: {
-  line: InquiryLine; onBound: (inquiry: Inquiry) => void; refresh: () => Promise<void>; disabled?: boolean;
+export default function PartBinding({ line, onBound, refresh, disabled, compact = false }: {
+  line: InquiryLine; onBound: (inquiry: Inquiry) => void; refresh: () => Promise<void>; disabled?: boolean; compact?: boolean;
 }) {
-  return <PartRegistrationForm key={line.id} initialPn={line.pn_raw} initialDescription={line.description}
+  return <PartRegistrationForm compact={compact} key={line.id} initialPn={line.pn_raw} initialDescription={line.description}
     submitLabel="新建并绑定 PN"
     disabled={disabled}
     onRefresh={refresh}

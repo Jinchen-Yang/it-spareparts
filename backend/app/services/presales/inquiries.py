@@ -1,6 +1,6 @@
 """询价单生命周期；待办、时间线和自定义字段仅走通用服务。"""
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -15,11 +15,14 @@ from app.models.presales import (
 from app.services import field_pool
 from app.services.presales import common
 from app.services.workflow import work_items
-from app.services.workflow.registry import Forbidden, InvalidTransition, Subject
+from app.services.workflow.registry import Conflict, Forbidden, InvalidTransition, Subject
 
 SUBJECT_TYPE = "presales_inquiry"
 _LINE_FIELDS = {"line_key", "part_id", "pn_raw", "description", "qty", "require_exact_pn",
-                "ref_offer_id", "notes", "notes_audience", "field_values", "expected_delivery"}
+                "ref_offer_id", "notes", "notes_audience", "field_values", "expected_delivery",
+                "return_defective"}
+PRIORITIES = {"normal", "urgent"}
+URGE_INTERVAL = timedelta(minutes=30)
 
 
 def subject(inquiry):
@@ -154,7 +157,7 @@ def _reference(db, line, ctx, *, allow_new=False):
         from app.services.presales.visibility import pinned_offer_view
         view = pinned_offer_view(db, line.ref_offer_id, line.ref_offer_revision_no, ctx)
         if view is None or view["expired"] or view["original_withdrawn"]:
-            raise InvalidTransition("只能引用有效期内且可见的报价版本")
+            raise InvalidTransition("只能引用有效且可见的报价版本")
         if line.part_id != view["part_id"]:
             raise InvalidTransition("引用报价的 PN 与询价行不一致")
         return
@@ -162,11 +165,8 @@ def _reference(db, line, ctx, *, allow_new=False):
         raise InvalidTransition("原引用缺少历史版本，请先取消引用再重新选择")
     offer = db.scalar(select(PresalesOffer).where(PresalesOffer.id == line.ref_offer_id)
                       .with_for_update().execution_options(populate_existing=True))
-    now = common.now()
-    if (offer is None or offer.status != "published" or offer.no_stock or
-            offer.valid_from is None or now < offer.valid_from or
-            offer.valid_until is None or now >= offer.valid_until):
-        raise InvalidTransition("只能引用有效期内的报价")
+    if offer is None or not common.offer_effective(offer):
+        raise InvalidTransition("只能引用有效的报价")
     if line.part_id is None or offer.part_id != line.part_id:
         raise InvalidTransition("引用报价的 PN 与询价行不一致")
     from app.services.presales.visibility import can_view_offer
@@ -180,7 +180,8 @@ def _reference(db, line, ctx, *, allow_new=False):
 
 def _signature(line):
     return {"part_id": line.part_id, "pn_raw": line.pn_raw, "qty": str(Decimal(line.qty).normalize()),
-            "require_exact_pn": line.require_exact_pn, "has_reference": line.ref_offer_id is not None}
+            "require_exact_pn": line.require_exact_pn, "return_defective": line.return_defective,
+            "has_reference": line.ref_offer_id is not None}
 
 
 def _snapshot(db, inquiry):
@@ -223,6 +224,10 @@ def _write_line(db, inquiry, data, seq, ctx, existing=None):
     exact = data.get("require_exact_pn", line.require_exact_pn if line.require_exact_pn is not None else False)
     if type(exact) is not bool:
         raise InvalidTransition("require_exact_pn 必须为布尔值")
+    return_defective = data.get("return_defective", line.return_defective if line.return_defective is not None else True)
+    if type(return_defective) is not bool:
+        raise InvalidTransition("坏件是否返回必须为布尔值")
+    line.return_defective = return_defective
     ref = data.get("ref_offer_id", line.ref_offer_id)
     if ref is not None and (type(ref) is not int or ref < 1):
         raise InvalidTransition("引用报价 ID 无效")
@@ -277,8 +282,15 @@ def _replace_lines(db, inquiry, data, ctx):
     db.flush()
 
 
+def _priority(value):
+    if value not in PRIORITIES:
+        raise InvalidTransition("优先级只能是普通或紧急")
+    return value
+
+
 def create_draft(db, actor, *, kind="sales_inquiry", customer_id=None, notes=None, lines=None,
-                 assignee_ids=None, offer_audience=None, notes_audience=None, field_values=None):
+                 assignee_ids=None, offer_audience=None, notes_audience=None, field_values=None,
+                 priority="normal"):
     user, ctx = common.resolve_actor(db, actor)
     if kind not in {"sales_inquiry", "proactive_offer"}:
         raise InvalidTransition("单据类型无效")
@@ -286,7 +298,8 @@ def create_draft(db, actor, *, kind="sales_inquiry", customer_id=None, notes=Non
     inquiry = PresalesInquiry(kind=kind, inquiry_no=_number(db, kind), customer_id=_customer(db, customer_id),
         status="draft", revision=1, version=1, created_by=user.id, assignee_ids=_assignees(db, assignee_ids or []),
         notes=_text(notes, "备注"), offer_audience_rule_id=common.rule_id(db, offer_audience, ctx, default="public"),
-        notes_audience_rule_id=common.rule_id(db, notes_audience, ctx), submitted_snapshot={})
+        notes_audience_rule_id=common.rule_id(db, notes_audience, ctx), submitted_snapshot={},
+        priority=_priority(priority))
     db.add(inquiry)
     db.flush()
     field_pool.template_for(db, SUBJECT_TYPE, "header", ctx)
@@ -299,8 +312,10 @@ def update_draft(db, inquiry_id, actor, expected_version, *, lines=None, field_v
     inquiry, user, ctx = _locked(db, inquiry_id, actor, expected_version)
     if inquiry.status not in {"draft", "revising"}:
         raise InvalidTransition("请先撤回再修改询价单")
-    if set(changes) - {"customer_id", "notes", "assignee_ids", "offer_audience", "notes_audience"}:
+    if set(changes) - {"customer_id", "notes", "assignee_ids", "offer_audience", "notes_audience", "priority"}:
         raise InvalidTransition("询价单包含未知字段")
+    if "priority" in changes:
+        inquiry.priority = _priority(changes["priority"])
     if "customer_id" in changes:
         inquiry.customer_id = _customer(db, changes["customer_id"])
     if "notes" in changes:
@@ -389,7 +404,7 @@ def resubmit(db, inquiry_id, actor, expected_version):
         raise InvalidTransition("只能重新提交已撤回的销售询价")
     rows = _validate_submit(db, inquiry, ctx)
     # 旧快照没有引用标记；不能仅因升级了签名就重开已经回复的待办。
-    previous = {key: {"has_reference": False, **signature}
+    previous = {key: {"has_reference": False, "return_defective": True, **signature}
                 for key, signature in inquiry.submitted_snapshot.get("lines", {}).items()}
     current = {line.line_key: _signature(line) for line in rows}
     changed = {key for key in previous if key not in current or previous[key] != current[key]}
@@ -415,7 +430,7 @@ def resubmit(db, inquiry_id, actor, expected_version):
         offers = list(db.scalars(select(PresalesOffer).where(PresalesOffer.line_id.in_(ids),
             PresalesOffer.status.in_(("draft", "published"))).order_by(PresalesOffer.id).with_for_update()))
         for offer in offers:
-            mark_stale(db, offer, user.id, "询价行删除或 PN、数量、要求 PN 一致发生变化")
+            mark_stale(db, offer, user.id, "询价行删除或 PN、数量、要求 PN 一致、坏件返回条件发生变化")
     items = work_items.list_by_subject(db, subject(inquiry), user.id, lock=True)
     old_assignees = inquiry.submitted_snapshot.get("assignee_ids", [])
     inquiry.status = "submitted"
@@ -469,7 +484,7 @@ def close(db, inquiry_id, actor, expected_version, *, outcome, won_offer_id=None
         raise InvalidTransition("关单状态或结果无效")
     if won_offer_id is not None:
         offer = db.get(PresalesOffer, won_offer_id)
-        line = db.get(PresalesInquiryLine, offer.line_id) if offer else None
+        line = db.get(PresalesInquiryLine, offer.line_id) if offer and offer.line_id is not None else None
         own = (offer is not None and offer.inquiry_id == inquiry.id and
                offer.status == "published" and not offer.no_stock and
                line is not None and line.status == "active")
@@ -520,13 +535,37 @@ def copy_as_new(db, inquiry_id, actor, expected_version):
     source_lines = lines_for(db, inquiry.id)
     payload = [{"part_id": line.part_id, "pn_raw": line.pn_raw, "description": line.description,
         "qty": line.qty, "require_exact_pn": line.require_exact_pn, "notes": line.notes,
-        "expected_delivery": line.expected_delivery}
+        "expected_delivery": line.expected_delivery, "return_defective": line.return_defective}
         for line in source_lines]
     copied = create_draft(db, user.id, kind=inquiry.kind, customer_id=inquiry.customer_id,
-        notes=inquiry.notes, lines=payload, assignee_ids=list(inquiry.assignee_ids))
+        notes=inquiry.notes, lines=payload, assignee_ids=list(inquiry.assignee_ids), priority=inquiry.priority)
     copied.offer_audience_rule_id = inquiry.offer_audience_rule_id
     copied.notes_audience_rule_id = inquiry.notes_audience_rule_id
     for source_line, copied_line in zip(source_lines, lines_for(db, copied.id), strict=True):
         copied_line.notes_audience_rule_id = source_line.notes_audience_rule_id
     _record(db, copied, user.id, "inquiry.copied", {"source_inquiry_id": inquiry.id})
     return copied
+
+
+def urge(db, inquiry_id, actor):
+    """D-0047：发起人催未回复的询价，30 分钟限一次；只记时间线与次数，不改待办。"""
+    inquiry = common.lock_inquiry(db, inquiry_id)
+    user, ctx = common.resolve_actor(db, actor)
+    _permission(ctx, inquiry.kind)
+    if inquiry.created_by != user.id:
+        raise Forbidden("只有询价发起人可以催办")
+    if inquiry.kind != "sales_inquiry" or inquiry.status != "submitted":
+        raise InvalidTransition("只能催办已提交的销售询价")
+    open_items = [item for item in work_items.subject_items(db, subject(inquiry), user.id)
+                  if item.status in work_items.ACTIVE and not item.paused]
+    if not open_items:
+        raise InvalidTransition("采购已全部回复，无需催办")
+    current = common.now()
+    if inquiry.last_urged_at is not None and current - inquiry.last_urged_at < URGE_INTERVAL:
+        wait = URGE_INTERVAL - (current - inquiry.last_urged_at)
+        minutes = max(1, -(-int(wait.total_seconds()) // 60))
+        raise Conflict(f"30 分钟内只能催办一次，请 {minutes} 分钟后再催", code="urge_too_soon")
+    # 不递增单据版本：采购正在填写的报价以询价版本做并发校验，催办不能让其保存冲突。
+    inquiry.urge_count += 1
+    inquiry.last_urged_at = current
+    return _record(db, inquiry, user.id, "inquiry.urged", {"urge_count": inquiry.urge_count})

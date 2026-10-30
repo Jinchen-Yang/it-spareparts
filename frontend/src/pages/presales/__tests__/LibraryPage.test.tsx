@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "../../../test/a
 import { MemoryRouter, useLocation } from "react-router-dom";
 import type { LibraryPart, Offer } from "../../../api/presales";
 import LibraryPage from "../LibraryPage";
-import { expiryLabel, usePresalesError, isOfferActive, offerDeadline, OfferBadge } from "../shared";
+import { usePresalesError, isOfferActive, offerDeadline, OfferBadge } from "../shared";
 
 const api = vi.hoisted(() => ({ searchLibrary: vi.fn(), getInquiry: vi.fn() }));
 vi.mock("../../../api/presales", () => ({ presales: api }));
@@ -16,7 +16,7 @@ vi.mock("../../../components/pricing/PriceRefBadge", () => ({ default: () => <sp
 function offer(overrides: Partial<Offer> = {}): Offer {
   return { id: 7, inquiry_id: 2, line_id: 3, part_id: 1, version: 1, revision_no: 1,
     status: "published", unit_price: "100.00", is_tax_inclusive: false, stock_location: "深圳",
-    valid_from: "2026-10-25T00:00:00Z", valid_until: "2026-10-25T15:59:59.999999Z", ...overrides };
+    valid_from: "2026-10-25T00:00:00Z", ...overrides };
 }
 
 function Location() {
@@ -44,20 +44,29 @@ it("报价库按输入查询，显示税基、来源和服务端允许的字段�
   expect(screen.getByText("来源：主动报价")).toBeInTheDocument();
   expect(screen.getByText("所在地：深圳")).toBeInTheDocument();
   expect(screen.queryByText(/报价人：|供应商：/)).not.toBeInTheDocument();
-  expect(screen.getByText(/有效报价.*不含税.*剩 1 天/)).toBeInTheDocument();
+  expect(screen.getByText(/有效报价.*不含税/)).toBeInTheDocument();
+  expect(screen.queryByText(/剩 \d+ 天/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "用这条报价建询价单" }));
   expect(screen.getByLabelText("导航")).toHaveTextContent("/presales/inquiries/new");
   expect(screen.getByLabelText("导航")).toHaveTextContent('"referenceOffer":{"id":7');
 });
 
-it("微秒截止在浏览器可表示的最后一毫秒仍有效，跨到次日立即置灰并禁用引用", async () => {
+it("D-0046：报价不随时间失效，跨日后仍可引用", async () => {
   await search();
-  await act(async () => { await vi.advanceTimersByTimeAsync(349); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(2 * 86_400_000); });
   expect(screen.getByRole("button", { name: "用这条报价建询价单" })).toBeEnabled();
-  await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-  expect(screen.getByRole("button", { name: "用这条报价建询价单" })).toBeDisabled();
-  expect(screen.getByLabelText("报价 7")).toHaveAttribute("aria-disabled", "true");
-  expect(screen.getByLabelText("报价 7")).toHaveTextContent("已失效");
+  expect(screen.getByLabelText("报价 7")).toHaveAttribute("aria-disabled", "false");
+  expect(screen.getByLabelText("报价 7")).not.toHaveTextContent("已失效");
+  expect(screen.getByText(/报价一直有效，直到报价人更新或撤回/)).toBeInTheDocument();
+});
+
+it("独立主动报价没有来源单，不请求或导航到null来源，仍可引用", async () => {
+  api.searchLibrary.mockResolvedValue([{ part_id: 1, pn_std: "PN-A", offers: [offer({ inquiry_id: null, line_id: null })], offer_count: 1 } as LibraryPart]);
+  await search();
+  expect(api.getInquiry).not.toHaveBeenCalled();
+  expect(screen.getByText("来源：主动报价")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "查看来源单" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "用这条报价建询价单" })).toBeEnabled();
 });
 
 it("旧搜索的迟到结果不会覆盖新的查询", async () => {
@@ -90,19 +99,23 @@ it("普通 409 保留业务原因不刷新，字段错误显示服务端原因",
   expect(refresh).not.toHaveBeenCalled();
 });
 
-it("报价角标只展示服务端返回的报价人，并在边界刷新", async () => {
-  render(<OfferBadge offer={offer({ reporter: { id: 4, name: "采购甲" } })} />);
+it("报价角标只展示服务端返回的报价人，不随时间变为失效", async () => {
+  localStorage.setItem("permissions", JSON.stringify({ data_cost: false }));
+  render(<OfferBadge offer={offer({ reporter: { id: 4, name: "采购甲" }, price_basis: "cost" })} />);
+  expect(screen.getByText("成本价")).toBeVisible();
   expect(screen.getByText(/采购甲/)).toBeInTheDocument();
-  await act(async () => { await vi.advanceTimersByTimeAsync(500); });
-  expect(screen.getByText(/已失效/)).toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(86_400_000); });
+  expect(screen.getByText(/有效报价/)).toBeInTheDocument();
+  expect(screen.queryByText(/已失效/)).not.toBeInTheDocument();
 });
 
-it("1 天和 3 天按上海自然日计算，覆盖月底及周末", () => {
-  const now = Date.parse("2026-10-30T16:30:00Z");
-  expect(expiryLabel(1, now)).toBe("将于 10月31日 23:59 失效（上海时间）");
-  expect(expiryLabel(3, now)).toBe("将于 11月2日 23:59 失效（上海时间）");
+it("有效判断只看状态与服务端取代标记，不看时间截止", () => {
   expect(isOfferActive(offer(), Date.parse("2026-10-25T15:59:59.999Z"))).toBe(true);
-  expect(isOfferActive(offer(), Date.parse("2026-10-25T16:00:00Z"))).toBe(false);
+  expect(isOfferActive(offer(), Date.parse("2036-10-25T16:00:00Z"))).toBe(true);
+  expect(isOfferActive(offer(), Date.parse("2026-10-24T23:59:59Z"))).toBe(false);
+  expect(isOfferActive(offer({ expired: true }))).toBe(false);
+  expect(isOfferActive(offer({ no_stock: true }))).toBe(false);
+  expect(isOfferActive(offer({ original_withdrawn: true }))).toBe(false);
   expect(offerDeadline("2026-10-25T16:00:00.000000Z")).toBe(Date.parse("2026-10-25T16:00:00Z"));
 });
 
@@ -145,14 +158,11 @@ it("更多报价也能展开各自的可供数量与交期，不误用主报价�
   expect(row).not.toHaveTextContent("主报价交期");
 });
 
-it("主报价到期但同组旧报价仍有效时，主行提升为可引用的最新有效报价", async () => {
+it("主报价不可用但同组其他报价仍有效时，主行提升为可引用的最新有效报价", async () => {
   api.searchLibrary.mockResolvedValue([{ part_id: 1, pn_std: "PN-A", offer_count: 1, offers: [
-    offer({ more: [offer({ id: 8, unit_price: "80.00", valid_from: "2026-10-24T00:00:00Z",
-      valid_until: "2026-10-26T15:59:59.999999Z" })] }),
+    offer({ expired: true, more: [offer({ id: 8, unit_price: "80.00", valid_from: "2026-10-24T00:00:00Z" })] }),
   ] }]);
   await search();
-  expect(screen.getByLabelText("报价 7")).toBeInTheDocument();
-  await act(async () => { await vi.advanceTimersByTimeAsync(350); });
   expect(screen.queryByLabelText("报价 7")).not.toBeInTheDocument();
   expect(screen.getByLabelText("报价 8")).toHaveTextContent("有效报价 ¥80");
   expect(screen.getByRole("button", { name: "用这条报价建询价单" })).toBeEnabled();

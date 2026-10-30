@@ -24,8 +24,8 @@ it("使用主键、各主体版本与受众账号字符串传递原始契约，�
   expect(http.post).toHaveBeenLastCalledWith("/presales/lines/20/bind-part", { expected_version: 3, part_id: 8 });
   await presales.saveOffer(1, 20, { expected_version: 7, offer_id: 9, unit_price: "12.50" });
   expect(http.post).toHaveBeenLastCalledWith("/presales/inquiries/1/lines/20/offers", { expected_version: 7, offer_id: 9, unit_price: "12.50" });
-  await presales.updateOffer(9, { expected_version: 8, validity_days: 3 });
-  expect(http.patch).toHaveBeenCalledWith("/presales/offers/9", { expected_version: 8, validity_days: 3 });
+  await presales.updateOffer(9, { expected_version: 8, unit_price: "13.00" });
+  expect(http.patch).toHaveBeenCalledWith("/presales/offers/9", { expected_version: 8, unit_price: "13.00" });
 });
 
 it("撤回、重新提交、追加、复制、关单与撤销调用对应端点", async () => {

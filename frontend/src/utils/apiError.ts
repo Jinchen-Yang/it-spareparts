@@ -34,7 +34,7 @@ const fieldLabels: Record<string, string> = {
   pn: "PN", pn_std: "PN", pn_raw: "PN", part_id: "PN 档案", description: "描述", summary: "简介",
   brand: "品牌", manufacturer: "制造商", category_major: "一级类别", category_minor: "二级类别",
   specs: "参数", spec_updates: "参数", key: "参数名", value: "参数值", unit: "单位", numeric_value: "参数数值", qty: "数量", lines: "明细", unit_price: "单价", machine_or_part: "整机或备件",
-  validity_days: "有效天数", stock_qty: "库存数量", qty_available: "可供数量", stock_location: "货物所在地", lead_time: "交期",
+  stock_qty: "库存数量", qty_available: "可供数量", stock_location: "货物所在地", lead_time: "交期",
   supplier_id: "供应商", source_key: "货源标识", is_tax_inclusive: "含税口径", expected_version: "记录版本", reason: "原因",
   notes: "备注", field_values: "扩展字段", name: "名称", assignee_id: "处理人", customer_name: "客户名称",
 };

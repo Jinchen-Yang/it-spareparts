@@ -7,6 +7,7 @@ import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import PartInquiryHistory from "./presales/PartInquiryHistory";
+import { latestActiveOffer, LatestPriceTag } from "./presales/shared";
 import PoolReferencePanel from "../components/pools/PoolReferencePanel";
 import InlinePartEditModal from "../components/parts/InlinePartEditModal";
 import PartGalleryPanel from "../components/parts/PartGalleryPanel";
@@ -15,10 +16,13 @@ import PartThumb from "../components/gallery/PartThumb";
 import GalleryPicker from "../components/gallery/GalleryPicker";
 import PriceRefBadge from "../components/pricing/PriceRefBadge";
 import api from "../api";
+import { presales, type Offer } from "../api/presales";
+import { readPermissionMap } from "../nav";
 import type { Overview, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { unifiedSearch, fetchOverview } from "../api/search";
-import type { SearchFilters, UnifiedSearchItem, UnifiedSearchResp } from "../api/search";
+import type { PartSuggestion, SearchFilters, UnifiedSearchItem, UnifiedSearchResp } from "../api/search";
 import "./PartSearchPage.css";
+import "./presales/presales.css";
 import { completeTaxPair, money, pct, splitByFlag, splitFixed } from "../utils/format";
 import type { TaxSplit } from "../utils/format";
 import { useTaxBasis, TaxMoney } from "../context/TaxBasis";
@@ -89,13 +93,16 @@ export default function PartSearchPage() {
       canEditSubstitutes: ["admin", "purchaser"].includes(role),
       // 详情页轻量编辑与「备件主数据」共用权限；后端 /parts/master 仍做最终准入。
       canEditPartDetails: canSee("page_master_data"),
-      canSeePresales: canSee("page_presales"),
+      canSeePresales: role === "admin" || readPermissionMap().page_presales === true,
     };
   });
 
   const [qInput, setQInput] = useState(urlQ);
   const [queryError, setQueryError] = useState(false);
   const [resp, setResp] = useState<UnifiedSearchResp | null>(null);
+  const [resultQuery, setResultQuery] = useState("");
+  const [suggestions, setSuggestions] = useState<PartSuggestion[]>([]);
+  const [latest, setLatest] = useState<{ key: string; offers: Record<number, Offer | undefined> }>({ key: "", offers: {} });
   const [searching, setSearching] = useState(false);
   const [ov, setOv] = useState<Overview | null>(null);
   const [loadingOv, setLoadingOv] = useState(false);
@@ -150,6 +157,7 @@ export default function PartSearchPage() {
       const data = await unifiedSearch(q, { pageSize: 20, filters });
       if (seq !== searchSeq.current) return;   // 已有更新的搜索在跑
       setResp(data);
+      setResultQuery(JSON.stringify([q, filters || {}]));
       if (data.items.length === 0) message.info("没有匹配的型号");
       // 精确即唯一：自动打开唯一主结果的全景（replace 不额外堆历史，后退直接回搜索前）
       if (data.exact && data.items[0]?.part_id && selectExact) {
@@ -289,14 +297,40 @@ export default function PartSearchPage() {
     }
   };
 
+  // 联想、结果与当前全景共用一次批量报价请求；同组 ID 的顺序/重复项不触发重查。
+  const currentResults = !searching && resultQuery === JSON.stringify([urlQ, urlFilters]) ? resp : null;
+  const currentOverview = ov && (String(ov.part.id) === urlPartId || ov.part.pn_std === urlPn) ? ov : null;
+  const pricePartIds = [...new Set([
+    ...suggestions.map((item) => item.part_id),
+    ...(currentResults?.items || []).map((item) => item.part_id),
+    ...(currentResults?.similar_items || []).map((item) => item.part_id),
+    ...(currentOverview ? [currentOverview.part.id] : []),
+  ])].filter((id) => id > 0).sort((a, b) => a - b).join(",");
+  useEffect(() => {
+    setLatest({ key: "", offers: {} });
+    if (!canSeePresales || !pricePartIds || searching) return;
+    let cancelled = false;
+    const ids = pricePartIds.split(",").map(Number);
+    presales.library(ids).then((groups) => {
+      if (cancelled) return;
+      setLatest({ key: pricePartIds, offers: Object.fromEntries(ids.map((id) => [id, latestActiveOffer(groups[id] || [])])) });
+    }).catch(() => { /* 报价加载失败不影响型号查询。 */ });
+    return () => { cancelled = true; };
+  }, [canSeePresales, pricePartIds, searching]);
+  const priceTag = (partId: number) => canSeePresales && !searching
+    ? <LatestPriceTag offer={latest.key === pricePartIds ? latest.offers[partId] : undefined} /> : null;
+
   const hitCols: ColumnsType<UnifiedSearchItem> = [
     {
       title: "型号 (PN)", dataIndex: "pn_std", width: 220,
       render: (v, r) => (
-        <Button type="link" size="small" onClick={() => openPart(r)}>
-          {v} {r.needs_review && <Tag color="orange">待复核</Tag>}
-          {r.is_excluded && <Tag color="red">已排除</Tag>}
-        </Button>
+        <Space size={4} wrap>
+          <Button type="link" size="small" onClick={() => openPart(r)}>
+            {v} {r.needs_review && <Tag color="orange">待复核</Tag>}
+            {r.is_excluded && <Tag color="red">已排除</Tag>}
+          </Button>
+          {priceTag(r.part_id)}
+        </Space>
       ),
     },
     {
@@ -395,6 +429,8 @@ export default function PartSearchPage() {
               renderThumb={(item) => <span className="live-part-search-thumb" aria-hidden>
                 <PartThumb partId={item.part_id} pn={item.pn_std} size={40} />
               </span>}
+              renderBadges={(item) => priceTag(item.part_id)}
+              onSuggestionsChange={setSuggestions}
               onInputChange={(text) => { setQInput(text); setQueryError(false); }}
               inputProps={{
                 "aria-label": "型号或关键词",
@@ -446,6 +482,7 @@ export default function PartSearchPage() {
             <Button type="link" size="small" onClick={() => openPart(exactItem)} style={{ fontFamily: "monospace", fontWeight: 600 }}>
               {exactItem.pn_std}
             </Button>
+            {priceTag(exactItem.part_id)}
             <Tag color="green">{exactItem.match_type === "exact_alias"
               ? `别名精确：${exactItem.matched_text}` : "PN 精确匹配"}</Tag>
             {exactItem.pool_name && <Tag color="geekblue">互通池：{exactItem.pool_name}</Tag>}
@@ -457,6 +494,7 @@ export default function PartSearchPage() {
                 <Button type="link" size="small" onClick={() => openPart(it)} title={it.description || undefined}>
                   {it.pn_std}
                 </Button>
+                {priceTag(it.part_id)}
                 <small>{it.match_reason || "非精确命中，仅供参考"}</small>
                 {it.needs_review && <Tag color="orange">待复核</Tag>}
                 {it.is_excluded && <Tag color="red">已排除</Tag>}
@@ -472,7 +510,8 @@ export default function PartSearchPage() {
       ))}
 
       {ov ? (
-        <Card className="part-overview" loading={loadingOv} title={<>型号全景：<b>{ov.part.pn_std}</b>
+        <Card className="part-overview" loading={loadingOv} title={<>型号全景：<Space size={6} wrap><b>{ov.part.pn_std}</b>
+          {priceTag(ov.part.id)}</Space>
           {ov.part.needs_review && <Tag color="orange" style={{ marginLeft: 8 }}>PN 待复核</Tag>}
           {ov.part.redirected_from && <Tag color="blue" style={{ marginLeft: 8 }}>由 {ov.part.redirected_from} 合并而来</Tag>}</>}>
           <section aria-label="型号摘要" className="part-summary">

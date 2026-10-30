@@ -20,7 +20,7 @@ def _submitted(db, users, parts, *, pool=False, reference=None):
 
 def _quote(db, inquiry, line, buyer):
     offer = offers.save_draft(db, inquiry.id, line.id, buyer.id,
-        {"unit_price": "123.45", "validity_days": 3}, expected_version=inquiry.version)
+        {"unit_price": "123.45"}, expected_version=inquiry.version)
     offers.reply(db, inquiry.id, buyer.id, expected_version=inquiry.version, on_existing="new")
     return offer
 

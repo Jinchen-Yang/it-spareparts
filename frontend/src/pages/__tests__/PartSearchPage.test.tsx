@@ -17,7 +17,7 @@ import type { Location, NavigateFunction } from "react-router-dom";
 import type { Overview } from "../../api";
 
 const partInquiries = vi.fn();
-vi.mock("../../api/presales", () => ({ presales: { partInquiries: (...args: unknown[]) => partInquiries(...args) } }));
+vi.mock("../../api/presales", () => ({ presales: { partInquiries: (...args: unknown[]) => partInquiries(...args), library: vi.fn(async () => ({})) } }));
 const unifiedSearch = vi.fn();
 const fetchOverview = vi.fn();
 const fetchMasterEditState = vi.fn();
@@ -34,6 +34,7 @@ function deferred<T>() {
 vi.mock("../../api/search", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../../api/search")>();
   return { ...mod,
+    suggestParts: vi.fn(async () => []),
     unifiedSearch: (...a: unknown[]) => unifiedSearch(...a),
     fetchOverview: (...a: unknown[]) => fetchOverview(...a),
     fetchMasterEditState: (...a: unknown[]) => fetchMasterEditState(...a),

@@ -21,6 +21,8 @@ export interface LivePartSearchProps {
   onCreate?: (text: string) => void;
   renderThumb?: (item: PartSuggestion) => ReactNode;
   renderBadges?: (item: PartSuggestion) => ReactNode;
+  /** 将当前候选交给调用页批量加载标签数据。 */
+  onSuggestionsChange?: (items: PartSuggestion[]) => void;
 }
 
 /** 只在 PN 内匹配字面片段，并把归一化/紧凑匹配映回原文字符区间。 */
@@ -70,7 +72,7 @@ function highlightedPn(pn: string, terms: string[]) {
 /** 独立联想组件，不接触现有 PartPicker 的身份与匹配契约。 */
 export default function LivePartSearch({
   mode = "single", value, onChange, inputValue, onInputChange, inputProps,
-  limit = 10, minChars = 1, onAddRaw, onCreate, renderThumb, renderBadges,
+  limit = 10, minChars = 1, onAddRaw, onCreate, renderThumb, renderBadges, onSuggestionsChange,
 }: LivePartSearchProps) {
   const [text, setText] = useState(inputValue ?? "");
   const [picked, setPicked] = useState<PartSuggestion[]>([]);
@@ -167,6 +169,7 @@ export default function LivePartSearch({
   };
 
   const shown = open && !!query.trim() && !inputProps?.disabled;
+  useEffect(() => { onSuggestionsChange?.(items); }, [items, onSuggestionsChange]);
   const canCreate = onCreate && searched && !loading && !error
     && !items.some((item) => item.pn_std.trim().toUpperCase() === query.trim().toUpperCase());
   return (

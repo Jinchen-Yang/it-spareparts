@@ -3,21 +3,23 @@ import type { Offer, OfferInput } from "../../api/presales";
 import type { AudienceRule } from "../../api/audience";
 import AudienceLock from "../../components/audience/AudienceLock";
 import { PUBLIC_AUDIENCE } from "../../components/audience/AudiencePicker";
-import { expiryLabel, useNow } from "./shared";
 import { presales } from "../../api/presales";
 import { readPermissionMap } from "../../nav";
 import { changedAudience } from "../../components/audience/rules";
 import CandidateSelect from "./CandidateSelect";
+import { basisLabel } from "./shared";
 
 const PRIVATE_AUDIENCE: AudienceRule = { mode: "private", user_ids: [], group_ids: [] };
-const editableFields = ["unit_price", "is_tax_inclusive", "no_stock", "qty_available", "stock_location",
-  "lead_time", "source_key", "supplier_id", "validity_days", "notes"] as const;
+const editableFields = ["unit_price", "is_tax_inclusive", "price_basis", "no_stock", "qty_available", "stock_location",
+  "lead_time", "source_key", "supplier_id", "notes"] as const;
 
 export function offerInput(offer?: Offer): OfferInput {
-  if (!offer) return { no_stock: false, validity_days: 1, supplier_audience: PRIVATE_AUDIENCE,
+  if (!offer) return { no_stock: false, supplier_audience: PRIVATE_AUDIENCE,
     reporter_audience: PUBLIC_AUDIENCE, notes_audience: PUBLIC_AUDIENCE };
   // 返回中缺失的字段保持缺失，避免保存时把不可见内容清空或改为公开。
+  // 草稿默认只用于回显；未明确选择时不发送，以便发布时更新已有报价能保留原口径。
   return Object.fromEntries(editableFields.filter((field) => field in offer)
+    .filter((field) => offer.status !== "draft" || (field !== "is_tax_inclusive" && field !== "price_basis"))
     .map((field) => [field, offer[field]]));
 }
 
@@ -36,11 +38,12 @@ interface Props {
 }
 
 export default function QuoteEditor({ value, onChange, existing, disabled = false, label = "报价", allowNoStock = true }: Props) {
-  const now = useNow();
   const permissions = readPermissionMap();
   const supplierVisible = localStorage.getItem("role") === "admin"
     || (permissions.data_supplier !== false && !!(permissions.action_presales_quote || permissions.action_presales_offer));
   const change = (patch: Partial<OfferInput>) => onChange({ ...value, ...patch });
+  const tax = value.is_tax_inclusive !== undefined ? value.is_tax_inclusive : existing ? existing.is_tax_inclusive ?? null : true;
+  const basis = value.price_basis ?? existing?.price_basis ?? "sale";
   const fieldVisible = (field: keyof Offer) => !existing || field in existing;
   const lock = (field: "supplier_audience" | "reporter_audience" | "notes_audience", title: string) => !existing || existing[field] ? (
     <AudienceLock key={`${existing?.id ?? "new"}:${existing?.version ?? 0}:${field}`} label={title} disabled={disabled}
@@ -50,9 +53,10 @@ export default function QuoteEditor({ value, onChange, existing, disabled = fals
 
   if (disabled) return <Descriptions column={1} items={[
     { key: "price", label: "单价", children: value.no_stock ? "无货" : value.unit_price ?? "待填写" },
-    { key: "tax", label: "含税口径", children: value.is_tax_inclusive === true ? "含税" : value.is_tax_inclusive === false ? "不含税" : "未声明" },
+    { key: "tax", label: "含税口径", children: tax === true ? "含税" : tax === false ? "不含税" : "未声明" },
+    { key: "basis", label: "价格性质", children: basisLabel({ price_basis: basis }) },
     ...([ ["qty_available", "可供数量"], ["stock_location", "货物所在地"], ["lead_time", "交期"],
-      ["validity_days", "有效天数"], ["supplier_id", "供应商"], ["source_key", "货源标识"], ["notes", "采购备注"] ] as const)
+      ["supplier_id", "供应商"], ["source_key", "货源标识"], ["notes", "采购备注"] ] as const)
       .filter(([key]) => key in value).map(([key, title]) => ({ key, label: title, children: String(value[key] ?? "—") })),
   ]} />;
   return <Form layout="vertical" component="div" className="presales-form">
@@ -65,11 +69,17 @@ export default function QuoteEditor({ value, onChange, existing, disabled = fals
           onChange={(next) => change({ unit_price: next })} />
       </Form.Item>}
       {<Form.Item label="含税口径">
-        <Select aria-label={`${label}含税口径`} value={value.is_tax_inclusive === true ? "inc" : value.is_tax_inclusive === false ? "ex" : "unknown"}
+        <Select aria-label={`${label}含税口径`} value={tax === true ? "inc" : tax === false ? "ex" : "unknown"}
           style={{ width: 150 }} disabled={disabled || value.no_stock}
-          options={[{ value: "unknown", label: "未声明" }, { value: "inc", label: "含税" }, { value: "ex", label: "不含税" }]}
-          onChange={(next) => change({ is_tax_inclusive: next === "unknown" ? null : next === "inc" })} />
+          options={[...(existing?.is_tax_inclusive == null && existing ? [{ value: "unknown", label: "未声明" }] : []),
+            { value: "inc", label: "含税" }, { value: "ex", label: "不含税" }]}
+          onSelect={(next) => change({ is_tax_inclusive: next === "unknown" ? null : next === "inc" })} />
       </Form.Item>}
+      <Form.Item label="价格性质">
+        <Select aria-label={`${label}价格性质`} value={basis} style={{ width: 150 }} disabled={disabled}
+          options={[{ value: "sale", label: "售价" }, { value: "cost", label: "成本价" }]}
+          onSelect={(next) => change({ price_basis: next })} />
+      </Form.Item>
       <Form.Item label="可供数量">
         <InputNumber aria-label={`${label}可供数量`} min={0} max={99999999999.999} precision={3}
           disabled={disabled || value.no_stock} value={value.qty_available == null ? null : Number(value.qty_available)}
@@ -84,18 +94,7 @@ export default function QuoteEditor({ value, onChange, existing, disabled = fals
           onChange={(event) => change({ lead_time: event.target.value })} />
       </Form.Item>
     </div>
-    <Form.Item className="presales-wide" label="有效天数（自然日）" required>
-      <Space wrap>
-        <Select aria-label={`${label}有效天数预设`} style={{ width: 150 }} disabled={disabled}
-          value={[1, 3, 7, 15, 30].includes(value.validity_days ?? 1) ? value.validity_days ?? 1 : "custom"}
-          options={[1, 3, 7, 15, 30].map((days) => ({ value: days as number | string, label: `${days} 天` }))
-            .concat([{ value: "custom", label: "自定义" }])}
-          onChange={(next) => change({ validity_days: next === "custom" ? 2 : Number(next) })} />
-        <InputNumber aria-label={`${label}有效天数`} min={1} max={36500} precision={0} disabled={disabled}
-          value={value.validity_days ?? 1} onChange={(next) => change({ validity_days: next ?? 1 })} />
-        <Typography.Text type="secondary" role="status">{expiryLabel(value.validity_days ?? 1, now)}</Typography.Text>
-      </Space>
-    </Form.Item>
+    <Typography.Text className="presales-wide" type="secondary">报价不设有效期，一直有效，直到你更新或撤回。</Typography.Text>
     {supplierVisible && fieldVisible("supplier_id") && <Form.Item label={<Space>供应商{lock("supplier_audience", "供应商")}</Space>}>
       <CandidateSelect label={`${label}供应商`} load={presales.suppliers} disabled={disabled} value={value.supplier_id}
         onChange={(next) => change({ supplier_id: next ?? null })} />

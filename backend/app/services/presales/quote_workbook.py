@@ -34,18 +34,19 @@ QUOTE_SCHEMA = WorkbookSchema("presales_quote_sheet", 1, [
         ColumnSpec("description", "描述", "text", "locked", "来源描述合并显示"),
         ColumnSpec("qty", "合计数量", "decimal", "locked", "按来源行合计", decimals=3),
         ColumnSpec("require_exact_pn", "要求 PN 一致", "bool", "locked", "一致要求不同的来源会拆行"),
+        ColumnSpec("return_defective", "坏件是否返回", "bool", "locked", "坏件返回条件不同的来源会拆行；不可修改"),
         ColumnSpec("customer_requirements", "客户要求", "text", "locked", "仅包含当前账号可见的备注和期望交期", width=35),
         ColumnSpec("purchase_reference", "参考采购均价", "text", "reference", "近 30 天；参考价不等于定价", field_group="data_purchase_cost"),
         ColumnSpec("sale_reference", "参考销售价", "text", "reference", "近 30 天；参考价不等于定价"),
         ColumnSpec("active_offers", "已有有效报价", "text", "reference", "仅列当前采购与所有来源单所有人均可见的有效报价", width=45),
         ColumnSpec("mode", "处理方式", "enum", "optional", "选择报价、沿用或不报；应用只保存草稿", choices={"quote": "报价", "reuse": "沿用", "skip": "不报"}),
         ColumnSpec("unit_price", "单价", "decimal", "optional", "报价时填写，最多两位小数", decimals=2),
+        ColumnSpec("price_basis", "价格性质", "enum", "optional", "成本价或售价；未修改时保留原草稿/更新目标的口径", choices={"cost": "成本价", "sale": "售价"}),
         ColumnSpec("is_tax_inclusive", "含税", "bool", "optional", "税口径；空白表示未填写"),
         ColumnSpec("qty_available", "可供数量", "decimal", "optional", "最多三位小数", decimals=3),
         ColumnSpec("source_key", "货源", "text", "optional", "货源标识，最多 128 字", max_len=128, field_group="data_supplier"),
         ColumnSpec("stock_location", "所在地", "text", "optional", "所在地，最多 256 字", max_len=256),
         ColumnSpec("lead_time", "交期", "text", "optional", "交期说明，最多 256 字", max_len=256),
-        ColumnSpec("validity_days", "有效天数", "int", "optional", "1–36500 个自然日；当前无单头统一值时默认为 1"),
         ColumnSpec("supplier", "供应商", "text", "optional", "按供应商档案名称精确匹配；不唯一或找不到时报错", field_group="data_supplier"),
         ColumnSpec("notes", "采购备注", "text", "optional", "沿用草稿中已有的可见性规则"),
         ColumnSpec("ref_offer_id", "沿用报价编号", "int", "optional", "沿用时必填，必须是所有来源单所有人可见的有效报价"),
@@ -54,13 +55,13 @@ QUOTE_SCHEMA = WorkbookSchema("presales_quote_sheet", 1, [
         ColumnSpec("existing_offer_id", "目标报价编号", "int", "optional", "选择更新且有多条有效报价时必须填写"),
     ]),
 ], instructions=[
-    "同一 PN 按要求 PN 一致分别合并；一致要求不同会拆成两行，避免放宽要求。",
+    "同一 PN 按要求 PN 一致、坏件是否返回分别合并；任一条件不同会拆行，避免放宽要求。",
     "一行会分发至全部来源单对应行；任何来源校验失败，整份回滚；不新建询价单。",
     "不允许新增或删除行。应用只保存草稿报价及处理选择；须回到页面点击回复给销售。",
     "合并来源已有草稿的值不一致时显示空白；未改动的字段按每个来源保留，修改后统一分发。",
 ])
 
-_DATA_KEYS = {"unit_price", "is_tax_inclusive", "qty_available", "source_key", "stock_location", "lead_time", "validity_days", "notes"}
+_DATA_KEYS = {"unit_price", "price_basis", "is_tax_inclusive", "qty_available", "source_key", "stock_location", "lead_time", "notes"}
 
 
 def _source_ids(entity_id):
@@ -273,7 +274,7 @@ def _load(db, ids, ctx):
 def _state(db, line, drafts, responses, ctx):
     own = [draft for draft in drafts if draft.line_id == line.id]
     response = next((row for row in responses if row.line_id == line.id and row.line_version == line.version), None)
-    result = {"validity_days": 1}
+    result = {}
     if len(own) == 1:
         draft = own[0]
         view = visibility.offer_view(db, draft, ctx) or {}
@@ -299,7 +300,8 @@ def _reference_text(value):
 
 
 def _group_key(line):
-    return ("part", line.part_id, line.require_exact_pn) if line.part_id is not None else ("raw", line.pn_raw, line.require_exact_pn)
+    return ("part", line.part_id, line.require_exact_pn, line.return_defective) if line.part_id is not None else (
+        "raw", line.pn_raw, line.require_exact_pn, line.return_defective)
 
 
 def _lock_active_offers(db, part_id):
@@ -323,7 +325,7 @@ def _lock_active_offers(db, part_id):
 def _row(db, data, refs=None):
     user, ctx, inquiries, tasks, lines, drafts, responses = data
     if len({_group_key(line) for line in lines}) != 1:
-        raise WorkbookError("合并行来源的 PN 或一致要求已改变，请重新导出")
+        raise WorkbookError("合并行来源的 PN、一致要求或坏件返回条件已改变，请重新导出")
     states = [_state(db, line, drafts, responses, ctx) for line in lines]
     values = {key: _same(states, key) for key in {column.key for column in QUOTE_SCHEMA.sheets[0].columns if column.editable}}
     part = db.get(DimPart, lines[0].part_id) if lines[0].part_id is not None else None
@@ -352,12 +354,12 @@ def _row(db, data, refs=None):
                        if entry["id"] in locked_offer_ids}
             active = visible if active is None else {key: value for key, value in active.items() if key in visible}
         # 预览后沿用价或可更新的本人报价发生变化时，必须重新确认。
-        active_versions = [(offer.id, offer.version, offer.revision_no, str(offer.valid_until))
+        active_versions = [(offer.id, offer.version, offer.revision_no)
             for offer in library._active(db, [part.id])
             if offer.id in locked_offer_ids and (offer.created_by == user.id or offer.id in (active or {}))]
         # 摘要不显示报价人，避免不同来源所有人的报价人字段可见性不一致。
         values["active_offers"] = "\n".join(
-            f"#{item['id']}：{item['unit_price']:.2f}（{'含税' if item.get('is_tax_inclusive') is True else '不含税' if item.get('is_tax_inclusive') is False else '税口径未填'}）"
+            f"#{item['id']}：{item['unit_price']:.2f}（{'成本价' if item.get('price_basis') == 'cost' else '售价'}；{'含税' if item.get('is_tax_inclusive') is True else '不含税' if item.get('is_tax_inclusive') is False else '税口径未填'}）"
             for item in sorted((active or {}).values(), key=lambda item: item["id"])) or None
         ref = (refs if refs is not None else price_reference.batch(db, [part.id], ctx)).get(part.id, {})
         values["purchase_reference"] = _reference_text(ref.get("purchase"))
@@ -365,10 +367,11 @@ def _row(db, data, refs=None):
     values.update(inquiry_nos="\n".join(row.inquiry_no for row in inquiries.values()),
         pn=part.pn_std if part else lines[0].pn_raw, qty=sum((line.qty for line in lines), Decimal("0")),
         description="\n".join(descriptions) or None,
-        require_exact_pn=lines[0].require_exact_pn, customer_requirements="\n".join(requirements) or None)
+        require_exact_pn=lines[0].require_exact_pn, return_defective=lines[0].return_defective,
+        customer_requirements="\n".join(requirements) or None)
     version_data = [
         [(row.id, row.version, row.status) for row in inquiries.values()],
-        [(row.id, row.version, row.part_id, row.pn_raw, row.require_exact_pn) for row in lines],
+        [(row.id, row.version, row.part_id, row.pn_raw, row.require_exact_pn, row.return_defective) for row in lines],
         [(row.id, row.version, row.status, row.paused, row.assignee_id, row.claimed_by) for row in tasks.values()],
         [(row.id, row.version) for row in drafts],
         [(row.id, row.line_version, row.mode, row.ref_offer_id, row.ref_offer_revision_no, row.reason,
@@ -511,12 +514,8 @@ def apply_quotes(db, plan, ctx):
                 payload["source_key"] = ""
             if "supplier" in changes:
                 payload["supplier_id"] = supplier_id
-            if "validity_days" in payload and payload["validity_days"] is None:
-                payload["validity_days"] = 1
             if mode == "quote":
                 payload["no_stock"] = False
-                if not any(draft.line_id == line.id for draft in drafts):
-                    payload.setdefault("validity_days", chosen("validity_days") or 1)
             result = offers.save_line_decision(db, line.inquiry_id, line.id, ctx,
                 expected_version=inquiries[line.inquiry_id].version, work_item_id=tasks[line.inquiry_id].id,
                 mode=mode, data=payload if mode == "quote" else None,

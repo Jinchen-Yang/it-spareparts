@@ -38,7 +38,7 @@ def _response_view(db, inquiry, viewer, line_id):
     return next(row for row in view["line_responses"] if row["line_id"] == line_id)
 
 
-def test_reuse_links_existing_offer_without_copying_price_and_expires_with_it(db, r6_actors, monkeypatch):
+def test_reuse_links_existing_offer_without_copying_price_and_follows_its_status(db, r6_actors, monkeypatch):
     users = r6_actors
     _, _, _, original = _publish(db, users)
     inquiry, lines = _pending(db, users)
@@ -54,10 +54,12 @@ def test_reuse_links_existing_offer_without_copying_price_and_expires_with_it(db
     assert _item(db, inquiry, users, users.buyer).status == "done"
     assert _response_view(db, inquiry, users.sales, line.id)["offer"]["unit_price"] == Decimal("100.00")
     assert _response_view(db, inquiry, users.sales, line.id)["expired"] is False
-    monkeypatch.setattr(common, "now", lambda: original.valid_until - timedelta(microseconds=1))
+    # D-0046：不随时间失效；原报价撤回后沿用才失效。
+    later = common.now() + timedelta(days=3650)
+    monkeypatch.setattr(common, "now", lambda: later)
     assert _response_view(db, inquiry, users.sales, line.id)["expired"] is False
-    monkeypatch.setattr(common, "now", lambda: original.valid_until)
-    assert _response_view(db, inquiry, users.sales, line.id)["expired"] is True
+    offers.withdraw(db, original.id, users.buyer.id, "停止供货", expected_version=original.version)
+    assert _response_view(db, inquiry, users.sales, line.id)["original_withdrawn"] is True
     assert library.batch(db, [users.part.id], users.sales.id)[users.part.id] == []
 
 
@@ -78,7 +80,7 @@ def test_reused_offer_reads_pinned_price_and_pinned_field_visibility(db, r6_acto
     assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 1
 
 
-def test_reused_offer_keeps_pinned_validity_when_source_is_updated_to_no_stock(db, r6_actors):
+def test_reused_offer_is_superseded_when_source_is_updated_to_no_stock(db, r6_actors):
     users = r6_actors
     _, _, _, original = _publish(db, users)
     inquiry, lines = _pending(db, users)
@@ -86,10 +88,11 @@ def test_reused_offer_keeps_pinned_validity_when_source_is_updated_to_no_stock(d
            [{"line_id": lines[0].id, "mode": "reuse", "ref_offer_id": original.id}])
     offers.update_offer(db, original.id, users.buyer.id,
         {"no_stock": True, "notes": "供应商确认库存售罄"}, expected_version=original.version)
-    assert original.status == "published" and original.valid_until > common.now()
+    assert original.status == "published" and original.valid_until is None
     assert original.unit_price is None and original.no_stock is True
     result = _response_view(db, inquiry, users.sales, lines[0].id)
-    assert result["expired"] is False
+    # D-0046：原报价改为无货即取代钉住版本；仍展示钉住的历史价和最新状态。
+    assert result["expired"] is True
     assert result["offer"]["unit_price"] == Decimal("100.00")
     assert result["offer"]["latest"]["unit_price"] is None
     assert result["ref_offer_id"] == original.id
@@ -162,14 +165,12 @@ def test_each_buyer_handles_the_same_line_independently(db, r6_actors):
     assert not shared.get("line_responses")
 
 
-@pytest.mark.parametrize("invalid", ["other-part", "expired", "withdrawn"])
-def test_reuse_rejects_wrong_pn_or_invalid_offer(db, r6_actors, monkeypatch, invalid):
+@pytest.mark.parametrize("invalid", ["other-part", "withdrawn"])
+def test_reuse_rejects_wrong_pn_or_invalid_offer(db, r6_actors, invalid):
     users = r6_actors
     _, _, _, original = _publish(db, users)
     inquiry, lines = _pending(db, users, lines=[{
         "part_id": users.other_part.id if invalid == "other-part" else users.part.id}])
-    if invalid == "expired":
-        monkeypatch.setattr(common, "now", lambda: original.valid_until)
     if invalid == "withdrawn":
         offers.withdraw(db, original.id, users.buyer.id, "价格有误", expected_version=original.version)
     with pytest.raises(InvalidTransition):

@@ -55,8 +55,7 @@ def list_lines(db, part_id, ctx, *, page=1, page_size=20):
             valid = [offer for offer in quotes if offer["status"] == "published"
                      and not offer.get("original_withdrawn") and not offer.get("expired")
                      and not offer["no_stock"] and offer["unit_price"] is not None
-                     and offer["valid_from"] is not None and offer["valid_from"] <= moment
-                     and offer["valid_until"] is not None and offer["valid_until"] > moment]
+                     and offer["valid_from"] is not None and offer["valid_from"] <= moment]
             # 各税口径分别取最低，避免把含税与未税直接比较。
             minimum = []
             for basis in (True, False, None):

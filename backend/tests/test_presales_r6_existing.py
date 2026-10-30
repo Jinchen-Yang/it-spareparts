@@ -56,7 +56,7 @@ def _prepared(db, users, *, kind="proactive_offer", whole=None, price="100.00",
         inquiries.submit(db, inquiry.id, users.sales.id, inquiry.version)
     line = inquiries.lines_for(db, inquiry.id)[0]
     draft = offers.save_draft(db, inquiry.id, line.id, buyer.id,
-        {"unit_price": price, "source_key": source, "validity_days": 3,
+        {"unit_price": price, "source_key": source, 
          "supplier_id": users.supplier.id, "notes": "报价备注", **(fields or {})},
         expected_version=inquiry.version)
     return inquiry, line, draft
@@ -184,7 +184,7 @@ def test_original_line_keeps_each_source_link_after_separate_cross_inquiry_updat
     users = r6_actors
     original, original_line, first = _prepared(db, users, source="source-A", price="100.00")
     second = offers.save_draft(db, original.id, original_line.id, users.buyer.id,
-        {"unit_price": "200.00", "source_key": "source-B", "validity_days": 3},
+        {"unit_price": "200.00", "source_key": "source-B"},
         expected_version=original.version)
     published = offers.publish_proactive(db, original.id, users.buyer.id,
         expected_version=original.version, on_existing="new")
@@ -215,12 +215,17 @@ def test_original_line_keeps_each_source_link_after_separate_cross_inquiry_updat
     assert {row["unit_price"] for row in owner_view["offers"]} == {Decimal("100.00"), Decimal("200.00")}
 
 
-def test_expired_quote_does_not_require_repeat_choice(db, r6_actors, monkeypatch):
+def test_old_quote_still_requires_repeat_choice_until_withdrawn(db, r6_actors, monkeypatch):
+    # D-0046：报价不随时间失效，多年后再报同一 PN 仍须选择更新或另报；撤回后才无需选择。
     users = r6_actors
     _, _, _, first = _publish(db, users)
-    monkeypatch.setattr(common, "now", lambda: first.valid_until + timedelta(microseconds=1))
+    later = common.now() + timedelta(days=3650)
+    monkeypatch.setattr(common, "now", lambda: later)
+    with pytest.raises(Conflict), db.begin_nested():
+        _publish(db, users, price="80.00")
+    offers.withdraw(db, first.id, users.buyer.id, "停止供货", expected_version=first.version)
     _, _, _, fresh = _publish(db, users, price="80.00")
-    assert fresh.id != first.id and first.revision_no == 1
+    assert fresh.id != first.id and first.status == "withdrawn"
 
 
 def test_batch_without_existing_quote_keeps_repeated_pn_as_independent_quotes(db, r6_actors):
@@ -230,7 +235,7 @@ def test_batch_without_existing_quote_keeps_repeated_pn_as_independent_quotes(db
     drafts = []
     for line, price in zip(inquiries.lines_for(db, inquiry.id), ("100.00", "80.00")):
         drafts.append(offers.save_draft(db, inquiry.id, line.id, users.buyer.id,
-            {"unit_price": price, "source_key": "same-source", "validity_days": 3},
+            {"unit_price": price, "source_key": "same-source"},
             expected_version=inquiry.version))
     result = offers.publish_proactive(db, inquiry.id, users.buyer.id,
         expected_version=inquiry.version, on_existing="new")
@@ -246,7 +251,7 @@ def test_batch_repeat_conflict_does_not_publish_earlier_lines(db, r6_actors):
     inquiry = inquiries.create_draft(db, users.buyer.id, kind="proactive_offer",
         lines=[{"part_id": users.part.id}, {"part_id": users.other_part.id}])
     drafts = [offers.save_draft(db, inquiry.id, line.id, users.buyer.id,
-        {"unit_price": "80.00", "validity_days": 3}, expected_version=inquiry.version)
+        {"unit_price": "80.00"}, expected_version=inquiry.version)
         for line in inquiries.lines_for(db, inquiry.id)]
     with pytest.raises(Conflict):
         offers.publish_proactive(db, inquiry.id, users.buyer.id, expected_version=inquiry.version)
@@ -262,7 +267,7 @@ def test_batch_cannot_update_the_same_existing_quote_twice(db, r6_actors):
     inquiry = inquiries.create_draft(db, users.buyer.id, kind="proactive_offer",
         lines=[{"part_id": users.part.id}, {"part_id": users.part.id}])
     drafts = [offers.save_draft(db, inquiry.id, line.id, users.buyer.id,
-        {"unit_price": "80.00", "validity_days": 3}, expected_version=inquiry.version)
+        {"unit_price": "80.00"}, expected_version=inquiry.version)
         for line in inquiries.lines_for(db, inquiry.id)]
     with pytest.raises(InvalidTransition):
         offers.publish_proactive(db, inquiry.id, users.buyer.id,

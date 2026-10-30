@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.services.presales import inquiries
+from app.services.presales import inquiries, visibility
 from tests.test_presales_api_visibility import _client, _quoted, users  # noqa: F401
 
 
@@ -98,3 +98,52 @@ def test_search_ignores_deleted_lines_and_keeps_like_wildcards_literal(db, users
 ])
 def test_search_parameters_are_validated(users, params):
     assert _client(users.seller).get("/api/presales/inquiries", params=params).status_code == 422
+
+
+def test_only_visible_page_serializes_offers_while_total_and_order_remain_accurate(db, users, monkeypatch):
+    from sqlalchemy import event
+    from app.db import engine
+
+    visible = []
+    for index in range(5):
+        # 隐藏草稿穿插在排序中，不能先 SQL limit 再做权限筛选。
+        inquiries.create_draft(db, users.other.id, lines=[{"pn_raw": f"HIDDEN-{index}"}])
+        row = inquiries.create_draft(db, users.seller.id, lines=[{"pn_raw": f"VISIBLE-{index}"}])
+        visible.append(row.id)
+    db.commit()
+    rendered, offer_reads = [], []
+    original = visibility.inquiry_view
+    def serialize(connection, inquiry, ctx, **kwargs):
+        rendered.append(inquiry.id)
+        return original(connection, inquiry, ctx, **kwargs)
+    def observe(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if "from presales_offer" in statement.lower():
+            offer_reads.append(statement)
+    monkeypatch.setattr(visibility, "inquiry_view", serialize)
+    event.listen(engine, "before_cursor_execute", observe)
+    try:
+        client = _client(users.seller)
+        params = {"scope": "all", "sort": "inquiry_no", "dir": "asc", "page": 2, "page_size": 2}
+        response = client.get("/api/presales/inquiries", params=params)
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["total"] == 5 and [row["id"] for row in data["items"]] == visible[2:4]
+        assert rendered == visible[2:4]
+        page_queries = len(offer_reads)
+        assert page_queries > 0
+        for index in range(10):
+            inquiries.create_draft(db, users.seller.id, lines=[{"pn_raw": f"LATER-{index}"}])
+            inquiries.create_draft(db, users.other.id, lines=[{"pn_raw": f"LATER-HIDDEN-{index}"}])
+        db.commit()
+        rendered.clear()
+        offer_reads.clear()
+        data = client.get("/api/presales/inquiries", params=params).json()
+        assert data["total"] == 15 and [row["id"] for row in data["items"]] == visible[2:4]
+        assert rendered == visible[2:4] and len(offer_reads) == page_queries
+        rendered.clear()
+        offer_reads.clear()
+        data = client.get("/api/presales/inquiries", params={**params, "page": 100}).json()
+        assert data["total"] == 15 and data["items"] == []
+        assert rendered == [] and offer_reads == []
+    finally:
+        event.remove(engine, "before_cursor_execute", observe)

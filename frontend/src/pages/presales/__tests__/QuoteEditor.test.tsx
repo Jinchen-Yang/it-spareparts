@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({ suppliers: vi.fn() }));
 vi.mock("../../../api/presales", () => ({ presales: mocks }));
 vi.mock("../../../api/audience", () => ({ listAudiencePeople: vi.fn(async () => []), listAudienceGroups: vi.fn(async () => []) }));
 const offer: Offer = { id: 8, inquiry_id: 1, line_id: 2, part_id: 3, version: 4, revision_no: 1,
-  status: "published", valid_from: null, valid_until: null, unit_price: "15", supplier_id: 9, notes: "原备注",
+  status: "published", valid_from: null, unit_price: "15", supplier_id: 9, notes: "原备注",
   reporter: { id: 7, name: "采购甲" },
   supplier_audience: { mode: "include", users: [{ id: "sale-a", name: "销售甲" }], groups: [{ id: 99, name: "原分组" }] },
   reporter_audience: { mode: "private", users: [], groups: [] },
@@ -28,6 +28,82 @@ beforeEach(() => {
 afterEach(cleanupAntd);
 
 describe("供应商档案与受众规则", () => {
+  it("旧入口可选择成本价，已有成本报价只改单价也保留性质", async () => {
+    const save = vi.fn();
+    const view = render(<Harness onSave={save} />);
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "PN价格性质" }));
+    fireEvent.click(screen.getByText("成本价", { selector: ".ant-select-item-option-content" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "PN单价" }), { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ unit_price: 20, price_basis: "cost" }));
+    expect(save.mock.calls[0][0]).not.toHaveProperty("is_tax_inclusive");
+    view.unmount();
+    render(<Harness existing={{ ...offer, price_basis: "cost", is_tax_inclusive: null }} onSave={save} />);
+    expect(screen.getByRole("combobox", { name: "PN价格性质" }).closest(".ant-select")).toHaveTextContent("成本价");
+    fireEvent.change(screen.getByRole("spinbutton", { name: "PN单价" }), { target: { value: "25" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ unit_price: 25, price_basis: "cost", is_tax_inclusive: null }));
+    await waitFor(() => expect(mocks.suppliers).toHaveBeenCalled());
+  });
+
+  it("无成本权限的只读查看也显示报价性质，未声明的存量性质按售价显示", () => {
+    localStorage.setItem("permissions", JSON.stringify({ data_cost: false }));
+    const view = render(<QuoteEditor value={{ price_basis: "cost", unit_price: 20 }} onChange={() => {}} disabled />);
+    expect(screen.getByText("成本价")).toBeVisible();
+    view.rerender(<QuoteEditor value={{ unit_price: 20 }} onChange={() => {}} disabled />);
+    expect(screen.getByText("售价")).toBeVisible();
+  });
+
+  it("旧入口新报价默认含税且不提供未声明选项", async () => {
+    const save = vi.fn();
+    render(<Harness onSave={save} />);
+    const tax = screen.getByRole("combobox", { name: "PN含税口径" });
+    expect(tax.closest(".ant-select")).toHaveTextContent("含税");
+    fireEvent.mouseDown(tax);
+    expect(screen.queryByText("未声明")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "PN单价" }), { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ unit_price: 20 }));
+    expect(save.mock.calls[0][0]).not.toHaveProperty("is_tax_inclusive");
+    expect(save.mock.calls[0][0]).not.toHaveProperty("price_basis");
+    await waitFor(() => expect(mocks.suppliers).toHaveBeenCalled());
+  });
+
+  it("旧入口编辑存量未声明报价只改价格仍保留 null", async () => {
+    const save = vi.fn();
+    render(<Harness existing={{ ...offer, is_tax_inclusive: null }} onSave={save} />);
+    expect(screen.getByRole("combobox", { name: "PN含税口径" }).closest(".ant-select")).toHaveTextContent("未声明");
+    fireEvent.change(screen.getByRole("spinbutton", { name: "PN单价" }), { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ unit_price: 20, is_tax_inclusive: null }));
+    await waitFor(() => expect(mocks.suppliers).toHaveBeenCalled());
+  });
+
+  it.each([true, null])("草稿税口径 %s 按现值回显，只改价格不把回显当作明确选择", async (tax) => {
+    const save = vi.fn();
+    render(<Harness existing={{ ...offer, status: "draft", is_tax_inclusive: tax, price_basis: "cost" }} onSave={save} />);
+    expect(screen.getByRole("combobox", { name: "PN含税口径" }).closest(".ant-select")).toHaveTextContent(tax === null ? "未声明" : "含税");
+    expect(screen.getByRole("combobox", { name: "PN价格性质" }).closest(".ant-select")).toHaveTextContent("成本价");
+    fireEvent.change(screen.getByRole("spinbutton", { name: "PN单价" }), { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save.mock.calls[0][0]).not.toHaveProperty("is_tax_inclusive");
+    expect(save.mock.calls[0][0]).not.toHaveProperty("price_basis");
+    await waitFor(() => expect(mocks.suppliers).toHaveBeenCalled());
+  });
+
+  it.each(["new", "draft", "published"] as const)("%s 报价明确选择含税和售价，即使等于默认显示值也提交", async (status) => {
+    const save = vi.fn();
+    render(<Harness existing={status === "new" ? undefined : { ...offer, status,
+      is_tax_inclusive: status === "draft" ? true : null, price_basis: status === "draft" ? "sale" : "cost" }} onSave={save} />);
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "PN含税口径" }));
+    fireEvent.click(screen.getByText("含税", { selector: ".ant-select-item-option-content" }));
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "PN价格性质" }));
+    fireEvent.click(screen.getByText("售价", { selector: ".ant-select-item-option-content" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ is_tax_inclusive: true, price_basis: "sale" }));
+    await waitFor(() => expect(mocks.suppliers).toHaveBeenCalled());
+  });
+
   it("带搜索选择供应商后提交档案 ID，候选使用专用接口", async () => {
     const save = vi.fn();
     render(<Harness onSave={save} />);

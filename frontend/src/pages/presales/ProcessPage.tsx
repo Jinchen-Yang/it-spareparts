@@ -6,8 +6,8 @@ import { releaseWorkItem, type WorkItem } from "../../api/workItems";
 import GalleryPicker from "../../components/gallery/GalleryPicker";
 import Timeline from "../../components/workflow/Timeline";
 import { refreshWorkBadges } from "../../components/workflow/useWorkBadge";
-import { offerInput, quoteComplete } from "./QuoteEditor";
-import { usePresalesError, isOfferActive, useNow, flattenOffers, expiryLabel } from "./shared";
+import QuoteEditor, { offerInput, quoteComplete } from "./QuoteEditor";
+import { usePresalesError, isOfferActive, useNow, flattenOffers } from "./shared";
 import QuoteGrid, { type QuoteGridRow } from "./QuoteGrid";
 import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDialog";
 import { WorkbookExportButton } from "../../components/workbook";
@@ -17,6 +17,8 @@ import PartBinding from "./PartBinding";
 import PageHeader from "../../components/PageHeader";
 import { findOwnTask, loadInquiry } from "./quoteData";
 import "./presales.css";
+import { ownedOfferForEdit } from "./answers";
+import { CurrentAnswer } from "./InquiryOffers";
 
 export default function ProcessPage() {
   const { id } = useParams();
@@ -47,7 +49,6 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
   const [gallery, setGallery] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [values, setValues] = useState<Record<number, { key: string; value: OfferInput }>>({});
-  const [validity, setValidity] = useState(1);
   const [withdrawOffer, setWithdrawOffer] = useState<Offer>();
   const [releaseOpen, setReleaseOpen] = useState(false);
   const [reason, setReason] = useState("");
@@ -71,7 +72,7 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
   };
   useEffect(() => { onDirtyChange?.(Object.values(dirty).some(Boolean) || Object.keys(responses).length > 0); }, [dirty, responses, onDirtyChange]);
   const now = useNow([...Object.values(library).flatMap(flattenOffers), ...(inquiry?.line_responses ?? []).flatMap((row) => row.offer ? [row.offer] : [])]
-    .flatMap((offer) => [offer.valid_from, offer.valid_until]));
+    .map((offer) => offer.valid_from));
   const partKey = (inquiry?.lines ?? []).filter((line) => line.part_id).map((line) => line.part_id).join(",");
   const refresh = useCallback(async () => {
     const latest = await loadInquiry(inquiryId);
@@ -93,7 +94,7 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
     setTask(currentTask);
     loadInquiry(inquiryId).then(async (data) => {
       const ownTask = currentTask ?? (data.kind === "proactive_offer" ? undefined : await findOwnTask(inquiryId));
-      if (!cancelled) { setInquiry(data); setTask(ownTask); setValidity(data.offers?.[0]?.validity_days ?? 1); }
+      if (!cancelled) { setInquiry(data); setTask(ownTask); }
     })
       .catch((error) => { if (!cancelled) { setLoadError(true); handlePresalesError(error); } })
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -172,10 +173,8 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
   };
 
   const currentFor = (line: InquiryLine) => {
-    const referenceId = proactive ? line.ref_offer_id ?? savedResponse(line.id)?.ref_offer_id ?? line.linked_offer_ids?.[0] : undefined;
-    return (referenceId ? ownOffers.find((offer) => offer.id === referenceId) : undefined)
-      ?? ownOffers.find((offer) => offer.line_id === line.id && offer.status !== "withdrawn" && offer.status !== "stale")
-      ?? ownOffers.find((offer) => offer.line_id === line.id);
+    return ownedOfferForEdit(inquiry, line, actorId)
+      ?? ownOffers.find((offer) => offer.line_id === line.id && ["withdrawn", "stale"].includes(offer.status));
   };
   const valueKey = (line: InquiryLine) => `${currentFor(line)?.id ?? "new"}:${currentFor(line)?.version ?? 0}`;
   const valueFor = (line: InquiryLine) => {
@@ -245,8 +244,9 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
   const rows: QuoteGridRow[] = lines.map((line) => {
     const current = currentFor(line);
     const response = responseFor(line.id);
-    const canEdit = editable && (proactive ? current?.status === "published"
-      : !line.ref_offer_id && (active || current?.status === "published"));
+    const canEditPublished = current?.status === "published" && (proactive || !line.ref_offer_id);
+    const canEdit = !refreshRequired && (canEditPublished
+      || (editable && !proactive && !line.ref_offer_id && active));
     return { line, current, value: valueFor(line), response, reused: reusedOffer(line),
       responseDraft: !!responses[line.id] || !!savedResponse(line.id)?.is_draft,
       reporterLabel: savedResponse(line.id)?.ref_offer_id === response.ref_offer_id ? savedResponse(line.id)?.reporter_label : undefined,
@@ -255,10 +255,16 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
       referenced: !!line.ref_offer_id && !proactive,
       binding: !line.part_id && canProcess && active ? <PartBinding line={line} onBound={setInquiry} refresh={refresh} disabled={busy || refreshRequired} /> : undefined,
       details: <>
+        {inquiry.line_answers && <p>当前答复：<CurrentAnswer inquiry={inquiry} line={line} /></p>}
+        {!proactive && canEditPublished && response.mode !== "quote" && <>
+          <h3>更新本人当前报价</h3>
+          <QuoteEditor label={line.pn_raw} value={valueFor(line)} existing={current} disabled={!canEdit || busy}
+            onChange={(value) => changeValue(line.id, value)} />
+        </>}
         {proactive && (!current || current.status !== "published") && <Alert type="info" message="当前报价不可更新，可新建主动报价"
           action={<Link to="/presales/offers/new">新建主动报价</Link>} />}
       </>,
-      actions: canEdit && (proactive || response.mode === "quote") && <span className="presales-toolbar">
+      actions: canEdit && (proactive || response.mode === "quote" || canEditPublished) && <span className="presales-toolbar">
         <Button size="small" loading={busy} disabled={!quoteComplete(valueFor(line)) || (!line.part_id && !valueFor(line).no_stock)}
           onClick={() => void save(line)}>{current?.status === "published" ? "更新报价" : "保存该行报价"}</Button>
         {current?.status === "published" && <Button size="small" danger disabled={busy} onClick={() => { setReason(""); setWithdrawOffer(current); }}>撤销报价</Button>}
@@ -273,19 +279,13 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
   });
   const count = (mode: LineResponseInput["mode"]) => handledRows.filter((line) => responseFor(line.id).mode === mode).length;
 
-  const dayValues = (proactive ? lines : required).map((line) => valueFor(line).validity_days ?? 1);
-  const uniformDays = dayValues.length ? dayValues.every((days) => days === dayValues[0]) ? dayValues[0] : undefined : validity;
 
   return <section className="presales-page">
     <PageHeader title={`询价人：${inquiry.created_by_name ?? "业务人员"}`} subtitle="逐行填写报价，保存草稿后回复给销售" extra={<Button onClick={back}>返回列表</Button>} />
     <div className="presales-panel">
     <div className="presales-toolbar">
       {"notes" in inquiry && <span className="presales-muted" title={inquiry.notes ?? undefined}>{inquiry.notes || "无客户补充要求"}</span>}
-      <div className="presales-toolbar"><span>统一有效期</span>{!editable ? <span>{uniformDays ?? "各行不同"} 天</span> : <InputNumber aria-label="统一有效期" min={1} max={36500} precision={0}
-        value={uniformDays ?? null} placeholder="多值" title="修改后应用到本单所有待处理报价行" disabled={!editable || busy} onChange={(days) => {
-          const next = days ?? 1; setValidity(next);
-          for (const line of proactive ? lines : required) changeValue(line.id, { ...valueFor(line), validity_days: next });
-        }} />}<span role="status">{uniformDays === undefined ? "各行有效期不同；修改后统一应用" : expiryLabel(uniformDays, now)}</span></div>
+      <span className="presales-muted">报价不设有效期，一直有效，直到更新或撤回</span>
       {!proactive && <><WorkbookExportButton size="small" label="下载报价表" schemaName="presales_quote_sheet" disabled={busy || !editable || !active}
         fetchSchema={() => presalesWorkbooks.getQuoteSheetSchema()} onExport={(visible) => presalesWorkbooks.exportQuoteSheet([inquiry.id], visible)}
         filename="采购报价表.xlsx" />
@@ -304,7 +304,7 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
     {libraryError && <Alert type="warning" message="已有有效报价加载失败，请刷新后重试；仍可报新价或不报" />}
     <QuoteGrid id="presales-workbench-lines" rows={rows} now={now} proactive={proactive} onChange={changeValue}
       onResponse={(lineId, patch) => {
-        setResponses((previous) => ({ ...previous, [lineId]: { ...responseFor(lineId), ...patch } }));
+        setResponses((previous) => ({ ...previous, [lineId]: { ...(previous[lineId] ?? savedResponse(lineId) ?? { line_id: lineId, mode: "quote" as const }), ...patch } }));
       }} />
     </div>
     <footer className="presales-footer"><span>填写完成 <b>{handledRows.length}</b> / {required.length} 行（报价 {count("quote")} · 沿用 {count("reuse")} · 不报 {count("skip")}）</span>

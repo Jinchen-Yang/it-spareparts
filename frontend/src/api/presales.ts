@@ -24,6 +24,8 @@ export interface LineInput {
   expected_delivery?: string | null;
   qty?: number | string;
   require_exact_pn?: boolean;
+  /** D-0047：坏件是否返回，默认返回。 */
+  return_defective?: boolean;
   ref_offer_id?: number | null;
   notes?: string | null;
   notes_audience?: AudienceRule;
@@ -48,8 +50,11 @@ export interface InquiryLine extends Omit<LineInput, "notes_audience" | "field_v
   ref_offer?: Offer;
 }
 
+export type InquiryPriority = "normal" | "urgent";
+
 export interface InquiryInput {
   kind?: "sales_inquiry" | "proactive_offer";
+  priority?: InquiryPriority;
   customer_id?: number | null;
   notes?: string | null;
   lines?: LineInput[];
@@ -68,8 +73,9 @@ export interface OfferInput {
   lead_time?: string | null;
   source_key?: string;
   supplier_id?: number | null;
-  validity_days?: number;
   notes?: string | null;
+  /** D-0047：价格性质，售价（默认）或成本价，仅作标注。 */
+  price_basis?: "sale" | "cost";
   supplier_audience?: AudienceRule;
   reporter_audience?: AudienceRule;
   notes_audience?: AudienceRule;
@@ -80,18 +86,17 @@ export interface Offer extends Omit<OfferInput, "supplier_audience" | "reporter_
   reporter_audience?: AudienceRuleRead;
   notes_audience?: AudienceRuleRead;
   id: number;
-  inquiry_id: number;
-  line_id: number;
+  inquiry_id: number | null;
+  line_id: number | null;
   part_id: number | null;
   version: number;
   revision_no: number;
   status: "draft" | "published" | "stale" | "withdrawn";
   valid_from: string | null;
-  valid_until: string | null;
   reporter?: { id: number; name: string };
   created_at?: string;
   updated_at?: string;
-  latest?: Pick<Offer, "unit_price" | "is_tax_inclusive" | "revision_no">;
+  latest?: Pick<Offer, "unit_price" | "is_tax_inclusive" | "revision_no" | "price_basis">;
   original_withdrawn?: boolean;
   expired?: boolean;
   more?: Offer[];
@@ -104,6 +109,15 @@ export interface InquiryWorkItem {
   status: WorkStatus;
   paused: boolean;
   version: number;
+}
+
+export interface CurrentLineAnswer {
+  line_id: number;
+  state: "quoted" | "skip" | "pending" | "unavailable";
+  offer?: Offer;
+  reporter?: string;
+  reason?: string;
+  responded: boolean;
 }
 
 export interface LineResponseInput {
@@ -119,6 +133,7 @@ export interface LineResponse extends LineResponseInput {
   work_item_id: number | null;
   offer?: Offer;
   expired: boolean;
+  current_offer?: Offer;
   ref_offer_revision_no?: number | null;
   reporter_label?: string;
 }
@@ -141,6 +156,9 @@ export interface Inquiry {
   status: "draft" | "submitted" | "revising" | "closed";
   version: number;
   revision: number;
+  priority?: InquiryPriority;
+  urge_count?: number;
+  last_urged_at?: string | null;
   customer_id?: number | null;
   customer_name?: string | null;
   is_owner?: boolean;
@@ -159,7 +177,9 @@ export interface Inquiry {
   won_offer_revision_no?: number | null;
   won_offer?: Offer;
   line_count: number;
-  progress: { quoted_lines: number; line_count: number };
+  progress: { quoted_lines: number; line_count: number; effective_quoted_lines?: number };
+  can_urge?: boolean;
+  line_answers?: CurrentLineAnswer[];
   lines?: InquiryLine[];
   offers?: Offer[];
   work_items?: InquiryWorkItem[];
@@ -234,6 +254,8 @@ export const presales = {
   resubmitInquiry: (id: number, body: VersionInput) => inquiryAction(id, "resubmit", body),
   withdrawInquiry: (id: number, body: VersionInput) => inquiryAction(id, "withdraw", body),
   copyInquiry: (id: number, body: VersionInput) => inquiryAction(id, "copy", body),
+  /** D-0047：发起人催办未回复的询价，30 分钟限一次（过早返回 409 urge_too_soon）。 */
+  async urgeInquiry(id: number) { return (await api.post<Inquiry>(`${root}/inquiries/${id}/urge`)).data; },
   async appendLines(id: number, body: VersionInput & { lines: LineInput[] }) {
     return (await api.post<Inquiry>(`${root}/inquiries/${id}/lines`, body)).data;
   },
@@ -242,6 +264,9 @@ export const presales = {
   },
   async saveOffer(inquiryId: number, lineId: number, body: OfferInput & VersionInput & { offer_id?: number; work_item_id?: number }) {
     return (await api.post<Offer>(`${root}/inquiries/${inquiryId}/lines/${lineId}/offers`, body)).data;
+  },
+  async directOffer(body: OfferInput & { part_id: number; on_existing?: "update" | "new"; existing_offer_id?: number; expected_version?: number }) {
+    return (await api.post<Offer>(`${root}/offers/direct`, body)).data;
   },
   async updateOffer(id: number, body: OfferInput & VersionInput) {
     return (await api.patch<Offer>(`${root}/offers/${id}`, body)).data;

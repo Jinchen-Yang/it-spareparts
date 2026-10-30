@@ -67,6 +67,7 @@ class LineInput(Input):
     description: str | None = None
     qty: Decimal = Field(default=Decimal("1"), gt=0, max_digits=14, decimal_places=3)
     require_exact_pn: bool = False
+    return_defective: bool = True
     ref_offer_id: int | None = Field(default=None, gt=0)
     notes: str | None = None
     notes_audience: AudienceInput | None = None
@@ -76,6 +77,7 @@ class LineInput(Input):
 
 class CreateInquiry(Input):
     kind: Literal["sales_inquiry", "proactive_offer"] = "sales_inquiry"
+    priority: Literal["normal", "urgent"] = "normal"
     customer_id: int | None = Field(default=None, gt=0)
     notes: str | None = None
     lines: list[LineInput] = Field(default_factory=list, max_length=200)
@@ -86,6 +88,7 @@ class CreateInquiry(Input):
 
 
 class UpdateInquiry(VersionInput):
+    priority: Literal["normal", "urgent"] | None = None
     customer_id: int | None = Field(default=None, gt=0)
     notes: str | None = None
     lines: list[LineInput] | None = Field(default=None, max_length=200)
@@ -113,8 +116,8 @@ class OfferData(Input):
     lead_time: str | None = Field(default=None, max_length=256)
     source_key: str = Field(default="", max_length=128)
     supplier_id: int | None = Field(default=None, gt=0)
-    validity_days: int = Field(default=1, ge=1, le=36500)
     notes: str | None = None
+    price_basis: Literal["sale", "cost"] = "sale"
     supplier_audience: AudienceInput | None = None
     reporter_audience: AudienceInput | None = None
     notes_audience: AudienceInput | None = None
@@ -127,6 +130,14 @@ class SaveOffer(OfferData, VersionInput):
 
 class UpdateOffer(OfferData, VersionInput):
     pass
+
+
+class DirectOffer(OfferData):
+    part_id: int = Field(gt=0)
+    on_existing: Literal["update", "new"] = "update"
+    existing_offer_id: int | None = Field(default=None, gt=0)
+    expected_version: int | None = Field(default=None, ge=1)
+    offer_audience: AudienceInput | None = None
 
 
 class WithdrawOffer(VersionInput):
@@ -314,7 +325,7 @@ def list_inquiries(db: Db, ctx: Ctx,
                 query = query.where(PresalesInquiry.updated_at < datetime.combine(date_to + timedelta(days=1), time.min, zone))
             else:
                 query = query.where(PresalesInquiry.updated_at <= datetime.combine(date_to, time.max, zone))
-        items = []
+        visible = []
         for inquiry, name in db.execute(query):
             if not visibility.can_view_inquiry(db, inquiry, ctx):
                 continue
@@ -323,11 +334,16 @@ def list_inquiries(db: Db, ctx: Ctx,
                 from app.services.workflow.registry import Subject
                 if not work_items.subject_participation(db, Subject("presales_inquiry", inquiry.id), ctx)["assigned"]:
                     continue
+            visible.append((inquiry, name))
+        # 准入与参与者筛选仍在分页之前，保证 total 和每一页的权限范围准确。
+        # 昂贵的行答复/报价/待办序列化只服务当前页，页外记录不展开。
+        items = []
+        for inquiry, name in visible[(page - 1) * page_size:page * page_size]:
             view = visibility.inquiry_view(db, inquiry, ctx, detail=False)
             view["customer_name"] = name if "customer_id" in view else None
             view["is_owner"] = inquiry.created_by == user.id
             items.append(view)
-        return {"items": items[(page - 1) * page_size:page * page_size], "total": len(items),
+        return {"items": items, "total": len(visible),
                 "page": page, "page_size": page_size}
     return _call(db, read)
 
@@ -378,6 +394,11 @@ def append_lines(inquiry_id: int, body: AppendLines, db: Db, ctx: Ctx):
         db, inquiry_id, ctx, body.expected_version, lines))
 
 
+@router.post("/inquiries/{inquiry_id}/urge")
+def urge_inquiry(inquiry_id: int, db: Db, ctx: Ctx):
+    return _inquiry_action(db, ctx, lambda: inquiries.urge(db, inquiry_id, ctx))
+
+
 @router.post("/inquiries/{inquiry_id}/close")
 def close_inquiry(inquiry_id: int, body: CloseInquiry, db: Db, ctx: Ctx):
     return _inquiry_action(db, ctx, lambda: inquiries.close(db, inquiry_id, ctx,
@@ -407,6 +428,17 @@ def reply(inquiry_id: int, body: ReplyInput, db: Db, ctx: Ctx):
 def publish(inquiry_id: int, body: PublishInput, db: Db, ctx: Ctx):
     return _call(db, lambda: [visibility.offer_view(db, row, ctx) for row in offers.publish_proactive(
         db, inquiry_id, ctx, **body.model_dump())], write=True)
+
+
+@router.post("/offers/direct")
+def direct_offer(body: DirectOffer, db: Db, ctx: Ctx):
+    control = {"part_id", "on_existing", "existing_offer_id", "expected_version", "offer_audience"}
+    data = body.model_dump(exclude_unset=True, exclude=control)
+    audience = body.offer_audience.model_dump() if body.offer_audience is not None else None
+    return _call(db, lambda: visibility.offer_view(db, offers.direct_offer(
+        db, ctx, body.part_id, data, on_existing=body.on_existing,
+        existing_offer_id=body.existing_offer_id, expected_version=body.expected_version,
+        offer_audience=audience), ctx), write=True)
 
 
 @router.patch("/offers/{offer_id}")

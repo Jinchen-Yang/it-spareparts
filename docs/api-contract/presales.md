@@ -18,12 +18,14 @@
 | POST | `/inquiries/{inquiry_id}/withdraw` | 撤回为 revising，暂停未结束待办 |
 | POST | `/inquiries/{inquiry_id}/resubmit` | 按 line_key 比较上一提交版，报价 stale、恢复或重开待办，revision 加一 |
 | POST | `/inquiries/{inquiry_id}/lines` | 追加新行，不需撤回；body 为 expected_version、lines |
+| POST | `/inquiries/{inquiry_id}/urge` | D-0047 催办：仅发起人，询价须已提交且仍有未完成待办；30 分钟限一次，过早返回 409 `urge_too_soon`；累计 urge_count、记 last_urged_at 与时间线，不改单据版本与待办 |
 | POST | `/inquiries/{inquiry_id}/close` | outcome=won/lost/cancelled，won_offer_id 可选且必须属于本单或本单引用／沿用的报价；记录采纳版本并结束未完成待办 |
 | POST | `/inquiries/{inquiry_id}/copy` | 返回新草稿、新编号和新 line_key；保留原生字段及可见性，不复制报价、引用、成交、字段值 |
 | POST | `/inquiries/{inquiry_id}/lines/{line_id}/offers` | 创建或保存报价草稿；采购需 `action_presales_quote` 且为本单处理人，主动报价需 `action_presales_offer` |
 | POST | `/inquiries/{inquiry_id}/reply` | 独立回复；所有未引用活动行必须报新价、沿用或不报，锁定本人草稿、发布快照并完成本人待办 |
 | POST | `/inquiries/{inquiry_id}/publish` | 主动报价发布；notice_user_ids 可定向通知在职且有 page_presales 的账号 |
-| PATCH | `/offers/{offer_id}` | 发布报价更新并续期、追加完整快照；报价本人或主管，需对应 quote/offer 动作权限 |
+| POST | `/offers/direct` | D-0048 单 PN 直接发布或更新本人报价；需 `action_presales_offer`，不创建 BJ 单据、询价行或通知待办 |
+| PATCH | `/offers/{offer_id}` | 更新发布报价、追加完整快照；报价本人或主管，需对应 quote/offer 动作权限 |
 | POST | `/offers/{offer_id}/withdraw` | 立即下架，reason 必填且非空白；追加撤销快照 |
 | GET | `/offers/{offer_id}/revisions` | 仅发起人、报价本人、主管；历史和当前可见性取交集，屏蔽作者旁路和私密字段 |
 | GET | `/lines/{line_id}/part-check?pn_std=` | 待建档查重，复用 master_edit.find_near_duplicates |
@@ -32,6 +34,9 @@
 | GET | `/library?part_ids=1,2` | 批量返回 `{part_id: [offer]}`；每 PN 每报价人一条最新有效主报价，其他可见有效报价置于 more；空列表表示无可见有效报价 |
 | GET | `/library/search?q=&limit=` | M1 实时检索，M8 过滤后的有效报价加权，每个候选附去重后的 offers、offer_count（报价人数） |
 | POST | `/reference` | 采购参考：part_ids 或 inquiry_id；返回 M3 reference、offers、gallery=[{part_id}]；指定 inquiry_id 时沿用候选同时满足查看者与单据所有人的 M8／字段组权限 |
+
+D-0047 新增字段：询价单 `priority`（normal/urgent，默认 normal，建单与修改可写）、`urge_count`、`last_urged_at`（只读）；
+询价行 `return_defective`（布尔，默认 true）；报价 `price_basis`（sale/cost，默认 sale，保存与更新可写，按报价原有受众规则可见）。
 
 建档两种写动作以及查重均要求 `action_presales_bind_part` 和 `page_master_data`，且必须为处理人、
 主动报价发起人或主管。公共池先领单。主数据字段包括 description、brand、manufacturer、summary、
@@ -57,6 +62,37 @@ q 为空时返回权限范围内的候选，非空时对原始名称、归一化
 客户与供应商字段组的可见性均复用 `is_field_hidden`，与 `apply_field_visibility` 使用同一判定来源。
 客户端使用售前专用候选接口，不复用分析页 options；没有对应字段权限时不展示客户或供应商选择器。
 
+## 无单据主动报价与当前行答复（D-0048）
+
+`POST /offers/direct` 接受报价字段及 `part_id`、`on_existing=update|new`（默认 update）、
+`existing_offer_id`、`expected_version`、仅新建时的 `offer_audience`。
+首次报价无需版本；已有本人同 PN 已发布报价时，必须携带明确报价 ID 和当前版本，缺失版本返回
+409 `existing_offer` 和经权限过滤的 `existing_offers`（最新在前）。客户端可明确选最新条并带
+ID/版本重试一次；版本冲突不能继续自动覆盖。`new` 明确另报时不可同时传既有 ID/版本。
+新报价（含旧询价草稿报价接口）默认含税；显式 null 保留未声明。更新仅改传入字段，既有来源和整条受众不变。
+Excel 明确更新已有报价时，新建的中间草稿继承未显式修改的成本/售价及税口径，不能用新建默认值覆盖既有报价；已有草稿仍保留自身未修改字段。
+该接口返回一条 Offer；无单据报价 `inquiry_id`、`line_id` 都为 null，有源报价仍返回真实 ID。
+独立报价的整条可见性仍走同一个受众出口，字段受众与供应商字段权限不变。
+报价本人更新/撤回不再受来源询价 closed/revising 限制；权限、CAS 版本和成交钉住版本不变。
+原 `/inquiries/.../publish` 只保留旧草稿兼容；新增主动报价入口使用 `/offers/direct`。
+
+询价列表和详情增加 `line_answers`：每项包含 `line_id`、`responded` 和
+`state=quoted|skip|pending|unavailable`。quoted 带当前有效、当前可见的完整 `offer` 及
+`reporter`；skip 带可见的 `reason`/`reporter`；unavailable 表示已回复而当前没有有效报价。
+其当前价格不替换 `ref_offer`、`line_responses[].offer`、`won_offer` 中的历史快照。
+沿用响应可另附 `current_offer`，客户端必须检查其 status/no_stock，不可把撤回或无货当成有效价。
+`progress.quoted_lines` 保持已处理行数，新增 `effective_quoted_lines` 仅计当前有效价；
+`can_urge` 与后端催办前提一致（发起人、已提交销售询价、存在未完成待办），30 分钟频控仍由
+催办写接口检查，暂停待办不满足催办前提。不因旧报价失效自动重开已完成待办。
+新价回复后撤回仍为 `responded=true/state=unavailable`；实质变更重提后，上一轮撤回或 stale 报价不计为本轮已处理。
+坏件是否返回属于实质报价条件：任一方向变更均使原报价 stale 并重新打开待办；旧提交快照缺该字段按历史默认 true 兼容。
+采购工作簿按 PN、一致要求、坏件返回条件分组；坏件返回是只读列。价格性质为成本价/售价枚举，可往返编辑，有效报价摘要同时标明该性质。
+列表先完成原有权限与参与者过滤、得到准确 total，再只序列化当前页的行答复、报价与待办；排序及页码口径不变。
+
+迁移 `f1a3c5e7b9d2` 放宽报价来源为空并保留成对约束，新增独立报价整条受众外键。
+空库可升降升；已有独立报价时 downgrade 明确拒绝删除数据或伪造 BJ 来源，发布回滚须
+保留新 schema 并前滚修复，禁止强制降级或以旧备份覆盖新业务数据。对外放行前的停写回退须遵守本次发布 runbook。
+
 ## 输入与版本
 
 创建单据接受 kind、customer_id、notes、lines、assignee_ids、offer_audience、notes_audience、field_values。
@@ -64,9 +100,11 @@ q 为空时返回权限范围内的候选，非空时对原始名称、归一化
 未建档行可仅传 pn_raw。行 qty 为正数、最多三位小数。每次 HTTP 提交最多 200 行。
 
 报价接受 unit_price、is_tax_inclusive、no_stock、qty_available、stock_location、lead_time、source_key、supplier_id、
-validity_days、notes、supplier_audience、reporter_audience、notes_audience。金额是 Money(14,2)，不转换税基。
-validity_days 为 1–36500 的自然日数；截止时刻为上海发布日期加 N−1 天的 23:59:59.999999，存 UTC。
-实时有效判断为 `valid_from <= now < valid_until`，截止微秒本身无效。
+notes、supplier_audience、reporter_audience、notes_audience。金额是 Money(14,2)，不转换税基。
+按 [D-0046](../decisions/0026-售前报价长期有效与主动报价简化.md)，报价不设有效期：不再接受 validity_days，
+响应不再返回 valid_until / validity_days；`valid_from` 即发布或最近一次更新的时间。
+实时有效判断为「已发布、未标无货、有单价且 `valid_from <= now`」，不看时间截止；直到更新、撤回或标为失效前一直有效。
+旧 Excel 中的「有效天数」列按未知列忽略。
 
 除创建外，所有业务写动作要求 expected_version。询价动作校验询价 version；绑定/建档校验行 version；
 更新、撤销、指定 offer_id 保存草稿校验报价 version；新报价草稿校验询价 version。
@@ -128,8 +166,8 @@ M5 注册 presales_inquiry（池 action_presales_quote，主管 action_presales_
 销售引用保存 `line.ref_offer_id` 和 `line.ref_offer_revision_no`；采购沿用保存
 `line_response.ref_offer_id` 和 `line_response.ref_offer_revision_no`；成交保存
 `won_offer_id` 和 `won_offer_revision_no`；跨单更新的原行关联保存 `offer_revision_no`。
-版本由服务端确定，客户端不能自行提交版本号。后续续期不能延长原引用的有效期。
-价格、含税口径、数量、货源、有效期及受众均读取所钉版本的 `presales_offer_revision.snapshot`，
+版本由服务端确定，客户端不能自行提交版本号。
+价格、含税口径、数量、货源及受众均读取所钉版本的 `presales_offer_revision.snapshot`，
 不取当前报价覆盖。新快照保存当时整单准入所需信息；内部准入信息不出现在业务响应中。
 单据详情返回行级 `ref_offer`、跨单原行级 `linked_offers`、成交级 `won_offer` 和沿用结果中的 `offer` 快照；
 不可读快照返回 null 或省略 offer，不用当前报价补全。
@@ -137,8 +175,9 @@ M5 注册 presales_inquiry（池 action_presales_quote，主管 action_presales_
 
 快照可见性仍通过 M8 和查看者当前字段组权限过滤；分组成员变更仍按 M8 的实时成员规则生效。
 当前版本较新且查看者对当前版本也有权限时，快照视图额外包含
-`latest={unit_price, is_tax_inclusive, revision_no}`；否则整个省略 latest，不能透露新价或更新版本号。
-前端以 latest 显示「该报价已更新为 ¥x」。有效性按快照的 valid_until 判断，当前撤销另标「原报价已撤销」。
+`latest={unit_price, is_tax_inclusive, revision_no, price_basis}`；否则整个省略 latest，不能透露新价或更新版本号。
+前端以 latest 显示「该报价已更新为 ¥x」。钉住版本直到原报价下一次更新前有效（D-0046）：原报价改价、改含税口径、
+标无货或标为失效后 `expired=true`；只改备注、货源等其他字段或可见范围不算取代；撤销另标「原报价已撤销」。
 快照视图返回 `expired` 与 `original_withdrawn`，行及沿用结果同步返回这两个标志。
 沿用行显示原报价人和报价时间；`reporter_label` 依据所有人权限返回姓名或「其他采购」，不泄露身份。
 

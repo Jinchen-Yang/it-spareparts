@@ -104,7 +104,7 @@ it("共享页 shared 持续版本冲突时只自动重试一次，随后保留�
 it("PN 状态按报价和版本去重，采购明确不报的行显示原因而非待报价", async () => {
   const quoted: Offer = { id: 71, inquiry_id: 1, line_id: 11, part_id: 1, version: 1, revision_no: 2,
     status: "published", unit_price: "100", is_tax_inclusive: true,
-    valid_from: "2020-01-01T00:00:00Z", valid_until: "2099-01-01T00:00:00Z" };
+    valid_from: "2020-01-01T00:00:00Z" };
   mocks.getInquiry.mockResolvedValue({ ...row, offers: [quoted], lines: [
     { id: 11, inquiry_id: 1, line_key: "quoted", seq: 1, pn_raw: "PN-QUOTED", qty: 1, status: "active", version: 1,
       ref_offer_id: quoted.id, ref_offer: quoted, linked_offers: [quoted] },
@@ -114,7 +114,8 @@ it("PN 状态按报价和版本去重，采购明确不报的行显示原因而�
     { line_id: 12, mode: "skip", created_by: 2, reason: "已停产，无法供货" },
   ], work_items: [{ id: 11, assignee_id: 2, status: "done", paused: false, version: 1 }] });
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
-  await screen.findByText("PN-QUOTED · PN-SKIPPED");
+  await screen.findByText("PN-QUOTED");
+  expect(screen.getByText("PN-SKIPPED")).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
   expect(screen.getByText("已引用 · 1 条有效报价")).toBeVisible();
   expect(screen.queryByText(/2 条有效报价|3 条有效报价|4 条有效报价/)).not.toBeInTheDocument();
@@ -122,14 +123,14 @@ it("PN 状态按报价和版本去重，采购明确不报的行显示原因而�
   expect(screen.queryByText("待报价", { exact: true })).not.toBeInTheDocument();
 });
 
-it("列表摘要使用本行钉住版本，报价更新不能续期已过期的引用", async () => {
+it("列表摘要使用本行钉住版本，被取代的引用不因当前报价有效而恢复", async () => {
   const current: Offer = { id: 71, inquiry_id: 1, line_id: 11, part_id: 1, version: 2, revision_no: 2,
     status: "published", unit_price: "50", is_tax_inclusive: true,
-    valid_from: "2020-01-01T00:00:00Z", valid_until: "2099-01-01T00:00:00Z" };
+    valid_from: "2020-01-01T00:00:00Z" };
   mocks.getInquiry.mockResolvedValue({ ...row, offers: [current], lines: [
     { id: 11, inquiry_id: 1, line_key: "referenced", seq: 1, pn_raw: "PN-PINNED", qty: 1, status: "active", version: 1,
       ref_offer_id: current.id, ref_offer_revision_no: 1,
-      ref_offer: { ...current, revision_no: 1, unit_price: "100", valid_until: "2020-01-02T00:00:00Z" } },
+      ref_offer: { ...current, revision_no: 1, unit_price: "100", expired: true } },
   ] });
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
   await screen.findByText("PN-PINNED");
@@ -138,13 +139,13 @@ it("列表摘要使用本行钉住版本，报价更新不能续期已过期的�
   expect(screen.getByText("待报价", { exact: true })).toBeVisible();
 });
 
-it("引用快照在毫秒截止边界刷新摘要，不等待当前报价的续期截止", async () => {
+it("引用快照不随时间失效（D-0046）", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-10-25T15:59:59.500Z"));
   const pinned: Offer = { id: 71, inquiry_id: 1, line_id: 11, part_id: 1, version: 1, revision_no: 1,
     status: "published", unit_price: "100", is_tax_inclusive: true,
-    valid_from: "2026-10-25T00:00:00Z", valid_until: "2026-10-25T15:59:59.999999Z" };
-  mocks.getInquiry.mockResolvedValue({ ...row, offers: [{ ...pinned, revision_no: 2, valid_until: "2099-01-01T00:00:00Z" }], lines: [
+    valid_from: "2026-10-25T00:00:00Z" };
+  mocks.getInquiry.mockResolvedValue({ ...row, offers: [{ ...pinned, revision_no: 2 }], lines: [
     { id: 11, inquiry_id: 1, line_key: "referenced", seq: 1, pn_raw: "PN-PINNED", qty: 1, status: "active", version: 1,
       ref_offer_id: pinned.id, ref_offer_revision_no: 1, ref_offer: pinned },
   ] });
@@ -154,9 +155,8 @@ it("引用快照在毫秒截止边界刷新摘要，不等待当前报价的续�
     fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(499); });
     expect(screen.getByText("已引用 · 1 条有效报价")).toBeVisible();
-    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-    expect(screen.queryByText(/条有效报价/)).not.toBeInTheDocument();
-    expect(screen.getByText("待报价", { exact: true })).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2 * 86_400_000); });
+    expect(screen.getByText("已引用 · 1 条有效报价")).toBeVisible();
   } finally {
     view.unmount();
     vi.useRealTimers();
@@ -175,16 +175,45 @@ it("共享分页直接请求 shared，服务端结果完整展示，不再拉取
 
 it("草稿沿用和不报标为未回复，不显示为有效报价或正式不报", async () => {
   const reused: Offer = { id: 90, inquiry_id: 9, line_id: 99, part_id: 1, status: "published", revision_no: 1, version: 1,
-    unit_price: "123", valid_from: "2020-01-01T00:00:00Z", valid_until: "2099-01-01T00:00:00Z" };
+    unit_price: "123", valid_from: "2020-01-01T00:00:00Z" };
   mocks.getInquiry.mockResolvedValue({ ...row, offers: [], work_items: [{ id: 11, assignee_id: 2, status: "in_progress", paused: false, version: 1 }],
     lines: [11, 12].map((id) => ({ id, line_key: `line-${id}`, inquiry_id: 1, seq: id, pn_raw: `DRAFT-${id}`, qty: 1, status: "active", version: 1 })),
     line_responses: [{ line_id: 11, mode: "reuse", ref_offer_id: 90, offer: reused, is_draft: true, created_by: 2 },
       { line_id: 12, mode: "skip", reason: "草稿无货", is_draft: true, created_by: 2 }] });
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
-  await screen.findByText("DRAFT-11 · DRAFT-12");
+  await screen.findByText("DRAFT-11");
+  expect(screen.getByText("DRAFT-12")).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
   expect(screen.getAllByText("草稿（未回复）")).toHaveLength(2);
   expect(screen.queryByText(/条有效报价/)).not.toBeInTheDocument();
   expect(screen.queryByText(/不报 · 草稿无货/)).not.toBeInTheDocument();
   expect(screen.getByText("处理中「已回复 0/1」")).toBeVisible();
+});
+
+it("当前答复失效时列表和概览一致，不把历史引用价计入有效价格合计", async () => {
+  const historical: Offer = { id: 71, inquiry_id: 1, line_id: 11, part_id: 1, version: 1, revision_no: 1,
+    status: "published", unit_price: "100", is_tax_inclusive: true, valid_from: "2020-01-01T00:00:00Z" };
+  mocks.getInquiry.mockResolvedValue({ ...row, lines: [
+    { id: 11, inquiry_id: 1, line_key: "historical", seq: 1, pn_raw: "PN-HISTORY", qty: 1, status: "active", version: 1,
+      ref_offer_id: historical.id, ref_offer: historical },
+  ], line_answers: [{ line_id: 11, state: "unavailable", responded: true, reason: "已回复，当前无有效报价" }] });
+  render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
+  await screen.findByText("PN-HISTORY 已回复，当前无有效报价");
+  fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
+  expect(screen.getAllByText("PN-HISTORY 已回复，当前无有效报价")).toHaveLength(2);
+  expect(screen.queryByText(/条有效报价/)).not.toBeInTheDocument();
+  expect(screen.getByText("最低报价合计（含税）：—")).toBeVisible();
+});
+
+it("当前报价和概览均显示成本性质，不因成本数据权限隐藏", async () => {
+  localStorage.setItem("permissions", JSON.stringify({ data_cost: false }));
+  const current: Offer = { id: 71, inquiry_id: 1, line_id: 11, part_id: 1, version: 2, revision_no: 2,
+    status: "published", unit_price: "100", is_tax_inclusive: true, price_basis: "cost", valid_from: "2020-01-01T00:00:00Z" };
+  mocks.getInquiry.mockResolvedValue({ ...row, lines: [
+    { id: 11, inquiry_id: 1, line_key: "cost", seq: 1, pn_raw: "PN-COST", qty: 1, status: "active", version: 1 },
+  ], line_answers: [{ line_id: 11, state: "quoted", responded: true, offer: current }] });
+  render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
+  await screen.findByText("成本价");
+  fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
+  expect(screen.getAllByText("成本价")).toHaveLength(2);
 });

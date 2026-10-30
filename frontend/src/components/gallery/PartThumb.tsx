@@ -95,7 +95,7 @@ export default function PartThumb({ partId, pn, size = 48, onEmptyClick }: Props
     background: "var(--mb-inset)", color: "var(--mb-text-3)",
     cursor: actionable ? "pointer" : "default",
   };
-  const title = status === "empty" ? "暂无图片，点击上传"
+  const title = status === "empty" ? (onEmptyClick ? "暂无图片，点击上传" : "暂无图片")
     : status === "error" ? "图库暂不可用" : undefined;
 
   return (

@@ -15,7 +15,7 @@ def _active(db, part_ids=None, *, now=None):
     query = select(PresalesOffer).where(
         PresalesOffer.status == "published", PresalesOffer.no_stock.is_(False),
         PresalesOffer.part_id.is_not(None), PresalesOffer.unit_price.is_not(None),
-        PresalesOffer.valid_from <= moment, PresalesOffer.valid_until > moment,
+        PresalesOffer.valid_from <= moment,
     )
     if part_ids is not None:
         query = query.where(PresalesOffer.part_id.in_(part_ids))

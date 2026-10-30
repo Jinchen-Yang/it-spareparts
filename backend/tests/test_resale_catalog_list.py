@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
-from sqlalchemy import event, func, select, update
+from sqlalchemy import event, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.api.resale_catalog_export import _encode_list_cursor
@@ -156,12 +156,9 @@ def test_tombstone_reports_direct_parent_and_excluded_rows_still_listed(db, cata
 
 
 def test_rows_sharing_one_timestamp_are_never_skipped(db, catalog_client):
-    parts = _parts(db, 5, prefix="SAME-TS")
-    db.commit()
     same = datetime(2026, 10, 1, 8, 0, 0, tzinfo=timezone.utc)
-    db.execute(
-        update(DimPart).where(DimPart.id.in_([p.id for p in parts])).values(updated_at=same)
-    )
+    parts = [DimPart(pn_std=f"SAME-TS-{i}", updated_at=same) for i in range(5)]
+    db.add_all(parts)
     db.commit()
 
     pages = _walk(catalog_client, limit=2)
@@ -177,14 +174,10 @@ def test_rows_sharing_one_timestamp_are_never_skipped(db, catalog_client):
 
 
 def test_cursor_roundtrip_keeps_microsecond_precision(db, catalog_client):
-    first, second = _parts(db, 2, prefix="MICRO")
-    db.commit()
     base = datetime(2026, 10, 1, 8, 0, 0, tzinfo=timezone.utc)
-    db.execute(update(DimPart).where(DimPart.id == first.id).values(updated_at=base))
-    db.execute(
-        update(DimPart).where(DimPart.id == second.id)
-        .values(updated_at=base + timedelta(microseconds=1))
-    )
+    first = DimPart(pn_std="MICRO-1", updated_at=base)
+    second = DimPart(pn_std="MICRO-2", updated_at=base + timedelta(microseconds=1))
+    db.add_all([first, second])
     db.commit()
 
     response = catalog_client.post(

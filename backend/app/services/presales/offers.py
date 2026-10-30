@@ -1,7 +1,7 @@
 """报价草稿、独立回复和只追加的发布历史；事务由调用方持有。"""
 
 import hashlib
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
@@ -20,19 +20,42 @@ from app.services.workflow.registry import Conflict, Forbidden, InvalidTransitio
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 EDITABLE = {
     "unit_price", "is_tax_inclusive", "no_stock", "qty_available", "stock_location",
-    "lead_time", "source_key", "supplier_id", "validity_days", "notes",
+    "lead_time", "source_key", "supplier_id", "notes", "price_basis",
     "supplier_audience", "reporter_audience", "notes_audience",
 }
+_BASIS_FIELDS = {"is_tax_inclusive", "price_basis"}
+_PUBLICATION_CHOICE_FIELDS = {"on_existing", "existing_offer_id", "existing_version"}
 
 
-def offer_valid_until(published_at: datetime, days: int) -> datetime:
-    """上海自然日末尾转换为 UTC；截止瞬间本身已失效。"""
-    if published_at.tzinfo is None or published_at.utcoffset() is None:
-        raise ValueError("published_at 必须包含时区")
-    if type(days) is not int or days < 1:
-        raise ValueError("有效天数必须为正整数")
-    day = published_at.astimezone(SHANGHAI).date() + timedelta(days=days - 1)
-    return datetime.combine(day, time.max, SHANGHAI).astimezone(timezone.utc)
+def _implicit_basis_fields(offer):
+    metadata = (offer.workbook_choice or {}).get("_draft_input", {})
+    if metadata.get("version") != 1:
+        # Legacy drafts did not record input presence. Protect the live quote
+        # from ambiguous defaults, while retaining stored null/false/cost.
+        return ({"is_tax_inclusive"} if offer.is_tax_inclusive is True else set()) | (
+            {"price_basis"} if offer.price_basis == "sale" else set())
+    return _BASIS_FIELDS.intersection(metadata.get("implicit_defaults", []))
+
+
+def _draft_input_choice(offer, data, *, new_draft):
+    # The update target may only be selected at /reply. Persist input presence,
+    # including an explicit value equal to a default, across separate requests.
+    choice = dict(offer.workbook_choice or {})
+    metadata = dict(choice.get("_draft_input", {}))
+    implicit = (_BASIS_FIELDS if new_draft else _implicit_basis_fields(offer)) - data.keys()
+    # Keep an explicit empty provenance record: otherwise an explicit true/sale
+    # would become indistinguishable from an unmarked legacy default next save.
+    metadata["version"] = 1
+    if implicit:
+        metadata["implicit_defaults"] = sorted(implicit)
+    else:
+        metadata.pop("implicit_defaults", None)
+    choice["_draft_input"] = metadata
+    # Retain the existing page-edit reconfirmation contract without discarding
+    # other internal metadata namespaces.
+    for key in _PUBLICATION_CHOICE_FIELDS:
+        choice.pop(key, None)
+    return choice
 
 
 def _json(value):
@@ -47,9 +70,12 @@ def append_revision(db, offer, actor, changed_fields, reason=None):
     db.flush()
     snapshot = {column.name: _json(getattr(offer, column.name))
                 for column in PresalesOffer.__table__.columns}
-    inquiry = common.get_inquiry(db, offer.inquiry_id)
-    snapshot["_inquiry"] = {key: _json(getattr(inquiry, key)) for key in (
+    inquiry = common.get_inquiry(db, offer.inquiry_id) if offer.inquiry_id is not None else None
+    snapshot["_inquiry"] = ({key: _json(getattr(inquiry, key)) for key in (
         "id", "kind", "created_by", "offer_audience_rule_id", "status", "submitted_at")}
+        if inquiry is not None else {"id": None, "kind": "proactive_offer",
+            "created_by": offer.created_by, "offer_audience_rule_id": offer.offer_audience_rule_id,
+            "status": "submitted", "submitted_at": _json(offer.valid_from)})
     if offer.status == "published":
         snapshot["_inquiry"].update(status="submitted", submitted_at=_json(offer.valid_from))
     revision = PresalesOfferRevision(
@@ -69,8 +95,9 @@ def mark_stale(db, offer, actor, reason):
     offer.version += 1
     offer.updated_at = common.now()
     append_revision(db, offer, actor, ["status"], reason)
-    inquiry = common.get_inquiry(db, offer.inquiry_id)
-    common.event(db, inquiry, actor, "offer.stale", {"offer_id": offer.id})
+    if offer.inquiry_id is not None:
+        inquiry = common.get_inquiry(db, offer.inquiry_id)
+        common.event(db, inquiry, actor, "offer.stale", {"offer_id": offer.id})
     common.audit(db, actor, "presales.offer.stale", offer.id)
     return offer
 
@@ -130,9 +157,6 @@ def _apply(db, offer, data, ctx):
             value = common.rule_id(db, value, ctx, default="private" if key == "supplier_audience" else "public")
         elif key in {"unit_price", "qty_available"}:
             value = _decimal(value, "单价" if key == "unit_price" else "可供数量", 2 if key == "unit_price" else 3) if value is not None else None
-        elif key == "validity_days":
-            if type(value) is not int or not 1 <= value <= 36500:
-                raise InvalidTransition("有效天数必须为 1–36500 的整数")
         elif key == "no_stock":
             if type(value) is not bool:
                 raise InvalidTransition("无货标记必须为布尔值")
@@ -149,6 +173,9 @@ def _apply(db, offer, data, ctx):
         elif key in {"stock_location", "lead_time"}:
             if value is not None and (not isinstance(value, str) or len(value) > 256):
                 raise InvalidTransition("所在地和交期最多 256 字")
+        elif key == "price_basis":
+            if value not in {"sale", "cost"}:
+                raise InvalidTransition("价格性质只能是售价或成本价")
         elif key == "notes" and value is not None and not isinstance(value, str):
             raise InvalidTransition("备注必须为文本")
         if getattr(offer, field) != value:
@@ -223,12 +250,13 @@ def save_draft(db, inquiry_id, line_id, actor, data, *, expected_version,
             raise Conflict("该行货源已有草稿，请指定 offer_id 和报价版本进行更新",
                            offer_id=offer.id, version=offer.version)
         common.check_version(inquiry, expected_version)
-    if offer is None:
+    new_draft = offer is None
+    if new_draft:
         offer = PresalesOffer(
             inquiry_id=inquiry.id, line_id=line.id, part_id=line.part_id,
             work_item_id=task.id if task else None, created_by=user.id,
-            source_key="", status="draft", no_stock=False, validity_days=1,
-            version=1, revision_no=0,
+            source_key="", status="draft", no_stock=False,
+            version=1, revision_no=0, is_tax_inclusive=True,
             supplier_audience_rule_id=common.rule_id(db, None, ctx, default="private"),
         )
         db.add(offer)
@@ -236,7 +264,7 @@ def save_draft(db, inquiry_id, line_id, actor, data, *, expected_version,
         offer.version += 1
     _apply(db, offer, data, ctx)
     # 页面重新编辑草稿后，旧 Excel 的发布选择须重新确认。
-    offer.workbook_choice = {}
+    offer.workbook_choice = _draft_input_choice(offer, data, new_draft=new_draft)
     previous = db.scalar(select(PresalesLineResponse).where(
         PresalesLineResponse.line_id == line.id, PresalesLineResponse.created_by == user.id,
         PresalesLineResponse.is_draft.is_(True)))
@@ -256,7 +284,7 @@ def _publish(db, offer, actor, published_at, reason="发布报价"):
     _publishable(db, offer)
     offer.status = "published"
     offer.valid_from = published_at
-    offer.valid_until = offer_valid_until(published_at, offer.validity_days)
+    offer.valid_until = None
     offer.version += 1
     offer.updated_at = published_at
     offer.workbook_choice = {}
@@ -265,8 +293,10 @@ def _publish(db, offer, actor, published_at, reason="发布报价"):
 
 def _copy_quote(target, source):
     target.part_id = source.part_id
+    implicit = _implicit_basis_fields(source)
     for field in EDITABLE - {"supplier_audience", "reporter_audience", "notes_audience"}:
-        setattr(target, field, getattr(source, field))
+        if field not in implicit:
+            setattr(target, field, getattr(source, field))
     for field in ("supplier_audience_rule_id", "reporter_audience_rule_id", "notes_audience_rule_id"):
         setattr(target, field, getattr(source, field))
 
@@ -330,9 +360,15 @@ def save_line_decision(db, inquiry_id, line_id, actor, *, expected_version, mode
             raise InvalidTransition("报价必须填写单价；无货请选择不报并填写原因")
         targets = _publication_plans(db, [draft], inquiry, ctx, on_existing, existing_offer_id, None)
         target = targets[0][1]
-        draft.workbook_choice = ({"on_existing": "update", "existing_offer_id": target.id,
-                                  "existing_version": target.version} if target else
-                                 {"on_existing": "new"} if on_existing == "new" else {})
+        if target is not None:
+            # 新旧草稿均保留未明确输入的原口径；标记保留至最终发布，
+            # 页面重新编辑/重新选择目标后仍不能把默认值当成用户选择。
+            for key in _implicit_basis_fields(draft):
+                setattr(draft, key, getattr(target, key))
+        selection = ({"on_existing": "update", "existing_offer_id": target.id,
+                      "existing_version": target.version} if target else
+                     {"on_existing": "new"} if on_existing == "new" else {})
+        draft.workbook_choice = {**(draft.workbook_choice or {}), **selection}
         response = db.scalar(select(PresalesLineResponse).where(
             PresalesLineResponse.line_id == line.id, PresalesLineResponse.created_by == user.id))
         if response is not None:
@@ -474,16 +510,16 @@ def _editable(db, offer_id, actor, expected_version):
     initial = db.get(PresalesOffer, offer_id)
     if initial is None:
         raise NotFound("报价不存在")
-    inquiry = common.lock_inquiry(db, initial.inquiry_id)
+    inquiry = common.lock_inquiry(db, initial.inquiry_id) if initial.inquiry_id is not None else None
     _serialize_source(db, initial.created_by, initial.part_id, initial.source_key)
     offer = db.scalar(select(PresalesOffer).where(PresalesOffer.id == offer_id)
                       .with_for_update().execution_options(populate_existing=True))
+    if offer.inquiry_id != (inquiry.id if inquiry is not None else None):
+        raise Conflict("报价来源已变化，请刷新后重试")
     common.check_version(offer, expected_version)
-    common.require(ctx, "action_presales_offer" if inquiry.kind == "proactive_offer" else "action_presales_quote")
+    common.require(ctx, "action_presales_offer" if inquiry is None or inquiry.kind == "proactive_offer" else "action_presales_quote")
     if offer.created_by != user.id and not common.bypass(ctx):
         raise Forbidden("只能修改自己的报价")
-    if inquiry.status != "submitted":
-        raise InvalidTransition("询价已撤回或关单，不能更新报价")
     if offer.status != "published":
         raise InvalidTransition("只能更新或撤销已发布报价")
     return offer, inquiry, ctx
@@ -502,11 +538,12 @@ def update_offer(db, offer_id, actor, data, *, expected_version):
     _publishable(db, offer)
     published_at = common.now()
     offer.valid_from = published_at
-    offer.valid_until = offer_valid_until(published_at, offer.validity_days)
+    offer.valid_until = None
     offer.updated_at = published_at
     offer.version += 1
-    append_revision(db, offer, actor, changed + ["valid_from", "valid_until"], "更新报价")
-    common.event(db, inquiry, actor, "offer.updated", {"offer_id": offer.id})
+    append_revision(db, offer, actor, changed + ["valid_from"], "更新报价")
+    if inquiry is not None:
+        common.event(db, inquiry, actor, "offer.updated", {"offer_id": offer.id})
     common.audit(db, actor, "presales.offer.updated", offer.id)
     return offer
 
@@ -519,8 +556,58 @@ def withdraw(db, offer_id, actor, reason, *, expected_version):
     offer.version += 1
     offer.updated_at = common.now()
     append_revision(db, offer, actor, ["status"], reason.strip())
-    common.event(db, inquiry, actor, "offer.withdrawn", {"offer_id": offer.id})
+    if inquiry is not None:
+        common.event(db, inquiry, actor, "offer.withdrawn", {"offer_id": offer.id})
     common.audit(db, actor, "presales.offer.withdrawn", offer.id)
+    return offer
+
+
+def direct_offer(db, actor, part_id, data, *, on_existing="update", existing_offer_id=None,
+                 expected_version=None, offer_audience=None):
+    """单 PN 直接发布；不创建询价、询价行、BJ 编号或通知待办。"""
+    from app.services.presales import visibility
+
+    user, ctx = common.resolve_actor(db, actor)
+    common.require(ctx, "page_presales")
+    common.require(ctx, "action_presales_offer")
+    part = db.get(DimPart, part_id)
+    if part is None or part.status != "active":
+        raise InvalidTransition("请选择已建档的有效型号")
+    if on_existing not in {"update", "new"}:
+        raise InvalidTransition("请选择更新原报价或另报一条")
+    if on_existing == "new" and (existing_offer_id is not None or expected_version is not None):
+        raise InvalidTransition("另报一条不能同时指定原报价版本")
+    _serialize_source(db, user.id, part_id, "")
+    candidates = list(db.scalars(select(PresalesOffer).where(
+        PresalesOffer.created_by == user.id, PresalesOffer.part_id == part_id,
+        PresalesOffer.status == "published",
+    ).order_by(PresalesOffer.valid_from.desc(), PresalesOffer.id.desc())))
+    if on_existing == "update" and (candidates or existing_offer_id is not None):
+        target = next((row for row in candidates if row.id == existing_offer_id), None) \
+            if existing_offer_id is not None else candidates[0]
+        if target is None:
+            raise Conflict("原报价已变化，请刷新后重试")
+        if expected_version is None:
+            raise Conflict("请确认最新报价后更新", code="existing_offer",
+                           existing_offers=visibility.offer_views(db, candidates, ctx))
+        if existing_offer_id is None:
+            raise InvalidTransition("更新已有报价必须指定 existing_offer_id 和 expected_version")
+        if offer_audience is not None:
+            raise InvalidTransition("更新报价保留原整条可见范围，请勿同时变更受众")
+        if target.inquiry_id is not None:
+            _lock_merge_inquiry(db, target.inquiry_id)
+        return update_offer(db, target.id, actor, data, expected_version=expected_version)
+    if expected_version is not None:
+        raise Conflict("原报价已变化，请刷新后重试")
+    offer = PresalesOffer(inquiry_id=None, line_id=None, part_id=part_id,
+        created_by=user.id, source_key="", status="draft", no_stock=False,
+        version=1, revision_no=0, is_tax_inclusive=True,
+        offer_audience_rule_id=common.rule_id(db, offer_audience, ctx, default="public"),
+        supplier_audience_rule_id=common.rule_id(db, None, ctx, default="private"))
+    db.add(offer)
+    _apply(db, offer, data, ctx)
+    _publish(db, offer, actor, common.now(), "直接发布主动报价")
+    common.audit(db, actor, "presales.offer.direct_published", offer.id)
     return offer
 
 
@@ -604,15 +691,11 @@ def _publication_plans(db, drafts, inquiry, ctx, on_existing, existing_offer_id,
             raise InvalidTransition("只能更新本人对同一 PN 的有效报价")
         if target.id in updating:
             raise InvalidTransition("同一有效报价不能在一批中被更新两次，请分别选择或另报一条")
-        origin = _lock_merge_inquiry(db, target.inquiry_id)
-        if origin is None or origin.status != "submitted":
-            raise InvalidTransition("原报价单已撤回或关单，请另报一条")
+        origin = _lock_merge_inquiry(db, target.inquiry_id) if target.inquiry_id is not None else None
         target = db.scalar(select(PresalesOffer).where(PresalesOffer.id == target.id)
                            .with_for_update().execution_options(populate_existing=True))
         # 旧单锁取得后重新核验，避免等待时旧单撤回使报价变更失效。
-        if (target.inquiry_id != origin.id or target.status != "published" or target.no_stock
-                or target.valid_from is None or target.valid_from > common.now()
-                or target.valid_until is None or target.valid_until <= common.now()):
+        if target.inquiry_id != (origin.id if origin else None) or not common.offer_effective(target):
             raise Conflict("原报价已变化，请刷新后重试")
         if use_saved and saved.get("existing_version") is not None and target.version != saved["existing_version"]:
             raise Conflict("Excel 选择的原报价已更新，请重新选择更新或另报")
@@ -627,7 +710,7 @@ def _publish_choice(db, draft, target, inquiry, actor, published_at, task_id=Non
         _publish(db, draft, actor, published_at)
         return draft
     # 报价归属迁至本次单据，整单 M8 立即使用最新规则；旧单只保留实时受控关联。
-    old_line = db.get(PresalesInquiryLine, target.line_id)
+    old_line = db.get(PresalesInquiryLine, target.line_id) if target.line_id is not None else None
     if old_line is not None and old_line.id != draft.line_id:
         if db.get(PresalesOfferLineLink, (old_line.id, target.id)) is None:
             db.add(PresalesOfferLineLink(line_id=old_line.id, offer_id=target.id,

@@ -5,7 +5,7 @@ import { presales, type Inquiry, type LibraryPart, type Offer } from "../../api/
 import LivePartSearch from "../../components/parts/LivePartSearch";
 import PartThumb from "../../components/gallery/PartThumb";
 import PriceRefBadge from "../../components/pricing/PriceRefBadge";
-import { usePresalesError, isOfferActive, OfferBadge, useNow, flattenOffers, offerDeadline, activeOfferGroups } from "./shared";
+import { usePresalesError, isOfferActive, OfferBadge, useNow, flattenOffers, activeOfferGroups } from "./shared";
 import PageHeader from "../../components/PageHeader";
 import { formatBusinessDateTime } from "../../utils/date";
 import "./presales.css";
@@ -24,7 +24,7 @@ export default function LibraryPage() {
   const [error, setError] = useState(false);
   const [reload, setReload] = useState(0);
   const sourceCache = useRef<Record<number, Inquiry["kind"]>>({});
-  const now = useNow(items.flatMap((item) => flattenOffers(item.offers).flatMap((offer) => [offer.valid_from, offer.valid_until])));
+  const now = useNow(items.flatMap((item) => flattenOffers(item.offers).map((offer) => offer.valid_from)));
 
   useEffect(() => {
     const controller = new AbortController();
@@ -40,7 +40,7 @@ export default function LibraryPage() {
         setItems(data);
         setLoading(false);
         setSources({ ...sourceCache.current });
-        const ids = [...new Set(data.flatMap((part) => flattenOffers(part.offers).map((offer) => offer.inquiry_id)))].filter((id) => !sourceCache.current[id]);
+        const ids = [...new Set(data.flatMap((part) => flattenOffers(part.offers).map((offer) => offer.inquiry_id)))].filter((id): id is number => id != null && !sourceCache.current[id]);
         let index = 0;
         // 报价库没有来源类型：缓存真实单据类型，并限制补取并发，搜索变化即取消。
         await Promise.allSettled(Array.from({ length: Math.min(4, ids.length) }, async () => {
@@ -82,12 +82,12 @@ export default function LibraryPage() {
       <Table aria-label="有效报价库" rowKey={({ offer }) => offer.id} dataSource={rows} loading={loading} tableLayout="fixed" pagination={{ defaultPageSize: 20 }} columns={[
         { title: "PN / 描述", key: "pn", sorter: (a, b) => a.part.pn_std.localeCompare(b.part.pn_std), render: (_, { part }) => <><Space><PartThumb partId={part.part_id} pn={part.pn_std} size={24} />{part.pn_std}</Space><div className="presales-muted">{part.description}</div></> },
         { title: "有效报价 / 税口径", key: "price", defaultSortOrder: "ascend", sorter: (a, b) => Number(a.offer.unit_price) - Number(b.offer.unit_price), render: (_, { offer }) => <div aria-label={`报价 ${offer.id}`} aria-disabled={!isOfferActive(offer, now)}><OfferBadge offer={offer} />{offer.reporter && <div className="presales-muted">{offer.reporter.name}</div>}</div> },
-        { title: "供货 / 来源", key: "source", width: 180, render: (_, { offer }) => <>{"stock_location" in offer && <div>所在地：{offer.stock_location || ""}</div>}{sources[offer.inquiry_id] && <div>来源：{sources[offer.inquiry_id] === "proactive_offer" ? "主动报价" : "询价回复"}</div>}</> },
-        { title: "报价时间 / 剩余天数", key: "time", sorter: (a, b) => (a.offer.valid_from ?? "").localeCompare(b.offer.valid_from ?? ""), width: 180, render: (_, { offer }) => <>{offer.valid_from && <div>{formatBusinessDateTime(offer.valid_from)}</div>}<Tag>{isOfferActive(offer, now) ? `${Math.max(1, Math.ceil((offerDeadline(offer.valid_until) - now) / 86400000))} 天` : "已失效"}</Tag></> },
+        { title: "供货 / 来源", key: "source", width: 180, render: (_, { offer }) => <>{"stock_location" in offer && <div>所在地：{offer.stock_location || ""}</div>}{offer.inquiry_id == null ? <div>来源：主动报价</div> : sources[offer.inquiry_id] && <div>来源：{sources[offer.inquiry_id] === "proactive_offer" ? "主动报价" : "询价回复"}</div>}</> },
+        { title: "报价时间", key: "time", sorter: (a, b) => (a.offer.valid_from ?? "").localeCompare(b.offer.valid_from ?? ""), width: 180, render: (_, { offer }) => <>{offer.valid_from && <div>{formatBusinessDateTime(offer.valid_from)}</div>}{!isOfferActive(offer, now) && <Tag>已失效</Tag>}</> },
         { title: "操作", key: "actions", width: 190, render: (_, item) => <Space direction="vertical"><Button type="link" disabled={!isOfferActive(item.offer, now)} onClick={() => reference(item.part, item.offer)}>用这条报价建询价单</Button>
-          <Button type="link" onClick={() => navigate(`/presales/inquiries/${item.offer.inquiry_id}`)}>查看来源单</Button><Button type="link" onClick={() => setSelected(item)}>报价详情{item.offer.more?.length ? `（更多 ${item.offer.more.length} 条）` : ""}</Button></Space> },
+          {item.offer.inquiry_id != null && <Button type="link" onClick={() => navigate(`/presales/inquiries/${item.offer.inquiry_id}`)}>查看来源单</Button>}<Button type="link" onClick={() => setSelected(item)}>报价详情{item.offer.more?.length ? `（更多 ${item.offer.more.length} 条）` : ""}</Button></Space> },
       ]} locale={{ emptyText: query.trim() ? "没有可见的有效报价" : "输入 PN 搜索有效报价" }} />
-      <p className="presales-muted">共 {rows.length} 条主报价 · 价格保留原税口径 · 有效期到点自动失效</p>
+      <p className="presales-muted">共 {rows.length} 条主报价 · 价格保留原税口径 · 报价一直有效，直到报价人更新或撤回</p>
     </div>
     <Drawer title={selected ? `${selected.part.pn_std} · 报价详情` : "报价详情"} open={!!selected} onClose={() => setSelected(undefined)} width={680} destroyOnHidden>
       {selected && <><p>{selected.part.description}</p><PriceRefBadge partId={selected.part.part_id} />
