@@ -360,6 +360,20 @@ def _formula_serial_value(numeric: float, date1904: bool) -> object:
     return converted
 
 
+def _lenient_formula_value(cell: ET.Element) -> object:
+    """Best-effort cached value for a bounded header scan.
+
+    Only :func:`iter_worksheet_rows` with ``strict_formula_cache=False`` uses
+    this: a missing cache becomes ``None`` so one ignored sheet cannot abort
+    header detection.  Selected sheets are always validated separately with
+    :func:`assert_formula_caches`, and business values are never read through
+    this path.
+    """
+    if cell.attrib.get("t") == "inlineStr":
+        return _value_text(cell, "inlineStr") or None
+    return _value_text(cell, "s") or None
+
+
 def _coerce_cell(
     cell: ET.Element,
     shared: list[str],
@@ -369,10 +383,13 @@ def _coerce_cell(
     sheet_name: str,
     coordinate: str,
     date1904: bool,
+    strict_formula_cache: bool,
 ) -> object:
     issue = _formula_cache_issue(cell, sheet_name, coordinate)
     if issue is not None:
-        raise issue.as_exception()
+        if strict_formula_cache:
+            raise issue.as_exception()
+        return _lenient_formula_value(cell)
     cell_type = cell.attrib.get("t")
     style_id = int(cell.attrib.get("s", "0") or 0)
     if cell_type == "inlineStr":
@@ -411,8 +428,15 @@ def iter_worksheet_rows(
     *,
     max_rows: int | None = None,
     date1904: bool | None = None,
+    strict_formula_cache: bool = True,
 ) -> Iterator[list[object]]:
-    """Yield worksheet rows, preserving sparse row/cell gaps as ``None``."""
+    """Yield worksheet rows, preserving sparse row/cell gaps as ``None``.
+
+    ``strict_formula_cache=False`` is only for the bounded header probe: an
+    uncached formula in an ignored sheet's first rows must not abort the whole
+    workbook.  Callers that read business values keep the default and get a
+    sheet/cell error instead of a silent ``None``.
+    """
     with zipfile.ZipFile(path) as archive:
         shared = _shared_strings(archive)
         date_styles = _date_style_ids(archive)
@@ -453,6 +477,7 @@ def iter_worksheet_rows(
                         sheet_name=sheet.name,
                         coordinate=coordinate,
                         date1904=date1904,
+                        strict_formula_cache=strict_formula_cache,
                     )
                 current_row = row_number
                 if max_rows is not None and emitted >= max_rows:

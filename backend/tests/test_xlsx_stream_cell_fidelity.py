@@ -267,7 +267,7 @@ def test_shared_formula_dependent_without_cache_is_checked():
         assert caught.value.cell == "A2"
 
 
-def test_inline_reader_precheck_and_execute_report_formula_error():
+def test_inline_header_probe_is_bounded_but_full_read_reports_formula_error():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "inline-formula.xlsx"
         workbook = _workbook(path)
@@ -282,12 +282,15 @@ def test_inline_reader_precheck_and_execute_report_formula_error():
             ),
         )
 
-        with pytest.raises(reader.ReaderError) as precheck:
-            reader.inspect_workbook(str(path), load_data=False)
-        assert precheck.value.code == "unsupported_cell_encoding"
-        assert "Data" in str(precheck.value)
-        assert "B1" in str(precheck.value)
-        assert "重新计算" in str(precheck.value)
+        # 表头探测（load_data=False）只读前几行，必须容许无缓存公式，
+        # 否则被忽略页的坏公式会拖垮整本；选中页的全行校验在 precheck。
+        inspected = reader.inspect_workbook(str(path), load_data=False)
+        assert inspected[0].sheet_name == "Data"
+
+        with pytest.raises(reader.ReaderError) as compat:
+            reader.inspect_workbook(str(path), load_data=True)
+        assert compat.value.code == "unsupported_cell_encoding"
+        assert "B1" in str(compat.value)
 
         with pytest.raises(reader.ReaderError) as execute:
             reader.load_selected_workbook(str(path), ["Data"])
