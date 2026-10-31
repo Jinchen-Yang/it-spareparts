@@ -868,9 +868,29 @@ def _register_wbdd_order(res: TransformResult, row, row_no: int,
 _BXD_RX = re.compile(r"BXD-\d{8}-\d+")
 
 
-def _clip(s: str | None, limit: int = 64) -> str | None:
-    """手填自由文本进定长列前钳制长度：超长截断而非流到 DB 炸整批（坏行隔离原则）。"""
-    return s[:limit] if s else s
+# D-0050：报销明细的身份/受限文本列不再静默截断；超过模型列宽即整批拒绝，
+# 回执带源数据行、字段、实际长度与上限。展示文本列（reason 等）已是 Text，不在此表。
+_EXPENSE_TEXT_LIMITS = {
+    "linked_sales_order_no": (64, "销售订单"),
+    "bxd_no": (64, "单号"),
+    "person": (64, "报销人员"),
+    "expense_type": (64, "报销类别"),
+    "fee_category": (64, "费用分类"),
+    "data_status": (16, "流程状态"),
+}
+
+
+def _expense_text(value: str | None, field_name: str, row_no: int) -> str | None:
+    """报销明细受限文本：合法值原样保留，超长整批拒绝（不截断、不静默）。"""
+    limit, label = _EXPENSE_TEXT_LIMITS[field_name]
+    if value is None or len(value) <= limit:
+        return value
+    from app.etl.reader import ReaderError     # 延迟导入：reader 不依赖 transform
+    raise ReaderError(
+        f"报销明细第 {row_no} 行「{label}」源文本长度 {len(value)} 超过字段上限 "
+        f"{limit} 字符，整批未导入；请缩短后重传",
+        code="expense_field_too_long",
+    )
 
 
 def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> TransformResult:
@@ -1178,21 +1198,35 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
         amount_ex_tax = tax_policy.round_money(amount_ex_tax)
         amount_inc_tax = tax_policy.round_money(amount_inc_tax)
 
-        # 头级字段走 gvh：延续行继承头行值（#168 形态）；行级明细列仍走 gv
-        xsdd = _clip(cleaner.clean_str(gvh("维保销售订单", "销售订单")) or anchor)
+        # 头级字段走 gvh：延续行继承头行值（#168 形态）；行级明细列仍走 gv。
+        # D-0050：六个受限源字段先校验长度再使用——超长即整批拒绝，不依赖该行
+        # 后续是否 missing_link/撞键，任何静默截断都不许进入业务事实或错误身份。
+        xsdd = _expense_text(
+            cleaner.clean_str(gvh("维保销售订单", "销售订单")) or anchor,
+            "linked_sales_order_no", row_no)
 
         # 身份提取必须早于 missing_link 判定：修复模式放行这类行后，loader 要靠
         # 这套身份证明「被丢的行不对应任何将被作废的旧行」。此处仍在 raw_line_id/
         # duplicate_key 之前——复合键 ck/scope 依赖 xsdd，那部分不能上移。
         title = cleaner.clean_str(gvh("数据标题"))
         m = _BXD_RX.search(title or "")
-        bxd_no = _clip(m.group(0) if m
-                       else cleaner.clean_str(gvh("单号", "费用单号", "报销单号")))
+        bxd_no = _expense_text(
+            m.group(0) if m else cleaner.clean_str(gvh("单号", "费用单号", "报销单号")),
+            "bxd_no", row_no)
         line_no = cleaner.parse_int(gv("报销明细.序号", "序号"))
-        person = _clip(cleaner.clean_str(gvh("报销人员", "申请人")))
+        person = _expense_text(
+            cleaner.clean_str(gvh("报销人员", "申请人")), "person", row_no)
         reason = cleaner.clean_str(gvh("支出事由", "报销主题"))
         native_line_id = cleaner.clean_str(gv("报销明细.数据ID(不可修改)",
                                               "报销明细.数据ID"))
+        data_status = _expense_text(
+            cleaner.clean_str(gvh("流程状态")), "data_status", row_no,
+        ) or config.MAINT_EXPENSE_ACTIVE_STATUS
+        expense_type = _expense_text(
+            cleaner.clean_str(gvh("报销类别", "费用类型")), "expense_type", row_no)
+        fee_category = _expense_text(
+            cleaner.clean_str(gv("报销明细.费用分类", "费用分类")),
+            "fee_category", row_no)
 
         if not xsdd:
             # expense_date/amount 在此必非空：无金额行已在 rows_skipped_no_data
@@ -1243,12 +1277,11 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
 
         res.lines.append({
             "raw_line_id": raw_line, "bxd_no": bxd_no, "line_no": line_no,
-            "data_status": _clip(cleaner.clean_str(gvh("流程状态")), 16)
-                           or config.MAINT_EXPENSE_ACTIVE_STATUS,
+            "data_status": data_status,
             "expense_date": expense_date,
             "person": person,
-            "expense_type": _clip(cleaner.clean_str(gvh("报销类别", "费用类型"))),
-            "fee_category": _clip(cleaner.clean_str(gv("报销明细.费用分类", "费用分类"))),
+            "expense_type": expense_type,
+            "fee_category": fee_category,
             "reason": reason,
             "linked_sales_order_no": xsdd,
             "amount": amount,
