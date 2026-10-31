@@ -5,6 +5,11 @@ Some upstream systems write every text cell as ``inlineStr`` instead of using
 unreliable for those files, so this module reads only the worksheet XML that
 the import pipeline selected.  It deliberately does not replace the existing
 ZIP/XML safety scanner in :mod:`app.etl.reader`.
+
+The reader never evaluates formulas: only cached results are accepted, and a
+formula without a usable cache raises :class:`FormulaCacheError` naming the
+worksheet and cell.  Date serials follow ``workbookPr@date1904`` and openpyxl's
+1900/1904 conversion rules.
 """
 
 from __future__ import annotations
@@ -14,11 +19,16 @@ import re
 import sys
 import zipfile
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time
 from typing import Iterator, Sequence
 import xml.etree.ElementTree as ET
 
 import pandas as pd
+from openpyxl.utils.datetime import (
+    CALENDAR_MAC_1904,
+    CALENDAR_WINDOWS_1900,
+    from_excel,
+)
 
 
 NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -33,6 +43,58 @@ class UnsupportedCellEncoding(ValueError):
     """The workbook is structurally valid but uses a value type we do not support."""
 
 
+class FormulaCacheError(UnsupportedCellEncoding):
+    """A formula cell has no usable cached result.
+
+    The streaming reader never evaluates formulas.  A formula without a cached
+    value must fail loudly instead of becoming ``None`` (the historical
+    openpyxl ``data_only=True`` behaviour).
+    """
+
+    def __init__(self, sheet: str, cell: str, *, detail: str):
+        self.sheet = sheet
+        self.cell = cell
+        super().__init__(f"工作表「{sheet}」的单元格 {cell} {detail}")
+
+
+class MissingFormulaCacheError(FormulaCacheError):
+    def __init__(self, sheet: str, cell: str):
+        super().__init__(
+            sheet,
+            cell,
+            detail=(
+                "公式没有缓存值，请在 Excel/WPS/LibreOffice 中重新计算并另存后重试。"
+            ),
+        )
+
+
+class FormulaErrorCacheError(FormulaCacheError):
+    def __init__(self, sheet: str, cell: str, cached_value: str | None):
+        super().__init__(
+            sheet,
+            cell,
+            detail=(
+                f"公式缓存为错误值「{cached_value or '（空）'}」，"
+                "请修正公式并重新计算后保存。"
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class FormulaCacheIssue:
+    """A formula cell whose cached result cannot be trusted as an imported value."""
+
+    sheet: str
+    cell: str
+    kind: str  # "missing" | "error"
+    cached_value: str | None = None
+
+    def as_exception(self) -> FormulaCacheError:
+        if self.kind == "error":
+            return FormulaErrorCacheError(self.sheet, self.cell, self.cached_value)
+        return MissingFormulaCacheError(self.sheet, self.cell)
+
+
 @dataclass(frozen=True)
 class WorksheetRef:
     name: str
@@ -44,6 +106,7 @@ class WorkbookLayout:
     sheets: tuple[WorksheetRef, ...]
     has_shared_strings: bool
     worksheet_encodings: dict[str, frozenset[str]]
+    date1904: bool = False
 
     @property
     def has_inline_strings(self) -> bool:
@@ -88,8 +151,11 @@ def _relationship_targets(archive: zipfile.ZipFile) -> dict[str, str]:
     return out
 
 
-def _sheet_refs(archive: zipfile.ZipFile) -> list[WorksheetRef]:
-    workbook = _xml_root(archive, "xl/workbook.xml")
+def _sheet_refs(
+    archive: zipfile.ZipFile, workbook: ET.Element | None = None
+) -> list[WorksheetRef]:
+    if workbook is None:
+        workbook = _xml_root(archive, "xl/workbook.xml")
     relationships = _relationship_targets(archive)
     refs: list[WorksheetRef] = []
     sheets = workbook.find(_tag("sheets"))
@@ -109,6 +175,25 @@ def _sheet_refs(archive: zipfile.ZipFile) -> list[WorksheetRef]:
     return refs
 
 
+def _workbook_date1904(workbook: ET.Element) -> bool:
+    """Read ``workbookPr@date1904``; missing attribute means the 1900 system."""
+    properties = next(
+        (child for child in workbook if _local(child.tag) == "workbookPr"),
+        None,
+    )
+    if properties is None:
+        return False
+    raw = properties.attrib.get("date1904")
+    if raw is None:
+        return False
+    value = raw.strip().lower()
+    if value in {"1", "true"}:
+        return True
+    if value in {"0", "false"}:
+        return False
+    raise UnsupportedCellEncoding(f"workbookPr date1904 值无效：{raw!r}")
+
+
 def _cell_col(ref: str) -> int:
     match = re.fullmatch(r"\$?([A-Za-z]{1,3})\$?\d+", ref or "")
     if not match:
@@ -124,6 +209,14 @@ def _cell_row(ref: str) -> int:
     if not match:
         raise ValueError(f"invalid cell reference: {ref!r}")
     return int(match.group(1))
+
+
+def _column_name(column: int) -> str:
+    letters: list[str] = []
+    while column > 0:
+        column, remainder = divmod(column - 1, 26)
+        letters.append(chr(ord("A") + remainder))
+    return "".join(reversed(letters))
 
 
 def _worksheet_encodings(archive: zipfile.ZipFile, ref: WorksheetRef) -> frozenset[str]:
@@ -146,7 +239,8 @@ def inspect_ooxml_layout(path: str) -> WorkbookLayout:
     try:
         with zipfile.ZipFile(path) as archive:
             names = set(archive.namelist())
-            refs = _sheet_refs(archive)
+            workbook = _xml_root(archive, "xl/workbook.xml")
+            refs = _sheet_refs(archive, workbook)
             encodings = {
                 ref.name: _worksheet_encodings(archive, ref) for ref in refs
             }
@@ -154,6 +248,7 @@ def inspect_ooxml_layout(path: str) -> WorkbookLayout:
                 sheets=tuple(refs),
                 has_shared_strings="xl/sharedStrings.xml" in names,
                 worksheet_encodings=encodings,
+                date1904=_workbook_date1904(workbook),
             )
     except UnsupportedCellEncoding:
         raise
@@ -209,12 +304,75 @@ def _value_text(element: ET.Element, tag: str) -> str:
     return value or ""
 
 
+def _cell_child(element: ET.Element, name: str) -> ET.Element | None:
+    return next(
+        (child for child in element if _local(child.tag) == name),
+        None,
+    )
+
+
+def _formula_cache_issue(
+    cell: ET.Element,
+    sheet_name: str,
+    coordinate: str,
+) -> FormulaCacheIssue | None:
+    """Return why a formula cell's cached result is unusable, if it is."""
+    if _cell_child(cell, "f") is None:
+        return None
+    cell_type = cell.attrib.get("t")
+    value_element = _cell_child(cell, "v")
+    if cell_type == "e":
+        return FormulaCacheIssue(
+            sheet_name,
+            coordinate,
+            "error",
+            (value_element.text or "") if value_element is not None else "",
+        )
+    if value_element is None:
+        return FormulaCacheIssue(sheet_name, coordinate, "missing")
+    raw = value_element.text or ""
+    # openpyxl writes an empty <v></v> for a formula it has never calculated.
+    # A cached empty *string* result is distinguishable by t="str".
+    if cell_type in {None, "n", "s", "b"} and not raw:
+        return FormulaCacheIssue(sheet_name, coordinate, "missing")
+    if cell_type == "inlineStr" and _cell_child(cell, "is") is None:
+        return FormulaCacheIssue(sheet_name, coordinate, "missing")
+    return None
+
+
+def _formula_serial_value(numeric: float, date1904: bool) -> object:
+    """Convert an Excel date serial using openpyxl's 1900/1904 semantics."""
+    epoch = CALENDAR_MAC_1904 if date1904 else CALENDAR_WINDOWS_1900
+    if numeric == 0:
+        # Serial zero is the epoch date in the 1904 system; openpyxl's
+        # generic from_excel() treats 0..1 as a time of day.
+        return epoch.date()
+    try:
+        converted = from_excel(numeric, epoch)
+    except (OverflowError, ValueError) as exc:
+        raise UnsupportedCellEncoding(
+            f"Excel 日期序列号无效：{numeric!r}"
+        ) from exc
+    if isinstance(converted, time):
+        return converted
+    if isinstance(converted, datetime):
+        return converted.date() if numeric.is_integer() else converted
+    raise UnsupportedCellEncoding(f"Excel 日期序列号无效：{numeric!r}")
+
+
 def _coerce_cell(
     cell: ET.Element,
     shared: list[str],
     date_styles: set[int],
     string_cache: dict[str, str],
+    *,
+    sheet_name: str,
+    coordinate: str,
+    date1904: bool,
 ) -> object:
+    issue = _formula_cache_issue(cell, sheet_name, coordinate)
+    if issue is not None:
+        raise issue.as_exception()
     cell_type = cell.attrib.get("t")
     style_id = int(cell.attrib.get("s", "0") or 0)
     if cell_type == "inlineStr":
@@ -243,9 +401,7 @@ def _coerce_cell(
     except ValueError as exc:
         raise UnsupportedCellEncoding("numeric cell is not a number") from exc
     if style_id in date_styles:
-        epoch = datetime(1899, 12, 30)
-        converted = epoch + timedelta(days=numeric)
-        return converted.date() if numeric.is_integer() else converted
+        return _formula_serial_value(numeric, date1904)
     return int(numeric) if numeric.is_integer() else numeric
 
 
@@ -254,11 +410,14 @@ def iter_worksheet_rows(
     sheet: WorksheetRef,
     *,
     max_rows: int | None = None,
+    date1904: bool | None = None,
 ) -> Iterator[list[object]]:
     """Yield worksheet rows, preserving sparse row/cell gaps as ``None``."""
     with zipfile.ZipFile(path) as archive:
         shared = _shared_strings(archive)
         date_styles = _date_style_ids(archive)
+        if date1904 is None:
+            date1904 = _workbook_date1904(_xml_root(archive, "xl/workbook.xml"))
         string_cache: dict[str, str] = {}
         with archive.open(sheet.path) as source:
             from app.etl.reader import _safe_xml_iterparse
@@ -285,8 +444,15 @@ def iter_worksheet_rows(
                         raise ValueError("invalid worksheet cell column")
                     if len(values) < column:
                         values.extend([None] * (column - len(values)))
+                    coordinate = ref or f"{_column_name(column)}{row_number}"
                     values[column - 1] = _coerce_cell(
-                        cell, shared, date_styles, string_cache
+                        cell,
+                        shared,
+                        date_styles,
+                        string_cache,
+                        sheet_name=sheet.name,
+                        coordinate=coordinate,
+                        date1904=date1904,
                     )
                 current_row = row_number
                 if max_rows is not None and emitted >= max_rows:
@@ -304,6 +470,79 @@ def load_selected_frames(path: str, sheet_names: Sequence[str]) -> dict[str, pd.
     if missing:
         raise ValueError(f"worksheet not found: {', '.join(missing)}")
     return {
-        name: pd.DataFrame(list(iter_worksheet_rows(path, by_name[name])))
+        name: pd.DataFrame(
+            list(
+                iter_worksheet_rows(
+                    path,
+                    by_name[name],
+                    date1904=layout.date1904,
+                )
+            )
+        )
         for name in sheet_names
     }
+
+
+def _scan_sheet_formula_caches(
+    archive: zipfile.ZipFile, sheet: WorksheetRef
+) -> list[FormulaCacheIssue]:
+    from app.etl.reader import _safe_xml_iterparse
+
+    issues: list[FormulaCacheIssue] = []
+    current_row = 0
+    current_column = 0
+    with archive.open(sheet.path) as source:
+        for event, element in _safe_xml_iterparse(source):
+            local = _local(element.tag)
+            if event == "start" and local == "row":
+                current_row = int(element.attrib.get("r", current_row + 1))
+                current_column = 0
+            elif event == "end" and local == "c":
+                ref = element.attrib.get("r")
+                column = _cell_col(ref) if ref else current_column + 1
+                current_column = column
+                coordinate = ref or f"{_column_name(column)}{current_row}"
+                issue = _formula_cache_issue(element, sheet.name, coordinate)
+                if issue is not None:
+                    issues.append(issue)
+                element.clear()
+            elif event == "end" and local == "row":
+                element.clear()
+    return issues
+
+
+def check_formula_caches(
+    path: str,
+    sheet_names: Sequence[str] | None = None,
+) -> list[FormulaCacheIssue]:
+    """Scan selected worksheets for formulas lacking a usable cached result.
+
+    This is the reusable guard for the ordinary shared-string path, where
+    pandas/openpyxl ``data_only=True`` silently returns ``None`` for formulas
+    that were never calculated.  Only the requested sheets are scanned, so a
+    formula on an ignored non-business sheet does not block a selected one.
+    """
+    with zipfile.ZipFile(path) as archive:
+        refs = _sheet_refs(archive)
+        by_name = {ref.name: ref for ref in refs}
+        names = (
+            list(sheet_names)
+            if sheet_names is not None
+            else [ref.name for ref in refs]
+        )
+        missing = [name for name in names if name not in by_name]
+        if missing:
+            raise ValueError(f"worksheet not found: {', '.join(missing)}")
+        issues: list[FormulaCacheIssue] = []
+        for name in names:
+            issues.extend(_scan_sheet_formula_caches(archive, by_name[name]))
+        return issues
+
+
+def assert_formula_caches(
+    path: str,
+    sheet_names: Sequence[str] | None = None,
+) -> None:
+    """Raise the first formula-cache problem found on the requested sheets."""
+    for issue in check_formula_caches(path, sheet_names):
+        raise issue.as_exception()
