@@ -823,8 +823,13 @@ def test_upsert_invalid_head_value_does_not_overwrite_existing(db, tmp_path):
     lines_before = db.scalar(select(func.count()).select_from(FSalesLine))
 
     path2 = _write_xlsx(tmp_path / "b.xlsx", [_row(订单金额="不是金额")])
-    batch = pipeline.run_import(db, path2, "b.xlsx", mode="upsert")
+    # A/C 集成契约：问题单据保留旧事实；本文件只有该问题单据，因此批次明确失败。
+    with pytest.raises(reader.ReaderError) as exc_info:
+        pipeline.run_import(db, path2, "b.xlsx", mode="upsert")
     db.commit()
+    assert exc_info.value.code == "no_importable_rows"
+    batch = db.scalar(select(SysImportBatch).order_by(SysImportBatch.id.desc()))
+    assert batch.status == "failed"
     db.refresh(order)
     assert (order.amount_inc_tax, order.amount_ex_tax,
             order.tax_amount, order.tax_rate) == before
@@ -849,8 +854,12 @@ def test_upsert_conflicting_head_values_does_not_overwrite_existing(db, tmp_path
     path2 = _write_xlsx(tmp_path / "b.xlsx", [
         _row(订单金额=Decimal("113.00")),
         _second_line(订单金额=Decimal("226.00"))])
-    batch = pipeline.run_import(db, path2, "b.xlsx", mode="upsert")
+    with pytest.raises(reader.ReaderError) as exc_info:
+        pipeline.run_import(db, path2, "b.xlsx", mode="upsert")
     db.commit()
+    assert exc_info.value.code == "no_importable_rows"
+    batch = db.scalar(select(SysImportBatch).order_by(SysImportBatch.id.desc()))
+    assert batch.status == "failed"
     db.refresh(order)
     assert (order.amount_inc_tax, order.amount_ex_tax,
             order.tax_amount, order.tax_rate) == before
