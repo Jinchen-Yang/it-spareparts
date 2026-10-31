@@ -112,6 +112,32 @@ def inspect_file(path: str, filename: str, *, mode: str = "skip",
                     "不影响本次导入。",
                 ))
 
+        if action == sheet_selection.SELECTED:
+            missing_ids = mapping.missing_identity_columns(
+                sheet.columns, sheet.file_type)
+            if missing_ids:
+                issues.append(_issue(
+                    "error",
+                    "missing_identity_columns",
+                    mapping.identity_columns_message(sheet.file_type, missing_ids),
+                ))
+            # 表头级只能看出「同一关键字段命中多个源列」；同值/异值必须读值。
+            # 只有存在这种歧义时才物化本页，复用 reader 的同一冲突判定，
+            # 不做第二套比较逻辑。正常单列导出不触发。
+            if (not sheet.dup_cols
+                    and mapping.critical_alias_columns(sheet.columns, sheet.file_type)):
+                try:
+                    reader.load_selected_workbook(
+                        path, [sheet.sheet_name], inspections=inspected)
+                except reader.ReaderError as exc:
+                    if exc.code != "alias_column_conflict":
+                        raise
+                    issues.append(_issue(
+                        "error",
+                        "alias_column_conflict",
+                        f"工作表「{sheet.sheet_name}」{exc}",
+                    ))
+
         sheet_missing_price = (
             action == sheet_selection.SELECTED
             and sheet.file_type in {mapping.PURCHASE, mapping.SALES}
