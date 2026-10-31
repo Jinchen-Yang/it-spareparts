@@ -1157,21 +1157,23 @@ def read_workbook(path: str) -> list[SheetData]:
 
 
 def read_excel(path: str) -> tuple[pd.DataFrame, str]:
-    """单表读取（兼容入口）：取第一个可识别 sheet → (DataFrame, file_type)。
+    """单表读取（兼容入口）：按工作簿顺序取第一个可识别 sheet → (DataFrame, file_type)。
 
-    与预检/正式导入共用同一选表规则，只物化和校验被选中的第一页。此前
-    走 ``read_workbook`` 会把整本（含被忽略页）全量读出并校验公式缓存，
-    被忽略页的坏公式会错误地拦住可导入的第一页。
+    历史语义是 ``read_workbook()[0]``，即工作簿原始顺序的第一张可识别页；
+    不能换成预检/正式导入的报销优先选表规则，否则工作簿里只要附带一张报销页，
+    原本可导入的业务页就会被挤掉。这里只做有界表头探测，然后只物化并校验该页，
+    被忽略页的坏公式不影响本入口。
     """
     inspected = inspect_workbook(path, load_data=False)
-    selection = sheet_selection.select_workbook_sheets(inspected)
-    if not selection.selected:
+    first = next(
+        (sheet for sheet in inspected if sheet.file_type is not None), None)
+    if first is None:
         raise ReaderError(
             "无法识别文件类型，请确认是采购/销售/库存/维保出库/报销明细导出文件",
             code="no_recognized_sheet",
         )
     parsed = load_selected_workbook(
-        path, [selection.selected[0].sheet_name], inspections=inspected)
+        path, [first.sheet_name], inspections=inspected)
     if not parsed:
         raise ReaderError(
             "无法识别文件类型，请确认是采购/销售/库存/维保出库/报销明细导出文件",

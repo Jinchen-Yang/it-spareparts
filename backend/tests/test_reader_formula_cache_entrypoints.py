@@ -317,10 +317,114 @@ def test_ignored_sheet_formula_gaps_do_not_block_selected_sheet(encoding):
         assert parsed[0].sheet_name == "Selected"
         assert parsed[0].df.shape[0] == 1
 
-        # 兼容单表入口同样只读取共享选表规则选中的第一页。
+        # 兼容单表入口按工作簿顺序读取第一张可识别页。
         frame, file_type = reader.read_excel(str(path))
         assert file_type == mapping.PURCHASE
         assert frame.iloc[0]["采购单号(必填)"] == "CGDD-1"
+
+
+@pytest.mark.parametrize("encoding", ENCODINGS)
+def test_read_excel_prefers_first_recognizable_sheet_over_later_expense(encoding):
+    """采购页在前、报销页在后：兼容入口保持工作簿顺序，不被报销优先规则改写。"""
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / f"purchase-then-expense-{encoding}.xlsx"
+        _write_book(
+            path,
+            [
+                ("Purchase", [PURCHASE_HEADERS, PURCHASE_ROW]),
+                ("Expense", [EXPENSE_HEADERS, EXPENSE_ROW]),
+            ],
+            encoding=encoding,
+        )
+
+        frame, file_type = reader.read_excel(str(path))
+        assert file_type == mapping.PURCHASE
+        assert list(frame["采购单号(必填)"]) == ["CGDD-1"]
+
+        # 预检/正式导入的报销优先规则是既有行为，本兼容入口不改变它。
+        result = _precheck_result(path)
+        assert result["selected_sheets"] == ["Expense"]
+
+
+@pytest.mark.parametrize("encoding", ENCODINGS)
+def test_read_excel_keeps_legacy_workbook_order_when_expense_sheet_comes_first(encoding):
+    """报销页在前、采购页在后：兼容入口仍按原始顺序取第一张可识别页（报销）。"""
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / f"expense-then-purchase-{encoding}.xlsx"
+        _write_book(
+            path,
+            [
+                ("Expense", [EXPENSE_HEADERS, EXPENSE_ROW]),
+                ("Purchase", [PURCHASE_HEADERS, PURCHASE_ROW]),
+            ],
+            encoding=encoding,
+        )
+
+        frame, file_type = reader.read_excel(str(path))
+        assert file_type == mapping.EXPENSE
+        assert list(frame["单号"]) == ["B1"]
+
+        result = _precheck_result(path)
+        assert result["selected_sheets"] == ["Expense"]
+
+
+@pytest.mark.parametrize("encoding", ENCODINGS)
+def test_read_excel_ignores_bad_formula_on_unselected_sheet(encoding):
+    """采购页在前且可读：后面报销页的坏公式不得拖垮兼容入口。"""
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / f"unselected-gap-{encoding}.xlsx"
+        _write_book(
+            path,
+            [
+                ("Purchase", [PURCHASE_HEADERS, PURCHASE_ROW]),
+                ("Expense", [
+                    EXPENSE_HEADERS,
+                    EXPENSE_ROW,
+                    [], [], [],
+                    [("formula", "1+2", "num", None)],
+                ]),
+            ],
+            encoding=encoding,
+        )
+
+        inspected = reader.inspect_workbook(str(path), load_data=False)
+        assert [sheet.sheet_name for sheet in inspected] == ["Purchase", "Expense"]
+
+        frame, file_type = reader.read_excel(str(path))
+        assert file_type == mapping.PURCHASE
+        assert list(frame["采购单号(必填)"]) == ["CGDD-1"]
+
+        # 报销优先的预检/正式导入仍会拒绝这张坏公式报销页（既有行为）。
+        result = _precheck_result(path)
+        assert result["can_import"] is False
+        assert result["selected_sheets"] == ["Expense"]
+        assert "formula_cache_unavailable" in _codes(_selected_sheet(result))
+
+
+@pytest.mark.parametrize("encoding", ENCODINGS)
+def test_read_excel_reports_bad_formula_on_selected_first_sheet(encoding):
+    """被选中的第一张业务页坏公式必须明确失败并给工作表+单元格。"""
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / f"selected-order-gap-{encoding}.xlsx"
+        _write_book(
+            path,
+            [
+                ("Purchase", [
+                    PURCHASE_HEADERS,
+                    PURCHASE_ROW,
+                    [], [], [],
+                    [("formula", "1+2", "num", None)],
+                ]),
+                ("Expense", [EXPENSE_HEADERS, EXPENSE_ROW]),
+            ],
+            encoding=encoding,
+        )
+
+        with pytest.raises(reader.ReaderError) as compat:
+            reader.read_excel(str(path))
+        assert compat.value.code == "unsupported_cell_encoding"
+        assert "Purchase" in str(compat.value)
+        assert "A6" in str(compat.value)
 
 
 @pytest.mark.parametrize("encoding", ENCODINGS)
