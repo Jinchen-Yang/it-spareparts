@@ -10,7 +10,7 @@ import pytest
 from openpyxl import Workbook
 from sqlalchemy import func, select
 
-from app.etl import loader, pipeline
+from app.etl import loader, pipeline, reader, transform
 from app.models.maintenance_project import (
     MaintenanceProjectAuditLog,
     MaintenanceProject,
@@ -1186,3 +1186,51 @@ def test_explicit_no_maintenance_flag_wins_over_business_type(db, tmp_path):
     )
     assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 1
     assert db.scalar(select(func.count()).select_from(MaintenanceProject)) == 0
+
+
+def test_contract_adapter_does_not_overwrite_sales_face_values(db, tmp_path):
+    """D-0050：合同额可更新，但不得把合同派生未税/税率写回销售票面原值。"""
+    order_no = "XSDD-20261031-0001"
+    raw_order_id = "sales-face-owner-1"
+    path = _ordinary_sales_workbook(
+        tmp_path,
+        order_no=order_no,
+        raw_order_id=raw_order_id,
+        project_name="票面归属测试项目",
+    )
+    pipeline.run_import(
+        db, path, "sales-face.xlsx", uploaded_by="sales-importer",
+        mode="upsert", auto_assign_maintenance_projects=True,
+    )
+    db.commit()
+    sales = db.scalar(select(FSalesOrder).where(
+        FSalesOrder.raw_order_id == raw_order_id))
+    contract = db.scalar(select(MaintenanceProjectContract))
+    assert sales is not None and contract is not None
+
+    # 模拟销售票面后来被独立修正，且合同额仍待按源文件更新。
+    sales.amount_ex_tax = Decimal("999.00")
+    sales.tax_rate = Decimal("0.0600")
+    contract.amount_inc_tax = Decimal("100.00")
+    db.commit()
+    face_before = (sales.amount_ex_tax, sales.tax_rate)
+
+    frame, file_type = reader.read_excel(path)
+    result = transform.transform(frame, file_type)
+    detected = bulk.transformed_sales_sheet(
+        result, source_columns=list(frame.columns)
+    )
+    plan = bulk.SalesContractAmountAdapter().build_plan(db, detected)
+    assert [op["action"] for op in plan["operations"]] == ["update_contract"]
+
+    bulk.SalesContractAmountAdapter().apply_plan(
+        db, plan, operated_by="sales-importer",
+        audit_reason="D-0050 合同额更新不改销售票面",
+    )
+    db.commit()
+    db.expire_all()
+    sales = db.scalar(select(FSalesOrder).where(
+        FSalesOrder.raw_order_id == raw_order_id))
+    contract = db.scalar(select(MaintenanceProjectContract))
+    assert (sales.amount_ex_tax, sales.tax_rate) == face_before
+    assert contract.amount_inc_tax == Decimal("113.00")

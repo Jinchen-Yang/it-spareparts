@@ -417,10 +417,10 @@ def test_transform_tax_trio_old_format_collected_from_invalid_line_rows(tmp_path
 
 
 def test_transform_tax_trio_bad_value_falls_back_to_later_good_row(tmp_path):
-    """三件套坏值口径（docstring 承诺）：静默 None、不报错、不锁定，后续好行可补位。
+    """D-0050：三件套坏值不再静默；同字段后续有好行时软告警并采用好值。
 
-    与对账区「坏值锁定 NULL + 逐行报错」刻意不同（沿用 _build_head 旧口径，
-    不新增错误码）；锁定该分歧，防止未来「统一规则」的重构悄悄改变落库值。
+    非法观测不参与写入（不能覆盖既有票面原值），但同单仍有有效观测时不阻断
+    整单；没有有效观测的字段由 test_transform_bad_head_value_without_fallback_blocks_order 覆盖。
     """
     path = _write_xlsx(tmp_path / "s.xlsx", [
         _row(订单金额="not-a-number", 税金="乱码", 是否含税="随便写的"),
@@ -430,7 +430,40 @@ def test_transform_tax_trio_bad_value_falls_back_to_later_good_row(tmp_path):
     assert head["amount_inc_tax"] == Decimal("113.00")  # 首行坏值不锁空，次行好值补位
     assert head["tax_amount"] == Decimal("13.00")
     assert head["is_tax_inclusive"] is True             # 次行 含税 补位（首行无法识别）
-    assert not result.errors                           # 三件套坏值静默（既有口径）
+    warnings = [e for e in result.errors
+                if e.error_type == "bad_head_value_ignored"]
+    assert len(warnings) == 2                           # 订单金额 + 税金各一条
+    assert all("无法解析" in e.error_detail for e in warnings)
+    assert not [e for e in result.errors
+                if e.error_type == "invalid_head_value"]
+
+
+def test_transform_bad_head_value_without_fallback_blocks_order(tmp_path):
+    """D-0050：无同字段有效观测的非法单头值 → 硬错误且该单头/行都不入计划。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [_row(税金="乱码")])
+    result = _transform_file(path)
+    assert "RAW-RECON-1" not in result.orders
+    assert result.lines == []
+    errors = [e for e in result.errors if e.error_type == "invalid_head_value"]
+    assert len(errors) == 1
+    assert "税金" in errors[0].error_detail and "乱码" in errors[0].error_detail
+
+
+def test_transform_sales_head_rate_conflict_is_visible_without_mixing(tmp_path):
+    """D-0050：显式税率与票面税金/未税额不一致 → 可见冲突，仍按源值保留。
+
+    不把显式税率替换成另一行推导率，也不因合法但矛盾的源值阻断 D-41 的
+    skip 补空/upsert 覆盖；真正非法的非空值仍由 invalid_head_value 阻断。
+    """
+    path = _write_xlsx(tmp_path / "s.xlsx", [_row(税率="6%")])
+    result = _transform_file(path)
+    head = result.orders["RAW-RECON-1"]
+    assert head["tax_rate"] == Decimal("0.0600")
+    assert head["tax_amount"] == Decimal("13.00")
+    conflicts = [e for e in result.errors if e.error_type == "sales_head_conflict"]
+    assert len(conflicts) == 1
+    assert "税率" in conflicts[0].error_detail
+    assert "sales_head_conflict" in transform.SOFT_ERROR_TYPES
 
 
 def test_transform_multi_sheet_with_hidden_sheet(tmp_path):
@@ -652,3 +685,25 @@ def test_purchase_import_leaves_snapshots_untouched(db, tmp_path):
                 "sales_recon_snapshots_missing_columns", "sales_tax_columns_backfilled"):
         assert key not in batch.report_json
     assert _snapshots(db) == []
+
+
+def test_upsert_invalid_head_value_does_not_overwrite_existing(db, tmp_path):
+    """D-0050：非空非法单头金额整单阻断，既有票面原值不被 NULL 覆盖。"""
+    path1 = _write_xlsx(tmp_path / "a.xlsx", [_row()])
+    pipeline.run_import(db, path1, "a.xlsx")
+    db.commit()
+    order = db.scalar(select(FSalesOrder).where(
+        FSalesOrder.raw_order_id == "RAW-RECON-1"))
+    before = (order.amount_inc_tax, order.amount_ex_tax,
+              order.tax_amount, order.tax_rate)
+    batch_id_before = order.import_batch_id
+
+    path2 = _write_xlsx(tmp_path / "b.xlsx", [_row(订单金额="不是金额")])
+    batch = pipeline.run_import(db, path2, "b.xlsx", mode="upsert")
+    db.commit()
+    db.refresh(order)
+    assert (order.amount_inc_tax, order.amount_ex_tax,
+            order.tax_amount, order.tax_rate) == before
+    assert order.import_batch_id == batch_id_before
+    types = {e["error_type"] for e in batch.report_json["errors_preview"]}
+    assert "invalid_head_value" in types

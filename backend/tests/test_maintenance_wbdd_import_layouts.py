@@ -153,3 +153,82 @@ def test_reupload_refreshes_display_but_not_cost(db, tmp_path):
     ln = db.execute(select(FMaintenanceLine)).scalars().one()
     assert o.receiver == "新收货人"                      # 展示列已刷新
     assert ln.unit_cost == 100 and ln.cost_source == "manual"  # 成本列未被触碰
+
+
+def test_missing_optional_columns_keep_values_but_present_blank_clears(db, tmp_path):
+    """D-0050：源列缺失保留旧值；源列存在但空白仍按既有规则覆盖为 NULL。"""
+    rows = make_rows(orders=1, lines_per_order=1)
+    rows[0]["仓储中心"] = "旧仓储中心"
+    rows[0]["需求明细.调整仓库"] = "旧调整仓"
+    _run(db, tmp_path, COLUMNS_91, rows, name="first.xlsx")
+
+    missing = [c for c in COLUMNS_91
+               if c not in ("仓储中心", "需求明细.调整仓库")]
+    _run(db, tmp_path, missing, make_rows(orders=1, lines_per_order=1),
+         name="missing.xlsx")
+    db.expire_all()
+    order = db.execute(select(FMaintenanceOrder)).scalars().one()
+    line = db.execute(select(FMaintenanceLine)).scalars().one()
+    assert order.storage_center == "旧仓储中心"
+    assert line.adjust_warehouse == "旧调整仓"
+
+    blank = make_rows(orders=1, lines_per_order=1)
+    blank[0]["仓储中心"] = ""
+    blank[0]["需求明细.调整仓库"] = ""
+    _run(db, tmp_path, COLUMNS_91, blank, name="blank.xlsx")
+    db.expire_all()
+    order = db.execute(select(FMaintenanceOrder)).scalars().one()
+    line = db.execute(select(FMaintenanceLine)).scalars().one()
+    assert order.storage_center is None
+    assert line.adjust_warehouse is None
+
+
+def test_adjust_warehouse_text_kept_raw_not_guessed_as_boolean(db, tmp_path):
+    """D-0050：仓库名保存原文；布尔列只在明确是/否时置值。"""
+    rows = make_rows(orders=1, lines_per_order=1)
+    rows[0]["需求明细.个别调整发货仓"] = "华南仓"
+    batch = _run(db, tmp_path, COLUMNS_91, rows)
+    line = db.execute(select(FMaintenanceLine)).scalars().one()
+    assert line.adjust_warehouse_flag is None
+    assert line.adjust_warehouse_raw == "华南仓"
+    assert batch.report_json["rows_display_issue"] == 1
+
+    rows = make_rows(orders=1, lines_per_order=1)
+    rows[0]["需求明细.个别调整发货仓"] = "是"
+    _run(db, tmp_path, COLUMNS_91, rows, name="yes.xlsx")
+    db.expire_all()
+    line = db.execute(select(FMaintenanceLine)).scalars().one()
+    assert line.adjust_warehouse_flag is True
+    assert line.adjust_warehouse_raw == "是"
+
+
+def test_proven_truncation_fields_keep_full_source_text(db, tmp_path):
+    """D-0050：退返旧件/收货人/电话/快递单号不再静默切片。"""
+    long_text = {
+        "需求明细.退返旧件": "退" * 24,
+        "收货人": "收" * 76,
+        "收货人电话": "1" * 56,
+        "快递单号": "E" * 188,
+        "快递单号#": "F" * 188,
+    }
+    rows = make_rows(orders=1, lines_per_order=1)
+    rows[0].update(long_text)
+    _run(db, tmp_path, COLUMNS_91, rows)
+    order = db.execute(select(FMaintenanceOrder)).scalars().one()
+    line = db.execute(select(FMaintenanceLine)).scalars().one()
+    assert order.receiver == long_text["收货人"]
+    assert order.receiver_phone == long_text["收货人电话"]
+    assert order.express_no == long_text["快递单号"]
+    assert order.express_no2 == long_text["快递单号#"]
+    assert line.return_old_part == long_text["需求明细.退返旧件"]
+
+
+def test_overlong_core_identity_reports_field_and_skips_order(db, tmp_path):
+    """D-0050：核心身份超长必须明确报错，不能截断或落到数据库整批失败。"""
+    rows = make_rows(orders=1, lines_per_order=1)
+    rows[0]["数据ID(不可修改)"] = "O" * 65
+    batch = _run(db, tmp_path, COLUMNS_91, rows)
+    assert db.execute(select(FMaintenanceOrder)).scalars().all() == []
+    assert db.execute(select(FMaintenanceLine)).scalars().all() == []
+    errors = batch.report_json["errors_preview"]
+    assert any(item["error_type"] == "field_too_long" for item in errors)

@@ -687,7 +687,38 @@ _MAINT_ORDER_UPD = ["order_no", "order_date", "linked_sales_order_no", "project_
                      *mapping.MAINTENANCE_HEAD_DISPLAY_FIELDS]
 _MAINT_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "description",
                     "qty", "return_qty", "serial_numbers", "anomaly_flags", "import_batch_id",
+                    "adjust_warehouse_raw",
                     *mapping.MAINTENANCE_LINE_DISPLAY_FIELDS]
+
+# D-0050：WBDD 更新白名单按源列存在性收窄。仅“源列缺失”跳过该字段；源列存在
+# 但空白仍由 excluded/NULL 覆盖（保留 D-26 地址显式清空与既有空白规则）。
+_MAINT_ORDER_SOURCE_DEPS = {
+    "customer_id": "customer_name",
+    "project_std": "project_raw",
+}
+_MAINT_ORDER_ALWAYS_UPD = {"import_batch_id"}
+_MAINT_LINE_SOURCE_DEPS = {
+    "part_id": "pn_raw",
+    "pn_std": "pn_raw",
+    "pn_raw": "pn_raw",
+    "adjust_warehouse_raw": "adjust_warehouse_flag",
+}
+_MAINT_LINE_ALWAYS_UPD = {"import_batch_id", "anomaly_flags", "order_id"}
+
+
+def _mask_maintenance_update_cols(update_cols: list[str],
+                                  present: frozenset[str] | None,
+                                  deps: dict[str, str],
+                                  always: set[str],
+                                  keep: tuple[str, ...] = ()) -> list[str]:
+    """按本文件实际提供的源字段收窄 WBDD 更新列；None=旧调用方，保持全量。"""
+    if present is None:
+        return update_cols
+    return [
+        column for column in update_cols
+        if column in always or column in keep or column in present
+        or deps.get(column) in present
+    ]
 
 
 def load(session: Session, result: TransformResult, batch_id: int, snapshot_date: date,
@@ -1108,11 +1139,18 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         address_write_ids = {o["raw_order_id"] for o in orders.values()
                              if o.get("receiver_address")}
     order_stats = {"inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set()}
+    present_head = result.present_fields.get("head")
     for write_address in (True, False):
         rows = [row for row in order_rows
                 if (row["raw_order_id"] in address_write_ids) == write_address]
-        update_cols = (_MAINT_ORDER_UPD if write_address else
-                       [c for c in _MAINT_ORDER_UPD if c != "receiver_address"])
+        base_cols = (_MAINT_ORDER_UPD if write_address else
+                     [c for c in _MAINT_ORDER_UPD if c != "receiver_address"])
+        update_cols = _mask_maintenance_update_cols(
+            base_cols, present_head, _MAINT_ORDER_SOURCE_DEPS,
+            _MAINT_ORDER_ALWAYS_UPD,
+            # D-26：地址设置/清空是显式动作，必须写入；缺列/空白仍被排除。
+            keep=("receiver_address",) if write_address else (),
+        )
         stats = _upsert_facts(session, FMaintenanceOrder, rows,
                               FMaintenanceOrder.raw_order_id,
                               update_cols if upsert else None, audit=audit,
@@ -1135,12 +1173,17 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         "qty": ln["qty"], "return_qty": ln["return_qty"],
         "serial_numbers": ln["serial_numbers"],
         "anomaly_flags": ln["anomaly_flags"], "import_batch_id": batch_id,
+        "adjust_warehouse_raw": ln.get("adjust_warehouse_raw"),
         **{f: ln.get(f) for f in mapping.MAINTENANCE_LINE_DISPLAY_FIELDS},
     } for ln in result.lines]
+    line_update_cols = _mask_maintenance_update_cols(
+        _MAINT_LINE_UPD, result.present_fields.get("line"),
+        _MAINT_LINE_SOURCE_DEPS, _MAINT_LINE_ALWAYS_UPD,
+    )
     line_stats = _upsert_maintenance_lines(
         session, line_rows,
         FMaintenanceLine.raw_line_id,
-        _MAINT_LINE_UPD if upsert else None, audit=audit,
+        line_update_cols if upsert else None, audit=audit,
         batch_id=batch_id, operated_by=operated_by,
     )
 
