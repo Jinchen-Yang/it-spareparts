@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.etl import loader as etl_loader, mapping, pipeline, reader, transform
-from app.models.sales import FSalesOrder, FSalesReconciliationSnapshot
+from app.models.sales import FSalesLine, FSalesOrder, FSalesReconciliationSnapshot
 from app.models.system import SysImportError
 from app.services.sales_reconciliation import (
     latest_snapshots_by_raw_order_id,
@@ -367,20 +367,32 @@ def test_import_tax_trio_from_invalid_line_row_persisted(db, tmp_path):
     assert snap.order_amount == Decimal("226.00")
 
 
-def test_transform_tax_trio_conflict_takes_first_nonempty(tmp_path):
-    """三件套跨行不一致（坏行 vs 存活行）：文件序首个非空生效 + 软告警（与对账区同规则）。"""
+def test_transform_tax_trio_conflicting_values_reject_whole_order(tmp_path):
+    """D-0050：同一金额字段跨行出现不同有效值 → 整单拒绝，不取首值。"""
     path = _write_xlsx(tmp_path / "s.xlsx", [
         _row(**{"订单明细.订单数量": "abc"}, 税金=Decimal("26.00"), 是否含税="不含税"),
         _second_line(税金=Decimal("13.00"), 是否含税="含税")])
     result = _transform_file(path)
+    assert "RAW-RECON-1" not in result.orders
+    assert result.lines == []
+    conflicts = [e for e in result.errors if e.error_type == "head_value_conflict"]
+    assert len(conflicts) == 1                         # 税金 26 vs 13
+    assert "税金" in conflicts[0].error_detail
+    assert "26.00" in conflicts[0].error_detail and "13.00" in conflicts[0].error_detail
+
+
+def test_transform_tax_inclusive_conflict_keeps_soft_warning(tmp_path):
+    """是否含税不是金额/税率字段：保持「首个非空 + 软告警」，不整单拒绝。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(**{"订单明细.订单数量": "abc"}, 是否含税="不含税"),
+        _second_line(是否含税="含税")])
+    result = _transform_file(path)
     head = result.orders["RAW-RECON-1"]
-    assert head["tax_amount"] == Decimal("26.00")
-    assert head["is_tax_inclusive"] is False          # 坏行的不含税先到先得
+    assert head["is_tax_inclusive"] is False          # 首个非空生效
     conflicts = [e for e in result.errors if e.error_type == "reconciliation_head_conflict"]
-    assert len(conflicts) == 2                         # 税金 + 是否含税 各一条
-    joined = "\n".join(e.error_detail for e in conflicts)
-    assert "税金" in joined and "是否含税" in joined
-    assert "不含税" in joined                           # 布尔按业务语义渲染
+    assert len(conflicts) == 1
+    assert "是否含税" in conflicts[0].error_detail
+    assert "reconciliation_head_conflict" in transform.SOFT_ERROR_TYPES
 
 
 def test_transform_tax_trio_equal_values_across_rows_no_conflict(tmp_path):
@@ -416,26 +428,18 @@ def test_transform_tax_trio_old_format_collected_from_invalid_line_rows(tmp_path
     assert head["is_tax_inclusive"] is True
 
 
-def test_transform_tax_trio_bad_value_falls_back_to_later_good_row(tmp_path):
-    """D-0050：三件套坏值不再静默；同字段后续有好行时软告警并采用好值。
-
-    非法观测不参与写入（不能覆盖既有票面原值），但同单仍有有效观测时不阻断
-    整单；没有有效观测的字段由 test_transform_bad_head_value_without_fallback_blocks_order 覆盖。
-    """
+def test_transform_bad_head_value_not_forgiven_by_later_good_row(tmp_path):
+    """D-0050：后出现的合法值不能豁免早先的非法观测；整单仍拒绝。"""
     path = _write_xlsx(tmp_path / "s.xlsx", [
         _row(订单金额="not-a-number", 税金="乱码", 是否含税="随便写的"),
         _second_line(订单金额=Decimal("113.00"), 税金=Decimal("13.00"))])
     result = _transform_file(path)
-    head = result.orders["RAW-RECON-1"]
-    assert head["amount_inc_tax"] == Decimal("113.00")  # 首行坏值不锁空，次行好值补位
-    assert head["tax_amount"] == Decimal("13.00")
-    assert head["is_tax_inclusive"] is True             # 次行 含税 补位（首行无法识别）
-    warnings = [e for e in result.errors
-                if e.error_type == "bad_head_value_ignored"]
-    assert len(warnings) == 2                           # 订单金额 + 税金各一条
-    assert all("无法解析" in e.error_detail for e in warnings)
-    assert not [e for e in result.errors
-                if e.error_type == "invalid_head_value"]
+    assert "RAW-RECON-1" not in result.orders
+    assert result.lines == []
+    errors = [e for e in result.errors if e.error_type == "invalid_head_value"]
+    assert {e.row_no for e in errors} == {1}           # 同一源行的两个非法字段
+    joined = "\n".join(e.error_detail for e in errors)
+    assert "订单金额" in joined and "税金" in joined
 
 
 def test_transform_bad_head_value_without_fallback_blocks_order(tmp_path):
@@ -449,21 +453,64 @@ def test_transform_bad_head_value_without_fallback_blocks_order(tmp_path):
     assert "税金" in errors[0].error_detail and "乱码" in errors[0].error_detail
 
 
-def test_transform_sales_head_rate_conflict_is_visible_without_mixing(tmp_path):
-    """D-0050：显式税率与票面税金/未税额不一致 → 可见冲突，仍按源值保留。
+def test_transform_rejected_document_does_not_block_other_documents(tmp_path):
+    """D-0050：被拒单据不写入，但同文件其他合法单据照常导入。"""
+    bad = _row(订单金额="不是金额")
+    good = _row(**{
+        "订单编号(必填)": "XSDD-20260630-0002",
+        "数据ID(不可修改)": "RAW-RECON-2",
+        LINE_ID: "LINE-2", LINE_NO: 2,
+    })
+    path = _write_xlsx(tmp_path / "s.xlsx", [bad, good])
+    result = _transform_file(path)
+    assert "RAW-RECON-1" not in result.orders
+    assert "RAW-RECON-2" in result.orders
+    assert [ln["raw_line_id"] for ln in result.lines] == ["LINE-2"]
+    assert result.orders["RAW-RECON-2"]["amount_inc_tax"] == Decimal("113.00")
 
-    不把显式税率替换成另一行推导率，也不因合法但矛盾的源值阻断 D-41 的
-    skip 补空/upsert 覆盖；真正非法的非空值仍由 invalid_head_value 阻断。
-    """
+
+def test_transform_sales_explicit_rate_conflict_rejects_order(tmp_path):
+    """D-0050：显式税率同单不同有效值 → 整单拒绝，不取首值/不替换成推导率。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(税率="13%"),
+        _second_line(税率="6%")])
+    result = _transform_file(path)
+    assert "RAW-RECON-1" not in result.orders
+    assert result.lines == []
+    conflicts = [e for e in result.errors if e.error_type == "head_value_conflict"]
+    assert len(conflicts) == 1
+    assert "税率" in conflicts[0].error_detail
+    assert not [e for e in result.errors if e.error_type == "invalid_head_value"]
+
+
+def test_transform_sales_arithmetic_mismatch_kept_without_new_blocking(tmp_path):
+    """D-0050：不新增「不含税×税率=税金」等算术等式阻断，票面原值照常保留。"""
     path = _write_xlsx(tmp_path / "s.xlsx", [_row(税率="6%")])
     result = _transform_file(path)
     head = result.orders["RAW-RECON-1"]
     assert head["tax_rate"] == Decimal("0.0600")
+    assert head["amount_ex_tax"] == Decimal("100.00")
     assert head["tax_amount"] == Decimal("13.00")
-    conflicts = [e for e in result.errors if e.error_type == "sales_head_conflict"]
-    assert len(conflicts) == 1
-    assert "税率" in conflicts[0].error_detail
-    assert "sales_head_conflict" in transform.SOFT_ERROR_TYPES
+    assert head["amount_inc_tax"] == Decimal("113.00")
+    assert not [e for e in result.errors
+                if e.error_type in {"invalid_head_value", "head_value_conflict",
+                                    "sales_head_conflict"}]
+
+
+def test_transform_sales_rate_not_derived_by_mixing_rows(tmp_path):
+    """D-0050：不含税额与税金来自不同源行时不得拼接推导税率。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(订单金额=None, 不含税金额=Decimal("100.00"),
+             税率=None, 税金=None),
+        _second_line(订单金额=None, 不含税金额=None,
+                     税率=None, 税金=Decimal("13.00"))])
+    result = _transform_file(path)
+    head = result.orders["RAW-RECON-1"]
+    assert head["amount_ex_tax"] == Decimal("100.00")
+    assert head["tax_amount"] == Decimal("13.00")
+    assert head["tax_rate"] is None
+    assert not [e for e in result.errors
+                if e.error_type in {"invalid_head_value", "head_value_conflict"}]
 
 
 def test_transform_multi_sheet_with_hidden_sheet(tmp_path):
@@ -697,6 +744,8 @@ def test_upsert_invalid_head_value_does_not_overwrite_existing(db, tmp_path):
     before = (order.amount_inc_tax, order.amount_ex_tax,
               order.tax_amount, order.tax_rate)
     batch_id_before = order.import_batch_id
+    snapshots_before = len(_snapshots(db))
+    lines_before = db.scalar(select(func.count()).select_from(FSalesLine))
 
     path2 = _write_xlsx(tmp_path / "b.xlsx", [_row(订单金额="不是金额")])
     batch = pipeline.run_import(db, path2, "b.xlsx", mode="upsert")
@@ -705,5 +754,31 @@ def test_upsert_invalid_head_value_does_not_overwrite_existing(db, tmp_path):
     assert (order.amount_inc_tax, order.amount_ex_tax,
             order.tax_amount, order.tax_rate) == before
     assert order.import_batch_id == batch_id_before
+    assert len(_snapshots(db)) == snapshots_before       # 被拒单据不追加快照
+    assert db.scalar(select(func.count()).select_from(FSalesLine)) == lines_before
     types = {e["error_type"] for e in batch.report_json["errors_preview"]}
     assert "invalid_head_value" in types
+
+
+def test_upsert_conflicting_head_values_does_not_overwrite_existing(db, tmp_path):
+    """D-0050：同单金额跨行冲突整单拒绝，既有事实与快照均不更新。"""
+    path1 = _write_xlsx(tmp_path / "a.xlsx", [_row()])
+    pipeline.run_import(db, path1, "a.xlsx")
+    db.commit()
+    order = db.scalar(select(FSalesOrder).where(
+        FSalesOrder.raw_order_id == "RAW-RECON-1"))
+    before = (order.amount_inc_tax, order.amount_ex_tax,
+              order.tax_amount, order.tax_rate)
+    snapshots_before = len(_snapshots(db))
+
+    path2 = _write_xlsx(tmp_path / "b.xlsx", [
+        _row(订单金额=Decimal("113.00")),
+        _second_line(订单金额=Decimal("226.00"))])
+    batch = pipeline.run_import(db, path2, "b.xlsx", mode="upsert")
+    db.commit()
+    db.refresh(order)
+    assert (order.amount_inc_tax, order.amount_ex_tax,
+            order.tax_amount, order.tax_rate) == before
+    assert len(_snapshots(db)) == snapshots_before
+    types = {e["error_type"] for e in batch.report_json["errors_preview"]}
+    assert "head_value_conflict" in types

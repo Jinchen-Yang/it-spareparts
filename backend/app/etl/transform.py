@@ -7,7 +7,6 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta, timezone
-from decimal import ROUND_HALF_UP, Decimal
 
 import pandas as pd
 
@@ -25,8 +24,6 @@ from app.services.maintenance_expense_integrity import content_key_digest
 SOFT_ERROR_TYPES = frozenset({"empty_pn_inactive", "missing_date_in_progress",
                               "maintenance_address_conflict",
                               "reconciliation_head_conflict",
-                              "bad_head_value_ignored",
-                              "sales_head_conflict",
                               "bad_reconciliation_amount",
                               "bad_source_modified_time"})
 
@@ -62,11 +59,13 @@ class TransformResult:
     rows_display_issue: int = 0        # 展示补全列坏值（旗标非是/否、日期/数量解析失败）计数，不阻断行
     headless_order_ids: list = field(default_factory=list)  # 「有单头、无明细」订单（保留入库）
     maintenance_address_patches: dict[str, AddressPatch] = field(default_factory=dict)
-    # D-0050：本文件实际提供的源字段（内部键），按 head/line 分层。loader 只更新
-    # 这里列出的 WBDD 字段：源列缺失保留旧值，源列存在但空白仍按既有规则覆盖；
-    # 采购/销售继续走各自 D-41 覆盖规则，不消费此掩码。None 表示调用方未提供
-    # 掩码（直接构造 TransformResult 的旧调用），loader 保持全量更新语义。
-    present_fields: dict[str, frozenset[str]] = field(default_factory=dict)
+    # D-0050：本文件实际提供的源字段（内部键），按 head/line 分层，由 reader
+    # 规范化后的 df.columns 生成（不看值是否非空、不依赖 df.attrs）。loader 只
+    # 更新这里列出的 WBDD 字段：源列缺失保留旧值，源列存在但空白仍按既有规则
+    # 覆盖；采购/销售继续走各自 D-41 覆盖规则，不消费此掩码。None（旧调用方
+    # 直接构造 TransformResult）→ loader 保持全量更新；空 frozenset 表示该层
+    # 源列全部缺失，与 None 严格区分。
+    present_fields: dict[str, frozenset[str]] | None = None
     # D-40：销售文件是否带对账区列（至少「已对账金额」列存在）。旧格式文件为
     # False → loader 不写快照（对账区列一个都没有时不产生 NULL 快照）。
     has_reconciliation_columns: bool = False
@@ -105,63 +104,22 @@ _RECON_FIELD_LABELS = {
     "tax_amount": "税金",
 }
 
-# D-0050：单头经济字段的非法值不得静默变 NULL。金额/税率逐行留痕；有其它
-# 有效观测时软告警并采用有效值，没有有效观测时整张单本次不导入（避免用 NULL
-# 覆盖既有票面原值，也避免只写半张单）。采购单头只有一行，任一非法即阻断。
-_HEAD_ECONOMIC_FIELDS = ("amount_ex_tax", "amount_inc_tax", "tax_amount", "tax_rate")
+# D-0050（用户确认的口径）：采购/销售单头金额或税率——非空值无法解析，或同一
+# 字段在一张单的全部源行里出现不同的有效值——该单本次不导入，保留库内旧事实；
+# 其他合法单据继续。后出现的合法值不能豁免早先的非法值；也绝不引入
+# 「不含税×税率=税金」等算术等式或舍入阈值阻断（票面差异按源值保留）。
 _HEAD_ECONOMIC_LABELS = {
     "amount_ex_tax": "不含税金额",
     "amount_inc_tax": "申报金额",
     "tax_amount": "税金",
     "tax_rate": "税率",
 }
-_HEAD_CONFLICT_TOLERANCE = Decimal("0.02")
 
 
 def _head_economic_label(file_type: str, field_name: str) -> str:
     if field_name == "amount_inc_tax":
         return "采购金额" if file_type == mapping.PURCHASE else "订单金额"
     return _HEAD_ECONOMIC_LABELS[field_name]
-
-
-def _head_amount_conflict(head: dict) -> str | None:
-    """同单一组金额观测的可见一致性检查（D-0050）。
-
-    只在票面标记明确「含税」时校验 不含税+税金=订单/采购金额；税率与
-    不含税×税率=税金在两种标记下都可校验，避免把不含税单的订单金额误
-    当成含税额。容忍 0.02 的分位差，与合同适配器现有严格校验同界。
-    """
-    amount_ex = head.get("amount_ex_tax")
-    amount_inc = head.get("amount_inc_tax")
-    tax_amount = head.get("tax_amount")
-    rate = head.get("tax_rate")
-    if rate is not None and amount_ex is not None and tax_amount is not None:
-        expected_tax = (amount_ex * rate).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        if abs(expected_tax - tax_amount) > _HEAD_CONFLICT_TOLERANCE:
-            return (
-                f"税率 {rate} 与不含税金额 {amount_ex} 推导税金 {expected_tax} "
-                f"不一致（票面税金 {tax_amount}）"
-            )
-    if head.get("is_tax_inclusive") is True and amount_inc is not None:
-        if amount_ex is not None and tax_amount is not None:
-            expected_inc = amount_ex + tax_amount
-            if abs(expected_inc - amount_inc) > _HEAD_CONFLICT_TOLERANCE:
-                return (
-                    f"订单金额 {amount_inc} 与不含税金额 {amount_ex}+税金 "
-                    f"{tax_amount}={expected_inc} 不一致"
-                )
-        if amount_ex is not None and rate is not None:
-            expected_inc = (amount_ex * (Decimal("1") + rate)).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
-            if abs(expected_inc - amount_inc) > _HEAD_CONFLICT_TOLERANCE:
-                return (
-                    f"订单金额 {amount_inc} 与不含税金额 {amount_ex}×"
-                    f"(1+税率 {rate})={expected_inc} 不一致"
-                )
-    return None
 
 
 def _fmt_head_value(value):
@@ -171,6 +129,67 @@ def _fmt_head_value(value):
     if value is False:
         return "不含税"
     return value
+
+
+def _observe_head_value(slot: dict, field: str, value, row_no: int) -> None:
+    """登记单头金额/税率的有效观测；同字段出现不同有效值 → 记为冲突待整单拒绝。
+
+    比较用解析后的值（Decimal），"100" 与 "100.00" 不算冲突。首个观测行号
+    记录在 _row_by_field，用于「税率缺失时只允许同一源行拼接」。
+    """
+    row_by_field = slot.setdefault("_row_by_field", {})
+    if field not in slot:
+        slot[field] = value
+        row_by_field[field] = row_no
+        return
+    if slot[field] != value:
+        slot.setdefault("_conflicts", []).append({
+            "field": field,
+            "row_no": row_no,
+            "first_row_no": row_by_field.get(field),
+            "first": slot[field],
+            "value": value,
+        })
+
+
+def _collect_head_economics(res, row, row_no: int, raw_order_id: str,
+                            inv_head: dict, head_obs: dict) -> None:
+    """逐行收集采购/销售单头经济字段观测（D-0050）。
+
+    调用于订单/行 ID 校验之后、明细级校验（PN/数量/单价）闸门之前：明细校验
+    失败的行同样携带单头值，不能因坏行静默漏掉非法观测。非空非法值按源行
+    留痕（即使后续行有合法值也不豁免）；跨行不同值按字段留痕，最终由
+    _finalize_head_economics 整单拒绝。
+    """
+    slot = head_obs.setdefault(raw_order_id, {})
+
+    def g(internal):
+        col = inv_head.get(internal)
+        return row.get(col) if col is not None else None
+
+    for field_name in ("amount_ex_tax", "amount_inc_tax", "tax_amount"):
+        raw = g(field_name)
+        try:
+            value = cleaner.parse_money(raw)
+        except ValueError as exc:
+            slot.setdefault("_invalid", []).append({
+                "field": field_name, "row_no": row_no,
+                "raw": str(raw), "detail": str(exc),
+            })
+            continue
+        if value is not None:
+            _observe_head_value(slot, field_name, value, row_no)
+    raw_rate = g("tax_rate")
+    try:
+        rate = cleaner.parse_rate(raw_rate)
+    except ValueError as exc:
+        slot.setdefault("_invalid", []).append({
+            "field": "tax_rate", "row_no": row_no,
+            "raw": str(raw_rate), "detail": str(exc),
+        })
+    else:
+        if rate is not None:
+            _observe_head_value(slot, "tax_rate", rate, row_no)
 
 
 def _merge_recon_value(res, slot, raw_order_id, field, value, row_no) -> None:
@@ -204,11 +223,11 @@ def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
 
     对账区（仅新格式文件）：坏值置 NULL 记行级错误（bad_reconciliation_amount /
     bad_source_modified_time，逐行上报不阻断），首个非空是坏值 → 锁定 NULL。
-    单头经济字段（金额/金额/税金/税率，新旧格式都有）：非空非法值记入
-    slot["_invalid"]，由 _finalize_sales_head 在整单观测收齐后判定——同字段
-    仍有有效观测时软告警并采用有效值，没有有效观测时整单阻断；绝不把非法值
-    当空值写入或静默用另一行推导值顶替。全部行校验失败的订单不并入订单头
-    （订单不入库，快照/头字段无从落），但已上报的行级错误仍然可见。
+    单头金额/税率（新旧格式都有）由 _collect_head_economics 按同一调用时点
+    逐行收集：非空非法或同字段跨行不同有效值 → 整单拒绝（D-0050）。
+    是否含税不是金额/税率字段，保持既有「首个非空 + 软告警」口径。
+    全部行校验失败的订单不并入订单头（订单不入库，快照/头字段无从落），但
+    已上报的行级错误仍然可见。
     比较用解析后的值（Decimal/datetime），"100" 与 "100.00" 不算冲突。
     """
     slot = head_obs.setdefault(raw_order_id, {})
@@ -217,31 +236,6 @@ def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
         col = inv_head.get(internal)
         return row.get(col) if col is not None else None
 
-    def observe_money(field_name):
-        raw = g(field_name)
-        try:
-            value = cleaner.parse_money(raw)
-        except ValueError as exc:
-            slot.setdefault("_invalid", []).append({
-                "field": field_name, "row_no": row_no,
-                "raw": str(raw), "detail": str(exc),
-            })
-            return
-        if value is not None:
-            _merge_recon_value(res, slot, raw_order_id, field_name, value, row_no)
-
-    for field_name in ("amount_ex_tax", "amount_inc_tax", "tax_amount"):
-        observe_money(field_name)
-    try:
-        rate = cleaner.parse_rate(g("tax_rate"))
-    except ValueError as exc:
-        slot.setdefault("_invalid", []).append({
-            "field": "tax_rate", "row_no": row_no,
-            "raw": str(g("tax_rate")), "detail": str(exc),
-        })
-    else:
-        if rate is not None:
-            _merge_recon_value(res, slot, raw_order_id, "tax_rate", rate, row_no)
     tax_inclusive = cleaner.parse_tax_inclusive(g("is_tax_inclusive"))
     if tax_inclusive is not None:
         _merge_recon_value(res, slot, raw_order_id, "is_tax_inclusive",
@@ -281,41 +275,41 @@ def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
                                modified.astimezone(timezone.utc), row_no)
 
 
-def _finalize_sales_head(res, raw_order_id: str, values: dict, head: dict,
-                         first_row_no: int) -> bool:
-    """按整单观测收口销售单头经济字段；返回是否需要整单阻断。
+def _finalize_head_economics(res, file_type: str, raw_order_id: str,
+                             values: dict, head: dict) -> bool:
+    """按整单观测收口采购/销售单头金额与税率；返回是否需要整单拒绝。
 
-    同一字段存在有效观测时，非法观测只作可见软告警（例如首行坏值、后续行
-    补上有效值），仍采用有效观测；没有有效观测则硬错误并阻断整单，防止
-    upsert 用 NULL 覆盖既有票面原值。税率只在显式值缺失且不含税额与税金
-    来自同一数据行时才推导，禁止跨行拼接后自造税率。
+    D-0050（用户确认）：任一源行出现非空无法解析的金额/税率，或同一字段在
+    不同源行出现不同的有效值 → 该单本次不导入（不写头/行/快照/合同），
+    保留库内旧事实；回执逐字段报告源行与原因。后出现的合法值不能豁免早先
+    的非法值。不做任何算术等式/舍入阈值判断，票面差异按源值保留。
+    税率只在显式值缺失且不含税额与税金来自同一数据行时才推导，禁止跨行
+    拼接自造税率。
     """
-    invalid = values.get("_invalid", [])
-    valid_fields = {
-        field for field in _HEAD_ECONOMIC_FIELDS
-        if values.get(field) is not None
-    }
     blocked = False
-    for rec in invalid:
-        label = _head_economic_label(mapping.SALES, rec["field"])
-        if rec["field"] in valid_fields:
-            res.errors.append(ErrorRec(
-                rec["row_no"], "bad_head_value_ignored",
-                f"{label}「{rec['raw']}」无法解析（{rec['detail']}）；"
-                "已忽略本行该值，采用同单其他有效值（可忽略）",
-                {rec["field"]: rec["raw"]}))
-        else:
-            res.errors.append(ErrorRec(
-                rec["row_no"], "invalid_head_value",
-                f"{label}「{rec['raw']}」无法解析（{rec['detail']}）；"
-                "该单本次不导入，避免覆盖已有票面原值",
-                {rec["field"]: rec["raw"]}))
-            blocked = True
+    for rec in values.get("_invalid", []):
+        label = _head_economic_label(file_type, rec["field"])
+        res.errors.append(ErrorRec(
+            rec["row_no"], "invalid_head_value",
+            f"{label}「{rec['raw']}」无法解析（{rec['detail']}）；"
+            "该单本次不导入，保留库内已有事实，请修正后重传",
+            {rec["field"]: rec["raw"]}))
+        blocked = True
+    for rec in values.get("_conflicts", []):
+        label = _head_economic_label(file_type, rec["field"])
+        res.errors.append(ErrorRec(
+            rec["row_no"], "head_value_conflict",
+            f"{label}同单多行取值不一致：第{rec['first_row_no']}行"
+            f"{_fmt_head_value(rec['first'])}，第{rec['row_no']}行"
+            f"{_fmt_head_value(rec['value'])}；该单本次不导入，保留库内已有事实",
+            {rec["field"]: str(rec["value"])}))
+        blocked = True
+    if blocked:
+        return True
 
     head["amount_ex_tax"] = values.get("amount_ex_tax")
     head["amount_inc_tax"] = values.get("amount_inc_tax")
     head["tax_amount"] = values.get("tax_amount")
-    head["is_tax_inclusive"] = values.get("is_tax_inclusive")
     explicit_rate = values.get("tax_rate")
     if explicit_rate is not None:
         head["tax_rate"] = explicit_rate
@@ -331,20 +325,7 @@ def _finalize_sales_head(res, raw_order_id: str, values: dict, head: dict,
                 values.get("amount_ex_tax"), values.get("tax_amount"))
             if same_row_pair else None
         )
-
-    if not blocked:
-        conflict = _head_amount_conflict(head)
-        if conflict:
-            # 合法但互相矛盾的票面观测：保留源值并明确提示，不在此重写税算法，
-            # 也不把显式税率替换成另一行推导值。D-41 的 skip 补空/upsert 覆盖
-            # 语义继续按源字段执行。
-            res.errors.append(ErrorRec(
-                first_row_no, "sales_head_conflict",
-                f"订单 {raw_order_id} 票面金额观测不一致：{conflict}；"
-                "已按源值保留并继续导入，请核对源文件",
-                {field: _fmt_head_value(head.get(field))
-                 for field in _HEAD_ECONOMIC_FIELDS}))
-    return blocked
+    return False
 
 
 def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
@@ -367,7 +348,7 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
         ),
     }
     # D-40：对账区列存在性 = 至少「已对账金额」列；按订单聚合的单头观测值
-    # （D-40 对账区 + D-41 含税三件套，见 _collect_sales_reconciliation）
+    # （D-40 对账区 + D-41 含税三件套 + D-0050 金额/税率，见收集函数）
     head_obs_by_order: dict = {}
     first_row_by_order: dict[str, int] = {}
     pending_heads: dict[str, dict] = {}
@@ -390,8 +371,11 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
 
         first_row_by_order.setdefault(raw_order_id, row_no)
 
-        # D-40/D-41 单头观测在明细级校验（PN/数量/单价）之前收集：校验失败的行
-        # 同样携带该订单的对账区/含税三件套值，绝不静默跳过（Codex 审查 P1）。
+        # D-0050/D-40/D-41 单头观测在明细级校验（PN/数量/单价）之前收集：校验
+        # 失败的行同样携带该订单的单头值，绝不静默跳过（Codex 审查 P1）。采购
+        # 与销售都逐行观测；后续合法值不能豁免早先的非法值。
+        _collect_head_economics(res, row, row_no, raw_order_id,
+                                inv_head, head_obs_by_order)
         if file_type == mapping.SALES:
             _collect_sales_reconciliation(res, row, row_no, raw_order_id,
                                           inv_head, head_obs_by_order)
@@ -399,13 +383,8 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
         # 单头在明细校验前解析并留错：即使后续明细全部被拒，非空非法的单头
         # 金额/税率也不会静默消失。订单只在出现首个有效明细时进入写入计划。
         if raw_order_id not in pending_heads:
-            head, invalid_fields = _build_head(
-                row, file_type, inv_head, row_no, res,
-                observations=head_obs_by_order.get(raw_order_id),
-            )
-            pending_heads[raw_order_id] = head
-            if invalid_fields:
-                invalid_order_ids.add(raw_order_id)
+            pending_heads[raw_order_id] = _build_head(
+                row, file_type, inv_head, row_no, res)
 
         pn_std, pn_raw, needs_review = cleaner.standardize_pn(row.get(inv_line["pn_raw"]))
         if pn_std is None:
@@ -463,23 +442,21 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
     # 单头观测聚合值并回订单头（只并给本文件中至少一行有效的订单——其余订单
     # 不入库，快照/头字段都无从落，收集时上报的行级错误仍可见）。对账区四个键
     # 补齐为 None：列存在但整单为空/坏值时键仍在，值为 NULL——下游（快照 NULL
-    # 语义）与测试断言都按此口径。含税三件套用聚合值覆盖头行原值：「首个非空」
-    # 取代「首个存活行」（各行一致时结果不变；跨行不同时按文件序首个非空为准，
-    # 且已留冲突告警）。D-0050 起税率不再无条件沿用首行推导值：显式税率优先，
-    # 缺失时只在不含税额与税金来自同一数据行时才推导。
+    # 语义）与测试断言都按此口径。含税三件套用聚合值覆盖头行原值；是否含税
+    # 沿用「首个非空 + 软告警」。D-0050：金额/税率任一非法或同字段跨行不同值
+    # → 整单拒绝；税率显式值优先，缺失时只在不含税额与税金来自同一数据行时推导。
     for raw_id, values in head_obs_by_order.items():
         head = res.orders.get(raw_id)
         if head is None:
-            # 全部明细行被拒的订单不入库，但其非法单头值仍须逐字段可见。
-            _finalize_sales_head(
-                res, raw_id, values, {}, first_row_by_order[raw_id])
+            # 全部明细行被拒的订单不入库，但其非法/冲突单头值仍须逐字段可见。
+            _finalize_head_economics(res, file_type, raw_id, values, {})
             continue
-        if res.has_reconciliation_columns:
+        if file_type == mapping.SALES:
+            head["is_tax_inclusive"] = values.get("is_tax_inclusive")
+        if file_type == mapping.SALES and res.has_reconciliation_columns:
             for field_name in (*_RECON_MONEY_FIELDS, "source_modified_at"):
                 head[field_name] = values.get(field_name)
-        if _finalize_sales_head(
-            res, raw_id, values, head, first_row_by_order[raw_id]
-        ):
+        if _finalize_head_economics(res, file_type, raw_id, values, head):
             invalid_order_ids.add(raw_id)
 
     if invalid_order_ids:
@@ -494,13 +471,13 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
     return res
 
 
-def _build_head(row, file_type, inv_head, row_no, res,
-                *, observations: dict | None = None) -> tuple[dict, dict[str, str]]:
-    """构建单头；返回 (head, invalid_fields)。
+def _build_head(row, file_type: str, inv_head: dict, row_no: int,
+                res) -> dict:
+    """构建单头中与金额/税率无关的字段（D-0050）。
 
-    D-0050：采购单头任一非空金额/税率非法即整单阻断（无同单多行可补位）；
-    销售单头经济字段由 _collect_sales_reconciliation 逐行收集、整单收口，
-    此处只填入已解析的首行观测，不再静默吞错或先按首行推导税率。
+    金额与税率由 _collect_head_economics 逐行观测、_finalize_head_economics
+    整单收口；这里只负责日期、状态、供应商/客户等非经济字段，避免先按首行
+    吞错或提前推导税率。
     """
     def g(internal):
         return row.get(inv_head[internal]) if internal in inv_head else None
@@ -520,33 +497,9 @@ def _build_head(row, file_type, inv_head, row_no, res,
         "data_status": cleaner.clean_str(g("data_status")),
     }
     if file_type == mapping.PURCHASE:
-        invalid: dict[str, str] = {}
-
-        def money(field_name):
-            raw = g(field_name)
-            try:
-                return cleaner.parse_money(raw)
-            except ValueError as exc:
-                invalid[field_name] = str(exc)
-                return None
-
-        amount_ex_tax = money("amount_ex_tax")
-        tax_amount = money("tax_amount")
-        amount_inc_tax = money("amount_inc_tax")
-        try:
-            tax_rate = cleaner.parse_rate(g("tax_rate"))
-        except ValueError as exc:
-            tax_rate = None
-            invalid["tax_rate"] = str(exc)
-        # 税率列实测常空 → 用 税金/不含税金额 反推（含税单）。非法显式值
-        # 不进入反推，避免用推导值掩盖源文件错误。
-        if tax_rate is None and "tax_rate" not in invalid:
-            tax_rate = cleaner.derive_tax_rate(amount_ex_tax, tax_amount)
         name_raw, name_norm = cleaner.normalize_supplier_name(g("supplier_name"))
         supplier_type = cleaner.clean_str(g("supplier_type"))
         head.update({
-            "tax_rate": tax_rate,
-            "amount_ex_tax": amount_ex_tax,
             "purchaser": cleaner.clean_str(g("purchaser")),
             "supplier_name_raw": name_raw,
             "supplier_name_normalized": name_norm,
@@ -559,24 +512,13 @@ def _build_head(row, file_type, inv_head, row_no, res,
             "linked_sales_order_no": cleaner.clean_str(g("linked_sales_order_no")),
             "linked_maintenance_order_no": cleaner.clean_str(g("linked_maintenance_order_no")),
             "is_tax_inclusive": cleaner.parse_tax_inclusive(g("is_tax_inclusive")),
-            "tax_amount": tax_amount,
-            "amount_inc_tax": amount_inc_tax,
+            "tax_amount": None,
+            "amount_inc_tax": None,
         })
-        for field_name, detail in invalid.items():
-            label = _head_economic_label(file_type, field_name)
-            res.errors.append(ErrorRec(
-                row_no, "invalid_head_value",
-                f"{label}「{g(field_name)}」无法解析（{detail}）；"
-                "该单本次不导入，避免覆盖已有事实",
-                {field_name: str(g(field_name))}))
-        return head, invalid
+        return head
 
-    # sales：经济字段已在 _collect_sales_reconciliation 中逐行解析并留痕；
-    # 这里只放首行观测，最终由 _finalize_sales_head 统一收口。
-    observed = observations or {}
+    # 销售：经济字段由整单观测收口；是否含税保持首个非空 + 软告警口径。
     head.update({
-        "tax_rate": observed.get("tax_rate"),
-        "amount_ex_tax": observed.get("amount_ex_tax"),
         "salesperson": cleaner.clean_str(g("salesperson")),
         "customer_name": cleaner.clean_str(g("customer_name")),
         "customer_type": cleaner.clean_str(g("customer_type")),
@@ -593,11 +535,11 @@ def _build_head(row, file_type, inv_head, row_no, res,
         "maintenance_period_from": g("maintenance_period_from"),
         "maintenance_period_to": g("maintenance_period_to"),
         "warehouse": cleaner.clean_str(g("warehouse")),
-        "is_tax_inclusive": observed.get("is_tax_inclusive"),
-        "tax_amount": observed.get("tax_amount"),
-        "amount_inc_tax": observed.get("amount_inc_tax"),
+        "is_tax_inclusive": None,
+        "tax_amount": None,
+        "amount_inc_tax": None,
     })
-    return head, {}
+    return head
 
 
 # 项目名规范化：剥「预交付-」前缀（聚合键；原值另存 project_raw 供追溯）。
@@ -644,7 +586,11 @@ _WBDD_LINE_DISPLAY_SPEC: dict[str, tuple[str, int | None]] = {
 
 
 def _wbdd_display_extras(row, inv_map: dict, spec: dict, res: TransformResult) -> dict:
-    """按规格解析展示补全列：坏值 → NULL＋rows_display_issue+=1，绝不阻断行（只展示用途）。"""
+    """按规格解析展示补全列：坏值 → NULL＋rows_display_issue+=1，绝不阻断行（只展示用途）。
+
+    例外（D-0050）：`adjust_warehouse_flag` 源列真实语义可能是仓库名；非是/否
+    文本不再计坏布尔，只保留在 `adjust_warehouse_raw`，兼容布尔列置 NULL。
+    """
     out: dict = {}
     for field_name, (kind, clip) in spec.items():
         source_col = inv_map.get(field_name)
@@ -661,6 +607,11 @@ def _wbdd_display_extras(row, inv_map: dict, spec: dict, res: TransformResult) -
                 out[field_name] = None
             elif s in ("是", "否"):
                 out[field_name] = (s == "是")
+            elif field_name == "adjust_warehouse_flag":
+                # D-0050：该源列真实语义是「个别调整发货仓」，可能是仓库名。
+                # 只有明确的是/否进兼容布尔列；其余合法文本保留在
+                # adjust_warehouse_raw，不再当作坏布尔累计展示告警。
+                out[field_name] = None
             else:
                 out[field_name] = None
                 res.rows_display_issue += 1

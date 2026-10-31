@@ -1139,7 +1139,8 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         address_write_ids = {o["raw_order_id"] for o in orders.values()
                              if o.get("receiver_address")}
     order_stats = {"inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set()}
-    present_head = result.present_fields.get("head")
+    present_fields = result.present_fields or {}
+    present_head = present_fields.get("head")
     for write_address in (True, False):
         rows = [row for row in order_rows
                 if (row["raw_order_id"] in address_write_ids) == write_address]
@@ -1177,7 +1178,7 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         **{f: ln.get(f) for f in mapping.MAINTENANCE_LINE_DISPLAY_FIELDS},
     } for ln in result.lines]
     line_update_cols = _mask_maintenance_update_cols(
-        _MAINT_LINE_UPD, result.present_fields.get("line"),
+        _MAINT_LINE_UPD, present_fields.get("line"),
         _MAINT_LINE_SOURCE_DEPS, _MAINT_LINE_ALWAYS_UPD,
     )
     line_stats = _upsert_maintenance_lines(

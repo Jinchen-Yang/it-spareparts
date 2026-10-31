@@ -213,6 +213,9 @@ def parse_tax_inclusive(x) -> bool | None:
     """氚云「是否含税」列：'含税'→True，'不含'/'未税'→False，空→None。
 
     顺序重要：'不含' 含子串 '含'，必须先判 '不含'/'未税' 再判 '含'。
+    D-0050：合同适配器已把 是/否/true/false/yes/no/1/0/y/n 作为受控含税标记；
+    这里对齐同一词表，避免明确的税标记被静默当 NULL。任意其它文本仍返回
+    None（不猜含义），不扩大税算法。
     """
     s = clean_str(x)
     if s is None:
@@ -221,6 +224,11 @@ def parse_tax_inclusive(x) -> bool | None:
         return False
     if "含税" in s or s == "含":
         return True
+    token = s.strip().casefold()
+    if token in {"是", "true", "yes", "y", "1"}:
+        return True
+    if token in {"否", "false", "no", "n", "0"}:
+        return False
     return None
 
 

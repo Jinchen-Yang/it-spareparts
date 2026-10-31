@@ -2,12 +2,16 @@
 
 全部使用合成 fixture（import-field-contract §9.2：禁真实业务数据）。
 """
+from datetime import date
+
 import pytest
 from sqlalchemy import select
 
-from app.etl import mapping, pipeline
+from app.etl import loader, mapping, pipeline, reader, transform
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.system import SysImportBatch
 from app.services import maintenance_wbdd_import as wbdd
+from tests import factories as f
 from tests.wbdd_fixtures import (
     COLUMNS_90,
     COLUMNS_91,
@@ -65,6 +69,26 @@ def test_mapping_counts_match_plan():
 
 
 # ---------- 端到端：合成文件走通用管线 ----------
+
+def test_present_fields_reflect_canonical_columns_not_values(tmp_path):
+    """D-0050：present_fields 由规范化后的列集合决定，空值不改变“已提供”。"""
+    cols = [c for c in COLUMNS_91
+            if c not in ("仓储中心", "需求明细.个别调整发货仓")]
+    rows = make_rows(orders=1, lines_per_order=1)
+    path = write_workbook(str(tmp_path / "present.xlsx"), cols, rows)
+    df, file_type = reader.read_excel(path)
+    assert file_type == mapping.MAINTENANCE
+    result = transform.transform(df, mapping.MAINTENANCE)
+    assert result.present_fields is not None
+    assert "storage_center" not in result.present_fields["head"]
+    assert "adjust_warehouse_flag" not in result.present_fields["line"]
+    assert "adjust_warehouse_raw" not in result.present_fields["line"]
+    # 列存在但值为空仍是“已提供”（空白按既有规则覆盖，不是缺列）
+    assert "receiver" in result.present_fields["head"]
+    assert "purchaser2_raw" in result.present_fields["head"]   # 裸「采购人员」已规范化
+    # 旧调用方直接构造 TransformResult 时 presence 缺省为 None（全量更新语义）
+    assert transform.TransformResult(file_type=mapping.MAINTENANCE).present_fields is None
+
 
 def _run(db, tmp_path, columns, rows, name="wbdd.xlsx"):
     path = write_workbook(str(tmp_path / name), columns, rows)
@@ -160,27 +184,84 @@ def test_missing_optional_columns_keep_values_but_present_blank_clears(db, tmp_p
     rows = make_rows(orders=1, lines_per_order=1)
     rows[0]["仓储中心"] = "旧仓储中心"
     rows[0]["需求明细.调整仓库"] = "旧调整仓"
+    rows[0]["需求明细.个别调整发货仓"] = "华南仓"
     _run(db, tmp_path, COLUMNS_91, rows, name="first.xlsx")
 
     missing = [c for c in COLUMNS_91
-               if c not in ("仓储中心", "需求明细.调整仓库")]
-    _run(db, tmp_path, missing, make_rows(orders=1, lines_per_order=1),
-         name="missing.xlsx")
+               if c not in ("仓储中心", "需求明细.调整仓库",
+                             "需求明细.个别调整发货仓",
+                             "客户名称", "项目名")]
+    batch = _run(db, tmp_path, missing, make_rows(orders=1, lines_per_order=1),
+                 name="missing.xlsx")
     db.expire_all()
     order = db.execute(select(FMaintenanceOrder)).scalars().one()
     line = db.execute(select(FMaintenanceLine)).scalars().one()
     assert order.storage_center == "旧仓储中心"
     assert line.adjust_warehouse == "旧调整仓"
+    assert line.adjust_warehouse_raw == "华南仓"
+    # 派生列按源列缺失保留：customer_id/project_std 不得因源列缺失变 NULL
+    assert order.customer_id is not None
+    assert order.project_std == "合成项目A"
+    # 缺列不得被误记为语义变化 / 触发 workbook revision bump
+    assert batch.report_json["orders_semantic_updated"] == 0
+    assert batch.report_json["fact_rows_semantic_updated"] == 0
+    assert batch.report_json["workbook_projects_bumped"] == 0
 
     blank = make_rows(orders=1, lines_per_order=1)
     blank[0]["仓储中心"] = ""
     blank[0]["需求明细.调整仓库"] = ""
+    blank[0]["需求明细.个别调整发货仓"] = ""
     _run(db, tmp_path, COLUMNS_91, blank, name="blank.xlsx")
     db.expire_all()
     order = db.execute(select(FMaintenanceOrder)).scalars().one()
     line = db.execute(select(FMaintenanceLine)).scalars().one()
     assert order.storage_center is None
     assert line.adjust_warehouse is None
+    assert line.adjust_warehouse_raw is None
+
+
+def test_present_fields_none_is_legacy_full_update_empty_set_preserves(db, tmp_path):
+    """D-0050：present_fields=None 保留旧全量更新；空集合表示“源列全缺失”只更新批号。
+
+    直接构造 TransformResult 的旧调用方（无 presence 元数据）不能被改成“全部保留”
+    或“全部覆盖”；空 frozenset 才是明确的源列缺失。
+    """
+    rows = make_rows(orders=1, lines_per_order=1)
+    rows[0]["仓储中心"] = "旧仓储中心"
+    rows[0]["需求明细.个别调整发货仓"] = "华南仓"
+    _run(db, tmp_path, COLUMNS_91, rows, name="seed.xlsx")
+
+    def _load(present_fields, name):
+        result = f.maintenance_result(
+            {"SYN-O001": f.maintenance_head("SYN-O001", order_no="WBDD-20260001")},
+            [f.maintenance_line("SYN-O001", "SYN-L001-1", "PN-SYN-0011")],
+        )
+        result.orders["SYN-O001"]["storage_center"] = None
+        result.lines[0]["adjust_warehouse_raw"] = None
+        result.present_fields = present_fields
+        batch = SysImportBatch(filename=name, file_type="maintenance",
+                               file_hash=name)
+        db.add(batch)
+        db.flush()
+        loader.load(db, result, batch.id, date(2026, 7, 20), mode="upsert")
+        db.commit()
+
+    _load(None, "legacy.xlsx")
+    db.expire_all()
+    order = db.execute(select(FMaintenanceOrder)).scalars().one()
+    line = db.execute(select(FMaintenanceLine)).scalars().one()
+    assert order.storage_center is None                 # 旧调用方仍全量更新
+    assert line.adjust_warehouse_raw is None
+
+    order.storage_center = "旧仓储中心"
+    line.adjust_warehouse_raw = "华南仓"
+    db.commit()
+    _load({"head": frozenset(), "line": frozenset()}, "missing.xlsx")
+    db.expire_all()
+    order = db.execute(select(FMaintenanceOrder)).scalars().one()
+    line = db.execute(select(FMaintenanceLine)).scalars().one()
+    assert order.storage_center == "旧仓储中心"          # 空集合=源列缺失 → 保留
+    assert line.adjust_warehouse_raw == "华南仓"
 
 
 def test_adjust_warehouse_text_kept_raw_not_guessed_as_boolean(db, tmp_path):
@@ -191,7 +272,8 @@ def test_adjust_warehouse_text_kept_raw_not_guessed_as_boolean(db, tmp_path):
     line = db.execute(select(FMaintenanceLine)).scalars().one()
     assert line.adjust_warehouse_flag is None
     assert line.adjust_warehouse_raw == "华南仓"
-    assert batch.report_json["rows_display_issue"] == 1
+    # D-0050：仓库名是合法原文，不再按坏布尔累计展示告警
+    assert batch.report_json["rows_display_issue"] == 0
 
     rows = make_rows(orders=1, lines_per_order=1)
     rows[0]["需求明细.个别调整发货仓"] = "是"
