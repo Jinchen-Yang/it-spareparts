@@ -156,10 +156,10 @@ def _collect_head_economics(res, row, row_no: int, raw_order_id: str,
                             inv_head: dict, head_obs: dict) -> None:
     """逐行收集采购/销售单头经济字段观测（D-0050）。
 
-    调用于订单/行 ID 校验之后、明细级校验（PN/数量/单价）闸门之前：明细校验
-    失败的行同样携带单头值，不能因坏行静默漏掉非法观测。非空非法值按源行
-    留痕（即使后续行有合法值也不豁免）；跨行不同值按字段留痕，最终由
-    _finalize_head_economics 整单拒绝。
+    调用于父单身份校验之后、明细身份（明细 ID）与明细级校验（PN/数量/单价）
+    闸门之前：缺明细 ID 或明细校验失败的行同样携带单头值，不能因坏行静默
+    漏掉非法观测。非空非法值按源行留痕（即使后续行有合法值也不豁免）；
+    跨行不同值按字段留痕，最终由 _finalize_head_economics 整单拒绝。
     """
     slot = head_obs.setdefault(raw_order_id, {})
 
@@ -216,8 +216,9 @@ def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
                                   head_obs) -> None:
     """按行收集销售单头观测值：D-40 对账区四列 + D-41 含税三件套。
 
-    调用于订单/行 ID 校验之后、明细级校验（PN/数量/单价）闸门**之前**——
-    明细校验失败的行同样携带该订单的单头值，绝不静默跳过（Codex 审查 P1）。
+    调用于父单身份校验之后、明细身份（明细 ID）与明细级校验（PN/数量/单价）
+    闸门**之前**——缺明细 ID 或明细校验失败的行同样携带该订单的单头值，
+    绝不静默跳过（Codex 审查 P1）。
     常规布局「值在首行、下方存活行留空」由 reader 按单向下 ffill 兜住；本
     收集点再兜住 ffill 兜不住的形态（值只在末行坏行上、坏行值与存活行不同）。
 
@@ -364,21 +365,27 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
         raw_order_id = cleaner.clean_str(row.get(inv_head["raw_order_id"]))
         raw_line_id = cleaner.clean_str(row.get(inv_line["raw_line_id"]))
 
-        if not raw_line_id or not raw_order_id:
+        if not raw_order_id:
+            # 无父单身份：只报本行错误，观测值不得归到任何订单。
             res.errors.append(ErrorRec(row_no, "missing_raw_id",
                                        "缺少订单/明细数据ID", _row_dict(row, full_map)))
             continue
 
-        first_row_by_order.setdefault(raw_order_id, row_no)
-
-        # D-0050/D-40/D-41 单头观测在明细级校验（PN/数量/单价）之前收集：校验
-        # 失败的行同样携带该订单的单头值，绝不静默跳过（Codex 审查 P1）。采购
-        # 与销售都逐行观测；后续合法值不能豁免早先的非法值。
+        # D-0050：父单可识别的源行先参与金额/税率观测，再走明细身份门禁——
+        # 缺明细ID不能成为跳过非法/冲突单头值的理由（用户确认的第五项：同一单
+        # 的所有可识别父单源行）。D-40/D-41 同为按行观测，随同前移。
         _collect_head_economics(res, row, row_no, raw_order_id,
                                 inv_head, head_obs_by_order)
         if file_type == mapping.SALES:
             _collect_sales_reconciliation(res, row, row_no, raw_order_id,
                                           inv_head, head_obs_by_order)
+
+        if not raw_line_id:
+            res.errors.append(ErrorRec(row_no, "missing_raw_id",
+                                       "缺少订单/明细数据ID", _row_dict(row, full_map)))
+            continue
+
+        first_row_by_order.setdefault(raw_order_id, row_no)
 
         # 单头在明细校验前解析并留错：即使后续明细全部被拒，非空非法的单头
         # 金额/税率也不会静默消失。订单只在出现首个有效明细时进入写入计划。
