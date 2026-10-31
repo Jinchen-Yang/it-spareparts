@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from collections import Counter
 from collections.abc import Iterable
+from decimal import Decimal, InvalidOperation
 from itertools import repeat
 from typing import NamedTuple
 
@@ -662,18 +663,97 @@ def _scan_anchor(raw: pd.DataFrame, upto: int) -> str | None:
     return None
 
 
+def _alias_value_blank(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value == ""
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalize_alias_value(value, internal: str | None):
+    """同义列冲突比较用：空值归一为 None；身份保字符串，价格/数量按 Decimal。"""
+    if _alias_value_blank(value):
+        return None
+    if internal in mapping.IDENTITY_INTERNALS:
+        return str(value).strip()
+    if internal in mapping.NUMERIC_ALIAS_INTERNALS:
+        if isinstance(value, bool):
+            return str(value).strip()
+        try:
+            return Decimal(str(value).strip().replace(",", ""))
+        except (InvalidOperation, ValueError):
+            return str(value).strip()
+    return str(value).strip()
+
+
+def _reject_alias_conflict(
+    df: pd.DataFrame, file_type: str, target: str, aliases: list[str],
+) -> None:
+    """身份/价格/数量同义列同一行取值不一致 → 整批拒绝，绝不按列序悄悄取一个。"""
+    internal = mapping.field_internal(file_type, target)
+    if internal not in mapping.CRITICAL_ALIAS_INTERNALS:
+        return
+    columns = ([target] if target in df.columns else []) + aliases
+    if len(columns) < 2:
+        return
+    combined = pd.Series(pd.NA, index=df.index, dtype=object)
+    conflict = pd.Series(False, index=df.index, dtype=bool)
+    for column in columns:
+        values = df[column].map(lambda value: _normalize_alias_value(value, internal))
+        conflict |= values.notna() & combined.notna() & (combined != values)
+        combined = combined.combine_first(values)
+    if not conflict.any():
+        return
+    first_label = conflict[conflict].index[0]
+    first_row = int(df.index.get_loc(first_label)) + 1
+    pairs = "；".join(
+        f"「{column}」={df.loc[[first_label], column].iloc[0]!s}"
+        for column in columns
+    )
+    raise ReaderError(
+        f"「{target}」命中多个同义列且取值不一致（数据第 {first_row} 行）：{pairs}。"
+        "同义列冲突无法安全决定取哪一列，请删除重复列或统一取值后重试。",
+        code="alias_column_conflict",
+    )
+
+
 def _coalesce_value_aliases(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
-    for target, aliases in mapping.VALUE_ALIASES.get(file_type, {}).items():
-        present_aliases = [alias for alias in aliases if alias in df.columns]
-        if target not in df.columns and not present_aliases:
+    """按文档类型把同义源列合并到规范键。
+
+    显式别名（VALUE_ALIASES，如销售裸「业务类型」）与仅注解不同的同义列
+    （annotation_aliases，如「明细.采购数量」vs「明细.采购数量(必填)」）都参与：
+    规范列优先、空白由别名补。身份/价格/数量同一行取值不一致时明确抛
+    alias_column_conflict，不再靠 canonicalize 的「不造重复列」把别名列当未知列
+    静默忽略（审计：规范数量=2、别名=99）。
+    """
+    alias_targets: dict[str, list[str]] = {
+        target: list(aliases)
+        for target, aliases in mapping.VALUE_ALIASES.get(file_type, {}).items()
+    }
+    for target, aliases in mapping.annotation_aliases(df.columns, file_type).items():
+        alias_targets.setdefault(target, []).extend(aliases)
+
+    drop_columns: list[str] = []
+    for target, declared in alias_targets.items():
+        present = []
+        for alias in declared:
+            if alias in df.columns and alias != target and alias not in present:
+                present.append(alias)
+        if target not in df.columns and not present:
             continue
+        _reject_alias_conflict(df, file_type, target, present)
         values = (df[target].replace("", pd.NA) if target in df.columns
                   else pd.Series(pd.NA, index=df.index, dtype=object))
-        for alias in present_aliases:
+        for alias in present:
             values = values.combine_first(df[alias].replace("", pd.NA))
         df[target] = values
-        if present_aliases:
-            df = df.drop(columns=present_aliases)
+        drop_columns.extend(present)
+    if drop_columns:
+        df = df.drop(columns=drop_columns)
     return df
 
 
@@ -766,6 +846,27 @@ def _ffill_head_columns(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
     return df
 
 
+def _drop_blank_data_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """去掉全空数据行：空白行不是业务事实，不能变成 missing_raw_id 错误。
+
+    pandas 对空单元格给 NaN，inline-string 读法给 None/空串；两种都算空白。
+    只删整行全空，任何一格有值都保留（含仅明细ID的合法续行）。
+    """
+    if df.empty:
+        return df
+    if not df.columns.is_unique:
+        # 空表头单元格会产生多个 "" 列；重复列校验另有职责，这里不猜列。
+        return df
+    blank = df.isna()
+    for column in df.columns:
+        series = df[column]
+        if series.dtype == object or pd.api.types.is_string_dtype(series.dtype):
+            blank[column] = blank[column] | series.map(
+                lambda value: isinstance(value, str) and not value.strip()
+            )
+    return df.loc[~blank.all(axis=1)].reset_index(drop=True)
+
+
 def _inspect_frame(
     raw: pd.DataFrame,
     sheet_name: str,
@@ -781,10 +882,13 @@ def _inspect_frame(
     if raw.empty:
         return SheetInspection(sheet_name, None, None, 0, [], [], None)
     for h in range(min(_HEADER_SCAN_ROWS, len(raw))):
-        cols = mapping.canonicalize_columns(_norm_cols(raw.iloc[h].tolist()))
-        file_type = mapping.detect_file_type(cols)
+        raw_cols = _norm_cols(raw.iloc[h].tolist())
+        file_type = mapping.detect_file_type(raw_cols)
         if file_type is None:
             continue
+        # 先识别文档类型，再按该类型自己的注册键归一：裸「税率」在采购归
+        # 采购「税率(必填)」、在销售归销售裸键，不会被另一类型的规范键截走。
+        cols = mapping.canonicalize_columns(raw_cols, file_type)
         dup = [c for c, n in Counter(cols).items() if n > 1 and c != ""]
         data_rows = (
             len(raw) - h - 1
@@ -797,6 +901,7 @@ def _inspect_frame(
             df = raw.iloc[h + 1:].reset_index(drop=True)
             df.columns = cols
             if not dup:
+                df = _drop_blank_data_rows(df)
                 df = _coalesce_value_aliases(df, file_type)
                 df = _ffill_head_columns(df, file_type)
             parsed = SheetData(
