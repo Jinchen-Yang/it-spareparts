@@ -56,11 +56,11 @@ def _seed_batch(db) -> int:
     return batch.id
 
 
-def _seed_order(db, *, receiver="短收货人") -> int:
+def _seed_order(db, *, receiver="短收货人", batch_id: int | None = None) -> int:
     order = FMaintenanceOrder(
         raw_order_id="MIG-ORDER-1",
         order_no="WBDD-MIG-1",
-        import_batch_id=_seed_batch(db),
+        import_batch_id=batch_id if batch_id is not None else _seed_batch(db),
         receiver=receiver,
         maintainer_raw="张三",
         whole_machine_check="是",
@@ -71,7 +71,8 @@ def _seed_order(db, *, receiver="短收货人") -> int:
 
 
 def _seed_line(db, *, adjust_warehouse="短仓", adjust_warehouse_raw=None) -> int:
-    order_id = _seed_order(db)
+    batch_id = _seed_batch(db)
+    order_id = _seed_order(db, batch_id=batch_id)
     part = DimPart(pn_std="MIG-LINE-PN")
     db.add(part)
     db.flush()
@@ -79,6 +80,7 @@ def _seed_line(db, *, adjust_warehouse="短仓", adjust_warehouse_raw=None) -> i
         raw_line_id="MIG-LINE-1",
         order_id=order_id,
         part_id=part.id,
+        import_batch_id=batch_id,
         adjust_warehouse=adjust_warehouse,
         adjust_warehouse_raw=adjust_warehouse_raw,
         return_old_part="旧件",
