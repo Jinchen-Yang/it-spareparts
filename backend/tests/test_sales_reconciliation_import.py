@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from app.etl import loader as etl_loader, mapping, pipeline, reader, transform
 from app.models.maintenance import MaintenanceContractWorkbookState
 from app.models.sales import FSalesLine, FSalesOrder, FSalesReconciliationSnapshot
-from app.models.system import SysImportError
+from app.models.system import SysImportBatch, SysImportError
 from app.services.sales_reconciliation import (
     latest_snapshots_by_raw_order_id,
     snapshot_content_hash,
