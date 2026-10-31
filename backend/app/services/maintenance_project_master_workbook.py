@@ -2812,6 +2812,16 @@ def _v2_build_expense(wb, db, project_id: str, contracts, project=None) -> dict[
         project.display_name if getattr(project, "display_name", None) else project_id
     )
     for expense in expenses:
+        reason = expense.reason or ""
+        if len(reason) > ec.EXCEL_CELL_MAX_CHARS:
+            # Excel 单元格硬上限：超长导出会被静默截断/修复，未编辑回传即覆盖
+            # 业务事实（与 04 独立导出同一 WorkbookError 口径）。
+            raise WorkbookError(
+                "cell_text_too_long",
+                f"报销行 {expense.raw_line_id} 的支出事由长度 {len(reason)} "
+                f"超过 Excel 单元格上限 {ec.EXCEL_CELL_MAX_CHARS}，"
+                "无法生成可回传工作簿",
+            )
         values = _v2_expense_row_values(expense, project_display)
         values[V2_BASE_COLUMN] = _v2_row_base_token(
             sheet="04_费用报销", entity_id=expense.raw_line_id,

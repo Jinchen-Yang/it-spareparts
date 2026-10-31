@@ -119,7 +119,14 @@ def download_workbook(
     ctx: UserContext = Depends(get_current_user_context),
     _scope: None = Depends(require_maintenance_project_access),
 ):
-    content = wbk.build_workbook(db, project_id=project_id)
+    try:
+        content = wbk.build_workbook(db, project_id=project_id)
+    except wbk.WorkbookError as exc:
+        # 与 _plan 同形回执：导出侧不截断超长文本，改为明确 422。
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": exc.code, "message": exc.message, "issues": exc.issues},
+        ) from exc
     if content is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             {"code": "not_found", "message": "项目不存在"})

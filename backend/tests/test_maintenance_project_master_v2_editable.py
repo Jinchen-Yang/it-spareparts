@@ -1242,6 +1242,43 @@ def _make_project_with_expense(db, *, data_status=None, raw_line_id=None):
     return project, order, line, expense
 
 
+def test_v2_expense_reason_at_excel_cell_limit_is_exported_verbatim(db):
+    """V2 导出边界：恰好 32767 字符可写出且不截断。"""
+    from app.services import maintenance_expense_collection_workbook as ec
+
+    project, _order, _line, expense = _make_project_with_expense(db)
+    reason = "x" * ec.EXCEL_CELL_MAX_CHARS
+    expense.reason = reason
+    db.commit()
+
+    content = master.build_project_master_v2(
+        db, project_id=project.project_id, sheets=(master.V2_SHEET_EXPENSE,)
+    )
+    worksheet = load_workbook(io.BytesIO(content))[master.V2_SHEET_EXPENSE]
+    headers = {cell.value: cell.column for cell in worksheet[1]}
+    row_no = next(
+        row
+        for row in range(2, worksheet.max_row + 1)
+        if worksheet.cell(row, headers["实体ID"]).value == expense.raw_line_id
+    )
+    assert worksheet.cell(row_no, headers["支出事由"]).value == reason
+
+
+def test_v2_expense_reason_over_excel_cell_limit_is_rejected_not_truncated(db):
+    """V2 导出超过 Excel 单元格上限：与 V1/04 同码拒绝，不静默截断。"""
+    from app.services import maintenance_expense_collection_workbook as ec
+
+    project, _order, _line, expense = _make_project_with_expense(db)
+    expense.reason = "x" * (ec.EXCEL_CELL_MAX_CHARS + 1)
+    db.commit()
+
+    with pytest.raises(ec.WorkbookError) as excinfo:
+        master.build_project_master_v2(
+            db, project_id=project.project_id, sheets=(master.V2_SHEET_EXPENSE,)
+        )
+    assert excinfo.value.code == "cell_text_too_long"
+
+
 def test_expense_update_syncs_canonical_once_with_one_version_bump(db):
     from app.services import maintenance_expense_collection_workbook as ec
 

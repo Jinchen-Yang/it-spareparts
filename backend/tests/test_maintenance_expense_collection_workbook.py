@@ -697,20 +697,20 @@ def test_legacy_expense_export_without_named_identity_header_still_reads_id(db, 
     assert response.json()["expense_updates"] == 0
 
 
-def test_old_empty_export_template_accepts_a_new_expense_row(db, project):
-    """旧版空导出只有 11 个可见表头（无隐藏行标识列），追加新报销仍须可录入。
-
-    整表没有标识列时只能新增；有标识列的既有行仍走原身份/项目归属校验。
-    """
-    client = uploader(db, "old-empty-template")
+def test_new_empty_template_has_named_identity_column_and_accepts_a_new_expense_row(
+    db, project,
+):
+    """新导出即使项目没有报销也要写隐藏行标识表头，合法新增路径仍可用。"""
+    client = uploader(db, "new-empty-template")
     content = _download(client, project)
     wb = load_workbook(io.BytesIO(content))
     ws = wb[wbk.SHEET_EXPENSE]
-    assert ws.max_row == 1  # 项目没有报销，旧导出不会写出隐藏列
-    ws.delete_cols(len(wbk._EXPENSE_HEADERS) + 1)
-    assert [c.value for c in ws[1]] == list(wbk._EXPENSE_HEADERS)
+    assert ws.max_row == 1
+    id_col = len(wbk._EXPENSE_HEADERS) + 1
+    assert ws.cell(row=1, column=id_col).value == wbk.RAW_LINE_ID_HEADER
+    assert ws.column_dimensions[ws.cell(row=1, column=id_col).column_letter].hidden
     ws.append([
-        "BXD-OLD-TEMPLATE", "2026-07-02", "李四", "差旅", "交通", "旧模板新增",
+        "BXD-NEW-TEMPLATE", "2026-07-02", "李四", "差旅", "交通", "新模板新增",
         "HT-001", 50, "", "已结束", "",
     ])
     buffer = io.BytesIO()
@@ -720,10 +720,60 @@ def test_old_empty_export_template_accepts_a_new_expense_row(db, project):
     assert response.json()["expense_creates"] == 1
     db.expire_all()
     created = db.execute(
-        select(FProjectExpense).where(FProjectExpense.bxd_no == "BXD-OLD-TEMPLATE")
+        select(FProjectExpense).where(FProjectExpense.bxd_no == "BXD-NEW-TEMPLATE")
     ).scalar_one()
     assert created.amount_ex_tax == Decimal("50.00")
     assert created.raw_line_id.startswith("EXP:")
+
+
+def test_old_empty_export_template_without_identity_column_is_rejected(db, project):
+    """旧版空模板没有隐藏行标识列：失败关闭，要求重新下载新模板。
+
+    不能把既有行当新增（无法证明上传前该文件是空模板）。
+    """
+    client = uploader(db, "old-empty-template")
+    content = _download(client, project)
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[wbk.SHEET_EXPENSE]
+    ws.delete_cols(len(wbk._EXPENSE_HEADERS) + 1)
+    assert [c.value for c in ws[1]] == list(wbk._EXPENSE_HEADERS)
+    ws.append([
+        "BXD-OLD-TEMPLATE", "2026-07-02", "李四", "差旅", "交通", "旧模板新增",
+        "HT-001", 50, "", "已结束", "",
+    ])
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    response = _upload(client, project, buffer.getvalue())
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "missing_row_identity"
+    assert "重新下载" in detail["message"]
+    db.expire_all()
+    assert db.execute(select(FProjectExpense)).scalars().all() == []
+
+
+def test_legacy_export_with_retained_hidden_id_column_updates_existing_row(
+    db, project,
+):
+    """旧版有数据导出保留无名隐藏列：仍按严格有序签名读取并更新既有行。"""
+    _expense(db)
+    client = uploader(db, "legacy-intact")
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    ws = wb[wbk.SHEET_EXPENSE]
+    id_col = len(wbk._EXPENSE_HEADERS) + 1
+    ws.cell(row=1, column=id_col, value=None)
+    ws.cell(row=2, column=len(wbk._EXPENSE_HEADERS), value="旧导出改备注")
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    response = _upload(client, project, buffer.getvalue())
+    assert response.status_code == 200, response.text
+    assert response.json()["expense_updates"] == 1
+    assert response.json()["expense_creates"] == 0
+    db.expire_all()
+    rows = db.execute(select(FProjectExpense)).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].raw_line_id == "BXD-1#1"
+    assert rows[0].remark == "旧导出改备注"
 
 
 def test_legacy_reordered_expense_headers_are_rejected(db, project):
@@ -773,6 +823,22 @@ def test_export_rejects_reason_over_excel_cell_limit(db, project):
     with pytest.raises(wbk.WorkbookError) as excinfo:
         wbk.build_workbook(db, project_id=project.project_id)
     assert excinfo.value.code == "cell_text_too_long"
+
+
+def test_download_returns_422_receipt_for_oversized_reason(db, project):
+    """导出超长不截断：HTTP 下载返回与 validate 同形的 422 回执，不是 500/空文件。"""
+    _expense(db)
+    expense = db.execute(select(FProjectExpense)).scalars().one()
+    expense.reason = "x" * (wbk.EXCEL_CELL_MAX_CHARS + 1)
+    db.commit()
+    client = uploader(db, "download-too-long")
+    response = client.get(
+        f"{_BASE}/{project.project_id}/expense-collection-workbook.xlsx")
+    assert response.status_code == 422, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    detail = response.json()["detail"]
+    assert detail["code"] == "cell_text_too_long"
+    assert str(wbk.EXCEL_CELL_MAX_CHARS) in detail["message"]
 
 
 def test_remark_roundtrips_into_the_database(db, project):

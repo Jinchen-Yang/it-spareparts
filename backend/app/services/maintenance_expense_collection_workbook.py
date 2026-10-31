@@ -15,6 +15,12 @@ v1 明确不做（AB-3 裁剪）：氚云 BXD 逐条对账、凭证附件、进�
 与冻结的「项目工作簿 v3 导出」的关系：两张 sheet 的列定义原样取自 v3 模板
 （`maintenance_project_workbook_v3.py`），但本模块是**独立的两表工作簿**，
 不导出 v3 的其余四表，因此不解冻 v3。
+
+行身份是技术守卫，不是业务身份：04 表第 12 列是隐藏的 ``行标识(系统)``。
+新导出（含空项目）总会写出该列表头；旧版有数据导出保留无名隐藏列，仅在
+前 11 列与模板逐列一致时按原位置读取。旧版空模板没有该列，无法证明上传前
+文件原本是空模板还是被删掉标识列的有数据导出，故失败关闭：要求重新下载新
+模板，不把既有行当新增，也不猜测任何业务身份。
 """
 from __future__ import annotations
 
@@ -522,12 +528,14 @@ def _map_columns(headers: list[str], names: list[str], sheet_name: str) -> dict[
     return positions
 
 
-def _expense_id_column(headers: list[str]) -> int | None:
-    """定位隐藏行标识列：新导出按名称；旧导出要求原样有序模板。
+def _expense_id_column(headers: list[str]) -> int:
+    """定位隐藏行标识列；找不到就整表拒绝，绝不按位置猜身份。
 
-    旧版导出在 04 表没有任何数据行时只写 11 个可见表头（没有隐藏行标识列）。
-    这种空模板允许用户追加新报销行；返回 ``None`` 表示整表只能新增，不能按
-    ID 更新既有行，既有行的身份/项目归属校验仍只在有 ID 列时生效。
+    兼容性（技术身份守卫）：
+    - 新导出：第 12 列表头为 ``行标识(系统)``（空项目也写），按名称定位；
+    - 旧版有数据导出：前 11 列与当前模板逐列一致、第 12 列表头为空，数据行
+      带隐藏行标识；只在这种严格有序签名下按原第 12 列读取。
+    旧版空导出模板没有隐藏行标识列，无法证明上传前的文件状态，失败关闭。
     """
     matches = [index for index, header in enumerate(headers)
                if header == RAW_LINE_ID_HEADER]
@@ -542,7 +550,12 @@ def _expense_id_column(headers: list[str]) -> int | None:
     if headers[:len(_EXPENSE_HEADERS)] == _EXPENSE_HEADERS:
         tail = headers[len(_EXPENSE_HEADERS):]
         if not tail:
-            return None
+            raise WorkbookError(
+                "missing_row_identity",
+                f"{SHEET_EXPENSE} 缺少隐藏「{RAW_LINE_ID_HEADER}」列（旧版空模板或"
+                "标识列已被删除），无法确认每行的业务身份；请重新下载系统导出的"
+                "最新模板后再录入，旧模板不能继续追加或修改报销行",
+            )
         if tail[0] == "":
             return len(_EXPENSE_HEADERS)
         raise WorkbookError(
@@ -615,12 +628,8 @@ def _parse_expenses(db: Session, ws, *, project_id: str) -> list[ExpenseUpdate]:
             )
             inc_tax = (ex_tax * (Decimal("1") + TAX_RATE)).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP)
-        # 旧版空导出模板没有隐藏行标识列：整表只可能是用户新填的报销行，
-        # 因此全部按新增处理；一旦有标识列，既有行仍必须通过身份/归属校验。
-        raw_line_id = (
-            _text(row[id_index]) if id_index is not None and len(row) > id_index
-            else ""
-        )
+        # _expense_id_column 已保证标识列存在，不允许缺列时把既有行当新增。
+        raw_line_id = _text(row[id_index]) if len(row) > id_index else ""
         is_create = False
         expense = None
         if contract_no and contract_no not in writable_contracts:
