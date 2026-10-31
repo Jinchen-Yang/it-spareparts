@@ -7,15 +7,19 @@ import stat
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
+import pandas as pd
 from sqlalchemy import select, text, update, or_
 from sqlalchemy.orm import Session
 
 from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, get_settings
-from app.etl import expense_void, loader, mapping, reader, sheet_selection
+from app.etl import cleaner, expense_void, loader, mapping, reader, sheet_selection
 from app.models.maintenance import FProjectExpense
 from app.etl.reader import ReaderError
-from app.etl.transform import ErrorRec, TransformResult, transform
+from app.etl.transform import (
+    SOFT_ERROR_TYPES, ErrorRec, TransformResult, transform,
+)
 from app.models.system import SysImportBatch, SysImportError, SysRawFile
 from app.services import data_quality_amount_mismatch
 
@@ -426,58 +430,146 @@ def _dedupe_expense_lines_across_sheets(
 
 
 _DUPLICATE_LINE_ERROR = "duplicate_raw_line_id_conflict"
-_DUPLICATE_LINE_FILE_TYPES = (mapping.PURCHASE, mapping.SALES, mapping.MAINTENANCE)
-_NO_FACTS_FILE_TYPES = _DUPLICATE_LINE_FILE_TYPES
+# 反馈范围：采购/销售同文件明细身份重复。WBDD 的父子身份由其专用快照/loader
+# 契约处理，不在通用重复门禁里扩大。
+_DUPLICATE_LINE_FILE_TYPES = (mapping.PURCHASE, mapping.SALES)
+_NO_FACTS_FILE_TYPES = (mapping.PURCHASE, mapping.SALES, mapping.MAINTENANCE)
 
 
-def _collapsed_duplicate_order_lines(result: TransformResult, extra_report: dict) -> None:
-    """同一文件内同 raw_line_id：内容相同计重复并折叠；内容不同整批拒绝。
+def _source_value_key(value):
+    """重复行内容比较用：空值归一，数值按 Decimal，日期按 isoformat。"""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float, Decimal)):
+        try:
+            return Decimal(str(value)).normalize()
+        except InvalidOperation:
+            return str(value).strip()
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value).strip()
 
-    旧行为把重复行原样交给 loader：skip 模式 ON CONFLICT DO NOTHING 静默第一行赢，
-    upsert 模式同一 INSERT 的重复键可能直接报 cardinality/二次更新错误。这里在
-    数据库写入前统一判定，错误行按 raw_line_id 从写入计划剔除并留 ErrorRec。
+
+def _source_line_id_column(file_type: str) -> str | None:
+    return next(
+        (source for source, internal in mapping.MAPPINGS[file_type]["line"].items()
+         if internal == "raw_line_id"),
+        None,
+    )
+
+
+def _duplicate_source_groups(
+    source_df: pd.DataFrame, file_type: str,
+) -> dict[str, list[tuple[int, tuple]]]:
+    """按源数据行扫描整个文件（不依赖 loader 分块），返回重复身份组。
+
+    签名包含**全部源列**（表头、快照、对账区、未知列），不是 transform 后的
+    精简 line dict；同 ID 换父单或只改头字段也必须判为内容不一致。
     """
-    if result.file_type not in _DUPLICATE_LINE_FILE_TYPES:
-        return
-    first: dict[str, tuple[dict, int]] = {}
-    conflicting: set[str] = set()
-    kept: list[dict] = []
-    collapsed = 0
-    for position, line in enumerate(result.lines):
-        key = line["raw_line_id"]
-        prior = first.get(key)
-        if prior is None:
-            first[key] = (line, position)
-            kept.append(line)
+    column = _source_line_id_column(file_type)
+    if column is None or column not in source_df.columns:
+        return {}
+    columns = list(source_df.columns)
+    line_position = columns.index(column)
+    groups: dict[str, list[tuple[int, tuple]]] = {}
+    for index, values in zip(source_df.index,
+                             source_df.itertuples(index=False, name=None)):
+        key = cleaner.clean_str(values[line_position])
+        if key is None:
             continue
-        prior_line, prior_position = prior
-        diff = {
-            name: (prior_line.get(name), line.get(name))
-            for name in set(prior_line) | set(line)
-            if name != "_sheet_name" and prior_line.get(name) != line.get(name)
-        }
-        if not diff:
-            collapsed += 1
+        signature = tuple(_source_value_key(value) for value in values)
+        groups.setdefault(key, []).append((int(index) + 1, signature))
+    return {key: rows for key, rows in groups.items() if len(rows) > 1}
+
+
+def _format_duplicate_source_diff(columns, occurrences) -> str:
+    first_signature = occurrences[0][1]
+    parts: list[str] = []
+    for position, column in enumerate(columns):
+        values = [(row_no, signature[position])
+                  for row_no, signature in occurrences]
+        if all(value == first_signature[position] for _row, value in values[1:]):
+            continue
+        rendered = " / ".join(
+            f"第 {row_no} 行={value!s}" for row_no, value in values[:4])
+        if len(values) > 4:
+            rendered += " 等"
+        parts.append(f"{column}：{rendered}")
+        if len(parts) >= 8:
+            parts.append("等")
+            break
+    return "；".join(parts) or "源行内容不一致"
+
+
+def _collapsed_duplicate_order_lines(
+    result: TransformResult, extra_report: dict, source_df: pd.DataFrame | None,
+) -> None:
+    """同一文件内同 raw_line_id：整行源内容相同计重复并折叠；不同整批拒绝。
+
+    判定在 loader.load 之前、对整张源表一次完成（不按 loader 分块），错误
+    带源数据行号；同 ID 不同父单/不同表头快照值都属于内容不一致。WBDD 不在
+    本门禁范围。
+    """
+    if result.file_type not in _DUPLICATE_LINE_FILE_TYPES or source_df is None:
+        return
+    groups = _duplicate_source_groups(source_df, result.file_type)
+    if not groups:
+        return
+    columns = list(source_df.columns)
+    conflicting: set[str] = set()
+    identical: set[str] = set()
+    collapsed = 0
+    for key, occurrences in groups.items():
+        signatures = [signature for _row_no, signature in occurrences]
+        if all(signature == signatures[0] for signature in signatures[1:]):
+            identical.add(key)
+            collapsed += len(occurrences) - 1
             continue
         conflicting.add(key)
-        detail = "；".join(
-            f"{name}：第 {prior_position + 1} 行={old!s} / 第 {position + 1} 行={new!s}"
-            for name, (old, new) in sorted(diff.items())
-        )
+        row_numbers = "、".join(str(row_no) for row_no, _sig in occurrences[:10])
+        if len(occurrences) > 10:
+            row_numbers += " 等"
+        detail = _format_duplicate_source_diff(columns, occurrences)
+        first_line = next(
+            (line for line in result.lines if line["raw_line_id"] == key), None)
+        identity = {
+            "raw_line_id": key,
+            "source_rows": [row_no for row_no, _sig in occurrences],
+        }
+        if first_line is not None:
+            identity.update({
+                "line_no": first_line.get("line_no"),
+                "raw_order_id": first_line.get("_order_raw_id"),
+            })
         result.errors.append(ErrorRec(
-            position + 1,
+            occurrences[1][0],
             _DUPLICATE_LINE_ERROR,
-            f"明细数据ID {key} 在文件内重复且内容不一致：{detail}",
+            f"明细数据ID {key} 在文件内重复且源内容不一致（数据行 {row_numbers}）："
+            f"{detail}",
             {"raw_line_id": key,
-             "diffs": {name: [str(old), str(new)] for name, (old, new) in sorted(diff.items())}},
-            identity={
-                "raw_line_id": key,
-                "line_no": line.get("line_no"),
-                "raw_order_id": line.get("_order_raw_id"),
-            },
+             "source_rows": [row_no for row_no, _sig in occurrences]},
+            identity=identity,
         ))
-    if conflicting:
-        kept = [line for line in kept if line["raw_line_id"] not in conflicting]
+    kept: list[dict] = []
+    seen_identical: set[str] = set()
+    for line in result.lines:
+        key = line["raw_line_id"]
+        if key in conflicting:
+            continue
+        if key in identical:
+            if key in seen_identical:
+                continue
+            seen_identical.add(key)
+        kept.append(line)
     result.lines = kept
     if collapsed:
         extra_report["duplicate_lines_collapsed"] = collapsed
@@ -510,6 +602,36 @@ def _ensure_importable_result(result: TransformResult) -> None:
         "整批未导入。",
         code="no_importable_rows",
     )
+
+
+def _failure_report(result: TransformResult, extra_report: dict,
+                    src_cols: list) -> dict:
+    """ReaderError 失败批次的留痕：保留已解析行数/错误/告警，不用单行错误覆盖。
+
+    计数口径与 loader 成功报告一致：source_rows_total 是源数据行数（重复折叠
+    不改变它），fact_rows_error 排除软告警，对账坏值警告单列。
+    """
+    return {
+        "file_type": result.file_type,
+        "source_rows_total": result.rows_total,
+        "fact_rows_error": sum(
+            1 for error in result.errors
+            if error.error_type not in SOFT_ERROR_TYPES),
+        "rows_inactive": result.rows_inactive,
+        "rows_skipped_no_data": result.rows_skipped_no_data,
+        "reconciliation_value_warnings": sum(
+            1 for error in result.errors
+            if error.error_type in ("bad_reconciliation_amount",
+                                    "bad_source_modified_time")),
+        "missing_price_columns": not mapping.has_price_columns(
+            src_cols, result.file_type),
+        "errors_preview": [
+            {"row_no": error.row_no, "error_type": error.error_type,
+             "detail": error.error_detail}
+            for error in result.errors[:10]
+        ],
+        **extra_report,
+    }
 
 
 def transform_workbook(loaded: LoadedWorkbook) -> TransformedWorkbook:
@@ -546,7 +668,7 @@ def transform_workbook(loaded: LoadedWorkbook) -> TransformedWorkbook:
                                    list(expense_sheets[0].df.columns))
     result = transform(primary.df, primary.file_type)
     extra_report = {}
-    _collapsed_duplicate_order_lines(result, extra_report)
+    _collapsed_duplicate_order_lines(result, extra_report, primary.df)
     if selection.ignored_recognized:
         extra_report["ignored_sheets"] = [
             f"{s.sheet_name}（{s.file_type}，多页文件只导第一个可识别页）"
@@ -608,15 +730,14 @@ def run_import(session: Session, file_path: str, original_name: str,
     session.add(batch)
     session.flush()  # 取 batch.id
 
+    failure_report: dict | None = None
+    facts_write_started = False
     try:
         loaded = load_workbook(file_path)
         batch.file_type = loaded.file_type
         require_clean_workbook(loaded)
         selection, expense_sheets = loaded.selection, loaded.expense_sheets
 
-        storage_path = _archive(file_path, file_hash)
-        session.add(SysRawFile(batch_id=batch.id, filename=original_name,
-                               file_hash=file_hash, storage_path=storage_path))
         snapshot = datetime.now(timezone.utc).date()
 
         # Capture identities from the same reader-selected page before PN/qty
@@ -642,6 +763,7 @@ def run_import(session: Session, file_path: str, original_name: str,
         transformed = transform_workbook(loaded)
         result, extra_report, src_cols = (
             transformed.result, transformed.extra_report, transformed.src_cols)
+        failure_report = _failure_report(result, extra_report, src_cols)
         if wbdd_source_snapshot is not None:
             wbdd_source_snapshot = maintenance_wbdd_source_snapshot.block_snapshot_errors(
                 wbdd_source_snapshot, result.errors)
@@ -723,6 +845,13 @@ def run_import(session: Session, file_path: str, original_name: str,
                 target_project_ids=set(target_project_ids)
             )
 
+        # 归档/原件留痕放在所有 ReaderError 门禁之后：API 对解析失败批次会
+        # commit 留痕，此时不能把 SysRawFile（或已归档文件）当成已导入原件提交。
+        storage_path = _archive(file_path, file_hash)
+        session.add(SysRawFile(batch_id=batch.id, filename=original_name,
+                               file_hash=file_hash, storage_path=storage_path))
+
+        facts_write_started = True
         counts = loader.load(
             session,
             result,
@@ -829,8 +958,23 @@ def run_import(session: Session, file_path: str, original_name: str,
         session.flush()
         return batch
     except ReaderError as exc:
+        if facts_write_started:
+            # loader.load 之后任何解析类异常都不能走 API 的 ReaderError 路径
+            # （外层会 commit 失败批次，连带提交已写入的业务半事务）。按完整性
+            # 失败处理，单文件与批量入口都会整事务 rollback。
+            raise loader.ImportIntegrityError(
+                f"导入写入阶段失败，整批已回滚：{exc}"
+            ) from exc
         batch.status = "failed"
-        batch.report_json = {"error": str(exc)}
+        if failure_report is None:
+            batch.report_json = {"error": str(exc)}
+        else:
+            # 解析/门禁失败也要保留已解析计数与错误预览，不能用单行错误覆盖；
+            # 失败批次由 API 提交留痕，但业务事实/原件归档均尚未写入。
+            batch.rows_total = failure_report["source_rows_total"]
+            batch.rows_error = failure_report["fact_rows_error"]
+            batch.rows_inactive = failure_report["rows_inactive"]
+            batch.report_json = {**failure_report, "error": str(exc)}
         session.flush()
         raise
 

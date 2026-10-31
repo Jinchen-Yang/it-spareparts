@@ -479,6 +479,34 @@ _IDENTITY_TYPE_LABELS = {
 }
 
 
+def critical_alias_columns(columns, file_type: str | None) -> dict[str, tuple[str, ...]]:
+    """表头级：命中同一关键字段的多个源列（预检用，不读值）。
+
+    canonicalize_columns 不制造重复列，第二个同义源列会留在原名；只有真正
+    读值时才能判断同值/异值。预检据此决定是否物化选中页复用同一冲突判定，
+    避免表头预检把规范数量=2、别名数量=99 的文件放行。
+    """
+    if file_type is None:
+        return {}
+    present = set(columns)
+    grouped: dict[str, list[str]] = {}
+
+    def record(target: str, aliases: tuple[str, ...]) -> None:
+        internal = field_internal(file_type, target)
+        if internal not in CRITICAL_ALIAS_INTERNALS:
+            return
+        names = [name for name in (target, *aliases) if name in present]
+        unique = list(dict.fromkeys(names))
+        if len(unique) > 1:
+            grouped[target] = unique
+
+    for target, aliases in VALUE_ALIASES.get(file_type, {}).items():
+        record(target, aliases)
+    for target, aliases in annotation_aliases(columns, file_type).items():
+        record(target, aliases)
+    return {target: tuple(names) for target, names in grouped.items()}
+
+
 def missing_identity_columns(columns, file_type: str | None) -> tuple[str, ...]:
     """该类型缺少的必需身份规范列（顺序固定；非通用订单类型返回空）。"""
     present = set(columns)

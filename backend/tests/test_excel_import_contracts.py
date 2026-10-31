@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from app.etl import mapping, pipeline, precheck, reader
 from app.etl.transform import transform
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
-from app.models.system import SysImportBatch, SysImportError
+from app.models.system import SysImportBatch, SysImportError, SysRawFile
 
 
 def _write_workbook(
@@ -172,6 +172,31 @@ def test_critical_alias_conflicts_reject_whole_file(tmp_path, headers, rows):
     assert "取值不一致" in str(exc_info.value)
 
 
+def test_precheck_reports_critical_alias_conflict_before_import(tmp_path):
+    """表头预检不能只看列名：规范数量=2、裸别名=99 必须报歧义并拦住导入。"""
+    headers = ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
+               "明细.产品名称(必填)", "明细.采购数量(必填)", "明细.采购数量",
+               "明细.单价(必填)"]
+    path = _write_workbook(
+        tmp_path, "precheck-alias-conflict.xlsx", headers,
+        [["CGDD-1", "O1", "L1", "PN-A", 2, 99, 100]],
+    )
+
+    result = precheck.inspect_file(path, "precheck-alias-conflict.xlsx")
+
+    assert result["can_import"] is False
+    selected = next(
+        sheet for sheet in result["sheets"] if sheet["action"] == "selected")
+    issue = next(
+        issue for issue in selected["issues"]
+        if issue["code"] == "alias_column_conflict")
+    assert issue["severity"] == "error"
+    assert "取值不一致" in issue["message"] and "明细.采购数量" in issue["message"]
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.read_excel(path)
+    assert exc_info.value.code == "alias_column_conflict"
+
+
 def test_same_value_aliases_are_merged_without_error(tmp_path):
     path = _write_workbook(
         tmp_path,
@@ -181,6 +206,9 @@ def test_same_value_aliases_are_merged_without_error(tmp_path):
          "明细.单价(必填)"],
         [["CGDD-1", "O1", "L1", "PN-A", 2, 2, 100]],
     )
+
+    preview = precheck.inspect_file(path, "alias-same.xlsx")
+    assert preview["can_import"] is True
 
     frame, file_type = reader.read_excel(path)
     result = transform(frame, file_type)
@@ -326,14 +354,96 @@ def test_duplicate_raw_line_same_content_is_counted_and_collapsed(tmp_path):
     headers = ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
                "明细.产品名称(必填)", "明细.采购数量(必填)", "明细.单价(必填)"]
     row = ["CGDD-1", "O1", "L1", "PN-A", 1, 100]
-    path = _write_workbook(tmp_path, "duplicate-same.xlsx", headers, [row, list(row)])
+    path = _write_workbook(
+        tmp_path, "duplicate-same.xlsx", headers,
+        [row, list(row), ["CGDD-2", "O2", "L2", "PN-B", 1, 200]],
+    )
 
     transformed = pipeline.transform_workbook(pipeline.load_workbook(path))
 
-    assert len(transformed.result.lines) == 1
+    assert transformed.result.rows_total == 3      # 源行数不因折叠减少
+    assert len(transformed.result.lines) == 2
     assert transformed.extra_report["duplicate_lines_collapsed"] == 1
     assert not transformed.result.errors
     pipeline._ensure_importable_result(transformed.result)   # 同内容不算全错
+
+
+def test_duplicate_raw_line_header_value_conflict_rejected(tmp_path):
+    """同明细ID只改了头字段：旧实现只比 line dict 会静默折叠，必须按源行拒绝。"""
+    headers = ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
+               "明细.产品名称(必填)", "明细.采购数量(必填)", "明细.单价(必填)",
+               "采购金额"]
+    path = _write_workbook(
+        tmp_path,
+        "duplicate-head-conflict.xlsx",
+        headers,
+        [
+            ["CGDD-1", "O1", "L1", "PN-A", 1, 100, 113],
+            ["CGDD-1", "O1", "L1", "PN-A", 1, 100, 114],
+        ],
+    )
+
+    transformed = pipeline.transform_workbook(pipeline.load_workbook(path))
+
+    conflict = next(
+        error for error in transformed.result.errors
+        if error.error_type == "duplicate_raw_line_id_conflict")
+    assert conflict.row_no == 2
+    assert conflict.identity["raw_line_id"] == "L1"
+    assert conflict.identity["source_rows"] == [1, 2]
+    assert "采购金额" in conflict.error_detail
+    assert "数据行 1、2" in conflict.error_detail
+    assert transformed.result.lines == []
+    with pytest.raises(reader.ReaderError) as exc_info:
+        pipeline._ensure_importable_result(transformed.result)
+    assert exc_info.value.code == "duplicate_raw_line_id_conflict"
+
+
+def test_duplicate_raw_line_detected_across_large_file_chunks(tmp_path):
+    """1,001 源行整表扫描：重复身份不能被任何分块边界漏掉。"""
+    headers = ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
+               "明细.产品名称(必填)", "明细.采购数量(必填)", "明细.单价(必填)"]
+    rows = [
+        [f"CGDD-{index}", f"O{index}", f"L{index}", "PN-A", 1, 100]
+        for index in range(1, 1001)
+    ]
+    rows.append(list(rows[0]))
+    path = _write_workbook(tmp_path, "duplicate-large.xlsx", headers, rows)
+
+    transformed = pipeline.transform_workbook(pipeline.load_workbook(path))
+
+    assert transformed.result.rows_total == 1001
+    assert transformed.extra_report["duplicate_lines_collapsed"] == 1
+    assert len(transformed.result.lines) == 1000
+    assert not transformed.result.errors
+
+
+def test_duplicate_raw_line_across_orders_is_a_conflict(tmp_path):
+    """同明细ID出现在不同父单：即使明细字段相同也必须拒绝。"""
+    headers = ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
+               "明细.产品名称(必填)", "明细.采购数量(必填)", "明细.单价(必填)"]
+    path = _write_workbook(
+        tmp_path,
+        "duplicate-parent.xlsx",
+        headers,
+        [
+            ["CGDD-1", "O1", "L1", "PN-A", 1, 100],
+            ["CGDD-2", "O2", "L1", "PN-A", 1, 100],
+        ],
+    )
+
+    transformed = pipeline.transform_workbook(pipeline.load_workbook(path))
+
+    conflict = next(
+        error for error in transformed.result.errors
+        if error.error_type == "duplicate_raw_line_id_conflict")
+    assert conflict.identity["raw_line_id"] == "L1"
+    assert conflict.identity["source_rows"] == [1, 2]
+    assert "数据ID(不可修改)" in conflict.error_detail
+    assert transformed.result.lines == []
+    with pytest.raises(reader.ReaderError) as exc_info:
+        pipeline._ensure_importable_result(transformed.result)
+    assert exc_info.value.code == "duplicate_raw_line_id_conflict"
 
 
 def test_duplicate_raw_line_conflicting_content_rejected_before_load(tmp_path):
@@ -358,6 +468,9 @@ def test_duplicate_raw_line_conflicting_content_rejected_before_load(tmp_path):
         if error.error_type == "duplicate_raw_line_id_conflict"
     )
     assert conflict.identity["raw_line_id"] == "L1"
+    assert conflict.row_no == 2
+    assert conflict.identity["source_rows"] == [1, 2]
+    assert "明细.采购数量" in conflict.error_detail
     with pytest.raises(reader.ReaderError) as exc_info:
         pipeline._ensure_importable_result(transformed.result)
     assert exc_info.value.code == "duplicate_raw_line_id_conflict"
@@ -418,6 +531,9 @@ def test_run_import_rejects_conflicting_duplicates_before_loader(monkeypatch, tm
     assert error.code == "duplicate_raw_line_id_conflict"
     batch = next(obj for obj in session.added if isinstance(obj, SysImportBatch))
     assert batch.status == "failed"
+    assert batch.rows_total == 2
+    assert batch.report_json["source_rows_total"] == 2
+    assert batch.report_json["fact_rows_error"] == 1
     assert any(
         isinstance(obj, SysImportError)
         and obj.error_type == "duplicate_raw_line_id_conflict"
@@ -441,6 +557,11 @@ def test_run_import_rejects_all_rejected_rows_before_loader(monkeypatch, tmp_pat
     assert error.code == "no_importable_rows"
     batch = next(obj for obj in session.added if isinstance(obj, SysImportBatch))
     assert batch.status == "failed"
+    assert batch.rows_total == 1
+    assert batch.rows_error == 1
+    assert batch.report_json["source_rows_total"] == 1
+    assert batch.report_json["fact_rows_error"] == 1
+    assert batch.report_json["error"] == str(error)
     assert any(
         isinstance(obj, SysImportError) and obj.error_type == "missing_raw_id"
         for obj in session.added
@@ -466,6 +587,11 @@ def test_pipeline_db_all_rejected_persists_failed_batch_without_facts(db, tmp_pa
     batch = db.scalar(select(SysImportBatch))
     assert batch is not None and batch.status == "failed"
     assert "均未形成可导入事实" in batch.report_json["error"]
+    assert batch.rows_total == 1
+    assert batch.report_json["source_rows_total"] == 1
+    assert batch.report_json["fact_rows_error"] == 1
     assert db.scalar(select(func.count()).select_from(FPurchaseOrder)) == 0
     assert db.scalar(select(func.count()).select_from(FPurchaseLine)) == 0
     assert db.scalar(select(func.count()).select_from(SysImportError)) == 1
+    # ReaderError 失败批次由 API commit 留痕，但原件归档/业务事实必须都没有写过。
+    assert db.scalar(select(func.count()).select_from(SysRawFile)) == 0

@@ -305,21 +305,28 @@ def test_transform_bad_recon_on_detail_invalid_row_still_reported(tmp_path):
 
 
 def test_import_all_lines_failed_no_order_no_snapshot(db, tmp_path):
-    """订单全部明细被拒：订单不入库、不写快照（与订单头一致），行级错误如实可见。
+    """订单全部明细被拒：整批 failed，不写订单/快照，行级错误与告警仍可查。
 
     同一行再植入坏对账值/坏修改时间：对账解析错误不随订单被拒而消失（收集点在
-    明细闸门之前，逐行上报）——审查意见 1「全部明细被拒 → 错误要报」的完整锁定。
+    明细闸门之前，逐行上报）。全数据行被拒且无任何可接受事实时必须失败，而不是
+    以 success + 0 行掩盖；失败留痕保留 source_rows_total / rows_error / 告警计数。
     """
     path = _write_xlsx(tmp_path / "a.xlsx", [
         _row(**{"订单明细.订单数量": "abc"}, 已对账金额="not-a-number",
               **{"修改时间(必填)": "乱码日期"})])
-    batch = pipeline.run_import(db, path, "a.xlsx")
+    with pytest.raises(reader.ReaderError) as exc_info:
+        pipeline.run_import(db, path, "a.xlsx")
     db.commit()
 
-    assert batch.status == "success"                   # 坏行隔离，整批照常成功
-    # #396 S10：坏对账金额/坏修改时间是已入库行上的警告，不再计入 rows_error；
-    # 只有 bad_number（该明细行真被拒）算错行。警告行级计数单列。
+    assert exc_info.value.code == "no_importable_rows"
+    batch = db.scalar(select(SysImportBatch))
+    assert batch.status == "failed"
+    assert "均未形成可导入事实" in batch.report_json["error"]
+    # 源行数仍是文件数据行数；坏行计数与成功路径同口径（仅非软告警）。
+    assert batch.rows_total == 1
+    assert batch.report_json["source_rows_total"] == 1
     assert batch.rows_error == 1                       # 仅 bad_number
+    assert batch.report_json["fact_rows_error"] == 1
     assert batch.report_json["reconciliation_value_warnings"] == 2
     assert db.scalar(select(func.count()).select_from(FSalesOrder)) == 0
     assert _snapshots(db) == []
