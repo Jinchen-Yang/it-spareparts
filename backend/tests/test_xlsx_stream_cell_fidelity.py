@@ -12,16 +12,17 @@ from datetime import date, datetime, time
 from pathlib import Path
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.utils.datetime import CALENDAR_MAC_1904
 
-from app.etl import reader
+from app.etl import reader, xlsx_stream
 from app.etl.xlsx_stream import (
     FormulaErrorCacheError,
     MissingFormulaCacheError,
     assert_formula_caches,
     check_formula_caches,
     inspect_ooxml_layout,
+    iter_formula_cache_issues,
     iter_worksheet_rows,
     load_selected_frames,
 )
@@ -66,6 +67,9 @@ def _read_all(path: Path) -> list[list[object]]:
     return list(iter_worksheet_rows(str(path), layout.sheets[0]))
 
 
+_DATE_SERIALS = (0, 0.5, 1, 59, 60, 61)
+
+
 def _date_workbook(path: Path, *, mac_1904: bool) -> None:
     workbook = _workbook(path, mac_1904=mac_1904)
     sheet = workbook["Data"]
@@ -73,14 +77,27 @@ def _date_workbook(path: Path, *, mac_1904: bool) -> None:
     sheet["A1"].number_format = "yyyy-mm-dd"
     sheet["A2"] = datetime(2026, 10, 30, 12, 30)
     sheet["A2"].number_format = "yyyy-mm-dd hh:mm"
-    for coordinate, serial in (("A3", 59), ("A4", 60), ("A5", 61), ("A6", 0), ("A7", 0.5)):
+    for offset, serial in enumerate(_DATE_SERIALS, start=3):
+        coordinate = f"A{offset}"
         sheet[coordinate] = serial
-        sheet[coordinate].number_format = "yyyy-mm-dd"
+        sheet[coordinate].number_format = "yyyy-mm-dd hh:mm:ss"
     sheet["B1"] = 3.5
     workbook.save(path)
 
 
-def test_default_1900_dates_fractions_and_leap_compatibility():
+def _openpyxl_column_a(path: Path) -> list[object]:
+    workbook = load_workbook(path, data_only=True)
+    try:
+        sheet = workbook["Data"]
+        return [
+            sheet.cell(row=index, column=1).value
+            for index in range(1, sheet.max_row + 1)
+        ]
+    finally:
+        workbook.close()
+
+
+def test_default_1900_date_serials_match_openpyxl():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "dates-1900.xlsx"
         _date_workbook(path, mac_1904=False)
@@ -89,17 +106,20 @@ def test_default_1900_dates_fractions_and_leap_compatibility():
         assert layout.date1904 is False
         rows = list(iter_worksheet_rows(str(path), layout.sheets[0]))
 
-        assert rows[0] == [date(2026, 10, 30), 3.5]
+        assert [row[0] for row in rows] == _openpyxl_column_a(path)
+        assert rows[0] == [datetime(2026, 10, 30), 3.5]
         assert rows[1] == [datetime(2026, 10, 30, 12, 30)]
+        # openpyxl 对 0 <= 序列 < 1 返回 time；1900 纪元也一样。
+        assert rows[2] == [time(0, 0)]
+        assert rows[3] == [time(12, 0)]
+        assert rows[4] == [datetime(1900, 1, 1)]
         # openpyxl 的 1900 闰年兼容：序列 59 与 60 都落到 1900-02-28。
-        assert rows[2] == [date(1900, 2, 28)]
-        assert rows[3] == [date(1900, 2, 28)]
-        assert rows[4] == [date(1900, 3, 1)]
-        assert rows[5] == [date(1899, 12, 30)]
-        assert rows[6] == [time(12, 0)]
+        assert rows[5] == [datetime(1900, 2, 28)]
+        assert rows[6] == [datetime(1900, 2, 28)]
+        assert rows[7] == [datetime(1900, 3, 1)]
 
 
-def test_1904_epoch_dates_fractions_and_epoch_zero():
+def test_1904_date_serials_match_openpyxl():
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "dates-1904.xlsx"
         _date_workbook(path, mac_1904=True)
@@ -108,13 +128,16 @@ def test_1904_epoch_dates_fractions_and_epoch_zero():
         assert layout.date1904 is True
         rows = list(iter_worksheet_rows(str(path), layout.sheets[0]))
 
-        assert rows[0] == [date(2026, 10, 30), 3.5]
+        assert [row[0] for row in rows] == _openpyxl_column_a(path)
+        # 回归：1904 纪元下 2026-10-30 不得再被读成 2022-10-29。
+        assert rows[0] == [datetime(2026, 10, 30), 3.5]
         assert rows[1] == [datetime(2026, 10, 30, 12, 30)]
-        assert rows[2] == [date(1904, 2, 29)]
-        assert rows[3] == [date(1904, 3, 1)]
-        assert rows[4] == [date(1904, 3, 2)]
-        assert rows[5] == [date(1904, 1, 1)]
-        assert rows[6] == [time(12, 0)]
+        assert rows[2] == [time(0, 0)]
+        assert rows[3] == [time(12, 0)]
+        assert rows[4] == [datetime(1904, 1, 2)]
+        assert rows[5] == [datetime(1904, 2, 29)]
+        assert rows[6] == [datetime(1904, 3, 1)]
+        assert rows[7] == [datetime(1904, 3, 2)]
 
 
 @pytest.mark.parametrize(
@@ -126,8 +149,11 @@ def test_workbook_pr_date1904_spellings(raw_value, expected):
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "epoch.xlsx"
         workbook = _workbook(path, mac_1904=True)
-        workbook["Data"]["A1"] = 0
-        workbook["Data"]["A1"].number_format = "yyyy-mm-dd"
+        sheet = workbook["Data"]
+        sheet["A1"] = 0
+        sheet["A1"].number_format = "yyyy-mm-dd"
+        sheet["A2"] = 1
+        sheet["A2"].number_format = "yyyy-mm-dd"
         workbook.save(path)
         _rewrite_member(
             path,
@@ -136,8 +162,10 @@ def test_workbook_pr_date1904_spellings(raw_value, expected):
         )
 
         assert inspect_ooxml_layout(str(path)).date1904 is expected
-        assert _read_all(path)[0][0] == (
-            date(1904, 1, 1) if expected else date(1899, 12, 30)
+        rows = _read_all(path)
+        assert rows[0][0] == time(0, 0)
+        assert rows[1][0] == (
+            datetime(1904, 1, 2) if expected else datetime(1900, 1, 1)
         )
 
 
@@ -349,6 +377,42 @@ def test_ordinary_shared_string_formula_guard_and_cached_value():
         )
         assert check_formula_caches(path, ["Data"]) == []
         assert assert_formula_caches(path, ["Data"]) is None
+
+
+def test_formula_cache_scan_stops_after_first_issue(monkeypatch):
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "many-missing.xlsx"
+        workbook = _workbook(path)
+        workbook.save(path)
+        rows = "".join(
+            f'<row r="{index}"><c r="A{index}"><f>1+2</f><v></v></c></row>'
+            for index in range(1, 101)
+        )
+        _rewrite_member(
+            path,
+            "xl/worksheets/sheet1.xml",
+            lambda _xml: _sheet_xml(rows),
+        )
+
+        issues = iter_formula_cache_issues(path, ["Data"])
+        try:
+            first = next(issues)
+        finally:
+            issues.close()
+        assert (first.sheet, first.cell, first.kind) == ("Data", "A1", "missing")
+
+        calls = 0
+        original = xlsx_stream._formula_cache_issue
+
+        def counting(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(xlsx_stream, "_formula_cache_issue", counting)
+        with pytest.raises(MissingFormulaCacheError, match="A1"):
+            assert_formula_caches(path, ["Data"])
+        assert calls == 1
 
 
 def test_ignored_sheet_formula_does_not_block_selected_sheet():

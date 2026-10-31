@@ -341,23 +341,23 @@ def _formula_cache_issue(
 
 
 def _formula_serial_value(numeric: float, date1904: bool) -> object:
-    """Convert an Excel date serial using openpyxl's 1900/1904 semantics."""
+    """Convert an Excel date serial exactly as openpyxl's reader does.
+
+    ``from_excel`` already implements the 1900 leap-year compatibility and
+    returns ``time`` for serials in ``[0, 1)`` even in the 1904 epoch.  Do not
+    special-case zero or truncate datetimes to dates here, otherwise the
+    inline/mixed reader diverges from the ordinary openpyxl path.
+    """
     epoch = CALENDAR_MAC_1904 if date1904 else CALENDAR_WINDOWS_1900
-    if numeric == 0:
-        # Serial zero is the epoch date in the 1904 system; openpyxl's
-        # generic from_excel() treats 0..1 as a time of day.
-        return epoch.date()
     try:
         converted = from_excel(numeric, epoch)
     except (OverflowError, ValueError) as exc:
         raise UnsupportedCellEncoding(
             f"Excel 日期序列号无效：{numeric!r}"
         ) from exc
-    if isinstance(converted, time):
-        return converted
-    if isinstance(converted, datetime):
-        return converted.date() if numeric.is_integer() else converted
-    raise UnsupportedCellEncoding(f"Excel 日期序列号无效：{numeric!r}")
+    if not isinstance(converted, (datetime, time)):
+        raise UnsupportedCellEncoding(f"Excel 日期序列号无效：{numeric!r}")
+    return converted
 
 
 def _coerce_cell(
@@ -483,12 +483,11 @@ def load_selected_frames(path: str, sheet_names: Sequence[str]) -> dict[str, pd.
     }
 
 
-def _scan_sheet_formula_caches(
+def _iter_sheet_formula_cache_issues(
     archive: zipfile.ZipFile, sheet: WorksheetRef
-) -> list[FormulaCacheIssue]:
+) -> Iterator[FormulaCacheIssue]:
     from app.etl.reader import _safe_xml_iterparse
 
-    issues: list[FormulaCacheIssue] = []
     current_row = 0
     current_column = 0
     with archive.open(sheet.path) as source:
@@ -503,24 +502,24 @@ def _scan_sheet_formula_caches(
                 current_column = column
                 coordinate = ref or f"{_column_name(column)}{current_row}"
                 issue = _formula_cache_issue(element, sheet.name, coordinate)
-                if issue is not None:
-                    issues.append(issue)
                 element.clear()
+                if issue is not None:
+                    yield issue
             elif event == "end" and local == "row":
                 element.clear()
-    return issues
 
 
-def check_formula_caches(
+def iter_formula_cache_issues(
     path: str,
     sheet_names: Sequence[str] | None = None,
-) -> list[FormulaCacheIssue]:
-    """Scan selected worksheets for formulas lacking a usable cached result.
+) -> Iterator[FormulaCacheIssue]:
+    """Yield formula-cache problems one cell at a time on selected sheets.
 
-    This is the reusable guard for the ordinary shared-string path, where
-    pandas/openpyxl ``data_only=True`` silently returns ``None`` for formulas
-    that were never calculated.  Only the requested sheets are scanned, so a
-    formula on an ignored non-business sheet does not block a selected one.
+    Only the requested worksheets are scanned, so a formula on an ignored
+    non-business sheet does not block a selected one.  The generator keeps at
+    most the current XML element and issue alive; callers that only need the
+    first failure must use :func:`assert_formula_caches` or stop iterating
+    instead of materialising every issue in a large worksheet.
     """
     with zipfile.ZipFile(path) as archive:
         refs = _sheet_refs(archive)
@@ -533,16 +532,33 @@ def check_formula_caches(
         missing = [name for name in names if name not in by_name]
         if missing:
             raise ValueError(f"worksheet not found: {', '.join(missing)}")
-        issues: list[FormulaCacheIssue] = []
         for name in names:
-            issues.extend(_scan_sheet_formula_caches(archive, by_name[name]))
-        return issues
+            yield from _iter_sheet_formula_cache_issues(archive, by_name[name])
+
+
+def check_formula_caches(
+    path: str,
+    sheet_names: Sequence[str] | None = None,
+) -> list[FormulaCacheIssue]:
+    """Collect formula-cache problems on selected worksheets for diagnostics.
+
+    This is the reusable guard for the ordinary shared-string path, where
+    pandas/openpyxl ``data_only=True`` silently returns ``None`` for formulas
+    that were never calculated.  It materialises every issue; use
+    :func:`iter_formula_cache_issues` or :func:`assert_formula_caches` when
+    only the first failure is needed.
+    """
+    return list(iter_formula_cache_issues(path, sheet_names))
 
 
 def assert_formula_caches(
     path: str,
     sheet_names: Sequence[str] | None = None,
 ) -> None:
-    """Raise the first formula-cache problem found on the requested sheets."""
-    for issue in check_formula_caches(path, sheet_names):
-        raise issue.as_exception()
+    """Raise the first formula-cache problem without scanning the whole sheet."""
+    issues = iter_formula_cache_issues(path, sheet_names)
+    try:
+        for issue in issues:
+            raise issue.as_exception()
+    finally:
+        issues.close()
