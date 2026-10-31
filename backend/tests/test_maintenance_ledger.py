@@ -281,6 +281,107 @@ def test_parse_old_ledger_structure():
     assert [str(p.amount_raw) for p in first_plans] == ["2986.57"] * 3
 
 
+_OLD_HEADERS_BASE = [
+    "订单编号", "订单日期", "销售人员", "业务类型", "项目名称", "维保起始日期",
+    "维保终止日期", "CMO", "项目经理", "订单金额", "已收尾款", "待收尾款",
+    "验收材料", "验收材料是否完成及上传附件", "巡检时间", "巡检是否完成及上传附件",
+]
+_OLD_ROW_BASE = [
+    "XSDD-20260731-0086", "2026-07-31", "李呈辉", "整体维保",
+    "照旧项目20260608-20291205", "2026-06-08", "2029-12-05", "廖晓娟", "任鑫明",
+    10000, 0, 10000, "", "", "", "",
+]
+
+
+def _old_ledger_custom(headers: list[str], row: list) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "维保项目清单"
+    ws.append(headers)
+    ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def test_parse_old_ledger_pairs_amount_with_its_time_column():
+    """整组列调换后，金额必须跟随相邻的时间列，而不是按物理金额顺序 zip。"""
+    headers = _OLD_HEADERS_BASE + [
+        "回款时间2", "回款金额", "回款时间1", "回款金额",
+    ]
+    row = _OLD_ROW_BASE + ["2026-12", 200, "2026-11", 100]
+    parsed = ledger.parse_ledger_workbook(_old_ledger_custom(headers, row), "x.xlsx")
+    assert [
+        (plan.sequence, plan.time_raw, str(plan.amount_raw))
+        for plan in parsed["plan_rows"]
+    ] == [(1, "2026-11", "100"), (2, "2026-12", "200")]
+
+
+@pytest.mark.parametrize(
+    ("plan_headers", "plan_values", "fragment"),
+    [
+        (["回款时间1"], ["2026-11"], "数量不一致"),
+        (["回款金额"], [100], "数量不一致"),
+        (["回款时间1", "回款金额", "回款金额", "回款时间2"],
+         ["2026-11", 100, 200, "2026-12"], "缺少相邻"),
+    ],
+)
+def test_parse_old_ledger_rejects_unpaired_plan_columns(
+    plan_headers, plan_values, fragment
+):
+    with pytest.raises(ledger.LedgerParseError, match=fragment):
+        ledger.parse_ledger_workbook(
+            _old_ledger_custom(
+                _OLD_HEADERS_BASE + plan_headers,
+                _OLD_ROW_BASE + plan_values,
+            ),
+            "unpaired.xlsx",
+        )
+
+
+def test_parse_old_ledger_rejects_duplicate_sequence():
+    with pytest.raises(ledger.LedgerParseError, match="期次重复"):
+        ledger.parse_ledger_workbook(
+            _old_ledger_custom(
+                _OLD_HEADERS_BASE + [
+                    "回款时间1", "回款金额", "回款时间1", "回款金额",
+                ],
+                _OLD_ROW_BASE + ["2026-11", 100, "2026-12", 200],
+            ),
+            "duplicate.xlsx",
+        )
+
+
+def test_parse_old_ledger_rejects_more_than_24_groups_instead_of_slicing():
+    plan_headers = [
+        item for sequence in range(1, 26)
+        for item in (f"回款时间{sequence}", "回款金额")
+    ]
+    plan_values = [
+        item for sequence in range(1, 26)
+        for item in (f"2026-{sequence:02d}", sequence)
+    ]
+    with pytest.raises(ledger.LedgerParseError, match="超过 24 组"):
+        ledger.parse_ledger_workbook(
+            _old_ledger_custom(
+                _OLD_HEADERS_BASE + plan_headers,
+                _OLD_ROW_BASE + plan_values,
+            ),
+            "too-many.xlsx",
+        )
+
+
+def test_parse_old_ledger_rejects_duplicate_canonical_header():
+    with pytest.raises(ledger.LedgerParseError, match="重复列"):
+        ledger.parse_ledger_workbook(
+            _old_ledger_custom(
+                _OLD_HEADERS_BASE + ["订单金额(必填)"],
+                _OLD_ROW_BASE + [10000],
+            ),
+            "duplicate-header.xlsx",
+        )
+
+
 def test_parse_new_template_structure():
     parsed = ledger.parse_ledger_workbook(
         _new_ledger_workbook_bytes(include_expense=True), "维保台账工作簿模板_v1.xlsx"

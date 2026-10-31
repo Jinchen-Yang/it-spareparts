@@ -459,6 +459,39 @@ def test_parse_bxd_expense(db, front_stock_seed):
     assert float(line.amount) == 800.0
 
 
+def test_parse_rejects_duplicate_alias_columns():
+    """同义重复列必须零写拒绝，不能静默取首列。"""
+    data = _doc_workbook(
+        sheet_title="费用报销_支付单",
+        head_headers=_BXD_HEAD + ["备注"],
+        line_headers=_BXD_LINE,
+        rows=[{"head": [
+            "BXD-20260721-0019", "罗汇康", "维保费用", "外援费用",
+            "XSDD-20260203-0029", "", "新华三集团", "李呈辉",
+            "800", "800", "现金", "2026-07-27", "", "已结束", "BXD-HEAD-1", "已结束",
+        ], "lines": []}],
+    )
+    with pytest.raises(docs.DocParseError, match="重复映射"):
+        docs.parse_doc_workbook("bxd_expense", data, "费用报销支付单.xlsx")
+
+
+def test_parse_rejects_plain_text_over_4096_instead_of_dropping_it():
+    """普通文本超长不能悄悄变 None；受控图片/附件仍按 bytes 政策跳过。"""
+    head = [
+        "BXD-20260721-0019", "罗汇康", "维保费用", "外援费用",
+        "XSDD-20260203-0029", "", "新华三集团", "李呈辉",
+        "800", "800", "现金", "2026-07-27", "x" * 4097, "已结束", "BXD-HEAD-1", "已结束",
+    ]
+    data = _doc_workbook(
+        sheet_title="费用报销_支付单",
+        head_headers=_BXD_HEAD,
+        line_headers=_BXD_LINE,
+        rows=[{"head": head, "lines": []}],
+    )
+    with pytest.raises(docs.DocParseError, match="4096"):
+        docs.parse_doc_workbook("bxd_expense", data, "费用报销支付单.xlsx")
+
+
 def test_apply_bxd_is_raw_only(db, front_stock_seed):
     data = _doc_workbook(
         sheet_title="费用报销_支付单",

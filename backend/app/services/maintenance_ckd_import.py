@@ -96,7 +96,8 @@ def _cell(row: tuple, index: int | None) -> str | None:
         return None
     text = str(value).strip()
     if len(text) > 4096:
-        return None  # 内嵌图片 base64：不落库
+        # bytes 图片已在上方跳过；这里只能是普通文本，静默置 None 会丢字段。
+        raise CkdParseError("单元格普通文本超过 4096 字符，拒绝导入")
     return text or None
 
 

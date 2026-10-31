@@ -90,6 +90,79 @@ def test_parse_rejects_missing_header(db):
         svc.parse_checklist_workbook(buf.getvalue(), "bad.xlsx")
 
 
+def _custom_xlsx(headers: list, rows: list[tuple]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "验收清单"
+    ws.append(headers)
+    for row in rows:
+        ws.append(list(row))
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_parse_accepts_exactly_the_row_limit():
+    rows = [(f"任务{i}", "是") for i in range(1, svc.MAX_CHECKLIST_ROWS + 1)]
+    parsed = svc.parse_checklist_workbook(
+        _custom_xlsx(["验收需求", "是否完成"], rows), "max.xlsx")
+    assert parsed["item_rows"] == svc.MAX_CHECKLIST_ROWS
+    assert parsed["items"][-1]["requirement"] == f"任务{svc.MAX_CHECKLIST_ROWS}"
+
+
+def test_parse_rejects_one_row_over_limit_instead_of_truncating():
+    rows = [(f"任务{i}", "是") for i in range(1, svc.MAX_CHECKLIST_ROWS + 2)]
+    with pytest.raises(svc.ChecklistParseError, match="超过"):
+        svc.parse_checklist_workbook(
+            _custom_xlsx(["验收需求", "是否完成"], rows), "over.xlsx")
+
+
+def test_parse_rejects_far_tail_data_after_blank_and_example_rows():
+    """第 2001 条数据不在扫描截断点上也必须被看到并整本拒绝。"""
+    rows = [(f"任务{i}", "是") for i in range(1, svc.MAX_CHECKLIST_ROWS + 1)]
+    rows += [("", ""), ("", ""), ("（示例）忽略", "是"), ("尾端真实需求", "否")]
+    with pytest.raises(svc.ChecklistParseError, match="超过"):
+        svc.parse_checklist_workbook(
+            _custom_xlsx(["验收需求", "是否完成"], rows), "tail.xlsx")
+
+
+def test_parse_does_not_count_blank_or_example_rows_toward_limit():
+    rows = [(f"任务{i}", "是") for i in range(1, svc.MAX_CHECKLIST_ROWS + 1)]
+    rows += [("", ""), ("（示例）忽略一", "是"), ("（示例）忽略二", "否"), ("", "")]
+    parsed = svc.parse_checklist_workbook(
+        _custom_xlsx(["验收需求", "是否完成"], rows), "tail-ok.xlsx")
+    assert parsed["item_rows"] == svc.MAX_CHECKLIST_ROWS
+
+
+def test_parse_reads_key_headers_moved_beyond_first_eight_columns():
+    parsed = svc.parse_checklist_workbook(
+        _custom_xlsx(
+            [None] * 8 + ["验收需求", "是否完成"],
+            [[None] * 8 + ["右移需求", "否"]],
+        ),
+        "shifted.xlsx",
+    )
+    assert parsed["items"][0]["requirement"] == "右移需求"
+    assert parsed["items"][0]["done"] is False
+
+
+def test_parse_maps_reordered_key_headers_by_name():
+    parsed = svc.parse_checklist_workbook(
+        _custom_xlsx(["是否完成", "验收需求"], [["是", "完成列在前"]]),
+        "reordered.xlsx",
+    )
+    assert parsed["items"][0]["requirement"] == "完成列在前"
+    assert parsed["items"][0]["done"] is True
+
+
+def test_parse_rejects_duplicate_key_header():
+    with pytest.raises(svc.ChecklistParseError, match="重复列"):
+        svc.parse_checklist_workbook(
+            _custom_xlsx(["验收需求", "验收需求", "是否完成"], [["a", "b", "是"]]),
+            "duplicate.xlsx",
+        )
+
+
 def _preview(db, project, data, *, key=None, by="tester"):
     parsed = svc.parse_checklist_workbook(data, "checklist.xlsx")
     batch_id = svc.store_preview(db, parsed, project_id=project.project_id,

@@ -155,10 +155,10 @@ class DocLineData:
 
 def _header_index(headers: list[str], name: str) -> int | None:
     variants = {name, f"{name}(必填)", f"{name}(不可修改)"}
-    for idx, value in enumerate(headers, 1):
-        if value in variants:
-            return idx
-    return None
+    matches = [idx for idx, value in enumerate(headers, 1) if value in variants]
+    if len(matches) > 1:
+        raise DocParseError(f"列「{name}」存在重复映射，拒绝解析")
+    return matches[0] if matches else None
 
 
 def _cell(row: tuple, index: int | None) -> str | None:
@@ -166,10 +166,11 @@ def _cell(row: tuple, index: int | None) -> str | None:
         return None
     value = row[index - 1]
     if value is None or isinstance(value, (bytes, bytearray)):
-        return None
+        return None  # 受控图片/附件单元格：仍按既有政策跳过
     text = str(value).strip()
     if len(text) > 4096:
-        return None
+        # 普通文本超长不能被当成附件静默丢弃：整单拒绝，避免 raw_json 缺字段。
+        raise DocParseError("单元格普通文本超过 4096 字符，拒绝导入")
     return text or None
 
 

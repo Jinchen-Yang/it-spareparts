@@ -592,7 +592,7 @@ def test_non_xlsx_upload_is_415(db, project):
 def test_expense_sheet_has_editable_remark_column(db, project):
     _expense(db)
     wb = load_workbook(io.BytesIO(_download(uploader(db, "rmk-1"), project)))
-    # 表头行末尾还有一列隐藏的行标识（值为空），所以按名字取位置而不是取 [-1]
+    # 表头行末尾是隐藏的行标识列；按名字取位置而不是取 [-1]
     headers = [c.value for c in wb[wbk.SHEET_EXPENSE][1]]
     assert "备注" in headers
     remark_col = headers.index("备注") + 1
@@ -605,6 +605,145 @@ def test_expense_sheet_has_editable_remark_column(db, project):
     # 只读仅剩含税金额列（第 9 列），备注黄底应与它不同色。
     assert ws.cell(row=1, column=remark_col).fill.fgColor.rgb \
         != ws.cell(row=1, column=9).fill.fgColor.rgb
+
+
+def test_expense_sheet_names_hidden_identity_column(db, project):
+    _expense(db)
+    wb = load_workbook(io.BytesIO(_download(uploader(db, "id-col"), project)))
+    ws = wb[wbk.SHEET_EXPENSE]
+    id_col = len(wbk._EXPENSE_HEADERS) + 1
+    assert ws.cell(row=1, column=id_col).value == wbk.RAW_LINE_ID_HEADER
+    assert ws.column_dimensions[ws.cell(row=1, column=id_col).column_letter].hidden
+
+
+def test_validate_rejects_duplicate_expense_header(db, project):
+    _expense(db)
+    content = _download(uploader(db, "dup-header"), project)
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[wbk.SHEET_EXPENSE]
+    ws.cell(row=1, column=len(wbk._EXPENSE_HEADERS) + 2, value="备注")
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    with pytest.raises(wbk.WorkbookError) as excinfo:
+        wbk.validate(db, project_id=project.project_id, data=buffer.getvalue())
+    assert excinfo.value.code == "duplicate_header"
+
+
+def test_validate_rejects_missing_expense_header(db, project):
+    _expense(db)
+    content = _download(uploader(db, "missing-header"), project)
+    wb = load_workbook(io.BytesIO(content))
+    remark_col = len(wbk._EXPENSE_HEADERS)
+    wb[wbk.SHEET_EXPENSE].cell(row=1, column=remark_col, value="备注X")
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    with pytest.raises(wbk.WorkbookError) as excinfo:
+        wbk.validate(db, project_id=project.project_id, data=buffer.getvalue())
+    assert excinfo.value.code == "missing_header"
+
+
+def test_moved_expense_columns_are_read_by_unique_header_name(db, project):
+    _expense(db)
+    expense = db.execute(select(FProjectExpense)).scalars().one()
+    expense.reason = "完整事由"
+    expense.remark = "原备注"
+    db.commit()
+    client = uploader(db, "moved-expense")
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    ws = wb[wbk.SHEET_EXPENSE]
+    reason_col = list(wbk._EXPENSE_HEADERS).index("支出事由") + 1
+    remark_col = list(wbk._EXPENSE_HEADERS).index("备注") + 1
+    for row in (1, 2):
+        left = ws.cell(row=row, column=reason_col).value
+        right = ws.cell(row=row, column=remark_col).value
+        ws.cell(row=row, column=reason_col, value=right)
+        ws.cell(row=row, column=remark_col, value=left)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    response = _upload(client, project, buffer.getvalue(), action="validate")
+    assert response.status_code == 200, response.text
+    assert response.json()["expense_updates"] == 0
+
+
+def test_inserted_unknown_expense_column_keeps_values_and_identity_aligned(db, project):
+    _expense(db)
+    expense = db.execute(select(FProjectExpense)).scalars().one()
+    expense.reason = "完整事由"
+    expense.remark = "原备注"
+    db.commit()
+    client = uploader(db, "unknown-column")
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    ws = wb[wbk.SHEET_EXPENSE]
+    ws.insert_cols(3)
+    ws.cell(row=1, column=3, value="临时说明")
+    ws.cell(row=2, column=3, value="忽略我")
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    response = _upload(client, project, buffer.getvalue(), action="validate")
+    assert response.status_code == 200, response.text
+    assert response.json()["expense_updates"] == 0
+
+
+def test_legacy_expense_export_without_named_identity_header_still_reads_id(db, project):
+    _expense(db)
+    client = uploader(db, "legacy-expense")
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    wb[wbk.SHEET_EXPENSE].cell(
+        row=1, column=len(wbk._EXPENSE_HEADERS) + 1, value=None)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    response = _upload(client, project, buffer.getvalue(), action="validate")
+    assert response.status_code == 200, response.text
+    assert response.json()["expense_updates"] == 0
+
+
+def test_legacy_reordered_expense_headers_are_rejected(db, project):
+    _expense(db)
+    client = uploader(db, "legacy-reordered")
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    ws = wb[wbk.SHEET_EXPENSE]
+    reason_col = list(wbk._EXPENSE_HEADERS).index("支出事由") + 1
+    remark_col = list(wbk._EXPENSE_HEADERS).index("备注") + 1
+    for row in (1, 2):
+        left = ws.cell(row=row, column=reason_col).value
+        right = ws.cell(row=row, column=remark_col).value
+        ws.cell(row=row, column=reason_col, value=right)
+        ws.cell(row=row, column=remark_col, value=left)
+    ws.cell(row=1, column=len(wbk._EXPENSE_HEADERS) + 1, value=None)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    response = _upload(client, project, buffer.getvalue(), action="validate")
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_header"
+
+
+def test_long_reason_roundtrips_without_truncation_or_overwrite(db, project):
+    _expense(db)
+    expense = db.execute(select(FProjectExpense)).scalars().one()
+    full_reason = "巡检证据" * 90  # 360 字，旧实现导出会截成 120
+    expense.reason = full_reason
+    db.commit()
+    client = uploader(db, "long-reason")
+    content = _download(client, project)
+    exported = load_workbook(io.BytesIO(content))[wbk.SHEET_EXPENSE]
+    reason_col = list(wbk._EXPENSE_HEADERS).index("支出事由") + 1
+    assert exported.cell(row=2, column=reason_col).value == full_reason
+
+    response = _upload(client, project, content)
+    assert response.status_code == 200, response.text
+    assert response.json()["expense_updates"] == 0
+    db.expire_all()
+    assert db.execute(select(FProjectExpense)).scalars().one().reason == full_reason
+
+
+def test_export_rejects_reason_over_excel_cell_limit(db, project):
+    _expense(db)
+    expense = db.execute(select(FProjectExpense)).scalars().one()
+    expense.reason = "x" * (wbk.EXCEL_CELL_MAX_CHARS + 1)
+    db.commit()
+    with pytest.raises(wbk.WorkbookError) as excinfo:
+        wbk.build_workbook(db, project_id=project.project_id)
+    assert excinfo.value.code == "cell_text_too_long"
 
 
 def test_remark_roundtrips_into_the_database(db, project):
@@ -706,6 +845,39 @@ def _update_month(client, project, month_text: str, amount, *, remark=_KEEP):
     buf = io.BytesIO()
     wb.save(buf)
     return _upload(client, project, buf.getvalue())
+
+
+def test_moved_collection_receipt_and_remark_columns_map_by_name(db, project):
+    _seed_confirmed_snapshots(db, project, (date(2026, 7, 1), "10000.00"))
+    snapshot = db.execute(select(MaintenanceCollectionSnapshot)).scalar_one()
+    snapshot.receipt_reference = "REC-1"
+    snapshot.remark = "NOTE-1"
+    db.commit()
+    client = uploader(db, "moved-collection")
+    wb = load_workbook(io.BytesIO(_download(client, project)))
+    ws = wb[wbk.SHEET_COLLECTION]
+    for row in range(2, ws.max_row + 1):
+        if ws.cell(row=row, column=3).value == "2026-07":
+            left = ws.cell(row=row, column=5).value
+            right = ws.cell(row=row, column=7).value
+            ws.cell(row=row, column=5, value=right)
+            ws.cell(row=row, column=7, value=left)
+            break
+    else:
+        raise AssertionError("下载的 05 表里没有 2026-07")
+    # 表头也随数据一起交换，模拟用户在 Excel 里整列移动
+    left = ws.cell(row=1, column=5).value
+    right = ws.cell(row=1, column=7).value
+    ws.cell(row=1, column=5, value=right)
+    ws.cell(row=1, column=7, value=left)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    response = _upload(client, project, buffer.getvalue())
+    assert response.status_code == 200, response.text
+    db.expire_all()
+    snapshot = db.execute(select(MaintenanceCollectionSnapshot)).scalar_one()
+    assert snapshot.receipt_reference == "REC-1"
+    assert snapshot.remark == "NOTE-1"
 
 
 def test_excel_update_regressing_below_earlier_confirmed_month_is_rejected(db, project):

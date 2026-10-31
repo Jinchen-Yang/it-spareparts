@@ -275,6 +275,28 @@ def test_parse_rejects_missing_columns():
         ckd.parse_ckd_workbook(buffer.getvalue(), "x.xlsx")
 
 
+def test_parse_rejects_duplicate_declared_header():
+    headers = ckd._HEAD_COLUMNS + ["备注"] + ckd._LINE_COLUMNS
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.append(["F0000001"] * len(headers))
+    ws.append(headers)
+    ws.append([""] * len(ckd._HEAD_COLUMNS))
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    with pytest.raises(ckd.CkdParseError, match="重复映射"):
+        ckd.parse_ckd_workbook(buffer.getvalue(), "发货单.xlsx")
+
+
+def test_parse_rejects_plain_text_over_4096_instead_of_dropping_it():
+    head = _HEAD_MAINT.copy()
+    head[13] = "x" * 4097  # 备注
+    data = _ckd_workbook_bytes(rows=[{"head": head, "lines": []}])
+    with pytest.raises(ckd.CkdParseError, match="4096"):
+        ckd.parse_ckd_workbook(data, "发货单.xlsx")
+
+
 def test_apply_rejects_cross_batch_lines(db, wbdd_project):
     """跨批明细（line.batch_id ≠ head.batch_id）→ 拒绝应用。"""
     data = _ckd_workbook_bytes(
