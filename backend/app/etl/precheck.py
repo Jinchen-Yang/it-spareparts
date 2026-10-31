@@ -112,6 +112,16 @@ def inspect_file(path: str, filename: str, *, mode: str = "skip",
                     "不影响本次导入。",
                 ))
 
+        if action == sheet_selection.SELECTED:
+            missing_ids = mapping.missing_identity_columns(
+                sheet.columns, sheet.file_type)
+            if missing_ids:
+                issues.append(_issue(
+                    "error",
+                    "missing_identity_columns",
+                    mapping.identity_columns_message(sheet.file_type, missing_ids),
+                ))
+
         sheet_missing_price = (
             action == sheet_selection.SELECTED
             and sheet.file_type in {mapping.PURCHASE, mapping.SALES}

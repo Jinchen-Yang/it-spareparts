@@ -347,14 +347,25 @@ def load_workbook(file_path: str, *, inspected: list | None = None) -> LoadedWor
                           expense_sheets, primary)
 
 
+def _require_identity_columns(sheet) -> None:
+    missing = mapping.missing_identity_columns(sheet.columns, sheet.file_type)
+    if missing:
+        raise ReaderError(
+            mapping.identity_columns_message(sheet.file_type, missing),
+            code="missing_identity_columns",
+        )
+
+
 def require_clean_workbook(loaded: LoadedWorkbook) -> None:
-    """将被取用的页若有重复列名 → 整批拒绝。独立于 load_workbook，好让 run_import
+    """将被取用的页若有重复列名/缺必需身份列 → 整批拒绝。独立于 load_workbook，好让 run_import
     在它之前把 batch.file_type 落库（失败批次仍记录识别出的类型，与旧行为一致）。"""
     if loaded.expense_sheets:
         for s in loaded.expense_sheets:
             reader.require_clean_columns(s)
+            _require_identity_columns(s)
     else:
         reader.require_clean_columns(loaded.primary)
+        _require_identity_columns(loaded.primary)
 
 
 def _dedupe_expense_lines_across_sheets(
@@ -414,6 +425,93 @@ def _dedupe_expense_lines_across_sheets(
     return [line for _sheet_name, line in kept if line["raw_line_id"] not in conflicts]
 
 
+_DUPLICATE_LINE_ERROR = "duplicate_raw_line_id_conflict"
+_DUPLICATE_LINE_FILE_TYPES = (mapping.PURCHASE, mapping.SALES, mapping.MAINTENANCE)
+_NO_FACTS_FILE_TYPES = _DUPLICATE_LINE_FILE_TYPES
+
+
+def _collapsed_duplicate_order_lines(result: TransformResult, extra_report: dict) -> None:
+    """同一文件内同 raw_line_id：内容相同计重复并折叠；内容不同整批拒绝。
+
+    旧行为把重复行原样交给 loader：skip 模式 ON CONFLICT DO NOTHING 静默第一行赢，
+    upsert 模式同一 INSERT 的重复键可能直接报 cardinality/二次更新错误。这里在
+    数据库写入前统一判定，错误行按 raw_line_id 从写入计划剔除并留 ErrorRec。
+    """
+    if result.file_type not in _DUPLICATE_LINE_FILE_TYPES:
+        return
+    first: dict[str, tuple[dict, int]] = {}
+    conflicting: set[str] = set()
+    kept: list[dict] = []
+    collapsed = 0
+    for position, line in enumerate(result.lines):
+        key = line["raw_line_id"]
+        prior = first.get(key)
+        if prior is None:
+            first[key] = (line, position)
+            kept.append(line)
+            continue
+        prior_line, prior_position = prior
+        diff = {
+            name: (prior_line.get(name), line.get(name))
+            for name in set(prior_line) | set(line)
+            if name != "_sheet_name" and prior_line.get(name) != line.get(name)
+        }
+        if not diff:
+            collapsed += 1
+            continue
+        conflicting.add(key)
+        detail = "；".join(
+            f"{name}：第 {prior_position + 1} 行={old!s} / 第 {position + 1} 行={new!s}"
+            for name, (old, new) in sorted(diff.items())
+        )
+        result.errors.append(ErrorRec(
+            position + 1,
+            _DUPLICATE_LINE_ERROR,
+            f"明细数据ID {key} 在文件内重复且内容不一致：{detail}",
+            {"raw_line_id": key,
+             "diffs": {name: [str(old), str(new)] for name, (old, new) in sorted(diff.items())}},
+            identity={
+                "raw_line_id": key,
+                "line_no": line.get("line_no"),
+                "raw_order_id": line.get("_order_raw_id"),
+            },
+        ))
+    if conflicting:
+        kept = [line for line in kept if line["raw_line_id"] not in conflicting]
+    result.lines = kept
+    if collapsed:
+        extra_report["duplicate_lines_collapsed"] = collapsed
+
+
+def _ensure_importable_result(result: TransformResult) -> None:
+    """数据库写入前的批次门禁：重复明细冲突必拒；全部数据行被拒且无事实不得成功。
+
+    合法的「有单头无明细」WBDD 由 result.orders 证明；空文件（无错误）不算全错；
+    全部已存在 skip 会保留 result.lines，由 loader 按 skipped 计数，不在这里误杀。
+    """
+    conflicts = [
+        error for error in result.errors
+        if error.error_type == _DUPLICATE_LINE_ERROR
+    ]
+    if conflicts:
+        raise ReaderError(
+            f"文件中存在同一明细数据ID但内容不一致的重复行（{len(conflicts)} 处），"
+            "整批未导入。请修正为唯一明细ID或统一内容后重试；详见批次错误明细。",
+            code=_DUPLICATE_LINE_ERROR,
+        )
+    if result.file_type not in _NO_FACTS_FILE_TYPES:
+        return
+    if result.lines or result.orders:
+        return
+    if not result.errors:
+        return
+    raise ReaderError(
+        f"本文件 {result.rows_total} 行数据均未形成可导入事实（详见批次错误明细），"
+        "整批未导入。",
+        code="no_importable_rows",
+    )
+
+
 def transform_workbook(loaded: LoadedWorkbook) -> TransformedWorkbook:
     """transform + 多报销页合并 + 跨页去重，同样只写一处（同上理由）。"""
     selection, expense_sheets, primary = (
@@ -448,6 +546,7 @@ def transform_workbook(loaded: LoadedWorkbook) -> TransformedWorkbook:
                                    list(expense_sheets[0].df.columns))
     result = transform(primary.df, primary.file_type)
     extra_report = {}
+    _collapsed_duplicate_order_lines(result, extra_report)
     if selection.ignored_recognized:
         extra_report["ignored_sheets"] = [
             f"{s.sheet_name}（{s.file_type}，多页文件只导第一个可识别页）"
@@ -566,6 +665,11 @@ def run_import(session: Session, file_path: str, original_name: str,
             session.add(SysImportError(batch_id=batch.id, row_no=e.row_no,
                                        error_type=e.error_type, error_detail=e.error_detail,
                                        raw_row=raw_row))
+
+        # 数据库写入前统一门禁：重复明细冲突保守整批拒绝；全部数据行被拒且没有
+        # 可接受事实（明细或单头）时不得显示成功。放在 loader.load 之前，异常只
+        # 提交失败批次/错误明细，不会留下半截业务事务。
+        _ensure_importable_result(result)
 
         # §17.4 修复模式=以本表为准（合同级删除重建）：半截行/撞键行意味着"本表"
         # 不完整，此时整表替换会静默丢账，必须先修再导。

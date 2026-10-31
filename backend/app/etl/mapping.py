@@ -292,6 +292,10 @@ VALUE_ALIASES = {
         # 报销兼容字段也会使用裸「是否含税」；按文件类型合并，避免全局列名
         # 归一后采购头部的 is_tax_inclusive 静默读空。
         "是否含税(必填)": ("是否含税",),
+        # 采购规范键是「税率(必填)」，而销售注册了裸「税率」。识别为采购后，
+        # 裸名/选填/不可修改变体都必须归到采购自己的字段，不能借用销售规范键
+        # 后整列读空、再落入反推或默认税率。
+        "税率(必填)": ("税率",),
     },
     SALES: {
         "业务类型#": ("业务类型",),
@@ -306,6 +310,11 @@ VALUE_ALIASES = {
         # sales 自己的 canonical 字段，避免税率静默读空。
         "税率": ("税率(必填)",),
         "是否含税": ("是否含税(必填)",),
+    },
+    MAINTENANCE: {
+        # WBDD 导出把「项目名」改名为「项目名称(必填)」（审计已合成复现）。
+        # 规范键保持项目名，别名按值合并；项目身份仍以 XSDD 为准，不据此重建项目。
+        "项目名": ("项目名称", "项目名称(必填)"),
     },
 }
 
@@ -325,6 +334,19 @@ FFILL_COLS = {
 # 价格/金额列（成交单价 + 行金额 + 头部含税未税/税金）——导入前预检用：
 # 采购/销售文件若一个价格列都没有（如导出视图选错），导入后这些单将无金额。
 PRICE_INTERNALS = {"unit_price", "line_amount", "amount_ex_tax", "tax_amount", "amount_inc_tax"}
+
+# 同义列冲突的受控判定：身份、价格、数量字段一旦同一行取值不一致，绝不能靠
+# 列顺序/目标列优先悄悄取一个（审计：规范数量列=2、别名列=99，重复列表为空）。
+IDENTITY_INTERNALS = frozenset({
+    "raw_order_id", "raw_line_id", "raw_inventory_id", "order_no",
+})
+QUANTITY_INTERNALS = frozenset({"qty", "return_qty", "source_qty"})
+NUMERIC_ALIAS_INTERNALS = frozenset(
+    PRICE_INTERNALS | QUANTITY_INTERNALS | {"tax_rate", "recent_purchase_price"}
+)
+CRITICAL_ALIAS_INTERNALS = frozenset(
+    IDENTITY_INTERNALS | NUMERIC_ALIAS_INTERNALS | {"is_tax_inclusive"}
+)
 
 
 def has_price_columns(cols: list[str], file_type: str | None) -> bool:
@@ -359,29 +381,121 @@ _ALL_KEYS = (set(PURCHASE_HEAD) | set(PURCHASE_LINE) | set(SALES_HEAD)
              | set(EXPENSE_HEAD) | set(EXPENSE_LINE) | EXPENSE_LOOSE_COLS
              | set(INVENTORY_MAP))
 # 去注解名 → 规范键（mapping 原 key）；同名冲突保留先遇到的（sorted 确定化）。
+# 只用于「文件类型未知」的展示兜底：同一裸名在不同类型注册成不同规范键时
+# （「税率」= 销售裸键 vs 采购「税率(必填)」），类型确定后必须走下面的类型内映射。
 _CANON_BY_STRIPPED: dict[str, str] = {}
 for _k in sorted(_ALL_KEYS):
     _CANON_BY_STRIPPED.setdefault(_strip_opt(_k), _k)
 
+# 文档类型内部的受控规范键。识别类型后再归一，采购/维保列不会被销售同名键吃掉。
+_TYPE_KEYS: dict[str, frozenset[str]] = {}
+_TYPE_CANON_BY_STRIPPED: dict[str, dict[str, str]] = {}
+for _type_name, _levels in MAPPINGS.items():
+    _type_keys = set(_levels["head"]) | set(_levels["line"])
+    if _type_name == EXPENSE:
+        _type_keys |= EXPENSE_LOOSE_COLS
+    _TYPE_KEYS[_type_name] = frozenset(_type_keys)
+    _type_stripped: dict[str, str] = {}
+    for _key in sorted(_type_keys):
+        _type_stripped.setdefault(_strip_opt(_key), _key)
+    _TYPE_CANON_BY_STRIPPED[_type_name] = _type_stripped
 
-def canonicalize_columns(cols: list[str]) -> list[str]:
+
+def canonicalize_columns(cols: list[str], file_type: str | None = None) -> list[str]:
     """把导出列名归一到 mapping 规范键。精确命中保持原样；否则按「去注解名」匹配规范键并改名。
 
-    冲突保护：目标规范键已在列里（或本次已用）则不改名，绝不造重复列（如「产品名称」与
-    「产品名称#」并存时只认前者、后者原样保留）。对标准导出零影响（列名已是规范键，全走精确分支）。
+    file_type 已识别时只在**该文档类型**的注册键内归一：裸「税率」在销售归销售裸键、
+    在采购归采购「税率(必填)」，裸「维保起始日期」在销售归销售注解键、在 WBDD 归
+    WBDD 裸键。未传 file_type 时保留旧的全局映射，仅供展示兜底。
+
+    冲突保护：目标规范键已在列里（或本次已用）则不改名，绝不造重复列；被留在原名的
+    同义列由 reader._coalesce_value_aliases 按值合并，身份/价格/数量冲突明确拒绝。
+    对标准导出零影响（列名已是规范键，全走精确分支）。
     """
+    keys = _TYPE_KEYS.get(file_type) if file_type is not None else None
+    by_stripped = (
+        _TYPE_CANON_BY_STRIPPED.get(file_type, _CANON_BY_STRIPPED)
+        if file_type is not None else _CANON_BY_STRIPPED
+    )
+    known = keys if keys is not None else _ALL_KEYS
     present = set(cols)
     out: list[str] = []
     seen: set[str] = set()
     for c in cols:
-        if c in _ALL_KEYS:
+        if c in known:
             canon = c
         else:
-            cand = _CANON_BY_STRIPPED.get(_strip_opt(c))
+            cand = by_stripped.get(_strip_opt(c))
             canon = cand if (cand and cand not in present and cand not in seen) else c
         out.append(canon)
         seen.add(canon)
     return out
+
+
+def field_internal(file_type: str | None, canonical: str) -> str | None:
+    """规范中文键 → 该文档类型内部字段名；未注册返回 None。"""
+    if file_type is None:
+        return None
+    levels = MAPPINGS.get(file_type)
+    if not levels:
+        return None
+    for level in ("head", "line"):
+        internal = levels[level].get(canonical)
+        if internal is not None:
+            return internal
+    return None
+
+
+def annotation_aliases(columns, file_type: str | None) -> dict[str, tuple[str, ...]]:
+    """同一类型内与规范键同字段、仅注解不同的源列（规范键已在列里时）。
+
+    canonicalize_columns 为避免制造重复列会把第二个同义源列留在原名；这里把它们
+    找回来交给 reader 按值合并，而不是当未知列静默丢弃。
+    """
+    by_stripped = _TYPE_CANON_BY_STRIPPED.get(file_type) if file_type else None
+    if not by_stripped:
+        return {}
+    present = set(columns)
+    grouped: dict[str, list[str]] = {}
+    for column in columns:
+        canonical = by_stripped.get(_strip_opt(column))
+        if canonical is None or canonical == column or canonical not in present:
+            continue
+        grouped.setdefault(canonical, []).append(column)
+    return {key: tuple(value) for key, value in grouped.items()}
+
+
+# 通用入口的必需身份列：订单数据ID + 明细数据ID。旧模板的「记录ID」等未确认
+# 身份列不在这里，也不做猜测映射——precheck 与执行都必须明确拒绝。
+REQUIRED_IDENTITY_COLUMNS = {
+    PURCHASE: ("数据ID(不可修改)", "明细.数据ID(不可修改)"),
+    SALES: ("数据ID(不可修改)", "订单明细.数据ID(不可修改)"),
+    MAINTENANCE: ("数据ID(不可修改)", "需求明细.数据ID(不可修改)"),
+}
+_IDENTITY_TYPE_LABELS = {
+    PURCHASE: "采购",
+    SALES: "销售",
+    MAINTENANCE: "维保出库",
+}
+
+
+def missing_identity_columns(columns, file_type: str | None) -> tuple[str, ...]:
+    """该类型缺少的必需身份规范列（顺序固定；非通用订单类型返回空）。"""
+    present = set(columns)
+    return tuple(
+        column for column in REQUIRED_IDENTITY_COLUMNS.get(file_type, ())
+        if column not in present
+    )
+
+
+def identity_columns_message(file_type: str | None, missing) -> str:
+    """precheck 与执行共用的缺身份列文案（避免两处口径漂移）。"""
+    label = _IDENTITY_TYPE_LABELS.get(file_type, "该类型")
+    columns = "、".join(f"「{column}」" for column in missing)
+    return (
+        f"{label}文件缺少必需身份列：{columns}。通用导入不猜测旧模板的"
+        "「记录ID」等未确认身份列，请从氚云按当前模板重新导出后再试。"
+    )
 
 
 def detect_file_type(cols: list[str]) -> str | None:
