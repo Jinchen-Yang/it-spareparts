@@ -523,7 +523,12 @@ def _map_columns(headers: list[str], names: list[str], sheet_name: str) -> dict[
 
 
 def _expense_id_column(headers: list[str]) -> int | None:
-    """定位隐藏行标识列：新导出按名称；旧导出要求原样有序模板。"""
+    """定位隐藏行标识列：新导出按名称；旧导出要求原样有序模板。
+
+    旧版导出在 04 表没有任何数据行时只写 11 个可见表头（没有隐藏行标识列）。
+    这种空模板允许用户追加新报销行；返回 ``None`` 表示整表只能新增，不能按
+    ID 更新既有行，既有行的身份/项目归属校验仍只在有 ID 列时生效。
+    """
     matches = [index for index, header in enumerate(headers)
                if header == RAW_LINE_ID_HEADER]
     if len(matches) > 1:
@@ -610,13 +615,12 @@ def _parse_expenses(db: Session, ws, *, project_id: str) -> list[ExpenseUpdate]:
             )
             inc_tax = (ex_tax * (Decimal("1") + TAX_RATE)).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if id_index is None:
-            raise WorkbookError(
-                "missing_row_identity",
-                f"{SHEET_EXPENSE} 缺少隐藏行标识列，无法区分新增与既有报销；"
-                "请重新下载系统导出工作簿",
-            )
-        raw_line_id = _text(row[id_index]) if len(row) > id_index else ""
+        # 旧版空导出模板没有隐藏行标识列：整表只可能是用户新填的报销行，
+        # 因此全部按新增处理；一旦有标识列，既有行仍必须通过身份/归属校验。
+        raw_line_id = (
+            _text(row[id_index]) if id_index is not None and len(row) > id_index
+            else ""
+        )
         is_create = False
         expense = None
         if contract_no and contract_no not in writable_contracts:

@@ -697,6 +697,35 @@ def test_legacy_expense_export_without_named_identity_header_still_reads_id(db, 
     assert response.json()["expense_updates"] == 0
 
 
+def test_old_empty_export_template_accepts_a_new_expense_row(db, project):
+    """旧版空导出只有 11 个可见表头（无隐藏行标识列），追加新报销仍须可录入。
+
+    整表没有标识列时只能新增；有标识列的既有行仍走原身份/项目归属校验。
+    """
+    client = uploader(db, "old-empty-template")
+    content = _download(client, project)
+    wb = load_workbook(io.BytesIO(content))
+    ws = wb[wbk.SHEET_EXPENSE]
+    assert ws.max_row == 1  # 项目没有报销，旧导出不会写出隐藏列
+    ws.delete_cols(len(wbk._EXPENSE_HEADERS) + 1)
+    assert [c.value for c in ws[1]] == list(wbk._EXPENSE_HEADERS)
+    ws.append([
+        "BXD-OLD-TEMPLATE", "2026-07-02", "李四", "差旅", "交通", "旧模板新增",
+        "HT-001", 50, "", "已结束", "",
+    ])
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    response = _upload(client, project, buffer.getvalue())
+    assert response.status_code == 200, response.text
+    assert response.json()["expense_creates"] == 1
+    db.expire_all()
+    created = db.execute(
+        select(FProjectExpense).where(FProjectExpense.bxd_no == "BXD-OLD-TEMPLATE")
+    ).scalar_one()
+    assert created.amount_ex_tax == Decimal("50.00")
+    assert created.raw_line_id.startswith("EXP:")
+
+
 def test_legacy_reordered_expense_headers_are_rejected(db, project):
     _expense(db)
     client = uploader(db, "legacy-reordered")

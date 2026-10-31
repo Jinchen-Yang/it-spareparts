@@ -4,7 +4,7 @@ import io
 from datetime import date
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import func, select
 
 from app.models.dimensions import DimPart
@@ -490,6 +490,82 @@ def test_parse_rejects_plain_text_over_4096_instead_of_dropping_it():
     )
     with pytest.raises(docs.DocParseError, match="4096"):
         docs.parse_doc_workbook("bxd_expense", data, "费用报销支付单.xlsx")
+
+
+def _append_continuation_row(data: bytes, *, head_names: list[str],
+                             line_names: list[str], head_values: dict,
+                             line_values: dict) -> bytes:
+    wb = load_workbook(io.BytesIO(data))
+    ws = wb.active
+    row: list = [None] * (len(head_names) + len(line_names))
+    for name, value in head_values.items():
+        row[head_names.index(name)] = value
+    for name, value in line_values.items():
+        row[len(head_names) + line_names.index(name)] = value
+    ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def test_parse_rejects_oversized_mapped_text_on_continuation_row():
+    """明细续行没有主表单据号，但映射列上的超长文本仍必须明确拒绝。"""
+    data = _doc_workbook(
+        sheet_title="费用报销_支付单",
+        head_headers=_BXD_HEAD,
+        line_headers=_BXD_LINE,
+        rows=[{"head": [
+            "BXD-20260721-0019", "罗汇康", "维保费用", "外援费用",
+            "XSDD-20260203-0029", "", "新华三集团", "李呈辉",
+            "800", "800", "现金", "2026-07-27", "", "已结束", "BXD-HEAD-1", "已结束",
+        ], "lines": [["交通", "1", "800", "", "BXD-LID-1", "1"]]}],
+    )
+    data = _append_continuation_row(
+        data, head_names=_BXD_HEAD, line_names=_BXD_LINE,
+        head_values={"备注": "x" * 4097},
+        line_values={"报销明细.报销金额": "10"},
+    )
+    with pytest.raises(docs.DocParseError, match="4096"):
+        docs.parse_doc_workbook("bxd_expense", data, "费用报销支付单.xlsx")
+
+
+def test_parse_doc_streaming_rejects_oversized_mapped_text(monkeypatch):
+    """大文件流式路径不能把超长映射文本丢成 None。"""
+    from app.services import import_safety
+
+    data = _doc_workbook(
+        sheet_title="费用报销_支付单",
+        head_headers=_BXD_HEAD,
+        line_headers=_BXD_LINE,
+        rows=[{"head": [
+            "BXD-20260721-0019", "罗汇康", "维保费用", "外援费用",
+            "XSDD-20260203-0029", "", "新华三集团", "李呈辉",
+            "800", "800", "现金", "2026-07-27", "x" * 4097, "已结束",
+            "BXD-HEAD-1", "已结束",
+        ], "lines": []}],
+    )
+    monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
+    with pytest.raises(docs.DocParseError, match="4096"):
+        docs.parse_doc_workbook("bxd_expense", data, "费用报销支付单.xlsx")
+
+
+def test_stream_rows_signal_oversized_text_is_opt_in():
+    """默认仍剥离超长单元格（图片政策）；显式信号只带长度，不回传原文。"""
+    from app.services import import_safety
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["标签", "x" * 4097])
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    default_rows = list(import_safety.stream_first_sheet_rows(buffer.getvalue()))
+    assert default_rows[0] == ("标签",)
+    signaled = list(import_safety.stream_first_sheet_rows(
+        buffer.getvalue(), signal_oversized_text=True))
+    marker = signaled[0][1]
+    assert isinstance(marker, bytes)
+    assert marker.oversized_text_length == 4097
+    assert bytes(marker) == b""
 
 
 def test_apply_bxd_is_raw_only(db, front_stock_seed):

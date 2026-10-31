@@ -74,7 +74,24 @@ STREAM_THRESHOLD_BYTES = 8 * 1024 * 1024  # 超过 8MB 的文件走流式 XML（
 MAX_CELL_TEXT = 4096  # 超过此长度的单元格视为内嵌图片/附件，跳过
 
 
-def stream_first_sheet_rows(data: bytes):
+class OversizedCellText(bytes):
+    """流式读取时超过 ``MAX_CELL_TEXT`` 的单元格信号。
+
+    默认行为仍是跳过（多为内嵌图片 base64）；调用方显式请求信号时拿到本类型，
+    可对**已映射的普通文本列**明确报错，而不是把超长文本静默变成空值。
+    继承 ``bytes`` 让既有 ``bytes`` 图片/附件判断继续把它当附件跳过；真正的
+    文本列由解析器在 ``_cell`` 中优先识别本类型并拒绝。
+    """
+
+    oversized_text_length: int
+
+    def __new__(cls, length: int):
+        obj = super().__new__(cls, b"")
+        obj.oversized_text_length = int(length)
+        return obj
+
+
+def stream_first_sheet_rows(data: bytes, *, signal_oversized_text: bool = False):
     """流式惰性生成第一个**可见** worksheet 的行元组，剥离超长（图片）单元格。
 
     氚云导出把附件图片以 base64 内嵌在单元格里（57MB 文件解压后 500MB+），
@@ -83,6 +100,10 @@ def stream_first_sheet_rows(data: bytes):
       不再按 worksheet XML 文件名排序瞎猜；
     - 解析 sharedStrings（t="s" 单元格还原为真实文本）；
     - 惰性 yield 行，不整表蓄积内存（调用方单遍消费）。
+
+    ``signal_oversized_text=True`` 时，超长文本不再丢弃，而是以
+    ``OversizedCellText``（只保留长度，不保留原文）占位；解析器对映射列报错、
+    对未映射列保持忽略，避免大文件路径把业务文本静默变成 None。
     """
     import io
     import re
@@ -153,12 +174,13 @@ def stream_first_sheet_rows(data: bytes):
                     ref = cell.get("r", "")
                     text = cell.find(NS_MAIN + "is/" + NS_MAIN + "t")
                     value = cell.find(NS_MAIN + "v")
-                    if (
-                        text is not None
-                        and text.text
-                        and len(text.text) <= MAX_CELL_TEXT
-                    ):
-                        cells[_column_index(ref)] = text.text.strip()
+                    if text is not None and text.text:
+                        if len(text.text) <= MAX_CELL_TEXT:
+                            cells[_column_index(ref)] = text.text.strip()
+                        elif signal_oversized_text:
+                            cells[_column_index(ref)] = OversizedCellText(
+                                len(text.text)
+                            )
                     elif value is not None and value.text:
                         raw = value.text
                         if cell.get("t") == "s":
@@ -168,6 +190,8 @@ def stream_first_sheet_rows(data: bytes):
                                 continue  # 共享字符串索引损坏 → 跳过该单元格
                         if len(raw) <= MAX_CELL_TEXT:
                             cells[_column_index(ref)] = raw.strip()
+                        elif signal_oversized_text:
+                            cells[_column_index(ref)] = OversizedCellText(len(raw))
                 if cells:
                     max_col = max(cells)
                     yield tuple(cells.get(i) for i in range(1, max_col + 1))

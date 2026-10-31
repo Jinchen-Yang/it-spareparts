@@ -90,6 +90,11 @@ def _cell(row: tuple, index: int | None) -> str | None:
     if index is None or index > len(row):
         return None
     value = row[index - 1]
+    oversized = getattr(value, "oversized_text_length", None)
+    if oversized is not None:
+        # 流式读取只带回长度信号；映射列上的超长文本必须明确拒绝，不能变 None。
+        raise CkdParseError(
+            f"单元格普通文本长度 {oversized} 超过 4096 字符，拒绝导入")
     if value is None:
         return None
     if isinstance(value, (bytes, bytearray)):
@@ -118,9 +123,12 @@ def parse_ckd_workbook(
 
     if len(data) > import_safety.STREAM_THRESHOLD_BYTES:
         # 大文件：流式 XML 解析，剥离内嵌图片单元格（54MB 文件普通模式需 7.5 分钟）
-        rows = iter(import_safety.stream_first_sheet_rows(data))
+        rows = iter(import_safety.stream_first_sheet_rows(
+            data, signal_oversized_text=True))
         try:
             result = _parse_ckd_rows(rows, column_aliases)
+        except CkdParseError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise CkdParseError(f"流式解析失败：{type(exc).__name__}") from exc
         return _with_file_meta(result, data, filename)
@@ -181,14 +189,13 @@ def _parse_ckd_rows(rows, column_aliases: dict | None) -> dict:
         for row in rows:
             if not _non_empty(row):
                 continue
-            head_anchor = _cell(row, head_indexes["出库单号"])
-            if head_anchor:
-                current = CkdHeadData(
-                    row_no=row_no,
-                    values={
-                        name: _cell(row, head_indexes[name]) for name in _HEAD_COLUMNS
-                    },
-                )
+            # 主表字段在每一非空行都读取：明细续行上若出现映射列超长普通文本，
+            # 也必须明确拒绝，不能因为该行没有出库单号就把值静默丢掉。
+            head_values = {
+                name: _cell(row, head_indexes[name]) for name in _HEAD_COLUMNS
+            }
+            if head_values["出库单号"]:
+                current = CkdHeadData(row_no=row_no, values=head_values)
                 heads.append(current)
             line_values = {
                 name: _cell(row, line_indexes[name]) for name in _LINE_COLUMNS

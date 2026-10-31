@@ -165,6 +165,11 @@ def _cell(row: tuple, index: int | None) -> str | None:
     if index is None or index > len(row):
         return None
     value = row[index - 1]
+    oversized = getattr(value, "oversized_text_length", None)
+    if oversized is not None:
+        # 流式读取只带回长度信号；映射列上的超长文本必须明确拒绝，不能变 None。
+        raise DocParseError(
+            f"单元格普通文本长度 {oversized} 超过 4096 字符，拒绝导入")
     if value is None or isinstance(value, (bytes, bytearray)):
         return None  # 受控图片/附件单元格：仍按既有政策跳过
     text = str(value).strip()
@@ -206,7 +211,8 @@ def parse_doc_workbook(
         # 大文件流式解析：51MB 入库单普通模式需 ~8 分钟（内嵌图片），流式 ~30s
         try:
             result = _parse_doc_rows(
-                import_safety.stream_first_sheet_rows(data),
+                import_safety.stream_first_sheet_rows(
+                    data, signal_oversized_text=True),
                 doc_type,
                 spec,
                 column_aliases,

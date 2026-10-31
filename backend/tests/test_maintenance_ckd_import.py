@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import select
 
 from app.models.dimensions import DimPart
@@ -293,6 +293,56 @@ def test_parse_rejects_plain_text_over_4096_instead_of_dropping_it():
     head = _HEAD_MAINT.copy()
     head[13] = "x" * 4097  # 备注
     data = _ckd_workbook_bytes(rows=[{"head": head, "lines": []}])
+    with pytest.raises(ckd.CkdParseError, match="4096"):
+        ckd.parse_ckd_workbook(data, "发货单.xlsx")
+
+
+def test_parse_rejects_oversized_mapped_text_on_continuation_row():
+    """续行没有出库单号，但映射列上的超长文本仍要整单拒绝。"""
+    data = _ckd_workbook_bytes(rows=[{
+        "head": _HEAD_MAINT,
+        "lines": [["LID-1", "1", "", "", "", "02311AYV", "", "", "", "",
+                   "", "", "", "", "2", "100", "200", "是"]],
+    }])
+    wb = load_workbook(io.BytesIO(data))
+    ws = wb.active
+    row: list = [None] * (len(ckd._HEAD_COLUMNS) + len(ckd._LINE_COLUMNS))
+    row[ckd._HEAD_COLUMNS.index("备注")] = "x" * 4097
+    row[len(ckd._HEAD_COLUMNS) + ckd._LINE_COLUMNS.index("备件明细.备件PN")] = "02311AYV"
+    row[len(ckd._HEAD_COLUMNS) + ckd._LINE_COLUMNS.index("备件明细.出库数量")] = "1"
+    ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    with pytest.raises(ckd.CkdParseError, match="4096"):
+        ckd.parse_ckd_workbook(buffer.getvalue(), "发货单.xlsx")
+
+
+def test_parse_ckd_streaming_matches_normal_parse(monkeypatch):
+    """开启超长文本信号后，正常大文件结果仍与普通模式一致。"""
+    from app.services import import_safety
+
+    data = _ckd_workbook_bytes(rows=[{
+        "head": _HEAD_MAINT,
+        "lines": [["LID-1", "1", "", "", "", "02311AYV", "", "", "", "",
+                   "", "", "", "", "2", "100", "200", "是"]],
+    }])
+    normal = ckd.parse_ckd_workbook(data, "发货单.xlsx")
+    monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
+    streamed = ckd.parse_ckd_workbook(data, "发货单.xlsx")
+    assert [h.values for h in streamed["heads"]] == [
+        h.values for h in normal["heads"]]
+    assert [line.values for line in streamed["heads"][0].lines] == [
+        line.values for line in normal["heads"][0].lines]
+
+
+def test_parse_ckd_streaming_rejects_oversized_mapped_text(monkeypatch):
+    """大文件流式路径不能把超长映射文本丢成 None。"""
+    from app.services import import_safety
+
+    head = _HEAD_MAINT.copy()
+    head[13] = "x" * 4097
+    data = _ckd_workbook_bytes(rows=[{"head": head, "lines": []}])
+    monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
     with pytest.raises(ckd.CkdParseError, match="4096"):
         ckd.parse_ckd_workbook(data, "发货单.xlsx")
 

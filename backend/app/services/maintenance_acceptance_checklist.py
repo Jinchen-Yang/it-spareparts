@@ -29,8 +29,11 @@ from app.models.maintenance_project import MaintenanceProject
 
 MAX_CHECKLIST_BYTES = 8 * 1024 * 1024
 MAX_CHECKLIST_ROWS = 2000
-# 资源上限：超过后明确拒绝，而不是把文件当成 2000 行截取成功。
+# 资源上限：超过后明确拒绝，而不是把文件当成 2000 行截取成功/按列截断。
+# 允许关键列正常右移，但拒绝把表头放到极右列后整表放大扫描面积。
 MAX_SCAN_ROWS = 100_000
+MAX_SCAN_COLUMNS = 256
+MAX_SCAN_CELLS = 2_000_000
 
 SHEET_CANDIDATES = ("验收清单", "验收需求")
 HEADER_SCAN_ROWS = 10
@@ -107,6 +110,10 @@ def parse_checklist_workbook(data: bytes, filename: str) -> dict:
         # 数据行只读取表头实际用到的列，但一直扫描到工作表末尾：超过 2000 条
         # 数据行不能靠 break 截取成“2000 条成功”，尾端的非空行也必须被看到。
         needed_cols = max(req_col, done_col if done_col is not None else 0) + 1
+        if needed_cols > MAX_SCAN_COLUMNS:
+            raise ChecklistParseError(
+                f"清单关键列位于第 {needed_cols} 列，超过可扫描上限 "
+                f"{MAX_SCAN_COLUMNS} 列，拒绝导入")
         # 至少扫到第 2001 条数据所在行，不能依赖可能被低报的 sheet dimension；
         # 超过资源上限则明确拒绝，而不是静默截取。
         dimension_rows = ws.max_row or 0
@@ -114,6 +121,11 @@ def parse_checklist_workbook(data: bytes, filename: str) -> dict:
             raise ChecklistParseError(
                 f"清单行数超过可扫描上限 {MAX_SCAN_ROWS} 行，拒绝导入")
         scan_rows = max(dimension_rows, HEADER_SCAN_ROWS + MAX_CHECKLIST_ROWS + 1)
+        if scan_rows * needed_cols > MAX_SCAN_CELLS:
+            raise ChecklistParseError(
+                f"清单扫描范围超过 {MAX_SCAN_CELLS} 个单元格的安全上限"
+                f"（{scan_rows} 行 × {needed_cols} 列），拒绝导入")
+
         items: list[dict] = []
         data_rows = ws.iter_rows(min_row=header_idx + 2, max_row=scan_rows,
                                  max_col=needed_cols, values_only=True)
@@ -128,8 +140,9 @@ def parse_checklist_workbook(data: bytes, filename: str) -> dict:
                 continue  # 模板灰底示例行——防呆跳过（同总表 V2.3.0 示例行约定）
             if len(items) >= MAX_CHECKLIST_ROWS:
                 raise ChecklistParseError(
-                    f"清单数据行超过 {MAX_CHECKLIST_ROWS} 行上限，"
-                    "已整本拒绝导入；请拆分或删减后重试")
+                    f"清单数据行超过 {MAX_CHECKLIST_ROWS} 行上限，已整本拒绝导入；"
+                    "本功能是整表替换，不能分批上传追加，请删减内容后重试，"
+                    "或联系管理员申请扩容支持")
             done: bool | None = None
             issues: list[str] = []
             if not raw_req:
