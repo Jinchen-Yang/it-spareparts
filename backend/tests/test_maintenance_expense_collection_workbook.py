@@ -688,8 +688,12 @@ def test_legacy_expense_export_without_named_identity_header_still_reads_id(db, 
     _expense(db)
     client = uploader(db, "legacy-expense")
     wb = load_workbook(io.BytesIO(_download(client, project)))
-    wb[wbk.SHEET_EXPENSE].cell(
-        row=1, column=len(wbk._EXPENSE_HEADERS) + 1, value=None)
+    ws = wb[wbk.SHEET_EXPENSE]
+    id_col = len(wbk._EXPENSE_HEADERS) + 1
+    # openpyxl 的 cell(..., value=None) 不清空既有值，必须直接赋 None。
+    ws.cell(row=1, column=id_col).value = None
+    assert ws.cell(row=1, column=id_col).value is None
+    assert ws.cell(row=2, column=id_col).value == "BXD-1#1"
     buffer = io.BytesIO()
     wb.save(buffer)
     response = _upload(client, project, buffer.getvalue(), action="validate")
@@ -761,7 +765,10 @@ def test_legacy_export_with_retained_hidden_id_column_updates_existing_row(
     wb = load_workbook(io.BytesIO(_download(client, project)))
     ws = wb[wbk.SHEET_EXPENSE]
     id_col = len(wbk._EXPENSE_HEADERS) + 1
-    ws.cell(row=1, column=id_col, value=None)
+    # openpyxl 的 cell(..., value=None) 不清空既有值，必须直接赋 None。
+    ws.cell(row=1, column=id_col).value = None
+    assert ws.cell(row=1, column=id_col).value is None
+    assert ws.cell(row=2, column=id_col).value == "BXD-1#1"
     ws.cell(row=2, column=len(wbk._EXPENSE_HEADERS), value="旧导出改备注")
     buffer = io.BytesIO()
     wb.save(buffer)
@@ -788,7 +795,13 @@ def test_legacy_reordered_expense_headers_are_rejected(db, project):
         right = ws.cell(row=row, column=remark_col).value
         ws.cell(row=row, column=reason_col, value=right)
         ws.cell(row=row, column=remark_col, value=left)
-    ws.cell(row=1, column=len(wbk._EXPENSE_HEADERS) + 1, value=None)
+    id_col = len(wbk._EXPENSE_HEADERS) + 1
+    # openpyxl 的 cell(..., value=None) 不清空既有值，必须直接赋 None。
+    ws.cell(row=1, column=id_col).value = None
+    assert ws.cell(row=1, column=id_col).value is None
+    assert ws.cell(row=2, column=id_col).value == "BXD-1#1"
+    assert [c.value for c in ws[1]][:len(wbk._EXPENSE_HEADERS)] != list(
+        wbk._EXPENSE_HEADERS)
     buffer = io.BytesIO()
     wb.save(buffer)
     response = _upload(client, project, buffer.getvalue(), action="validate")
