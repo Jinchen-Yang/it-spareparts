@@ -568,6 +568,34 @@ def test_run_import_rejects_all_rejected_rows_before_loader(monkeypatch, tmp_pat
     )
 
 
+def test_run_import_post_load_reader_error_becomes_integrity_failure(
+    monkeypatch, tmp_path,
+):
+    """loader.load 之后的解析类异常不能走 ReaderError 提交失败批次的路径。"""
+    headers = ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
+               "明细.产品名称(必填)", "明细.采购数量(必填)", "明细.单价(必填)"]
+    path = _write_workbook(
+        tmp_path, "post-load-reader-error.xlsx", headers,
+        [["CGDD-1", "O1", "L1", "PN-A", 1, 100]], double_header=False)
+    monkeypatch.setattr(
+        pipeline, "get_settings",
+        lambda: SimpleNamespace(raw_file_dir=str(tmp_path / "raw")))
+    monkeypatch.setattr(
+        pipeline, "_archive", lambda *_args, **_kwargs: str(tmp_path / "raw" / "x.xlsx"))
+    monkeypatch.setattr(
+        pipeline.loader, "load",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            reader.ReaderError("写入阶段模拟失败", code="after_load")))
+
+    session = _FakeSession()
+    with pytest.raises(pipeline.loader.ImportIntegrityError) as exc_info:
+        pipeline.run_import(session, path, "post-load-reader-error.xlsx")
+
+    assert "整批已回滚" in str(exc_info.value)
+    batch = next(obj for obj in session.added if isinstance(obj, SysImportBatch))
+    assert batch.status == "processing"   # 不标 failed；由入口 rollback 丢弃半事务
+
+
 def test_pipeline_db_all_rejected_persists_failed_batch_without_facts(db, tmp_path):
     headers = ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
                "明细.产品名称(必填)", "明细.采购数量(必填)", "明细.单价(必填)"]
