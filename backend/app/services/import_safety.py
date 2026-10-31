@@ -74,6 +74,27 @@ STREAM_THRESHOLD_BYTES = 8 * 1024 * 1024  # 超过 8MB 的文件走流式 XML（
 MAX_CELL_TEXT = 4096  # 超过此长度的单元格视为内嵌图片/附件，跳过
 
 
+class StreamedSheetRow(tuple):
+    """行元组 + 源行号（普通/流式两条路径同形，便于错误回执定位）。
+
+    tuple 子类不能声明非空 ``__slots__``；行对象短暂存在，随行携带
+    ``excel_row`` 比改调用方返回结构更小。
+    """
+
+    def __new__(cls, values, excel_row: int | None):
+        obj = super().__new__(cls, values)
+        obj.excel_row = excel_row
+        return obj
+
+
+def iter_sheet_rows(worksheet):
+    """openpyxl 普通路径：逐行产出带物理行号的 ``StreamedSheetRow``。"""
+    for index, values in enumerate(
+        worksheet.iter_rows(values_only=True), start=1
+    ):
+        yield StreamedSheetRow(values, index)
+
+
 class OversizedCellText(bytes):
     """流式读取时超过 ``MAX_CELL_TEXT`` 的单元格信号。
 
@@ -172,15 +193,28 @@ def stream_first_sheet_rows(data: bytes, *, signal_oversized_text: bool = False)
                 cells: dict[int, str] = {}
                 for cell in el.iter(NS_MAIN + "c"):
                     ref = cell.get("r", "")
-                    text = cell.find(NS_MAIN + "is/" + NS_MAIN + "t")
+                    inline = cell.find(NS_MAIN + "is")
                     value = cell.find(NS_MAIN + "v")
-                    if text is not None and text.text:
-                        if len(text.text) <= MAX_CELL_TEXT:
-                            cells[_column_index(ref)] = text.text.strip()
-                        elif signal_oversized_text:
-                            cells[_column_index(ref)] = OversizedCellText(
-                                len(text.text)
+                    if inline is not None:
+                        # inlineStr 有普通 is/t 与富文本 is/r/t 两种；只取这两类，
+                        # 不把注音 rPh 等扩展文本并进业务值。
+                        plain = inline.find(NS_MAIN + "t")
+                        text = (
+                            plain.text or ""
+                            if plain is not None
+                            else "".join(
+                                node.text or ""
+                                for run in inline.findall(NS_MAIN + "r")
+                                for node in run.findall(NS_MAIN + "t")
                             )
+                        )
+                        if text:
+                            if len(text) <= MAX_CELL_TEXT:
+                                cells[_column_index(ref)] = text.strip()
+                            elif signal_oversized_text:
+                                cells[_column_index(ref)] = OversizedCellText(
+                                    len(text)
+                                )
                     elif value is not None and value.text:
                         raw = value.text
                         if cell.get("t") == "s":
@@ -194,7 +228,14 @@ def stream_first_sheet_rows(data: bytes, *, signal_oversized_text: bool = False)
                             cells[_column_index(ref)] = OversizedCellText(len(raw))
                 if cells:
                     max_col = max(cells)
-                    yield tuple(cells.get(i) for i in range(1, max_col + 1))
+                    try:
+                        excel_row = int(el.get("r", ""))
+                    except (TypeError, ValueError):
+                        excel_row = None
+                    yield StreamedSheetRow(
+                        (cells.get(i) for i in range(1, max_col + 1)),
+                        excel_row,
+                    )
                 el.clear()
     finally:
         archive.close()

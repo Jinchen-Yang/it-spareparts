@@ -161,27 +161,36 @@ def _header_index(headers: list[str], name: str) -> int | None:
     return matches[0] if matches else None
 
 
-def _cell(row: tuple, index: int | None) -> str | None:
+def _cell(row: tuple, index: int | None, *, row_no: int | None = None,
+          field: str | None = None) -> str | None:
     if index is None or index > len(row):
         return None
     value = row[index - 1]
+    location = (
+        f"第 {row_no} 行" if row_no is not None else "数据行"
+    ) + (f"「{field}」" if field else "映射列")
     oversized = getattr(value, "oversized_text_length", None)
     if oversized is not None:
         # 流式读取只带回长度信号；映射列上的超长文本必须明确拒绝，不能变 None。
         raise DocParseError(
-            f"单元格普通文本长度 {oversized} 超过 4096 字符，拒绝导入")
+            f"{location}普通文本长度 {oversized} 超过 4096 字符，拒绝导入")
     if value is None or isinstance(value, (bytes, bytearray)):
         return None  # 受控图片/附件单元格：仍按既有政策跳过
     text = str(value).strip()
     if len(text) > 4096:
         # 普通文本超长不能被当成附件静默丢弃：整单拒绝，避免 raw_json 缺字段。
-        raise DocParseError("单元格普通文本超过 4096 字符，拒绝导入")
+        raise DocParseError(f"{location}普通文本超过 4096 字符，拒绝导入")
     return text or None
 
 
 def _non_empty(row: tuple) -> bool:
+    # 超长文本信号本质是 bytes(b"")，不能因继承 bytes 被当成附件跳过，
+    # 否则该行唯一的映射文本永远不会进入 _cell 校验。
     return bool(row) and any(
-        v is not None and not isinstance(v, (bytes, bytearray)) and str(v).strip()
+        v is not None and (
+            getattr(v, "oversized_text_length", None) is not None
+            or (not isinstance(v, (bytes, bytearray)) and str(v).strip())
+        )
         for v in row
     )
 
@@ -239,7 +248,7 @@ def parse_doc_workbook(
                 break
         if sheet is None:
             sheet = workbook.worksheets[0]
-        rows = sheet.iter_rows(values_only=True)
+        rows = import_safety.iter_sheet_rows(sheet)
         result = _parse_doc_rows(rows, doc_type, spec, column_aliases)
     finally:
         workbook.close()
@@ -282,14 +291,21 @@ def _parse_doc_rows(rows, doc_type: str, spec: dict, column_aliases: dict | None
         for row in rows:
             if not _non_empty(row):
                 continue
+            # 错误回执用源工作表行号；普通与流式两条路径由 StreamedSheetRow 统一。
+            source_row = getattr(row, "excel_row", None) or row_no
             anchor_hit = any(
-                _cell(row, head_indexes[name]) for name in spec["anchor"]
+                _cell(row, head_indexes[name], row_no=source_row, field=name)
+                for name in spec["anchor"]
             )
             head_values = {
-                name: _cell(row, head_indexes[name]) for name in spec["head"]
+                name: _cell(row, head_indexes[name],
+                            row_no=source_row, field=name)
+                for name in spec["head"]
             }
             line_values = {
-                name: _cell(row, line_indexes[name]) for name in spec["line"]
+                name: _cell(row, line_indexes[name],
+                            row_no=source_row, field=name)
+                for name in spec["line"]
             }
             if anchor_hit:
                 current = DocHeadData(row_no=row_no, values=head_values)

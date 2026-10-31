@@ -1,7 +1,9 @@
 """氚云三单（RKD/返库/BXD）导入与返库出账测试（C1b）。"""
 
 import io
+import zipfile
 from datetime import date
+from xml.sax.saxutils import escape
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -488,7 +490,7 @@ def test_parse_rejects_plain_text_over_4096_instead_of_dropping_it():
         line_headers=_BXD_LINE,
         rows=[{"head": head, "lines": []}],
     )
-    with pytest.raises(docs.DocParseError, match="4096"):
+    with pytest.raises(docs.DocParseError, match=r"第 3 行「备注」.*4096"):
         docs.parse_doc_workbook("bxd_expense", data, "费用报销支付单.xlsx")
 
 
@@ -525,7 +527,7 @@ def test_parse_rejects_oversized_mapped_text_on_continuation_row():
         head_values={"备注": "x" * 4097},
         line_values={"报销明细.报销金额": "10"},
     )
-    with pytest.raises(docs.DocParseError, match="4096"):
+    with pytest.raises(docs.DocParseError, match=r"第 5 行「备注」.*4096"):
         docs.parse_doc_workbook("bxd_expense", data, "费用报销支付单.xlsx")
 
 
@@ -545,8 +547,149 @@ def test_parse_doc_streaming_rejects_oversized_mapped_text(monkeypatch):
         ], "lines": []}],
     )
     monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
-    with pytest.raises(docs.DocParseError, match="4096"):
+    with pytest.raises(docs.DocParseError, match=r"第 3 行「备注」.*4096"):
         docs.parse_doc_workbook("bxd_expense", data, "费用报销支付单.xlsx")
+
+
+def test_parse_doc_streaming_rejects_row_whose_only_value_is_oversize(monkeypatch):
+    """整行只有超长信号一个非空值：不能按空行跳过，必须进入映射列校验。"""
+    from app.services import import_safety
+
+    data = _doc_workbook(
+        sheet_title="费用报销_支付单",
+        head_headers=_BXD_HEAD,
+        line_headers=_BXD_LINE,
+        rows=[{"head": [
+            "BXD-20260721-0019", "罗汇康", "维保费用", "外援费用",
+            "XSDD-20260203-0029", "", "新华三集团", "李呈辉",
+            "800", "800", "现金", "2026-07-27", "", "已结束",
+            "BXD-HEAD-1", "已结束",
+        ], "lines": []}],
+    )
+    wb = load_workbook(io.BytesIO(data))
+    ws = wb.active
+    row: list = [None] * (len(_BXD_HEAD) + len(_BXD_LINE))
+    row[_BXD_HEAD.index("备注")] = "x" * 4097
+    ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
+    with pytest.raises(docs.DocParseError, match=r"第 4 行「备注」.*4096"):
+        docs.parse_doc_workbook("bxd_expense", buffer.getvalue(), "费用报销支付单.xlsx")
+
+
+def test_parse_doc_streaming_ignores_oversized_unmapped_cell(monkeypatch):
+    """未映射列的超长信号仍按非事实忽略，不能变成解析错误。"""
+    from app.services import import_safety
+
+    data = _doc_workbook(
+        sheet_title="费用报销_支付单",
+        head_headers=_BXD_HEAD + ["临时说明"],
+        line_headers=_BXD_LINE,
+        rows=[{"head": [
+            "BXD-20260721-0019", "罗汇康", "维保费用", "外援费用",
+            "XSDD-20260203-0029", "", "新华三集团", "李呈辉",
+            "800", "800", "现金", "2026-07-27", "", "已结束",
+            "BXD-HEAD-1", "已结束", "",
+        ], "lines": []}],
+    )
+    wb = load_workbook(io.BytesIO(data))
+    ws = wb.active
+    row: list = [None] * (len(_BXD_HEAD) + 1 + len(_BXD_LINE))
+    row[len(_BXD_HEAD)] = "y" * 4097
+    ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
+    parsed = docs.parse_doc_workbook(
+        "bxd_expense", buffer.getvalue(), "费用报销支付单.xlsx")
+    assert len(parsed["heads"]) == 1
+    assert parsed["heads"][0].values["备注"] is None
+
+
+def _inline_string_xlsx(value: str, *, rich: bool) -> bytes:
+    """同一份最小 xlsx 源：A1 为普通 inlineStr 或多段富文本 inlineStr。"""
+    if rich:
+        half = len(value) // 2
+        body = "".join(
+            f'<r><t xml:space="preserve">{escape(part)}</t></r>'
+            for part in (value[:half], value[half:])
+        )
+    else:
+        body = f'<t xml:space="preserve">{escape(value)}</t>'
+    main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    pkg = "http://schemas.openxmlformats.org/package/2006/relationships"
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<worksheet xmlns="{main}"><sheetData><row r="1">'
+        f'<c r="A1" t="inlineStr"><is>{body}</is></c>'
+        "</row></sheetData></worksheet>"
+    )
+    workbook = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<workbook xmlns="{main}" xmlns:r="{rel}"><sheets>'
+        '<sheet name="Sheet1" sheetId="1" r:id="rId1"/>'
+        "</sheets></workbook>"
+    )
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" '
+        'ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        "</Types>"
+    )
+    root_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<Relationships xmlns="{pkg}">'
+        f'<Relationship Id="rId1" Type="{rel}/officeDocument" '
+        'Target="xl/workbook.xml"/>'
+        "</Relationships>"
+    )
+    workbook_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<Relationships xmlns="{pkg}">'
+        f'<Relationship Id="rId1" Type="{rel}/worksheet" '
+        'Target="worksheets/sheet1.xml"/>'
+        "</Relationships>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", root_rels)
+        archive.writestr("xl/workbook.xml", workbook)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
+        archive.writestr("xl/worksheets/sheet1.xml", sheet)
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("rich", [False, True], ids=["plain-inline", "rich-inline"])
+@pytest.mark.parametrize("length", [4096, 4097])
+def test_stream_rows_inline_strings_match_openpyxl(rich, length):
+    """同一份文件的 ordinary/rich inlineStr 在 4096/4097 边界与 openpyxl 一致。"""
+    from app.services import import_safety
+
+    value = "A" * (length // 2) + "B" * (length - length // 2)
+    data = _inline_string_xlsx(value, rich=rich)
+    expected = load_workbook(io.BytesIO(data)).active["A1"].value
+    assert str(expected) == value
+
+    signaled = list(import_safety.stream_first_sheet_rows(
+        data, signal_oversized_text=True))
+    default = list(import_safety.stream_first_sheet_rows(data))
+    if length <= import_safety.MAX_CELL_TEXT:
+        assert signaled[0][0] == expected
+        assert default[0][0] == expected
+    else:
+        marker = signaled[0][0]
+        assert getattr(marker, "oversized_text_length", None) == length
+        assert bytes(marker) == b""
+        assert default == []
 
 
 def test_stream_rows_signal_oversized_text_is_opt_in():

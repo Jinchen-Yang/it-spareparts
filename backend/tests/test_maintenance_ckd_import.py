@@ -293,7 +293,7 @@ def test_parse_rejects_plain_text_over_4096_instead_of_dropping_it():
     head = _HEAD_MAINT.copy()
     head[13] = "x" * 4097  # 备注
     data = _ckd_workbook_bytes(rows=[{"head": head, "lines": []}])
-    with pytest.raises(ckd.CkdParseError, match="4096"):
+    with pytest.raises(ckd.CkdParseError, match=r"第 3 行「备注」.*4096"):
         ckd.parse_ckd_workbook(data, "发货单.xlsx")
 
 
@@ -313,7 +313,7 @@ def test_parse_rejects_oversized_mapped_text_on_continuation_row():
     ws.append(row)
     buffer = io.BytesIO()
     wb.save(buffer)
-    with pytest.raises(ckd.CkdParseError, match="4096"):
+    with pytest.raises(ckd.CkdParseError, match=r"第 5 行「备注」.*4096"):
         ckd.parse_ckd_workbook(buffer.getvalue(), "发货单.xlsx")
 
 
@@ -343,8 +343,43 @@ def test_parse_ckd_streaming_rejects_oversized_mapped_text(monkeypatch):
     head[13] = "x" * 4097
     data = _ckd_workbook_bytes(rows=[{"head": head, "lines": []}])
     monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
-    with pytest.raises(ckd.CkdParseError, match="4096"):
+    with pytest.raises(ckd.CkdParseError, match=r"第 3 行「备注」.*4096"):
         ckd.parse_ckd_workbook(data, "发货单.xlsx")
+
+
+def test_parse_ckd_streaming_rejects_row_whose_only_value_is_oversize(monkeypatch):
+    """整行只有超长信号一个非空值：不能按空行跳过，必须进入映射列校验。"""
+    from app.services import import_safety
+
+    data = _ckd_workbook_bytes(rows=[{"head": _HEAD_MAINT, "lines": []}])
+    wb = load_workbook(io.BytesIO(data))
+    ws = wb.active
+    row: list = [None] * (len(ckd._HEAD_COLUMNS) + len(ckd._LINE_COLUMNS))
+    row[ckd._HEAD_COLUMNS.index("备注")] = "x" * 4097
+    ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
+    with pytest.raises(ckd.CkdParseError, match=r"第 4 行「备注」.*4096"):
+        ckd.parse_ckd_workbook(buffer.getvalue(), "发货单.xlsx")
+
+
+def test_parse_ckd_streaming_ignores_oversized_unmapped_cell(monkeypatch):
+    """未映射列的超长信号仍按非事实忽略，不能变成解析错误。"""
+    from app.services import import_safety
+
+    data = _ckd_workbook_bytes(rows=[{"head": _HEAD_MAINT, "lines": []}])
+    wb = load_workbook(io.BytesIO(data))
+    ws = wb.active
+    row: list = [None] * (len(ckd._HEAD_COLUMNS) + len(ckd._LINE_COLUMNS) + 1)
+    row[-1] = "y" * 4097
+    ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
+    parsed = ckd.parse_ckd_workbook(buffer.getvalue(), "发货单.xlsx")
+    assert len(parsed["heads"]) == 1
+    assert parsed["heads"][0].values["出库单号"] == "CKD-20260806-0014"
 
 
 def test_apply_rejects_cross_batch_lines(db, wbdd_project):
