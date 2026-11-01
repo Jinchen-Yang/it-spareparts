@@ -14,7 +14,7 @@ import pandas as pd
 from openpyxl import load_workbook as openpyxl_load_workbook
 
 from app import config
-from app.etl import mapping, sheet_selection
+from app.etl import cleaner, mapping, sheet_selection
 
 _FCODE = re.compile(r"^F\d{7}$")
 # 空表头单元格归一：pandas 以 dtype=object 读空单元格为 float('nan')→str 后是小写 'nan'，
@@ -664,22 +664,60 @@ def _scan_anchor(raw: pd.DataFrame, upto: int) -> str | None:
 
 
 def _alias_value_blank(value) -> bool:
+    """同义列合并层的源空白判定：None/NA 与纯空白字符串都算空。
+
+    冲突比较（_normalize_alias_value）与实际合并（_coalesce_value_aliases）
+    必须共用这一口径：只认 "" 会让「空白规范列 + 合法别名」在比较阶段放行，
+    合并阶段却保留规范列空格、压掉合法别名。
+    """
     if value is None:
         return True
     if isinstance(value, str):
-        return value == ""
+        return not value.strip()
     try:
         return bool(pd.isna(value))
     except (TypeError, ValueError):
         return False
 
 
+def _alias_nonblank_values(series: pd.Series) -> pd.Series:
+    """把空白源值置 NA，供 combine_first 让合法别名补位（仅别名合并层）。"""
+    blank = series.map(_alias_value_blank).astype(bool)
+    return series.mask(blank)
+
+
+# 非法税率在别名比较里的显式标记：必须保持非空，否则 combine_first 会让
+# 合法别名悄悄补位。业务上是否拒单仍由 transform 的 D-0050 流程决定。
+_INVALID_TAX_RATE_ALIAS = "invalid_tax_rate"
+
+
 def _normalize_alias_value(value, internal: str | None):
-    """同义列冲突比较用：空值归一为 None；身份保字符串，价格/数量按 Decimal。"""
+    """同义列冲突比较用：空值归一为 None；身份保字符串，价格/数量按 Decimal。
+
+    税率按 cleaner.parse_rate 的既有语义比较（13%、13.0%、0.13 等价），
+    非法非空值保留非空标记而不是 None。
+    """
     if _alias_value_blank(value):
         return None
     if internal in mapping.IDENTITY_INTERNALS:
         return str(value).strip()
+    if internal == "is_tax_inclusive":
+        parsed = cleaner.parse_tax_inclusive(value)
+        if parsed is not None:
+            # False 是有效业务值（不含税/未税），不能用 `or` 兜底成原文。
+            return parsed
+        # 非空但词表未命中：保留原文非空 marker，不能当空值让合法别名补位。
+        return str(value).strip()
+    if internal == "tax_rate":
+        try:
+            parsed = cleaner.parse_rate(value)
+        except ValueError:
+            return (_INVALID_TAX_RATE_ALIAS, str(value).strip())
+        if parsed is None:
+            # 源值非空但 parse_rate 仍返回 None（如 " nan "）：必须保留非空
+            # 标记，不能当成空值让合法别名静默补位。
+            return (_INVALID_TAX_RATE_ALIAS, str(value).strip())
+        return parsed
     if internal in mapping.NUMERIC_ALIAS_INTERNALS:
         if isinstance(value, bool):
             return str(value).strip()
@@ -709,7 +747,8 @@ def _reject_alias_conflict(
     if not conflict.any():
         return
     first_label = conflict[conflict].index[0]
-    first_row = int(df.index.get_loc(first_label)) + 1
+    # 去空行后索引保留源数据行相对位置，不能按位置重算行号。
+    first_row = int(first_label) + 1
     pairs = "；".join(
         f"「{column}」={df.loc[[first_label], column].iloc[0]!s}"
         for column in columns
@@ -746,14 +785,44 @@ def _coalesce_value_aliases(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
         if target not in df.columns and not present:
             continue
         _reject_alias_conflict(df, file_type, target, present)
-        values = (df[target].replace("", pd.NA) if target in df.columns
+        values = (_alias_nonblank_values(df[target]) if target in df.columns
                   else pd.Series(pd.NA, index=df.index, dtype=object))
         for alias in present:
-            values = values.combine_first(df[alias].replace("", pd.NA))
+            values = values.combine_first(_alias_nonblank_values(df[alias]))
         df[target] = values
         drop_columns.extend(present)
     if drop_columns:
         df = df.drop(columns=drop_columns)
+    return df
+
+
+_SOURCE_HEAD_ECONOMIC_PAIR_ROWS = "_source_head_economic_pair_rows"
+
+
+def _record_source_head_economic_pair_rows(
+    df: pd.DataFrame, file_type: str,
+) -> pd.DataFrame:
+    """记录「不含税金额+税金」都由源行显式提供的原始行索引（ffill 之前）。
+
+    仅采购/销售挂 attrs；空集合=该类型已检查但没有源行同时提供两项金额，
+    未挂 key=该类型不参与此口径，两者必须可区分。集合按 ffill 前的源值判定，
+    不允许把 ffill 补出的金额当成同源证据。不复制整表、不改任何列值。
+    """
+    if file_type in (mapping.PURCHASE, mapping.SALES):
+        economic_columns = {
+            internal: source
+            for source, internal in mapping.MAPPINGS[file_type]["head"].items()
+            if internal in ("amount_ex_tax", "tax_amount")
+        }
+        amount_column = economic_columns.get("amount_ex_tax")
+        tax_column = economic_columns.get("tax_amount")
+        if amount_column in df.columns and tax_column in df.columns:
+            amount_blank = df[amount_column].map(_alias_value_blank)
+            tax_blank = df[tax_column].map(_alias_value_blank)
+            source_rows = df.index[~(amount_blank | tax_blank)]
+        else:
+            source_rows = df.index[:0]
+        df.attrs[_SOURCE_HEAD_ECONOMIC_PAIR_ROWS] = frozenset(source_rows)
     return df
 
 
@@ -851,6 +920,8 @@ def _drop_blank_data_rows(df: pd.DataFrame) -> pd.DataFrame:
 
     pandas 对空单元格给 NaN，inline-string 读法给 None/空串；两种都算空白。
     只删整行全空，任何一格有值都保留（含仅明细ID的合法续行）。
+    刻意不 reset 索引：索引值即源数据行相对位置（表头后首行为 0），后续
+    别名冲突/transform/重复明细的「数据第 N 行」才能落在真实源行上。
     """
     if df.empty:
         return df
@@ -864,7 +935,7 @@ def _drop_blank_data_rows(df: pd.DataFrame) -> pd.DataFrame:
             blank[column] = blank[column] | series.map(
                 lambda value: isinstance(value, str) and not value.strip()
             )
-    return df.loc[~blank.all(axis=1)].reset_index(drop=True)
+    return df.loc[~blank.all(axis=1)]
 
 
 def _inspect_frame(
@@ -903,6 +974,7 @@ def _inspect_frame(
             if not dup:
                 df = _drop_blank_data_rows(df)
                 df = _coalesce_value_aliases(df, file_type)
+                df = _record_source_head_economic_pair_rows(df, file_type)
                 df = _ffill_head_columns(df, file_type)
             parsed = SheetData(
                 sheet_name,
