@@ -1,7 +1,8 @@
 """行级清洗 + 校验：原始 DataFrame → 干净记录 + 错误 + 行级异常标记（§6.8/§11）。
 
 原则：坏行隔离、好行照常。每个明细行独立校验，错误进 errors，不阻断其它行。
-订单头从同一行（ffill 后头字段已补齐）解析，按 raw_order_id 首次出现去重。
+订单头在首个有效 PN/数量明细行解析（坏明细不冻结非经济头），按 raw_order_id
+首次有效明细出现去重。
 """
 import hashlib
 import re
@@ -135,7 +136,8 @@ def _observe_head_value(slot: dict, field: str, value, row_no: int) -> None:
     """登记单头金额/税率的有效观测；同字段出现不同有效值 → 记为冲突待整单拒绝。
 
     比较用解析后的值（Decimal），"100" 与 "100.00" 不算冲突。首个观测行号
-    记录在 _row_by_field，用于「税率缺失时只允许同一源行拼接」。
+    记录在 _row_by_field，仅用于冲突告警定位；税率同源判定改用 reader 的
+    原始 pair index，不看这里。
     """
     row_by_field = slot.setdefault("_row_by_field", {})
     if field not in slot:
@@ -153,15 +155,22 @@ def _observe_head_value(slot: dict, field: str, value, row_no: int) -> None:
 
 
 def _collect_head_economics(res, row, row_no: int, raw_order_id: str,
-                            inv_head: dict, head_obs: dict) -> None:
+                            inv_head: dict, head_obs: dict,
+                            source_index, pair_rows: frozenset | None) -> None:
     """逐行收集采购/销售单头经济字段观测（D-0050）。
 
     调用于父单身份校验之后、明细身份（明细 ID）与明细级校验（PN/数量/单价）
     闸门之前：缺明细 ID 或明细校验失败的行同样携带单头值，不能因坏行静默
     漏掉非法观测。非空非法值按源行留痕（即使后续行有合法值也不豁免）；
     跨行不同值按字段留痕，最终由 _finalize_head_economics 整单拒绝。
+
+    税率同源候选只在本行未税与税金都解析成功、且本行是 reader 记录的「ffill
+    前两值同时非空」原始源行时登记。pair_rows 为空 frozenset 表示确定没有
+    同源对，绝不回退到 ffill 后看似齐全的本行；pair_rows 为 None（调用方直接
+    传入未 ffill 的原始 DataFrame）才按本行实际两值判定。
     """
     slot = head_obs.setdefault(raw_order_id, {})
+    parsed = {}
 
     def g(internal):
         col = inv_head.get(internal)
@@ -178,7 +187,12 @@ def _collect_head_economics(res, row, row_no: int, raw_order_id: str,
             })
             continue
         if value is not None:
+            parsed[field_name] = value
             _observe_head_value(slot, field_name, value, row_no)
+    if ("amount_ex_tax" in parsed and "tax_amount" in parsed
+            and (pair_rows is None or source_index in pair_rows)):
+        slot.setdefault("_same_source_pair",
+                        (parsed["amount_ex_tax"], parsed["tax_amount"]))
     raw_rate = g("tax_rate")
     try:
         rate = cleaner.parse_rate(raw_rate)
@@ -199,7 +213,8 @@ def _merge_recon_value(res, slot, raw_order_id, field, value, row_no) -> None:
     比较用解析后的值（Decimal/datetime/bool），"100" 与 "100.00" 不算冲突。"""
     if field not in slot:
         slot[field] = value
-        # D-0050：记录首个有效观测所在数据行，用于禁止跨行拼接后才推导税率。
+        # D-0050：记录首个有效观测所在数据行，仅用于冲突告警定位；税率同源
+        # 判定改用 reader 的原始 pair index。
         slot.setdefault("_row_by_field", {})[field] = row_no
         return
     prev = slot[field]
@@ -284,8 +299,9 @@ def _finalize_head_economics(res, file_type: str, raw_order_id: str,
     不同源行出现不同的有效值 → 该单本次不导入（不写头/行/快照/合同），
     保留库内旧事实；回执逐字段报告源行与原因。后出现的合法值不能豁免早先
     的非法值。不做任何算术等式/舍入阈值判断，票面差异按源值保留。
-    税率只在显式值缺失且不含税额与税金来自同一数据行时才推导，禁止跨行
-    拼接自造税率。
+    税率显式值优先；缺失时只接受「ffill 前同一原始源行同时给出未税金额与
+    税金」的候选（由 reader 的原始 pair index 限定），禁止用 ffill 后看似
+    齐全的本行或跨行拼接自造税率。
     """
     blocked = False
     for rec in values.get("_invalid", []):
@@ -315,17 +331,9 @@ def _finalize_head_economics(res, file_type: str, raw_order_id: str,
     if explicit_rate is not None:
         head["tax_rate"] = explicit_rate
     else:
-        row_by_field = values.get("_row_by_field", {})
-        same_row_pair = (
-            values.get("amount_ex_tax") is not None
-            and values.get("tax_amount") is not None
-            and row_by_field.get("amount_ex_tax") == row_by_field.get("tax_amount")
-        )
+        pair = values.get("_same_source_pair")
         head["tax_rate"] = (
-            cleaner.derive_tax_rate(
-                values.get("amount_ex_tax"), values.get("tax_amount"))
-            if same_row_pair else None
-        )
+            cleaner.derive_tax_rate(*pair) if pair is not None else None)
     return False
 
 
@@ -351,9 +359,13 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
     # D-40：对账区列存在性 = 至少「已对账金额」列；按订单聚合的单头观测值
     # （D-40 对账区 + D-41 含税三件套 + D-0050 金额/税率，见收集函数）
     head_obs_by_order: dict = {}
-    first_row_by_order: dict[str, int] = {}
-    pending_heads: dict[str, dict] = {}
     invalid_order_ids: set[str] = set()
+    # D-0050：reader 在 alias coalesce 后、ffill 前记录「未税金额与税金同时
+    # 非空」的原始 index。空 frozenset 表示确定没有同源对，不得回退到 ffill
+    # 后两值齐全的行；键缺失（直接 transform 原始 DataFrame）才按本行判定。
+    pair_rows = df.attrs.get("_source_head_economic_pair_rows")
+    if pair_rows is not None:
+        pair_rows = frozenset(pair_rows)
     res.has_reconciliation_columns = (
         file_type == mapping.SALES and inv_head.get("reconciled_amount") in df.columns
     )
@@ -375,7 +387,7 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
         # 缺明细ID不能成为跳过非法/冲突单头值的理由（用户确认的第五项：同一单
         # 的所有可识别父单源行）。D-40/D-41 同为按行观测，随同前移。
         _collect_head_economics(res, row, row_no, raw_order_id,
-                                inv_head, head_obs_by_order)
+                                inv_head, head_obs_by_order, idx, pair_rows)
         if file_type == mapping.SALES:
             _collect_sales_reconciliation(res, row, row_no, raw_order_id,
                                           inv_head, head_obs_by_order)
@@ -384,14 +396,6 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
             res.errors.append(ErrorRec(row_no, "missing_raw_id",
                                        "缺少订单/明细数据ID", _row_dict(row, full_map)))
             continue
-
-        first_row_by_order.setdefault(raw_order_id, row_no)
-
-        # 单头在明细校验前解析并留错：即使后续明细全部被拒，非空非法的单头
-        # 金额/税率也不会静默消失。订单只在出现首个有效明细时进入写入计划。
-        if raw_order_id not in pending_heads:
-            pending_heads[raw_order_id] = _build_head(
-                row, file_type, inv_head, row_no, res)
 
         pn_std, pn_raw, needs_review = cleaner.standardize_pn(row.get(inv_line["pn_raw"]))
         if pn_std is None:
@@ -435,23 +439,17 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
             line["serial_numbers"] = cleaner.clean_str(row.get(inv_line["serial_numbers"]))
         res.lines.append(line)
 
-        # 订单头（首次有效明细出现时入计划；此前已解析并留错）
+        # 单头在首个有效 PN/数量明细之后解析：坏明细行不得冻结非经济头，
+        # 客户/日期/状态取首个有效明细行。
         if raw_order_id not in res.orders:
-            head = pending_heads[raw_order_id]
-            res.orders[raw_order_id] = head
-            if head.get("data_status") and head["data_status"] != "已生效":
-                pass  # inactive 计数在 line 级更直观，见下
-    # inactive 行数：按行所属订单状态统计
-    res.rows_inactive = sum(
-        1 for ln in res.lines
-        if res.orders.get(ln["_order_raw_id"], {}).get("data_status") not in (None, "已生效")
-    )
+            res.orders[raw_order_id] = _build_head(
+                row, file_type, inv_head, row_no, res)
     # 单头观测聚合值并回订单头（只并给本文件中至少一行有效的订单——其余订单
     # 不入库，快照/头字段都无从落，收集时上报的行级错误仍可见）。对账区四个键
     # 补齐为 None：列存在但整单为空/坏值时键仍在，值为 NULL——下游（快照 NULL
     # 语义）与测试断言都按此口径。含税三件套用聚合值覆盖头行原值；是否含税
     # 沿用「首个非空 + 软告警」。D-0050：金额/税率任一非法或同字段跨行不同值
-    # → 整单拒绝；税率显式值优先，缺失时只在不含税额与税金来自同一数据行时推导。
+    # → 整单拒绝；税率显式值优先，缺失时只在 reader 提供的原始同源 pair 上推导。
     for raw_id, values in head_obs_by_order.items():
         head = res.orders.get(raw_id)
         if head is None:
@@ -475,6 +473,11 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
             line for line in res.lines
             if line["_order_raw_id"] not in invalid_order_ids
         ]
+    # inactive 行数：只数最终保留明细（经济坏单剔除后），rows_total 仍为全源行数。
+    res.rows_inactive = sum(
+        1 for ln in res.lines
+        if res.orders.get(ln["_order_raw_id"], {}).get("data_status") not in (None, "已生效")
+    )
     return res
 
 
