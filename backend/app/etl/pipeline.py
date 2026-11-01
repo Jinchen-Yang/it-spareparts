@@ -732,6 +732,7 @@ def run_import(session: Session, file_path: str, original_name: str,
 
     failure_report: dict | None = None
     facts_write_started = False
+    void_preview_conflict = False
     try:
         loaded = load_workbook(file_path)
         batch.file_type = loaded.file_type
@@ -845,22 +846,44 @@ def run_import(session: Session, file_path: str, original_name: str,
                 target_project_ids=set(target_project_ids)
             )
 
-        # 归档/原件留痕放在所有 ReaderError 门禁之后：API 对解析失败批次会
-        # commit 留痕，此时不能把 SysRawFile（或已归档文件）当成已导入原件提交。
+        # 归档/原件留痕必须等 loader 成功：VoidPlanDrift 的公开契约是
+        # 「409 + 失败批次留痕」，失败批次由 API commit；此时既不能留下
+        # SysRawFile 行，也不能已把文件物理归档。
+        #
+        # 报销装载另放进保存点：VoidPlanDrift 只由 expense_void.assert_fingerprint
+        # 在 loader._load_expense 的两道预演复核点抛出，第二道之前
+        # lock_workbook_states 会为缺失项目补建 revision=0 的工作簿状态行。
+        # 保存点在 loader 任何写入之前建立（begin_nested 先 flush 已加入的批次/
+        # 错误明细，它们留在保存点外），预演失效时回滚保存点即可证明载荷期没有
+        # 留下任何副作用；失败批次仍在外层事务里，由 API 按既有契约提交。
+        facts_write_started = True
+
+        def _load() -> dict:
+            return loader.load(
+                session,
+                result,
+                batch.id,
+                snapshot,
+                mode=mode,
+                operated_by=uploaded_by,
+                audit_overwrites=True,
+                maintenance_lock_envelope=maintenance_lock_envelope, expected_void_fingerprint=expected_void_fingerprint)
+
+        if result.file_type == mapping.EXPENSE:
+            try:
+                with session.begin_nested():
+                    counts = _load()
+            except expense_void.VoidPlanDrift:
+                # 保存点已回滚：业务事实、归因、revision 与补建的工作簿状态行
+                # 都不存在；该异常保持原有 409 公开契约。
+                void_preview_conflict = True
+                raise
+        else:
+            counts = _load()
+
         storage_path = _archive(file_path, file_hash)
         session.add(SysRawFile(batch_id=batch.id, filename=original_name,
                                file_hash=file_hash, storage_path=storage_path))
-
-        facts_write_started = True
-        counts = loader.load(
-            session,
-            result,
-            batch.id,
-            snapshot,
-            mode=mode,
-            operated_by=uploaded_by,
-            audit_overwrites=True,
-            maintenance_lock_envelope=maintenance_lock_envelope, expected_void_fingerprint=expected_void_fingerprint)
         sales_project_sync = None
         if auto_assign_maintenance_projects and result.file_type == mapping.SALES:
             from app.services import maintenance_bulk_import
@@ -958,7 +981,13 @@ def run_import(session: Session, file_path: str, original_name: str,
         session.flush()
         return batch
     except ReaderError as exc:
-        if facts_write_started:
+        # VoidPlanDrift 只有在保存点已经回滚之后才保持「409 + 失败批次留痕」：
+        # 报销装载在保存点内执行，异常出口先回滚整个载荷期（含
+        # lock_workbook_states 为缺失项目补建的 revision=0 状态行），再由
+        # void_preview_conflict 证明业务事实/归因/归档均未留下，只剩保存点外
+        # 的批次与错误明细供 API 提交。其余 ReaderError（包括任何写入之后的）
+        # 必须按完整性失败整事务回滚。
+        if facts_write_started and not void_preview_conflict:
             # loader.load 之后任何解析类异常都不能走 API 的 ReaderError 路径
             # （外层会 commit 失败批次，连带提交已写入的业务半事务）。按完整性
             # 失败处理，单文件与批量入口都会整事务 rollback。
