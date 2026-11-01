@@ -236,6 +236,7 @@ def _apply_after_revocation_during_proven_wait(case, lock_kind, revocation):
             try:
                 deadline = monotonic() + 12
                 waiter = None
+                last = None
                 while monotonic() < deadline:
                     waiters = observer.execute(text("""
                         SELECT pid, wait_event_type, query FROM pg_stat_activity
@@ -244,11 +245,17 @@ def _apply_after_revocation_during_proven_wait(case, lock_kind, revocation):
                     """), {"holder": holder_pid}).mappings().all()
                     if waiters:
                         assert len(waiters) == 1, waiters
-                        waiter = waiters[0]
-                        break
+                        last = waiters[0]
+                        query = last["query"] or ""
+                        # pg_blocking_pids 从锁管理器证明等待，wait_event_type 来自另一时点的
+                        # 活动快照；登记等待队列后可短暂为 None，须等到同一候选样本一致。
+                        if (last["wait_event_type"] == "Lock" and expected_query in query
+                                and query.startswith("SELECT ")):
+                            waiter = last
+                            break
                     assert not future.done(), f"apply returned before a real lock wait: {future.result().text}"
                     Event().wait(0.01)
-                assert waiter is not None, "did not observe a PostgreSQL lock wait"
+                assert waiter is not None, f"did not observe a PostgreSQL lock wait; last={dict(last) if last else None}"
                 assert waiter["wait_event_type"] == "Lock"
                 assert expected_query in waiter["query"], waiter
                 # 宽行 SELECT 会超过 PostgreSQL 默认 1024 字节的活动文本上限。
