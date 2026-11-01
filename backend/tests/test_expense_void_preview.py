@@ -204,6 +204,41 @@ def test_drift_is_caught_at_the_unlocked_probe_first(db, tmp_path, monkeypatch):
     assert calls == [0]                                              # 第一次就抛了
 
 
+# ---------- 写入后失败仍整批回滚 ----------
+
+def test_reader_error_after_expense_write_rolls_back_whole_batch(db, tmp_path, monkeypatch):
+    """已写入事实后的普通 ReaderError 仍按完整性失败整事务回滚（与预演失效区分）。
+
+    预演失配由 expense_void.assert_fingerprint 在任何 FProjectExpense 变更之前抛出，
+    走失败批次留痕；这里在真实 `_upsert_facts` 落地后注入普通 ReaderError，必须得到
+    ImportIntegrityError，且调用方 rollback 后同键覆盖、作废与失败批次都不存在。
+    """
+    _seed(db, tmp_path)
+    page = _anchored(tmp_path, "page.xlsx",
+                     [["2026-05-01", "甲", "备件", 5500, "BXD-1", 1], R2])   # 改金额 + 删 R3
+    pv = pipeline.preview_expense_void(db, page, mode="upsert")
+    assert pv["void"]["rows"] == 1
+    real_upsert = pipeline.loader._upsert_facts
+
+    def explode_after_write(*args, **kwargs):
+        stats = real_upsert(*args, **kwargs)
+        raise ReaderError("模拟写入后的解析失败", code="after_write")
+
+    monkeypatch.setattr(pipeline.loader, "_upsert_facts", explode_after_write)
+    with pytest.raises(pipeline.loader.ImportIntegrityError) as exc_info:
+        pipeline.run_import(db, page, "page.xlsx", mode="upsert",
+                            expected_void_fingerprint=pv["fingerprint"],
+                            require_void_preview=True)
+    assert "整批已回滚" in str(exc_info.value)
+    db.rollback()            # 与单文件/批量入口一致：完整性失败整事务回滚
+    db.expire_all()
+    rows = _rows(db)
+    assert rows["备件"].amount == Decimal("5000")                    # 同键覆盖随事务回滚
+    assert rows["租金"].data_status == "已结束"                      # 作废随事务回滚
+    assert db.scalars(select(pipeline.SysImportBatch)
+                      .where(pipeline.SysImportBatch.status == "failed")).all() == []
+
+
 # ---------- 强制预演只在 HTTP 入口 ----------
 
 def test_armed_import_requires_preview_only_when_http_layer_asks(db, tmp_path):

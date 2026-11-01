@@ -958,7 +958,14 @@ def run_import(session: Session, file_path: str, original_name: str,
         session.flush()
         return batch
     except ReaderError as exc:
-        if facts_write_started:
+        # VoidPlanDrift 是 load 期唯一能证明「业务事实尚未写入」的解析类异常：
+        # 它只由 expense_void.assert_fingerprint 抛出，而该函数只在
+        # loader._load_expense 的两道预演复核点（无锁探针后、加锁重读后）被调用，
+        # 都在任何 FProjectExpense 变更之前。该路径提交失败批次只会带上批次、
+        # 错误行、原件留痕与幂等的 revision-0 工作簿状态行，不会提交业务事实，
+        # 因此保持既有契约（409 + 失败批次留痕）比改成完整性失败更准确。
+        # 其余 ReaderError（包括任何写入之后的）必须按完整性失败整事务回滚。
+        if facts_write_started and not isinstance(exc, expense_void.VoidPlanDrift):
             # loader.load 之后任何解析类异常都不能走 API 的 ReaderError 路径
             # （外层会 commit 失败批次，连带提交已写入的业务半事务）。按完整性
             # 失败处理，单文件与批量入口都会整事务 rollback。
