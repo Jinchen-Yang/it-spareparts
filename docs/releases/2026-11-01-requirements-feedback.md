@@ -117,3 +117,11 @@ FEEDBACK_RELEASE_PG_DRILL=1 python3 -m unittest discover -s .deploy/tests -p tes
 有限旧应用回退的实测使用精确旧提交 `e6cfd25c51bc19c1f80d0bad23037d71e6d2aa0e`，1,874个文件逐blob一致，归档SHA256 `7207a5237827240a6f3548aeb5bbf22efdc16c79fa3d7faa6cb3ec3b4b2ebeac`。在本任务独立 `spareparts_feedback_oldcompat_gitbytes` 库（由合成候选一致性dump恢复）启动旧应用，schema前后始终为c7；29项真实HTTP读取/权限检查通过，140张业务与状态表摘要不变。认证、访问/失败审计和请求诊断另列，不将真实登录的系统写入称为零写入。旧应用完成lifespan shutdown后受监督SIGTERM退出，验证器实际exit0，独立18501端口已释放。此证据限定旧应用启动、既有读取与权限防护，不承诺所有旧写路径或保留新版本入口。
 
 以上完整日志和回执位于开发机本任务独占目录及控制机 `.tmp/requirements-audit-20261101/oldcompat-gitbytes-evidence`。最终main/标签/镜像、用户验收结果、必需CI与生产恢复收据仍须在实际完成后绑定，当前不宣称生产已变更。
+
+## 姓名筛选修复与生产镜像兼容复验
+
+首批原提交 `2539156fa5e1e3a4d9ffc4fc989c06147dff1a28` 的 CI run `41317699349` 实际通过：后端8504通过、11跳过，前端202文件、2418项通过，迁移与依赖扫描通过。随后修复复审指出的销售人员选项首尾空白与筛选不一致问题，只规范化看板最终姓名投影，不改变主档优先、人工清空或公共活单众数。独立目录两文件29项回归通过，原生gpt-6-astra复审无剩余P1/P2；新首批提交 `d765f49f337a539365a30e7db3edff184b75b3f4` 重新运行必需CI，旧CI不代替新提交验证。
+
+更新后的合成验收候选为 `4843ee8df12bc78c0c5c848129c6eeaf7b7b0a6f`，Git tree `7b36ebaca18bec6c2d55d558446509e75a83f98e`，1906文件逐Git blob一致；源码树SHA256 `ec70b36991c9d13ecc72d68d6f4f005509d113d1faf9a72af3288ac5acdf25a3`。保留原候选账号、种子和所有已操作数据，未seed、迁移或重置。原已审hook重新通过后端23/前端22项，非访问审计表和旧审计水位不变，保留32条新审计；新回执在 `ui-candidate/revision-4843ee8d/readonly-smoke-dev-receipt.json`，SHA256 `7f1939cf229ac045d1a50ea8de2aae0076d5bc1ca112d6a1fa589ea28c53bbb8`。旧含登录的24项仅保留为历史结果，本次不重复登录或改账号状态。用户点按仍待反馈。
+
+旧源码兼容验证的解释器实际为Python3.12.3，另已补测精确生产镜像 `sha256:d5eea20acbf7b9f8f72f834ee4d220fbf1633111705c9ae9c9c6a6f9858522e5`（OCI e6cfd25c51bc19c1f80d0bad23037d71e6d2aa0e，实际Python3.11.15）。复用原独占合成c7库，29项实际HTTP/权限检查通过，140张业务和状态表摘要不变；认证及审计仍按原明确例外记录。容器正常exit0后按精确ID删除、18501释放、本库客户端0、原PG身份与网络未变。首轮功能检查通过但结束时端口探测误报导致整体exit1，原失败收据保留；修正端口释放判据后在独立run-2完整复验，验证器真实exit0。最终回执 `oldcompat-production-image/run-2/compatibility-receipt.json` SHA256 `5fdc8c06e5e04326fc165a5fa472f4418e6de1c82587371e0f2cda92a6f4d793`。这是同一有限读取/启动兼容范围，不扩大到所有旧写路径或暴露后的自动回退。
