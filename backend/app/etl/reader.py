@@ -701,6 +701,13 @@ def _normalize_alias_value(value, internal: str | None):
         return None
     if internal in mapping.IDENTITY_INTERNALS:
         return str(value).strip()
+    if internal == "is_tax_inclusive":
+        parsed = cleaner.parse_tax_inclusive(value)
+        if parsed is not None:
+            # False 是有效业务值（不含税/未税），不能用 `or` 兜底成原文。
+            return parsed
+        # 非空但词表未命中：保留原文非空 marker，不能当空值让合法别名补位。
+        return str(value).strip()
     if internal == "tax_rate":
         try:
             parsed = cleaner.parse_rate(value)
@@ -786,6 +793,36 @@ def _coalesce_value_aliases(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
         drop_columns.extend(present)
     if drop_columns:
         df = df.drop(columns=drop_columns)
+    return df
+
+
+_SOURCE_HEAD_ECONOMIC_PAIR_ROWS = "_source_head_economic_pair_rows"
+
+
+def _record_source_head_economic_pair_rows(
+    df: pd.DataFrame, file_type: str,
+) -> pd.DataFrame:
+    """记录「不含税金额+税金」都由源行显式提供的原始行索引（ffill 之前）。
+
+    仅采购/销售挂 attrs；空集合=该类型已检查但没有源行同时提供两项金额，
+    未挂 key=该类型不参与此口径，两者必须可区分。集合按 ffill 前的源值判定，
+    不允许把 ffill 补出的金额当成同源证据。不复制整表、不改任何列值。
+    """
+    if file_type in (mapping.PURCHASE, mapping.SALES):
+        economic_columns = {
+            internal: source
+            for source, internal in mapping.MAPPINGS[file_type]["head"].items()
+            if internal in ("amount_ex_tax", "tax_amount")
+        }
+        amount_column = economic_columns.get("amount_ex_tax")
+        tax_column = economic_columns.get("tax_amount")
+        if amount_column in df.columns and tax_column in df.columns:
+            amount_blank = df[amount_column].map(_alias_value_blank)
+            tax_blank = df[tax_column].map(_alias_value_blank)
+            source_rows = df.index[~(amount_blank | tax_blank)]
+        else:
+            source_rows = df.index[:0]
+        df.attrs[_SOURCE_HEAD_ECONOMIC_PAIR_ROWS] = frozenset(source_rows)
     return df
 
 
@@ -937,6 +974,7 @@ def _inspect_frame(
             if not dup:
                 df = _drop_blank_data_rows(df)
                 df = _coalesce_value_aliases(df, file_type)
+                df = _record_source_head_economic_pair_rows(df, file_type)
                 df = _ffill_head_columns(df, file_type)
             parsed = SheetData(
                 sheet_name,

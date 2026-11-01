@@ -647,6 +647,181 @@ def test_same_invalid_tax_rate_alias_does_not_invent_rejection(tmp_path):
     assert not result.errors
 
 
+_FLAG_PURCHASE_HEADERS = [
+    "采购单号(必填)", "数据ID(不可修改)", "不含税金额", "税率(必填)", "税金",
+    "采购金额", "是否含税(必填)", "是否含税",
+    "明细.数据ID(不可修改)", "明细.产品名称(必填)",
+    "明细.采购数量(必填)", "明细.单价(必填)", "明细.合计金额",
+]
+
+
+def _flag_purchase_row(
+    *, canonical: object, alias: object,
+) -> list[object]:
+    return ["CGDD-1", "O1", 100, "13%", 13, 113, canonical, alias,
+            "L1", "PN-A", 1, 113, 113]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("含税", True), ("含", True), ("不含税", False), ("未税", False),
+     ("不含", False)],
+)
+def test_tax_inclusive_alias_normalization_reuses_cleaner_vocabulary(raw, expected):
+    """复用 cleaner 既有词表；False 是有效业务值，不能被 truthy or 兜底成原文。"""
+    assert reader._normalize_alias_value(raw, "is_tax_inclusive") is expected
+
+
+def test_tax_inclusive_unknown_nonblank_marker_is_not_blank():
+    assert reader._normalize_alias_value("待确认", "is_tax_inclusive") == "待确认"
+    assert reader._normalize_alias_value("   ", "is_tax_inclusive") is None
+
+
+@pytest.mark.parametrize(
+    ("canonical", "alias", "expected"),
+    [("未税", "不含税", "未税"), ("不含", "未税", "不含")],
+)
+def test_tax_inclusive_alias_equivalence_keeps_valid_false(
+    tmp_path, canonical, alias, expected,
+):
+    """不含税/未税在 cleaner 既有词表里都是 False，不能误报同义列冲突。"""
+    path = _write_workbook(
+        tmp_path, "flag-equivalent.xlsx", _FLAG_PURCHASE_HEADERS,
+        [_flag_purchase_row(canonical=canonical, alias=alias)],
+    )
+
+    frame, file_type = reader.read_excel(path)
+    result = transform(frame, file_type)
+
+    assert frame["是否含税(必填)"].iloc[0] == expected
+    assert result.orders["O1"]["is_tax_inclusive"] is False
+    assert not result.errors
+
+
+@pytest.mark.parametrize(
+    ("canonical", "alias"),
+    [("含税", "未税"), ("不含", "含税")],
+)
+def test_tax_inclusive_opposite_flags_conflict(tmp_path, canonical, alias):
+    """相反含税口径必须是显式冲突，不能按列序静默取一个。"""
+    path = _write_workbook(
+        tmp_path, "flag-conflict.xlsx", _FLAG_PURCHASE_HEADERS,
+        [_flag_purchase_row(canonical=canonical, alias=alias)],
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.read_excel(path)
+
+    assert exc_info.value.code == "alias_column_conflict"
+    assert canonical in str(exc_info.value) and alias in str(exc_info.value)
+
+
+def test_tax_inclusive_unknown_nonblank_is_not_swallowed(tmp_path):
+    """未知非空值保留非空 marker：不能当空值让合法别名静默补位。"""
+    path = _write_workbook(
+        tmp_path, "flag-unknown.xlsx", _FLAG_PURCHASE_HEADERS,
+        [_flag_purchase_row(canonical="待确认", alias="含税")],
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.read_excel(path)
+
+    assert exc_info.value.code == "alias_column_conflict"
+    assert "待确认" in str(exc_info.value) and "含税" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("canonical", "alias", "expected"),
+    [("   ", "未税", "未税"), (None, "不含税", "不含税")],
+)
+def test_tax_inclusive_blank_target_is_filled_by_legal_alias(
+    tmp_path, canonical, alias, expected,
+):
+    """空白目标列按同一口径置空，由合法别名补位且保留有效 False。"""
+    path = _write_workbook(
+        tmp_path, "flag-blank.xlsx", _FLAG_PURCHASE_HEADERS,
+        [_flag_purchase_row(canonical=canonical, alias=alias)],
+    )
+
+    frame, file_type = reader.read_excel(path)
+    result = transform(frame, file_type)
+
+    assert frame["是否含税(必填)"].iloc[0] == expected
+    assert result.orders["O1"]["is_tax_inclusive"] is False
+    assert not result.errors
+
+
+_SOURCE_PAIR_KEY = "_source_head_economic_pair_rows"
+
+
+def test_source_economic_pair_rows_use_pre_ffill_source_index(tmp_path):
+    """空行保留源索引；只有后行显式同时提供不含税金额+税金才算同源配对。"""
+    headers = ["采购单号(必填)", "数据ID(不可修改)", "不含税金额", "税金",
+               "是否含税(必填)"]
+    path = _write_workbook(
+        tmp_path, "source-pair-positive.xlsx", headers,
+        [
+            ["CGDD-1", "O1", 100, None, "不含"],
+            [None, None, None, None, None],
+            ["CGDD-1", "O1", 100, 13, "含税"],
+        ],
+    )
+
+    frame, file_type = reader.read_excel(path)
+
+    assert file_type == mapping.PURCHASE
+    assert frame.index.tolist() == [0, 2]
+    assert frame.attrs[_SOURCE_PAIR_KEY] == frozenset({2})
+
+
+def test_source_economic_pair_rows_are_not_created_by_ffill(tmp_path):
+    """早行 100 only、后行仅税 13：ffill 后看似双值，源集合必须为空。"""
+    headers = ["采购单号(必填)", "数据ID(不可修改)", "不含税金额", "税金"]
+    path = _write_workbook(
+        tmp_path, "source-pair-negative.xlsx", headers,
+        [
+            ["CGDD-1", "O1", 100, None],
+            ["CGDD-1", "O1", None, 13],
+        ],
+    )
+
+    frame, file_type = reader.read_excel(path)
+
+    assert file_type == mapping.PURCHASE
+    assert frame.attrs[_SOURCE_PAIR_KEY] == frozenset()
+    # ffill 之后后行两项金额都非空，但该行不是源行同源证据。
+    assert frame[["不含税金额", "税金"]].notna().all(axis=1).tolist() == [
+        False, True,
+    ]
+
+
+def test_source_economic_pair_rows_attached_for_sales(tmp_path):
+    headers = ["订单编号(必填)", "数据ID(不可修改)", "业务类型#",
+               "不含税金额", "税金"]
+    path = _write_workbook(
+        tmp_path, "source-pair-sales.xlsx", headers,
+        [["XSDD-1", "S1", "备件销售", 100, 13]],
+    )
+
+    frame, file_type = reader.read_excel(path)
+
+    assert file_type == mapping.SALES
+    assert frame.attrs[_SOURCE_PAIR_KEY] == frozenset({0})
+
+
+def test_source_economic_pair_rows_key_absent_for_other_types(tmp_path):
+    headers = ["需求单号", "数据ID(不可修改)", "需求类型", "不含税金额", "税金"]
+    path = _write_workbook(
+        tmp_path, "source-pair-wbdd.xlsx", headers,
+        [["WBDD-1", "M1", "报修供货", 100, 13]],
+    )
+
+    frame, file_type = reader.read_excel(path)
+
+    assert file_type == mapping.MAINTENANCE
+    assert _SOURCE_PAIR_KEY not in frame.attrs
+
+
 def test_blank_rows_keep_source_line_for_alias_conflict(tmp_path):
     headers = ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
                "明细.产品名称(必填)", "明细.采购数量(必填)", "明细.采购数量",
