@@ -1,5 +1,5 @@
 // 订单明细表定向回归（A-AC 返工）：
-// 1) 全权限 + 三金额口径下 14 个可见数据列全部双向可排（desc → asc，含客户与
+// 1) 全权限 + 三金额口径下 11 个可排序数据列全部双向可排（desc → asc，含客户与
 //    对账块四列）——任何一列被漏出 sortable 链路这里直接红；
 // 2) 窄屏布局：横向滚动由 Table 自身 scroll.x 容器（.ant-table-content）承担，
 //    外层容器 min-width:0 / max-width:100% 可收缩，客户列固定宽 + ellipsis。
@@ -21,6 +21,10 @@ const ROW: SalesAnalyticsOrderRow = {
   data_status: "ok",
   amount_ex_tax: 200, amount_inc_tax: 226, revenue: 150,
   gross_profit: 40, gross_margin: 0.2,
+  products: [
+    { line_id: 1, pn: "PN-A", unit_price: 12.34 },
+    { line_id: 2, pn: "PN-B", unit_price: 56.78 },
+  ],
   reconciliation: {
     has_data: true,
     reconciled_as_of: "2026-10-15T08:00:00+00:00",
@@ -67,7 +71,19 @@ afterEach(() => {
   calls.length = 0;
 });
 
-describe("订单明细表：全权限 14 个可见数据列双向排序（A-AC07/A-AC 返工）", () => {
+it("产品与单价逐项对应，保留一张订单一行，精简列不再出现", () => {
+  render(<Harness />);
+  expect(screen.getAllByRole("row", { name: /XS-2026-201/ })).toHaveLength(1);
+  expect(screen.getByText("PN-A")).toBeInTheDocument();
+  expect(screen.getByText("PN-B")).toBeInTheDocument();
+  expect(screen.getByText("12.34")).toBeInTheDocument();
+  expect(screen.getByText("56.78")).toBeInTheDocument();
+  for (const title of ["客户类型", "不含税金额", "营收"]) {
+    expect(screen.queryByRole("columnheader", { name: title })).toBeNull();
+  }
+});
+
+describe("订单明细表：全权限 11 个可排序数据列双向排序（A-AC07/A-AC 返工）", () => {
   // [列头可访问名, 期望排序键]——与 DrillTable columns 一一对应
   const SORTABLE_COLUMNS: [string, SalesAnalyticsSortKey][] = [
     ["订单日期", "order_date"],
@@ -75,10 +91,7 @@ describe("订单明细表：全权限 14 个可见数据列双向排序（A-AC07
     ["业务类型", "business_type"],
     ["销售人员", "salesperson"],
     ["客户", "customer"],
-    ["客户类型", "customer_type"],
-    ["不含税金额", "amount_ex_tax"],
     ["含税订单金额", "amount_inc_tax"],
-    ["营收", "revenue"],
     ["毛利", "gross_profit"],
     ["已对账金额", "reconciled_display"],
     ["待对账金额", "pending_amount"],

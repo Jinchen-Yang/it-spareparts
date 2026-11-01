@@ -1083,7 +1083,8 @@ def test_filters_echo_reflects_request(boss, ds):
     assert data["filters_echo"] == {
         "date_from": "2026-03-01", "date_to": "2026-03-31",
         "source_type": ["指定采购"], "purchaser": [], "salesperson": [],
-        "customer_id": [], "category": ["电器件"], "group_by": "month", "group_key": None}
+        "customer_id": [], "category": ["电器件"], "group_by": "month", "group_key": None,
+        "supplier": None, "order_no": None, "linked_sales_order_no": None}
     assert data["as_of"] == business_today().isoformat()
 
 

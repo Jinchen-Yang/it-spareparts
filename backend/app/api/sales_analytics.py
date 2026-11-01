@@ -267,10 +267,29 @@ def summary(
         **f.log_echo(), "compare": compare})
     filters = _service_filters(f)
     data = sales_analytics.summary(db, **filters)
+    data["recorded_expenses"] = sales_analytics.recorded_expenses(db, ctx, **filters)
     data["kpi"].update(sales_dashboard.customer_lifecycle(db, **filters))
     data["compare"] = sales_dashboard.summary_compare(db, **filters) if compare else None
     data["compare_available"] = sales_dashboard.compare_window(f.date_from, f.date_to) is not None
     return _finish(data, ctx)
+
+
+@router.get("/expenses")
+def recorded_expenses(
+    f: SalesFilters = Depends(sales_filters),
+    page: int = Query(1, ge=1, le=ANALYTICS_PAGE_MAX),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_sales_analysis")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    _guards(ctx, f)
+    if _cost_hidden(ctx) or is_field_hidden(ctx, "gross_profit"):
+        raise HTTPException(status_code=403, detail="当前账号无费用金额权限")
+    record_access_log(ctx, "sales_recorded_expenses", "sales_analytics", f.log_echo())
+    return _finish(sales_analytics.recorded_expenses(
+        db, ctx, page=page, page_size=page_size, with_items=True, **_service_filters(f)), ctx)
 
 
 def effective_sort(ctx: UserContext, sort: str) -> str:

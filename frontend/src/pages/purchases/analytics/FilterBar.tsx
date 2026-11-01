@@ -1,6 +1,7 @@
 // 采购分析筛选栏：日期预设（共用组件）+ 类型/采购员/销售/客户/分类多选 + 分组维度 + 口径多选。
 // 客户维度被 data_customer 遮蔽时禁用客户筛选与客户分组（后端同款 403，这里先不给出入口）。
-import { Button, Select, Tooltip } from "antd";
+import { Button, Input, Select, Tooltip } from "antd";
+import { useEffect, useState } from "react";
 import DateRangePresets from "../../../components/DateRangePresets";
 import AmountBasisSelect from "../../../components/AmountBasisSelect";
 import {
@@ -31,6 +32,7 @@ export interface FilterBarProps {
   costRestricted: boolean;
   /** data_customer=false：客户筛选/分组不可用（后端 fail-closed 403）。 */
   customerRestricted: boolean;
+  supplierRestricted?: boolean;
   onReset: () => void;
 }
 
@@ -55,9 +57,11 @@ export default function FilterBar({
   customersHasMore,
   costRestricted,
   customerRestricted,
+  supplierRestricted = false,
   onReset,
 }: FilterBarProps) {
   const change = (next: Partial<AnalyticsUrlState>) => patch(next, { resetPage: true });
+  const locate = (next: Partial<AnalyticsUrlState>) => change({ ...next, groupKey: null, orderId: null });
   const customerSelect = (
     <Select
       {...multiSelectProps}
@@ -139,7 +143,19 @@ export default function FilterBar({
         onChange={(v: string[]) => patch({ basis: v as AmountBasis[] })}
         hidden={costRestricted}
       />
+      <LookupInput label="供应商" value={state.supplier || ""} disabled={supplierRestricted} onSearch={value => locate({ supplier: value })} />
+      <LookupInput label="采购单号" value={state.purchaseOrderNo || ""} onSearch={value => locate({ purchaseOrderNo: value })} />
+      <LookupInput label="销售单号" value={state.salesOrderNo || ""} onSearch={value => locate({ salesOrderNo: value })} />
       <Button onClick={onReset}>重置</Button>
     </div>
   );
+}
+
+function LookupInput({ label, value, disabled, onSearch }: { label: string; value: string; disabled?: boolean; onSearch: (value: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  return <Input.Search aria-label={label} placeholder={`${label}（包含）`} style={{ width: 210 }} value={draft}
+    disabled={disabled} allowClear maxLength={label === "供应商" ? 200 : 64}
+    onChange={event => { setDraft(event.target.value); if (!event.target.value) onSearch(""); }}
+    onSearch={text => onSearch(text.trim())} />;
 }

@@ -26,6 +26,9 @@ describe("parseAnalyticsUrl：默认与容错", () => {
       salesperson: [],
       customerIds: [],
       category: [],
+      supplier: "",
+      purchaseOrderNo: "",
+      salesOrderNo: "",
       groupBy: DEFAULT_GROUP_BY,
       groupKey: null,
       sort: "order_date",
@@ -268,5 +271,22 @@ describe("toAnalyticsApiFilters：默认「今天」按 Asia/Shanghai", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("采购定位条件：URL 与 API 同源", () => {
+  it("三项定位条件保真往返，清空删除参数，传递给所有分析请求", () => {
+    const query = new URLSearchParams({ preset: "all", supplier: "供%_应商", purchase_order_no: "CG 101", sales_order_no: "XSDD-01" });
+    const state = parseAnalyticsUrl(query);
+    expect(state).toMatchObject({ supplier: "供%_应商", purchaseOrderNo: "CG 101", salesOrderNo: "XSDD-01" });
+    expect(serializeAnalyticsState(state)).toMatchObject({ supplier: "供%_应商", purchase_order_no: "CG 101", sales_order_no: "XSDD-01" });
+    const filters = toAnalyticsApiFilters(state, TODAY);
+    expect(filters).toEqual({ supplier: "供%_应商", order_no: "CG 101", linked_sales_order_no: "XSDD-01" });
+    const params = toAnalyticsParams(filters);
+    expect(params.get("supplier")).toBe("供%_应商");
+    expect(params.get("order_no")).toBe("CG 101");
+    expect(params.get("linked_sales_order_no")).toBe("XSDD-01");
+    expect(serializeAnalyticsState({ supplier: "", purchaseOrderNo: "", salesOrderNo: "" }))
+      .toEqual({ supplier: undefined, purchase_order_no: undefined, sales_order_no: undefined });
   });
 });

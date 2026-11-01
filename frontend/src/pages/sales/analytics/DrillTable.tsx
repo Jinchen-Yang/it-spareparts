@@ -83,7 +83,7 @@ export default function DrillTable({
   const amountSortHidden = costRestricted && (sort === "amount_ex_tax" || sort === "amount_inc_tax");
   // 金额列可排 = 该口径正显示 + 账号看得见金额（revenue 恒公开）
   const sortable = (key: AmountKey) =>
-    amounts.includes(key) && (key === "revenue" || !costRestricted);
+    (key === "inc" || amounts.includes(key)) && (key === "revenue" || !costRestricted);
 
   const reconNoData = (b: SalesReconciliationBlock) => reconRestricted || isReconBlockEmpty(b);
 
@@ -134,15 +134,11 @@ export default function DrillTable({
       render: (v: string | null) => v || "—",
       ...sortableCol("customer", !customerRestricted),
     },
-    ...(customerRestricted ? [] : [{
-      // 客户类型列（A-AC07 可见即可排）：无 data_customer 时后端置 null，不渲染
-      title: "客户类型", dataIndex: "customer_type", width: 96,
-      render: (v: string | null) => v || "—",
-      ...sortableCol("customer_type", !customerRestricted),
-    }]),
-    ...(amounts.includes("ex") ? [amountColumn("ex", "不含税金额")] : []),
-    ...(amounts.includes("inc") ? [amountColumn("inc", "含税订单金额")] : []),
-    ...(amounts.includes("revenue") ? [amountColumn("revenue", "营收")] : []),
+    { title: "PN", key: "products", width: 210, render: (_, row) => row.products?.length
+      ? row.products.map(product => <div key={product.line_id} style={{ height: 24, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={product.pn || undefined}>{product.pn || "/"}</div>) : "/" },
+    { title: "含税单价", key: "unit_prices", width: 120, align: "right", render: (_, row) => row.products?.length
+      ? row.products.map(product => <div key={product.line_id} style={{ height: 24, whiteSpace: "nowrap" }}>{costRestricted ? "—" : fmtMoney(product.unit_price)}</div>) : "—" },
+    amountColumn("inc", "含税订单金额"),
     {
       title: (
         <Tooltip title="毛利 = 已配成本营收 − 成本（与老板看板同口径）；未配成本的单为空，不当 0">
