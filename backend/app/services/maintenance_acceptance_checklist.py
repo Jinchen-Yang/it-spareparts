@@ -16,7 +16,7 @@ import io
 import re
 import uuid
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 
 from openpyxl import Workbook, load_workbook
@@ -52,6 +52,15 @@ _DONE_TRUE = {"是", "已完成", "完成", "已完", "yes", "y", "true", "1"}
 _DONE_FALSE = {"否", "未完成", "未完", "no", "n", "false", "0"}
 EXAMPLE_PREFIX = "（示例）"
 
+# OOXML 硬边界：行 1–1,048,576，列 1–16,384（XFD）。
+_EXCEL_MAX_ROW = 1_048_576
+_EXCEL_MAX_COLUMN = 16_384
+# openpyxl 只用 [Content_Types].xml 的 Override 定位 sharedStrings，且取第一个；
+# 这里按同一口径选部件，重复声明由我们显式拒绝。
+_SHARED_STRINGS_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"
+)
+
 
 class ChecklistParseError(Exception):
     """文件不是可识别的验收清单。"""
@@ -68,13 +77,16 @@ def _cell_text(value) -> str:
 
 
 class _ScanBudget:
-    """一次导入预扫共享的资源预算（选中 sheet + 共享字符串 + 关系文件）。"""
+    """一次导入预扫共享的资源预算（选中 sheet + 内容类型 + 共享字符串）。"""
 
-    __slots__ = ("elements", "decompressed_bytes")
+    __slots__ = ("elements", "decompressed_bytes", "formula_cache_error")
 
     def __init__(self) -> None:
         self.elements = 0
         self.decompressed_bytes = 0
+        # 预扫先完整走到 EOF（保留尾行/预算判定），缓存问题延后到行/列上限
+        # 之后报出，避免掩盖既有的“真实尾行超限”护栏。
+        self.formula_cache_error: str | None = None
 
     def count_element(self) -> None:
         self.elements += 1
@@ -145,36 +157,44 @@ def _selected_worksheet_part(archive: zipfile.ZipFile) -> tuple[str, str]:
 
 def _shared_strings_part(archive: zipfile.ZipFile,
                          budget: _ScanBudget) -> str | None:
-    """定位 sharedStrings。标准路径优先，非标准路径按关系目标兜底。"""
+    """按 [Content_Types].xml 的 Override 定位 sharedStrings。
+
+    与 openpyxl 的 ``Manifest.find(SHARED_STRINGS)`` 完全同口径：只看 Override、
+    忽略 workbook 关系，且不使用“标准路径优先”的猜测。openpyxl 取第一个匹配；
+    重复声明属于歧义，这里显式拒绝而不是任选一个。
+    """
     member_names = set(archive.namelist())
-    if "xl/sharedStrings.xml" in member_names:
-        return "xl/sharedStrings.xml"
-    relationships_path = "xl/_rels/workbook.xml.rels"
-    if relationships_path not in member_names:
-        return None
     found: str | None = None
+    saw_root = False
     open_elements: list = []
     open_tags: list[str] = []
-    with _open_bounded_member(archive, relationships_path, budget) as source:
+    with _open_bounded_member(archive, "[Content_Types].xml", budget) as source:
         for event, element in reader._safe_xml_iterparse(source):
             tag = reader._xml_local_name(element.tag)
             if event == "start":
                 budget.count_element()
                 if len(open_tags) + 1 > reader._XML_DEPTH_LIMIT:
                     raise ChecklistParseError("工作簿 XML 层级超过安全上限")
-                if tag == "Relationship":
-                    rel_type = element.attrib.get("Type", "")
-                    if rel_type.endswith("/sharedStrings"):
+                if not open_tags:
+                    if tag != "Types":
+                        raise ChecklistParseError("工作簿内容类型结构无效")
+                    saw_root = True
+                elif tag == "Override" and open_tags[-1] == "Types":
+                    if (element.attrib.get("ContentType", "")
+                            == _SHARED_STRINGS_CONTENT_TYPE):
                         if found is not None:
                             raise ChecklistParseError(
                                 "工作簿包含多个 sharedStrings 部件")
-                        if element.attrib.get("TargetMode", "").lower() == "external":
+                        part_name = element.attrib.get("PartName", "")
+                        if not part_name.startswith("/"):
                             raise ChecklistParseError(
-                                "sharedStrings 部件不允许外部引用")
-                        target = reader._normalize_internal_target(
-                            source_path="xl/workbook.xml",
-                            target=element.attrib.get("Target", ""),
-                        )
+                                "sharedStrings 部件路径无效")
+                        target = part_name[1:]
+                        if ("\\" in target or target in {"", ".", ".."}
+                                or target.startswith("../")
+                                or "/../" in target):
+                            raise ChecklistParseError(
+                                "sharedStrings 部件路径无效")
                         if target not in member_names:
                             raise ChecklistParseError("sharedStrings 部件不存在")
                         found = target
@@ -189,6 +209,8 @@ def _shared_strings_part(archive: zipfile.ZipFile,
             element.clear()
             if parent is not None:
                 parent.remove(element)
+    if not saw_root:
+        raise ChecklistParseError("工作簿内容类型结构无效")
     return found
 
 
@@ -245,6 +267,56 @@ def _scan_shared_strings(archive: zipfile.ZipFile,
     return flags
 
 
+def _formula_cache_error(
+    cell_type: str,
+    has_value_node: bool,
+    value_text: str,
+    shared_strings: bytearray | None,
+) -> str | None:
+    """校验公式单元格的本地缓存，避免 data_only 把缺失缓存静默读成空。
+
+    openpyxl ``data_only=True`` 直接采用 ``<v>`` 缓存，不计算 ``<f>``；缓存缺失
+    时单元格值为 None，会被当成空行跳过。这里在预扫阶段拒绝这种“看起来成功
+    但丢数据”的文件。节点存在与文本非空分开判断：``t="str"`` 的空字符串结果
+    合法，数字 0 / 布尔 false（``<v>0</v>``）同样合法。
+    """
+    if not has_value_node:
+        return "公式缺少缓存结果；请用 Excel 重新保存后再导入"
+    if cell_type in ("", "n"):
+        if not value_text:
+            return "公式的数字缓存为空；请用 Excel 重新保存后再导入"
+        try:
+            if "." in value_text or "E" in value_text or "e" in value_text:
+                float(value_text)
+            else:
+                int(value_text)
+        except ValueError:
+            return f"公式的数字缓存无效：{value_text[:32]}"
+        return None
+    if cell_type == "b":
+        try:
+            boolean = int(value_text)
+        except ValueError:
+            return f"公式的布尔缓存无效：{value_text[:32]}"
+        if boolean not in (0, 1):
+            return f"公式的布尔缓存无效：{value_text[:32]}"
+        return None
+    if cell_type == "s":
+        if not value_text.isdigit():
+            return f"公式的共享字符串缓存无效：{value_text[:32]}"
+        index = int(value_text)
+        if shared_strings is None or index >= len(shared_strings):
+            return "公式的共享字符串缓存越界或部件缺失"
+        return None
+    if cell_type == "str":
+        return None  # 空字符串也是合法结果
+    if cell_type in ("e", "d"):
+        if not value_text:
+            return "公式的错误/日期缓存为空；请用 Excel 重新保存后再导入"
+        return None
+    return f"公式缓存类型无效：{cell_type[:16]}"
+
+
 def _scan_worksheet_value_bounds(
     archive: zipfile.ZipFile,
     worksheet_path: str,
@@ -265,6 +337,8 @@ def _scan_worksheet_value_bounds(
     cell_col = 0
     cell_type = ""
     cell_has_value = False
+    cell_has_value_node = False
+    cell_value_text = ""
     cell_has_formula = False
     cell_nodes = 0
     open_elements: list = []
@@ -288,11 +362,18 @@ def _scan_worksheet_value_bounds(
                         raise ChecklistParseError("工作表 XML 结构无效")
                     row_ref = element.attrib.get("r")
                     if row_ref is None:
-                        current_row += 1
+                        next_row = current_row + 1
                     else:
                         if re.fullmatch(r"[0-9]{1,7}", row_ref) is None:
                             raise ChecklistParseError("工作表的行号无效")
-                        current_row = int(row_ref)
+                        next_row = int(row_ref)
+                    if not 1 <= next_row <= _EXCEL_MAX_ROW:
+                        raise ChecklistParseError(
+                            "工作表的行号超出 Excel 有效范围")
+                    if next_row <= current_row:
+                        raise ChecklistParseError(
+                            "工作表的行号必须严格递增")
+                    current_row = next_row
                     current_col = 0
                 elif tag == "c" and parent == "row":
                     if in_cell:
@@ -308,12 +389,23 @@ def _scan_worksheet_value_bounds(
                         if bounds is None:
                             raise ChecklistParseError("工作表单元格坐标无效")
                         cell_row, cell_col = bounds
+                        if not 1 <= cell_row <= _EXCEL_MAX_ROW:
+                            raise ChecklistParseError(
+                                "工作表单元格行号超出 Excel 有效范围")
                         if cell_row != current_row:
                             raise ChecklistParseError(
                                 "工作表单元格坐标与行号不一致")
+                        if cell_col <= current_col:
+                            raise ChecklistParseError(
+                                "工作表单元格列号必须严格递增")
                         current_col = cell_col
+                    if not 1 <= cell_col <= _EXCEL_MAX_COLUMN:
+                        raise ChecklistParseError(
+                            "工作表单元格列号超出 Excel 有效范围")
                     in_cell = True
                     cell_has_value = False
+                    cell_has_value_node = False
+                    cell_value_text = ""
                     cell_has_formula = False
                 elif tag == "f" and in_cell:
                     cell_has_formula = True
@@ -324,6 +416,9 @@ def _scan_worksheet_value_bounds(
                 raise ChecklistParseError("工作表 XML 结构无效")
             if tag == "v" and in_cell:
                 text = (element.text or "").strip()
+                if not cell_has_value_node:
+                    cell_has_value_node = True
+                    cell_value_text = text
                 if cell_type == "s":
                     if not text or not text.isdigit():
                         raise ChecklistParseError("共享字符串索引无效")
@@ -345,6 +440,13 @@ def _scan_worksheet_value_bounds(
                     raise ChecklistParseError(
                         f"清单实际单元格数量超过 {MAX_SCAN_CELLS} 个安全上限，"
                         "拒绝导入")
+                if cell_has_formula and budget.formula_cache_error is None:
+                    problem = _formula_cache_error(
+                        cell_type, cell_has_value_node, cell_value_text,
+                        shared_strings)
+                    if problem is not None:
+                        budget.formula_cache_error = (
+                            f"第 {cell_row} 行第 {cell_col} 列：{problem}")
                 if cell_has_value or cell_has_formula:
                     if cell_row > real_max_row:
                         real_max_row = cell_row
@@ -406,6 +508,9 @@ def parse_checklist_workbook(data: bytes, filename: str) -> dict:
         if real_max_row > HEADER_SCAN_ROWS + MAX_SCAN_ROWS:
             raise ChecklistParseError(
                 f"清单行数超过可扫描上限 {MAX_SCAN_ROWS} 行，拒绝导入")
+        # 缓存问题在行/列/区域上限之后报出：尾行超限等既有护栏优先。
+        if budget.formula_cache_error is not None:
+            raise ChecklistParseError(budget.formula_cache_error)
 
         try:
             wb = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
@@ -512,10 +617,21 @@ def parse_checklist_workbook(data: bytes, filename: str) -> dict:
             "item_rows": len(items),
             "issue_rows": sum(1 for it in items if it["issues"]),
         }
+    except ChecklistParseError:
+        raise
+    except reader.ReaderError as exc:
+        raise ChecklistParseError(f"无法读取 Excel 文件：{exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        # openpyxl 迭代阶段（坏数字/布尔缓存等）同样必须收敛成 422，
+        # 不能把 ValueError 泄露成 500。
+        raise ChecklistParseError(
+            f"无法读取 Excel 文件：{type(exc).__name__}") from exc
     finally:
         if wb is not None:
-            wb.close()
-        archive.close()
+            with suppress(Exception):
+                wb.close()
+        with suppress(Exception):
+            archive.close()
 
 
 def store_preview(
