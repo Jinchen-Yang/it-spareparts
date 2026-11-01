@@ -1,6 +1,7 @@
 """D-26: WBDD address intent, scoped to this file type and source order ID."""
 from collections import defaultdict
 from dataclasses import dataclass
+from numbers import Integral
 
 import pandas as pd
 
@@ -36,7 +37,11 @@ def collect_addresses(frame: pd.DataFrame) -> dict[str, AddressPatch]:
     if not columns and not operations:
         return {}
     groups = defaultdict(lambda: {"values": set(), "operations": set(), "rows": [], "order_no": ""})
-    for position, (_, row) in enumerate(frame.iterrows(), 1):
+    for ordinal, (index, row) in enumerate(frame.iterrows(), 1):
+        # Blank source rows are dropped without resetting the index, so use the
+        # preserved position for the relative data row; non-standard labels
+        # (negative/not integral) fall back to the visit ordinal.
+        position = int(index) + 1 if isinstance(index, Integral) and index >= 0 else ordinal
         raw_id = cleaner.clean_str(row.get("数据ID(不可修改)"))
         order_no = cleaner.clean_str(row.get("需求单号"))
         if not raw_id or not order_no:

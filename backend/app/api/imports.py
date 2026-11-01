@@ -450,7 +450,7 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                 db.rollback()
                 errored += 1
                 notes.append(f"并发冲突：{name}（{_IMPORT_CONFLICT_ERROR}）")
-            except loader.ImportIntegrityError:
+            except loader.ImportIntegrityError as exc:
                 db.rollback()
                 errored += 1
                 notes.append(f"完整性失败：{name}（{str(exc)[:300]}）")
