@@ -10,7 +10,8 @@ import pytest
 from sqlalchemy import func, select
 
 from app.etl import loader as etl_loader, mapping, pipeline, reader, transform
-from app.models.sales import FSalesOrder, FSalesReconciliationSnapshot
+from app.models.maintenance import MaintenanceContractWorkbookState
+from app.models.sales import FSalesLine, FSalesOrder, FSalesReconciliationSnapshot
 from app.models.system import SysImportBatch, SysImportError
 from app.services.sales_reconciliation import (
     latest_snapshots_by_raw_order_id,
@@ -79,21 +80,25 @@ def _snapshots(db):
     ).all()
 
 
+def _purchase_row(**over):
+    """一行采购导出（头级字段随行重复，模拟 ffill 后形态）。"""
+    row = {
+        "采购单号(必填)": "CGDD-1", "数据ID(不可修改)": "PUR-RAW-1",
+        "采购日期(必填)": "2026-06-30", "采购人员(必填)": "测试采购",
+        "供应商(必填)": "测试供应商", "批量采购(必填)": "备货",
+        "不含税金额": Decimal("100.00"), "税率(必填)": "13%",
+        "是否含税(必填)": "含税", "税金": Decimal("13.00"),
+        "采购金额": Decimal("113.00"), "数据状态": "已生效",
+        "明细.数据ID(不可修改)": "PL-1", "明细.序号": 1,
+        "明细.产品名称(必填)": "TEST-PN-1", "明细.采购数量(必填)": 1,
+        "明细.单价(必填)": Decimal("113.00"), "明细.合计金额": Decimal("113.00"),
+    }
+    row.update(over)
+    return row
+
+
 def _purchase_xlsx(path):
-    headers = ["采购单号(必填)", "数据ID(不可修改)", "采购日期(必填)", "采购人员(必填)",
-               "供应商(必填)", "批量采购(必填)", "不含税金额", "税率(必填)",
-               "是否含税(必填)", "税金", "采购金额", "数据状态",
-               "明细.数据ID(不可修改)", "明细.序号", "明细.产品名称(必填)",
-               "明细.采购数量(必填)", "明细.单价(必填)", "明细.合计金额"]
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.append([f"F{i:07d}" for i in range(1, len(headers) + 1)])
-    ws.append(headers)
-    ws.append(["CGDD-1", "PUR-RAW-1", "2026-06-30", "测试采购", "测试供应商", "备货",
-               Decimal("100.00"), "13%", "含税", Decimal("13.00"), Decimal("113.00"),
-               "已生效", "PL-1", 1, "TEST-PN-1", 1, Decimal("113.00"), Decimal("113.00")])
-    wb.save(path)
-    return str(path)
+    return _write_xlsx(path, [_purchase_row()])
 
 
 # ---------- transform：列存在性 / 变体 / 旧格式 ----------
@@ -374,20 +379,32 @@ def test_import_tax_trio_from_invalid_line_row_persisted(db, tmp_path):
     assert snap.order_amount == Decimal("226.00")
 
 
-def test_transform_tax_trio_conflict_takes_first_nonempty(tmp_path):
-    """三件套跨行不一致（坏行 vs 存活行）：文件序首个非空生效 + 软告警（与对账区同规则）。"""
+def test_transform_tax_trio_conflicting_values_reject_whole_order(tmp_path):
+    """D-0050：同一金额字段跨行出现不同有效值 → 整单拒绝，不取首值。"""
     path = _write_xlsx(tmp_path / "s.xlsx", [
         _row(**{"订单明细.订单数量": "abc"}, 税金=Decimal("26.00"), 是否含税="不含税"),
         _second_line(税金=Decimal("13.00"), 是否含税="含税")])
     result = _transform_file(path)
+    assert "RAW-RECON-1" not in result.orders
+    assert result.lines == []
+    conflicts = [e for e in result.errors if e.error_type == "head_value_conflict"]
+    assert len(conflicts) == 1                         # 税金 26 vs 13
+    assert "税金" in conflicts[0].error_detail
+    assert "26.00" in conflicts[0].error_detail and "13.00" in conflicts[0].error_detail
+
+
+def test_transform_tax_inclusive_conflict_keeps_soft_warning(tmp_path):
+    """是否含税不是金额/税率字段：保持「首个非空 + 软告警」，不整单拒绝。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(**{"订单明细.订单数量": "abc"}, 是否含税="不含税"),
+        _second_line(是否含税="含税")])
+    result = _transform_file(path)
     head = result.orders["RAW-RECON-1"]
-    assert head["tax_amount"] == Decimal("26.00")
-    assert head["is_tax_inclusive"] is False          # 坏行的不含税先到先得
+    assert head["is_tax_inclusive"] is False          # 首个非空生效
     conflicts = [e for e in result.errors if e.error_type == "reconciliation_head_conflict"]
-    assert len(conflicts) == 2                         # 税金 + 是否含税 各一条
-    joined = "\n".join(e.error_detail for e in conflicts)
-    assert "税金" in joined and "是否含税" in joined
-    assert "不含税" in joined                           # 布尔按业务语义渲染
+    assert len(conflicts) == 1
+    assert "是否含税" in conflicts[0].error_detail
+    assert "reconciliation_head_conflict" in transform.SOFT_ERROR_TYPES
 
 
 def test_transform_tax_trio_equal_values_across_rows_no_conflict(tmp_path):
@@ -423,21 +440,152 @@ def test_transform_tax_trio_old_format_collected_from_invalid_line_rows(tmp_path
     assert head["is_tax_inclusive"] is True
 
 
-def test_transform_tax_trio_bad_value_falls_back_to_later_good_row(tmp_path):
-    """三件套坏值口径（docstring 承诺）：静默 None、不报错、不锁定，后续好行可补位。
-
-    与对账区「坏值锁定 NULL + 逐行报错」刻意不同（沿用 _build_head 旧口径，
-    不新增错误码）；锁定该分歧，防止未来「统一规则」的重构悄悄改变落库值。
-    """
+def test_transform_bad_head_value_not_forgiven_by_later_good_row(tmp_path):
+    """D-0050：后出现的合法值不能豁免早先的非法观测；整单仍拒绝。"""
     path = _write_xlsx(tmp_path / "s.xlsx", [
         _row(订单金额="not-a-number", 税金="乱码", 是否含税="随便写的"),
         _second_line(订单金额=Decimal("113.00"), 税金=Decimal("13.00"))])
     result = _transform_file(path)
+    assert "RAW-RECON-1" not in result.orders
+    assert result.lines == []
+    errors = [e for e in result.errors if e.error_type == "invalid_head_value"]
+    assert {e.row_no for e in errors} == {1}           # 同一源行的两个非法字段
+    joined = "\n".join(e.error_detail for e in errors)
+    assert "订单金额" in joined and "税金" in joined
+
+
+def test_transform_missing_line_id_bad_head_value_still_rejects_document(tmp_path):
+    """D-0050 第五项：缺明细ID但父单可识别的源行仍参与金额观测。
+
+    早先行在明细身份门禁处 continue，非法单头值被静默漏掉；现在该单整单拒绝，
+    同单合法行不豁免，其他单据照常导入。
+    """
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(**{LINE_ID: None, "订单金额": "不是金额"}),
+        _second_line(),
+        _row(**{
+            "订单编号(必填)": "XSDD-20260630-0002",
+            "数据ID(不可修改)": "RAW-RECON-2",
+            LINE_ID: "LINE-B",
+        }),
+    ])
+    result = _transform_file(path)
+    assert "RAW-RECON-1" not in result.orders
+    assert [ln["raw_line_id"] for ln in result.lines] == ["LINE-B"]
+    assert "RAW-RECON-2" in result.orders
+    assert any(e.error_type == "missing_raw_id" and e.row_no == 1
+               for e in result.errors)
+    invalid = [e for e in result.errors if e.error_type == "invalid_head_value"]
+    assert [e.row_no for e in invalid] == [1]
+    assert "订单金额" in invalid[0].error_detail
+
+
+def test_transform_missing_line_id_conflict_observes_all_parent_rows(tmp_path):
+    """D-0050：缺明细ID行的有效值与同单其他行不同 → 整单拒绝。"""
+    path = _write_xlsx(tmp_path / "purchase.xlsx", [
+        _purchase_row(**{"明细.数据ID(不可修改)": None,
+                         "采购金额": Decimal("226.00")}),
+        _purchase_row(**{"明细.数据ID(不可修改)": "PL-2"}),
+    ])
+    df, file_type = reader.read_excel(str(tmp_path / "purchase.xlsx"))
+    assert file_type == mapping.PURCHASE
+    result = transform.transform(df, file_type)
+    assert "PUR-RAW-1" not in result.orders
+    assert result.lines == []
+    assert any(e.error_type == "missing_raw_id" and e.row_no == 1
+               for e in result.errors)
+    conflicts = [e for e in result.errors if e.error_type == "head_value_conflict"]
+    assert len(conflicts) == 1
+    assert "采购金额" in conflicts[0].error_detail
+
+
+def test_transform_unidentifiable_parent_row_does_not_contaminate_other_document(
+    tmp_path,
+):
+    """无父单身份的坏金额只报本行 missing_raw_id，不污染其他单据观测。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(**{"订单编号(必填)": "XSDD-ORPHAN", "数据ID(不可修改)": None,
+                LINE_ID: None, "订单金额": "不是金额"}),
+        _row(),
+    ])
+    result = _transform_file(path)
+    assert "RAW-RECON-1" in result.orders
+    assert result.orders["RAW-RECON-1"]["amount_inc_tax"] == Decimal("113.00")
+    assert [ln["raw_line_id"] for ln in result.lines] == ["LINE-1"]
+    assert any(e.error_type == "missing_raw_id" and e.row_no == 1
+               for e in result.errors)
+    assert not [e for e in result.errors if e.error_type == "invalid_head_value"]
+
+
+def test_transform_bad_head_value_without_fallback_blocks_order(tmp_path):
+    """D-0050：无同字段有效观测的非法单头值 → 硬错误且该单头/行都不入计划。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [_row(税金="乱码")])
+    result = _transform_file(path)
+    assert "RAW-RECON-1" not in result.orders
+    assert result.lines == []
+    errors = [e for e in result.errors if e.error_type == "invalid_head_value"]
+    assert len(errors) == 1
+    assert "税金" in errors[0].error_detail and "乱码" in errors[0].error_detail
+
+
+def test_transform_rejected_document_does_not_block_other_documents(tmp_path):
+    """D-0050：被拒单据不写入，但同文件其他合法单据照常导入。"""
+    bad = _row(订单金额="不是金额")
+    good = _row(**{
+        "订单编号(必填)": "XSDD-20260630-0002",
+        "数据ID(不可修改)": "RAW-RECON-2",
+        LINE_ID: "LINE-2", LINE_NO: 2,
+    })
+    path = _write_xlsx(tmp_path / "s.xlsx", [bad, good])
+    result = _transform_file(path)
+    assert "RAW-RECON-1" not in result.orders
+    assert "RAW-RECON-2" in result.orders
+    assert [ln["raw_line_id"] for ln in result.lines] == ["LINE-2"]
+    assert result.orders["RAW-RECON-2"]["amount_inc_tax"] == Decimal("113.00")
+
+
+def test_transform_sales_explicit_rate_conflict_rejects_order(tmp_path):
+    """D-0050：显式税率同单不同有效值 → 整单拒绝，不取首值/不替换成推导率。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(税率="13%"),
+        _second_line(税率="6%")])
+    result = _transform_file(path)
+    assert "RAW-RECON-1" not in result.orders
+    assert result.lines == []
+    conflicts = [e for e in result.errors if e.error_type == "head_value_conflict"]
+    assert len(conflicts) == 1
+    assert "税率" in conflicts[0].error_detail
+    assert not [e for e in result.errors if e.error_type == "invalid_head_value"]
+
+
+def test_transform_sales_arithmetic_mismatch_kept_without_new_blocking(tmp_path):
+    """D-0050：不新增「不含税×税率=税金」等算术等式阻断，票面原值照常保留。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [_row(税率="6%")])
+    result = _transform_file(path)
     head = result.orders["RAW-RECON-1"]
-    assert head["amount_inc_tax"] == Decimal("113.00")  # 首行坏值不锁空，次行好值补位
+    assert head["tax_rate"] == Decimal("0.0600")
+    assert head["amount_ex_tax"] == Decimal("100.00")
     assert head["tax_amount"] == Decimal("13.00")
-    assert head["is_tax_inclusive"] is True             # 次行 含税 补位（首行无法识别）
-    assert not result.errors                           # 三件套坏值静默（既有口径）
+    assert head["amount_inc_tax"] == Decimal("113.00")
+    assert not [e for e in result.errors
+                if e.error_type in {"invalid_head_value", "head_value_conflict",
+                                    "sales_head_conflict"}]
+
+
+def test_transform_sales_rate_not_derived_by_mixing_rows(tmp_path):
+    """D-0050：不含税额与税金来自不同源行时不得拼接推导税率。"""
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(订单金额=None, 不含税金额=Decimal("100.00"),
+             税率=None, 税金=None),
+        _second_line(订单金额=None, 不含税金额=None,
+                     税率=None, 税金=Decimal("13.00"))])
+    result = _transform_file(path)
+    head = result.orders["RAW-RECON-1"]
+    assert head["amount_ex_tax"] == Decimal("100.00")
+    assert head["tax_amount"] == Decimal("13.00")
+    assert head["tax_rate"] is None
+    assert not [e for e in result.errors
+                if e.error_type in {"invalid_head_value", "head_value_conflict"}]
 
 
 def test_transform_multi_sheet_with_hidden_sheet(tmp_path):
@@ -659,3 +807,100 @@ def test_purchase_import_leaves_snapshots_untouched(db, tmp_path):
                 "sales_recon_snapshots_missing_columns", "sales_tax_columns_backfilled"):
         assert key not in batch.report_json
     assert _snapshots(db) == []
+
+
+def test_upsert_invalid_head_value_does_not_overwrite_existing(db, tmp_path):
+    """D-0050：非空非法单头金额整单阻断，既有票面原值不被 NULL 覆盖。"""
+    path1 = _write_xlsx(tmp_path / "a.xlsx", [_row()])
+    pipeline.run_import(db, path1, "a.xlsx")
+    db.commit()
+    order = db.scalar(select(FSalesOrder).where(
+        FSalesOrder.raw_order_id == "RAW-RECON-1"))
+    before = (order.amount_inc_tax, order.amount_ex_tax,
+              order.tax_amount, order.tax_rate)
+    batch_id_before = order.import_batch_id
+    snapshots_before = len(_snapshots(db))
+    lines_before = db.scalar(select(func.count()).select_from(FSalesLine))
+
+    path2 = _write_xlsx(tmp_path / "b.xlsx", [_row(订单金额="不是金额")])
+    # A/C 集成契约：问题单据保留旧事实；本文件只有该问题单据，因此批次明确失败。
+    with pytest.raises(reader.ReaderError) as exc_info:
+        pipeline.run_import(db, path2, "b.xlsx", mode="upsert")
+    db.commit()
+    assert exc_info.value.code == "no_importable_rows"
+    batch = db.scalar(select(SysImportBatch).order_by(SysImportBatch.id.desc()))
+    assert batch.status == "failed"
+    db.refresh(order)
+    assert (order.amount_inc_tax, order.amount_ex_tax,
+            order.tax_amount, order.tax_rate) == before
+    assert order.import_batch_id == batch_id_before
+    assert len(_snapshots(db)) == snapshots_before       # 被拒单据不追加快照
+    assert db.scalar(select(func.count()).select_from(FSalesLine)) == lines_before
+    types = {e["error_type"] for e in batch.report_json["errors_preview"]}
+    assert "invalid_head_value" in types
+
+
+def test_upsert_conflicting_head_values_does_not_overwrite_existing(db, tmp_path):
+    """D-0050：同单金额跨行冲突整单拒绝，既有事实与快照均不更新。"""
+    path1 = _write_xlsx(tmp_path / "a.xlsx", [_row()])
+    pipeline.run_import(db, path1, "a.xlsx")
+    db.commit()
+    order = db.scalar(select(FSalesOrder).where(
+        FSalesOrder.raw_order_id == "RAW-RECON-1"))
+    before = (order.amount_inc_tax, order.amount_ex_tax,
+              order.tax_amount, order.tax_rate)
+    snapshots_before = len(_snapshots(db))
+
+    path2 = _write_xlsx(tmp_path / "b.xlsx", [
+        _row(订单金额=Decimal("113.00")),
+        _second_line(订单金额=Decimal("226.00"))])
+    with pytest.raises(reader.ReaderError) as exc_info:
+        pipeline.run_import(db, path2, "b.xlsx", mode="upsert")
+    db.commit()
+    assert exc_info.value.code == "no_importable_rows"
+    batch = db.scalar(select(SysImportBatch).order_by(SysImportBatch.id.desc()))
+    assert batch.status == "failed"
+    db.refresh(order)
+    assert (order.amount_inc_tax, order.amount_ex_tax,
+            order.tax_amount, order.tax_rate) == before
+    assert len(_snapshots(db)) == snapshots_before
+    types = {e["error_type"] for e in batch.report_json["errors_preview"]}
+    assert "head_value_conflict" in types
+
+
+def test_missing_line_id_bad_amount_rejects_document_without_facts(
+    db, tmp_path
+):
+    """D-0050：缺明细ID行的非法金额使整单零头/零行/零快照/零合同契约。
+
+    同单合法行不能豁免，其他合法单据 B 照常入库。
+    """
+    path = _write_xlsx(tmp_path / "mixed.xlsx", [
+        _row(**{LINE_ID: None, "订单金额": "不是金额"}),
+        _second_line(),
+        _row(**{
+            "订单编号(必填)": "XSDD-20260630-0002",
+            "数据ID(不可修改)": "RAW-RECON-2",
+            LINE_ID: "LINE-B",
+        }),
+    ])
+    batch = pipeline.run_import(db, path, "mixed.xlsx")
+    db.commit()
+
+    assert db.scalar(
+        select(func.count()).select_from(FSalesOrder).where(
+            FSalesOrder.raw_order_id == "RAW-RECON-1")
+    ) == 0
+    assert db.scalar(
+        select(func.count()).select_from(FSalesLine).where(
+            FSalesLine.raw_line_id.in_(["LINE-2"]))
+    ) == 0
+    assert not [s for s in _snapshots(db) if s.raw_order_id == "RAW-RECON-1"]
+    assert db.scalar(
+        select(func.count()).select_from(MaintenanceContractWorkbookState)
+    ) == 0
+    good = db.scalar(select(FSalesOrder).where(
+        FSalesOrder.raw_order_id == "RAW-RECON-2"))
+    assert good is not None
+    types = {e["error_type"] for e in batch.report_json["errors_preview"]}
+    assert {"missing_raw_id", "invalid_head_value"} <= types

@@ -23,6 +23,12 @@ def test_parse_tax_inclusive():
     assert cleaner.parse_tax_inclusive("未税") is False
     assert cleaner.parse_tax_inclusive(None) is None
     assert cleaner.parse_tax_inclusive("") is None
+    # D-0050：与合同适配器受控词表对齐，明确标记不再静默 NULL
+    for token in ("是", "true", "TRUE", "yes", "Y", "1"):
+        assert cleaner.parse_tax_inclusive(token) is True, token
+    for token in ("否", "false", "FALSE", "no", "N", "0"):
+        assert cleaner.parse_tax_inclusive(token) is False, token
+    assert cleaner.parse_tax_inclusive("随便写的") is None   # 任意文本不猜含义
 
 
 def test_derive_tax_rate():

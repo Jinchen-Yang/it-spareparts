@@ -133,17 +133,23 @@ def _aliased_headers(headers: list, column_aliases: dict | None) -> list:
         raise LedgerParseError(str(exc)) from exc
 
 
-def _header_index(headers: list, name: str) -> int | None:
-    variants = {
-        name,
-        f"{name}(必填)",
-        f"{name}(不可修改)",
-        f"{name}(含税)",
-    }
-    for idx, value in enumerate(headers, 1):
-        if value in variants:
-            return idx
-    return None
+def _header_index(headers: list, name: str, *alternate_names: str) -> int | None:
+    """按 canonical 名称定位列；同字段多个别名/变体并存时明确拒绝。"""
+    variants = set()
+    for candidate in (name, *alternate_names):
+        variants.update({
+            candidate,
+            f"{candidate}(必填)",
+            f"{candidate}(不可修改)",
+            f"{candidate}(含税)",
+        })
+    matches = [
+        (idx, value) for idx, value in enumerate(headers, 1) if value in variants
+    ]
+    if len(matches) > 1:
+        detail = "、".join(f"「{value}」第 {idx} 列" for idx, value in matches)
+        raise LedgerParseError(f"字段「{name}」存在重复列：{detail}")
+    return matches[0][0] if matches else None
 
 
 def _cell(row: tuple, index: int | None) -> str | None:
@@ -198,8 +204,33 @@ def _parse_old_ledger(workbook, column_aliases: dict | None = None):
             time_cols.append((int(match.group(1)), idx))
         elif name == "回款金额":
             amount_cols.append(idx)
-    time_cols.sort()
-    pairs = list(zip(time_cols, amount_cols))[:24]
+
+    if len(time_cols) > 24:
+        raise LedgerParseError(
+            f"「维保项目清单」回款计划为 {len(time_cols)} 组，超过 24 组上限，拒绝截取")
+    if len(time_cols) != len(amount_cols):
+        raise LedgerParseError(
+            "「维保项目清单」回款时间列与回款金额列数量不一致"
+            f"（{len(time_cols)} 组时间 / {len(amount_cols)} 列金额），拒绝猜测配对")
+    sequences: set[int] = set()
+    amount_positions = set(amount_cols)
+    paired_amount_positions: set[int] = set()
+    for sequence, time_idx in time_cols:
+        if not 1 <= sequence <= 24:
+            raise LedgerParseError(f"「回款时间{sequence}」期次无效（应为 1-24）")
+        if sequence in sequences:
+            raise LedgerParseError(f"「回款时间{sequence}」期次重复，拒绝配对")
+        sequences.add(sequence)
+        # 每个回款时间必须紧跟自己的回款金额；不能先按期次排序再与物理顺序
+        # 的金额列 zip（列组调换会把 11 月的金额配到 12 月）。
+        if time_idx + 1 not in amount_positions:
+            raise LedgerParseError(
+                f"「回款时间{sequence}」后缺少相邻的「回款金额」列，拒绝配对")
+        paired_amount_positions.add(time_idx + 1)
+    if paired_amount_positions != amount_positions:
+        raise LedgerParseError(
+            "「维保项目清单」存在没有相邻回款时间列的回款金额列，拒绝配对")
+    pairs = sorted((sequence, time_idx) for sequence, time_idx in time_cols)
 
     contract_rows: list[ContractRowData] = []
     plan_rows: list[PlanRowData] = []
@@ -211,7 +242,8 @@ def _parse_old_ledger(workbook, column_aliases: dict | None = None):
         order_no = _clean_order_no(values["订单编号"])
         if not order_no:
             issues.append("订单编号缺失或格式异常")
-        for (seq, time_idx), amount_idx in pairs:
+        for seq, time_idx in pairs:
+            amount_idx = time_idx + 1  # 已在表头阶段校验为相邻回款金额列
             time_raw = _cell(row, time_idx)
             amount_raw = _cell(row, amount_idx)
             if not time_raw and not amount_raw:
@@ -243,11 +275,9 @@ def _parse_expense_sheet(sheet, column_aliases: dict | None = None) -> list[Expe
     )
     indexes: dict[str, int | None] = {}
     for name in _EXPENSE_HEADERS:
-        index = _header_index(headers, name)
-        if index is None:
-            # 兼容「报销明细.报销金额」「报销明细.费用分类」前缀变体
-            index = _header_index(headers, f"报销明细.{name}")
-        indexes[name] = index
+        # 兼容「报销明细.报销金额」「报销明细.费用分类」前缀变体；裸名与前缀名
+        # 同时出现属于同字段歧义，必须在 _header_index 里拒绝而不是取首个。
+        indexes[name] = _header_index(headers, name, f"报销明细.{name}")
     result: list[ExpenseRowData] = []
     for row_no, row in enumerate(rows[1:], 2):
         if not _non_empty_row(row):

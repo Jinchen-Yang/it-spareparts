@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import select
 
 from app.models.dimensions import DimPart
@@ -273,6 +273,113 @@ def test_parse_rejects_missing_columns():
     wb.save(buffer)
     with pytest.raises(ckd.CkdParseError):
         ckd.parse_ckd_workbook(buffer.getvalue(), "x.xlsx")
+
+
+def test_parse_rejects_duplicate_declared_header():
+    headers = ckd._HEAD_COLUMNS + ["备注"] + ckd._LINE_COLUMNS
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.append(["F0000001"] * len(headers))
+    ws.append(headers)
+    ws.append([""] * len(ckd._HEAD_COLUMNS))
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    with pytest.raises(ckd.CkdParseError, match="重复映射"):
+        ckd.parse_ckd_workbook(buffer.getvalue(), "发货单.xlsx")
+
+
+def test_parse_rejects_plain_text_over_4096_instead_of_dropping_it():
+    head = _HEAD_MAINT.copy()
+    head[13] = "x" * 4097  # 备注
+    data = _ckd_workbook_bytes(rows=[{"head": head, "lines": []}])
+    with pytest.raises(ckd.CkdParseError, match=r"第 3 行「备注」.*4096"):
+        ckd.parse_ckd_workbook(data, "发货单.xlsx")
+
+
+def test_parse_rejects_oversized_mapped_text_on_continuation_row():
+    """续行没有出库单号，但映射列上的超长文本仍要整单拒绝。"""
+    data = _ckd_workbook_bytes(rows=[{
+        "head": _HEAD_MAINT,
+        "lines": [["LID-1", "1", "", "", "", "02311AYV", "", "", "", "",
+                   "", "", "", "", "2", "100", "200", "是"]],
+    }])
+    wb = load_workbook(io.BytesIO(data))
+    ws = wb.active
+    row: list = [None] * (len(ckd._HEAD_COLUMNS) + len(ckd._LINE_COLUMNS))
+    row[ckd._HEAD_COLUMNS.index("备注")] = "x" * 4097
+    row[len(ckd._HEAD_COLUMNS) + ckd._LINE_COLUMNS.index("备件明细.备件PN")] = "02311AYV"
+    row[len(ckd._HEAD_COLUMNS) + ckd._LINE_COLUMNS.index("备件明细.出库数量")] = "1"
+    ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    with pytest.raises(ckd.CkdParseError, match=r"第 5 行「备注」.*4096"):
+        ckd.parse_ckd_workbook(buffer.getvalue(), "发货单.xlsx")
+
+
+def test_parse_ckd_streaming_matches_normal_parse(monkeypatch):
+    """开启超长文本信号后，正常大文件结果仍与普通模式一致。"""
+    from app.services import import_safety
+
+    data = _ckd_workbook_bytes(rows=[{
+        "head": _HEAD_MAINT,
+        "lines": [["LID-1", "1", "", "", "", "02311AYV", "", "", "", "",
+                   "", "", "", "", "2", "100", "200", "是"]],
+    }])
+    normal = ckd.parse_ckd_workbook(data, "发货单.xlsx")
+    monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
+    streamed = ckd.parse_ckd_workbook(data, "发货单.xlsx")
+    assert [h.values for h in streamed["heads"]] == [
+        h.values for h in normal["heads"]]
+    assert [line.values for line in streamed["heads"][0].lines] == [
+        line.values for line in normal["heads"][0].lines]
+
+
+def test_parse_ckd_streaming_rejects_oversized_mapped_text(monkeypatch):
+    """大文件流式路径不能把超长映射文本丢成 None。"""
+    from app.services import import_safety
+
+    head = _HEAD_MAINT.copy()
+    head[13] = "x" * 4097
+    data = _ckd_workbook_bytes(rows=[{"head": head, "lines": []}])
+    monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
+    with pytest.raises(ckd.CkdParseError, match=r"第 3 行「备注」.*4096"):
+        ckd.parse_ckd_workbook(data, "发货单.xlsx")
+
+
+def test_parse_ckd_streaming_rejects_row_whose_only_value_is_oversize(monkeypatch):
+    """整行只有超长信号一个非空值：不能按空行跳过，必须进入映射列校验。"""
+    from app.services import import_safety
+
+    data = _ckd_workbook_bytes(rows=[{"head": _HEAD_MAINT, "lines": []}])
+    wb = load_workbook(io.BytesIO(data))
+    ws = wb.active
+    row: list = [None] * (len(ckd._HEAD_COLUMNS) + len(ckd._LINE_COLUMNS))
+    row[ckd._HEAD_COLUMNS.index("备注")] = "x" * 4097
+    ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
+    with pytest.raises(ckd.CkdParseError, match=r"第 4 行「备注」.*4096"):
+        ckd.parse_ckd_workbook(buffer.getvalue(), "发货单.xlsx")
+
+
+def test_parse_ckd_streaming_ignores_oversized_unmapped_cell(monkeypatch):
+    """未映射列的超长信号仍按非事实忽略，不能变成解析错误。"""
+    from app.services import import_safety
+
+    data = _ckd_workbook_bytes(rows=[{"head": _HEAD_MAINT, "lines": []}])
+    wb = load_workbook(io.BytesIO(data))
+    ws = wb.active
+    row: list = [None] * (len(ckd._HEAD_COLUMNS) + len(ckd._LINE_COLUMNS) + 1)
+    row[-1] = "y" * 4097
+    ws.append(row)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
+    parsed = ckd.parse_ckd_workbook(buffer.getvalue(), "发货单.xlsx")
+    assert len(parsed["heads"]) == 1
+    assert parsed["heads"][0].values["出库单号"] == "CKD-20260806-0014"
 
 
 def test_apply_rejects_cross_batch_lines(db, wbdd_project):

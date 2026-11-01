@@ -2625,6 +2625,8 @@ def order_lines(
                 "demand_pending_return_qty": ln.demand_pending_return_qty,
                 "change_warehouse_purchase_qty": ln.change_warehouse_purchase_qty,
                 "return_old_part": ln.return_old_part,
+                # D-0050：个别调整发货仓原文（可能是仓库名，不等于布尔标记）
+                "adjust_warehouse_raw": ln.adjust_warehouse_raw,
                 "serial_numbers": ln.serial_numbers,
                 # 成本与取价来源同属成本数据组（无权限时整体 restricted，无侧信道）
                 "known_apply_cost_inc_tax": (cost_stat(inc["amount"], inc["tier"])),

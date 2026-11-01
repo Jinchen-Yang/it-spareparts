@@ -1298,27 +1298,20 @@ class SalesContractAmountAdapter(HeaderAdapter):
             current_relations = all_contracts.get(norm, [])
             contract = safe_contracts.get(norm)
             if contract is not None:
+                # 预览只展示本合同会写的字段；销售票面不由本适配器写入。
                 before = {
                     "contract_amount_inc_tax": contract.amount_inc_tax,
                     "contract_version": contract.version,
-                    "sales_amount_ex_tax": sales_amount_before,
-                    "sales_tax_rate": sales_rate_before,
                 }
                 after = {
                     "contract_amount_inc_tax": inc,
-                    "sales_amount_ex_tax": amount_ex,
-                    "sales_tax_rate": rate,
                 }
-                action = "noop" if (
-                    contract.amount_inc_tax == inc
-                    and (
-                        not sync_sales
-                        or (
-                            sales_amount_before == amount_ex
-                            and sales_rate_before == rate
-                        )
-                    )
-                ) else "update_contract"
+                # D-0050：合同适配器不再写销售原值，noop 只由合同额决定；
+                # 销售票面差异不触发合同版本 bump，也不被这里“同步”覆盖。
+                action = (
+                    "noop" if contract.amount_inc_tax == inc
+                    else "update_contract"
+                )
                 contract_project = projects_by_id.get(contract.project_id)
                 operation.update(
                     action=action,
@@ -1391,16 +1384,8 @@ class SalesContractAmountAdapter(HeaderAdapter):
                         expected_project_version=evidence[0]["project_version"],
                         expected_assignment_fingerprint=_assignment_fingerprint(evidence),
                     )
-                    before = {
-                        "contract_amount_inc_tax": None,
-                        "sales_amount_ex_tax": sales_amount_before,
-                        "sales_tax_rate": sales_rate_before,
-                    }
-                    after = {
-                        "contract_amount_inc_tax": inc,
-                        "sales_amount_ex_tax": amount_ex,
-                        "sales_tax_rate": rate,
-                    }
+                    before = {"contract_amount_inc_tax": None}
+                    after = {"contract_amount_inc_tax": inc}
                     action = "create_contract"
                 else:
                     # Never infer a project from customer/name text.  Only an
@@ -1473,14 +1458,10 @@ class SalesContractAmountAdapter(HeaderAdapter):
                     before = {
                         "project": None,
                         "contract_amount_inc_tax": None,
-                        "sales_amount_ex_tax": sales_amount_before,
-                        "sales_tax_rate": sales_rate_before,
                     }
                     after = {
                         "project": metadata,
                         "contract_amount_inc_tax": inc,
-                        "sales_amount_ex_tax": amount_ex,
-                        "sales_tax_rate": rate,
                     }
                     action = "create_project"
 
@@ -1624,8 +1605,6 @@ class SalesContractAmountAdapter(HeaderAdapter):
                         "预览后销售事实匹配状态已变化，请重新预览"
                     )
             new_inc = Decimal(item["new_contract_amount_inc_tax"])
-            new_ex = Decimal(item["new_sales_amount_ex_tax"])
-            new_rate = Decimal(item["new_sales_tax_rate"])
             if item["action"] == "noop":
                 contract = db.get(
                     MaintenanceProjectContract, item["project_contract_id"]
@@ -1813,27 +1792,9 @@ class SalesContractAmountAdapter(HeaderAdapter):
                 # bump for an amount-noop row that contributes a new peer name.
                 operations.bump_workbook_revision(db, project_id=project_id)
 
-            if sales is not None:
-                before = {
-                    "amount_ex_tax": _jsonable(sales.amount_ex_tax),
-                    "tax_rate": _jsonable(sales.tax_rate),
-                }
-                sales.amount_ex_tax = new_ex
-                sales.tax_rate = new_rate
-                after = {
-                    "amount_ex_tax": _jsonable(new_ex),
-                    "tax_rate": _jsonable(new_rate),
-                }
-                if before != after:
-                    db.add(SysAuditLog(
-                        entity_type="sales_order_contract_amount",
-                        entity_id=sales.id,
-                        action="overwrite",
-                        before_json=before,
-                        after_json=after,
-                        reason=audit_reason,
-                        operated_by=operated_by,
-                    ))
+            # D-0050：合同适配器可生成合同金额，但不得把合同派生的未税/税率
+            # 写回既有 f_sales_order。销售票面原值由通用销售导入/原件拥有；
+            # 这里的 sales 只用于身份/并发校验，不再是写入目标。
             writes += 1
             project_ids.add(project_id)
         return {

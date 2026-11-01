@@ -8,6 +8,7 @@ from sqlalchemy import event, select
 
 from app import config
 from app.config import get_settings
+from app.etl import pipeline
 from app.models.maintenance import FMaintenanceOrder
 from app.models.sales import FSalesOrder
 from app.models.system import SysImportBatch
@@ -22,6 +23,7 @@ from tests.boss_board_helpers import (
     purchaser_client,
     set_costs,
 )
+from tests.wbdd_fixtures import COLUMNS_91, make_rows, write_workbook
 
 
 @pytest.fixture(autouse=True)
@@ -354,6 +356,36 @@ def test_order_and_line_drilldown(db, tmp_path):
     assert float(line["supplied_qty"]) == 2.0
     assert line["consumed_qty"] is None
     assert line["known_apply_cost_inc_tax"]["state"] == "ready"
+
+
+def test_order_line_evidence_returns_long_adjust_warehouse_raw_and_return_text(
+    db, tmp_path
+):
+    """D-0050：个别调整发货仓原文与退返旧件均按源文本完整返回，不截断。
+
+    仓位列可能是仓库名而非布尔；证据接口只读原样返回，null 也保持 null。
+    """
+    long_warehouse = "华南仓-" + "仓位原文" * 400
+    long_return = "旧件-" + "待返描述" * 600
+    rows = make_rows(orders=1, lines_per_order=2)
+    rows[0]["需求明细.个别调整发货仓"] = long_warehouse
+    rows[0]["需求明细.退返旧件"] = long_return
+    rows[1]["需求明细.个别调整发货仓"] = ""
+    path = write_workbook(str(tmp_path / "long-line-text.xlsx"), COLUMNS_91, rows)
+    pipeline.run_import(db, path, "long-line-text.xlsx",
+                        uploaded_by="tester", mode="upsert")
+    db.commit()
+
+    order = db.scalar(select(FMaintenanceOrder))
+    response = boss_client(db, username="long-line-text").get(
+        f"/api/maintenance/boss-board/orders/{order.raw_order_id}/lines"
+    )
+    assert response.status_code == 200, response.text
+    by_id = {row["raw_line_id"]: row for row in response.json()["rows"]}
+    first = by_id["SYN-L001-1"]
+    assert first["adjust_warehouse_raw"] == long_warehouse
+    assert first["return_old_part"] == long_return
+    assert by_id["SYN-L001-2"]["adjust_warehouse_raw"] is None
 
 
 def test_order_line_evidence_is_strict_and_manual_uses_net_quantity(db, tmp_path):

@@ -224,3 +224,32 @@ def test_job_note_error_sanitized():
     huge = Exception("numeric field overflow\nDETAIL: ...\n[SQL: INSERT INTO f_purchase_order (" + "x" * 500000 + ")]")
     out = _short_err(huge)
     assert len(out) < 250 and "INSERT INTO" not in out
+
+
+def test_purchase_bad_head_amount_blocks_order_with_field_error(tmp_path):
+    """D-0050：采购单头非空非法金额不再静默 NULL，整单不入计划并留字段错误。"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append([
+        "采购单号(必填)", "数据ID(不可修改)", "采购日期(必填)", "采购人员(必填)",
+        "供应商(必填)", "批量采购(必填)", "不含税金额", "税率(必填)",
+        "是否含税(必填)", "税金", "采购金额", "数据状态",
+        "明细.数据ID(不可修改)", "明细.序号", "明细.产品名称(必填)",
+        "明细.采购数量(必填)", "明细.单价(必填)", "明细.合计金额",
+    ])
+    ws.append([
+        "CGDD-1", "P1", "2026-01-01", "采购员", "供应商", "备货",
+        "100", "13%", "含税", "13", "不是金额", "已生效",
+        "PL1", 1, "PN-1", 1, "113", "113",
+    ])
+    path = tmp_path / "purchase-bad-head.xlsx"
+    wb.save(path)
+
+    df, file_type = reader.read_excel(str(path))
+    assert file_type == mapping.PURCHASE
+    result = transform.transform(df, mapping.PURCHASE)
+    assert result.orders == {}
+    assert result.lines == []
+    errors = [e for e in result.errors if e.error_type == "invalid_head_value"]
+    assert len(errors) == 1
+    assert "采购金额" in errors[0].error_detail

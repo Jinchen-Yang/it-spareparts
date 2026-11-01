@@ -96,11 +96,11 @@ def test_selected_column_types(db):
     assert order_cols["head_demand_qty"].scale == 3
     assert isinstance(order_cols["change_warehouse_flag"], sa.Boolean)
     assert isinstance(order_cols["supply_deadline"], sa.Date)
-    assert isinstance(order_cols["receiver_phone"], sa.String)
-    assert order_cols["receiver_phone"].length == 32
+    # D-0050：展示文本列已扩 Text，避免源文本被静默截断。
+    assert isinstance(order_cols["receiver_phone"], sa.Text)
     assert isinstance(order_cols["receiver_address"], sa.Text)
     assert isinstance(line_cols["consumed_qty"], sa.Numeric)
     assert isinstance(line_cols["adjust_warehouse_flag"], sa.Boolean)
     assert isinstance(line_cols["line_note"], sa.Text)
-    assert isinstance(line_cols["whole_or_part"], sa.String)
-    assert line_cols["whole_or_part"].length == 8
+    assert isinstance(line_cols["whole_or_part"], sa.Text)
+    assert isinstance(line_cols["adjust_warehouse_raw"], sa.Text)
