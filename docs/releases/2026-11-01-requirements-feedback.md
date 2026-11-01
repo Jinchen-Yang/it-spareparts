@@ -103,3 +103,17 @@ FEEDBACK_RELEASE_PG_DRILL=1 python3 -m unittest discover -s .deploy/tests -p tes
 2026-11-01 开发机独立目录 `/home/cloudlay/work/requirements-20261101-01a1976c/release-safety` 完成复审修复后验证，受管进程真实 exit0，59项中57通过、2项旧 SQL drill 显式跳过，35.802秒；本次23项（22合成+1实际PG多场景演练）全部通过。真实PG15先后恢复旧头、新头两份合成全库，错误计数分支实际拒绝，追加审计后恢复门禁实际放行且保留新审计，篡改/删除旧审计和等数业务篡改均拒绝。随后只读 `docker ps -a` 确认本任务 `itsp-feedback-synthetic-` 容器零残留。全程未连接或写生产。
 
 证据日志 `release-safety/review-fixed-final.log` SHA256 `245be7876753b655f5e239c6667583f1298aef20c1af6555645ee94b3a21384a`；控制器 `b6a60c014727500ad207be4c4d94276eca84003240ecb25f2c7969b824146421`；测试 `7001808eda9ab574f755f1b6bee2e7e96289ab26ed9081196d56d3e6efc75b53`；未经改写的复用库 `60419aeb3ada6165c1968c8af8deffb7d4db30224077eebb94b79898193fda2f`。这是控制器开发证据，不替代最终候选镜像、真实认证 HTTP 冒烟、实际点按、精确提交 CI 或生产备份/恢复回执。
+
+## 精确合成候选与兼容验证
+
+2026-11-01 的开发验收候选为 `f84c672250f5dfd7f5816533a0abf63fa4632850`，Git tree `59ca4a0e6621d2fa9b86513ac24007338992d1f6`，1,906 个文件逐一按 Git blob 核对原始字节。应用版本为1.43.0，候选独立库 `spareparts_feedback_dev`，仅有合成数据。测试源码/运行目录与其他测试进程分开，更新候选未重置已登记事实。
+
+- 前端完整回归204个文件、2,436项全部通过；未放宽用例超时，开发机限制4个worker避免共享CPU争用。TypeScript、Vite构建及生产依赖审计通过。首次完整运行发现采购新定位仍保留旧分组，下钻清理修复后定向与完整复验均通过。
+- 迁移链 `upgrade head`、ORM零漂移 `check` 和单头检查通过，目标为 `c7e1a3b5d9f2`。业务定向回归与发布安全验证分别留日志；完整后端仍在运行，不能将定向结果写成完整通过。
+- Linux归档修复后，部署脚本/监控/边缘控制的124项测试通过、1项按既有条件跳过。早先 Windows 默认 `git archive` 受 `core.autocrlf` 影响引入CRLF，导致shell测试失败；改用 `git -c core.autocrlf=false -c core.eol=lf archive` 并逐字节校验后重跑。该失败属于验证制品准备，未用改变断言或生产脚本规避。
+- 精确候选完成24项接口/交付检查；新的发布只读smoke在后端23项、前端22项全部通过。前后核对所有非 `sys_access_log` 表逐行摘要及旧审计水位，均不变，保留32条真实HTTP新增访问审计。最新回执 `release-safety/readonly-smoke-dev-receipt.json` SHA256为 `381a93b72af3cb583ebb1fb84aa5029fc663485b1cbb87b99569ef4ba7849d6c`。
+- 原生 `gpt-6-astra` 独立复审覆盖三批业务改动、发布控制器及构建/smoke准备脚本。已修复规范XSDD漏关联、审计阻断回退和构建输入校验后被替换的问题，并逐项二次复核；当前无剩余可操作P1/P2。实际用户点按尚待反馈，代理页面检查只计开发验证。
+
+有限旧应用回退的实测使用精确旧提交 `e6cfd25c51bc19c1f80d0bad23037d71e6d2aa0e`，1,874个文件逐blob一致，归档SHA256 `7207a5237827240a6f3548aeb5bbf22efdc16c79fa3d7faa6cb3ec3b4b2ebeac`。在本任务独立 `spareparts_feedback_oldcompat_gitbytes` 库（由合成候选一致性dump恢复）启动旧应用，schema前后始终为c7；29项真实HTTP读取/权限检查通过，140张业务与状态表摘要不变。认证、访问/失败审计和请求诊断另列，不将真实登录的系统写入称为零写入。旧应用完成lifespan shutdown后受监督SIGTERM退出，验证器实际exit0，独立18501端口已释放。此证据限定旧应用启动、既有读取与权限防护，不承诺所有旧写路径或保留新版本入口。
+
+以上完整日志和回执位于开发机本任务独占目录及控制机 `.tmp/requirements-audit-20261101/oldcompat-gitbytes-evidence`。最终main/标签/镜像、用户验收结果、必需CI与生产恢复收据仍须在实际完成后绑定，当前不宣称生产已变更。
