@@ -448,12 +448,18 @@ def test_sales_tax_flag_blank_target_is_filled_by_legal_alias(tmp_path):
     [(1.0, "是", True), (0.0, "否", False)],
     ids=["numeric-1.0", "numeric-0.0"],
 )
-@pytest.mark.parametrize("storage", ["shared", "inline"], ids=["shared", "inline"])
+@pytest.mark.parametrize(
+    "storage", ["shared", "inline", "mixed"], ids=["shared", "inline", "mixed"],
+)
 def test_numeric_tax_flag_xml_matches_alias_across_readers(
     tmp_path, business, value, alias, expected, storage,
 ):
-    """真实 XLSX：源 <v> 为 1.0/0.0 时，shared 与 inline/mixed 两条读取入口
-    都必须把它当受控税标记，并与同义文本列（是/否）一致；次行留空覆盖缺行。
+    """真实 XLSX：源 <v> 为 1.0/0.0 时，三种真实存储布局都必须把它当受控税标记，
+    并与同义文本列（是/否）一致；次行留空覆盖缺行。
+
+    三种布局：全部 sharedStrings（openpyxl 读取入口）；全部 inlineStr
+    （xlsx_stream 入口）；sharedStrings 与个别 inlineStr 混合（同样走
+    xlsx_stream，但同表 t="s" 与 t="inlineStr" 并存，别名列须逐格解析）。
 
     openpyxl 写 float 常序列化为 <v>1</v>，这里直接改回真实源形态并断言原 XML，
     避免「夹具其实写的是整数」的假覆盖。
@@ -466,6 +472,9 @@ def test_numeric_tax_flag_xml_matches_alias_across_readers(
     alias_ref = f"{get_column_letter(headers.index(alias_column) + 1)}3"
     if storage == "shared":
         _convert_inline_strings_to_shared(path)
+    elif storage == "mixed":
+        _convert_inline_strings_to_shared(path)
+        _force_inline_cell(path, alias_ref, alias)
     else:
         _force_inline_cell(path, alias_ref, alias)
 
@@ -474,6 +483,11 @@ def test_numeric_tax_flag_xml_matches_alias_across_readers(
         assert re.search(rf'<c r="{ref}"[^>]*><v>{value:.1f}</v></c>', xml)
         if storage == "shared":
             assert "inlineStr" not in xml
+            assert "xl/sharedStrings.xml" in archive.namelist()
+        elif storage == "mixed":
+            assert 't="s"' in xml
+            assert 't="inlineStr"' in xml
+            assert re.search(rf'<c r="{alias_ref}"[^>]*t="inlineStr"', xml)
             assert "xl/sharedStrings.xml" in archive.namelist()
         else:
             assert 't="inlineStr"' in xml
