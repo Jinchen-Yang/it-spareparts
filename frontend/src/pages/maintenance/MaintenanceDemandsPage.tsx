@@ -347,6 +347,9 @@ export function MaintenanceDemandsPage() {
         subtitle="上传氚云需求单原件，更新已有资料，并核对本次上传范围内的缺失单据和明细。" />
 
       <Card title="氚云快照同步">
+        <Alert type="info" showIcon style={{ marginBottom: 12 }}
+          message="取消、缺项和人工保护按不同路径核对"
+          description="原件中已取消的单据：上传后到项目的备件与需求单查看已取消影响。原件中删去的整单或明细：在本页缺项清单选择确认。人工更正过的字段继续保护，不会因重传自动覆盖；需要采用新原件值时先核对保护来源。" />
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Space wrap size={12} align="center">
             {canEditLines ? (

@@ -25,6 +25,7 @@ from app.services import maintenance_return_request_summary as return_summaries
 
 
 router = APIRouter(prefix="/maintenance/demands", tags=["maintenance"])
+beta_router = APIRouter(prefix="/maintenance/demands", tags=["maintenance"])
 logger = logging.getLogger(__name__)
 
 
@@ -216,7 +217,7 @@ def void_fast(
         raise
 
 
-@router.post("/delete-intents", status_code=status.HTTP_201_CREATED)
+@beta_router.post("/delete-intents", status_code=status.HTTP_201_CREATED)
 def create_delete_intent(
     body: DeleteIntentCreateRequest,
     db: Session = Depends(get_db),
@@ -247,7 +248,7 @@ def create_delete_intent(
         raise
 
 
-@router.get("/delete-intents/{intent_id}")
+@beta_router.get("/delete-intents/{intent_id}")
 def get_delete_intent(
     intent_id: str = Path(..., min_length=36, max_length=36),
     db: Session = Depends(get_db),
@@ -310,7 +311,7 @@ def _intent_action(
         raise
 
 
-@router.post("/delete-intents/{intent_id}/arm")
+@beta_router.post("/delete-intents/{intent_id}/arm")
 def arm_delete_intent(
     body: DeleteIntentActionRequest,
     intent_id: str = Path(..., min_length=36, max_length=36),
@@ -330,7 +331,7 @@ def arm_delete_intent(
     )
 
 
-@router.post("/delete-intents/{intent_id}/execute")
+@beta_router.post("/delete-intents/{intent_id}/execute")
 def execute_delete_intent(
     body: DeleteIntentActionRequest,
     intent_id: str = Path(..., min_length=36, max_length=36),
@@ -353,7 +354,7 @@ def execute_delete_intent(
     )
 
 
-@router.post("/delete-intents/{intent_id}/cancel")
+@beta_router.post("/delete-intents/{intent_id}/cancel")
 def cancel_delete_intent(
     body: DeleteIntentActionRequest,
     intent_id: str = Path(..., min_length=36, max_length=36),
