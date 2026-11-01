@@ -2,6 +2,7 @@
 
 全部用测试生成的小 xlsx（双表头：第 0 行 F 码、第 1 行中文列名），无真实客户数据。
 """
+import copy
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -928,6 +929,23 @@ def test_purchase_import_leaves_snapshots_untouched(db, tmp_path):
     assert _snapshots(db) == []
 
 
+def _fact_tables_snapshot(db):
+    """D-0050 事实保全：三张销售事实表按主键稳定排序的全字段快照。
+
+    直接按表 ``select`` 读取数据库并深拷贝，不复用 ORM identity-map 对象；
+    PK/id 集合、每个字段（金额、import_batch_id 等）都参与比较，原地改值与
+    等量删插同样会暴露。回执表（SysImportBatch 等）不在保护范围。
+    """
+    snapshot = {}
+    for model in (FSalesOrder, FSalesLine, FSalesReconciliationSnapshot):
+        table = model.__table__
+        rows = db.execute(
+            select(table).order_by(*table.primary_key.columns)
+        ).mappings()
+        snapshot[table.name] = tuple(copy.deepcopy(dict(row)) for row in rows)
+    return snapshot
+
+
 def test_upsert_invalid_head_value_does_not_overwrite_existing(db, tmp_path):
     """D-0050：非空非法单头金额整单阻断，既有票面原值不被 NULL 覆盖。"""
     path1 = _write_xlsx(tmp_path / "a.xlsx", [_row()])
@@ -940,12 +958,21 @@ def test_upsert_invalid_head_value_does_not_overwrite_existing(db, tmp_path):
     batch_id_before = order.import_batch_id
     snapshots_before = len(_snapshots(db))
     lines_before = db.scalar(select(func.count()).select_from(FSalesLine))
+    facts_before = _fact_tables_snapshot(db)
 
-    path2 = _write_xlsx(tmp_path / "b.xlsx", [_row(订单金额="不是金额")])
+    # 问题文件沿用 LINE-1 身份，但明细 qty/单价与对账内容均改为另一组合法值：
+    # 若被误 upsert，三张事实表的字段比较必然与快照不同，而非只在数量上相等。
+    path2 = _write_xlsx(tmp_path / "b.xlsx", [_row(
+        订单金额="不是金额",
+        已对账金额=Decimal("40.00"), 待对账金额=Decimal("73.00"),
+        **{"订单明细.订单数量": 2, "订单明细.单价": Decimal("56.50"),
+           "修改时间(必填)": "2026-08-01 10:00:00"},
+    )])
     # A/C 集成契约：问题单据保留旧事实；本文件只有该问题单据，因此批次明确失败。
     with pytest.raises(reader.ReaderError) as exc_info:
         pipeline.run_import(db, path2, "b.xlsx", mode="upsert")
     db.commit()
+    assert _fact_tables_snapshot(db) == facts_before
     assert exc_info.value.code == "no_importable_rows"
     batch = db.scalar(select(SysImportBatch).order_by(SysImportBatch.id.desc()))
     assert batch.status == "failed"
@@ -968,20 +995,31 @@ def test_upsert_conflicting_head_values_does_not_overwrite_existing(db, tmp_path
         FSalesOrder.raw_order_id == "RAW-RECON-1"))
     before = (order.amount_inc_tax, order.amount_ex_tax,
               order.tax_amount, order.tax_rate)
+    batch_id_before = order.import_batch_id
     snapshots_before = len(_snapshots(db))
+    facts_before = _fact_tables_snapshot(db)
 
+    # LINE-1 身份不变，但合法明细 qty/单价与对账内容换成另一组一致值；LINE-2 仍是
+    # 冲突新增行。误 upsert 会改变 LINE-1 字段或新增行，全字段快照必然不相等。
     path2 = _write_xlsx(tmp_path / "b.xlsx", [
-        _row(订单金额=Decimal("113.00")),
-        _second_line(订单金额=Decimal("226.00"))])
+        _row(订单金额=Decimal("113.00"),
+             已对账金额=Decimal("40.00"), 待对账金额=Decimal("73.00"),
+             **{"订单明细.订单数量": 2, "订单明细.单价": Decimal("56.50"),
+                "修改时间(必填)": "2026-08-01 10:00:00"}),
+        _second_line(订单金额=Decimal("226.00"),
+                     已对账金额=Decimal("40.00"), 待对账金额=Decimal("73.00"),
+                     **{"修改时间(必填)": "2026-08-01 10:00:00"})])
     with pytest.raises(reader.ReaderError) as exc_info:
         pipeline.run_import(db, path2, "b.xlsx", mode="upsert")
     db.commit()
+    assert _fact_tables_snapshot(db) == facts_before
     assert exc_info.value.code == "no_importable_rows"
     batch = db.scalar(select(SysImportBatch).order_by(SysImportBatch.id.desc()))
     assert batch.status == "failed"
     db.refresh(order)
     assert (order.amount_inc_tax, order.amount_ex_tax,
             order.tax_amount, order.tax_rate) == before
+    assert order.import_batch_id == batch_id_before
     assert len(_snapshots(db)) == snapshots_before
     types = {e["error_type"] for e in batch.report_json["errors_preview"]}
     assert "head_value_conflict" in types
