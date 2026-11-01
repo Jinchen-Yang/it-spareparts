@@ -6,7 +6,10 @@ import pytest
 from openpyxl import load_workbook
 from sqlalchemy import select
 
+import pandas as pd
+
 from app.etl import pipeline
+from app.etl.maintenance_addresses import collect_addresses
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.system import SysAuditLog, SysImportError
 from app.services import maintenance_project_operations as ops
@@ -165,6 +168,45 @@ def test_conflicting_addresses_keep_original_other_order_and_quantity_continue(
     assert error.error_type == "maintenance_address_conflict"
     assert "合成冲突地址" not in json.dumps(error.raw_row, ensure_ascii=False)
     assert "合成冲突地址" not in json.dumps(batch.report_json, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("single_header", [False, True])
+def test_address_conflict_rows_keep_source_index_after_blank_rows(db, tmp_path, single_header):
+    rows = make_rows(orders=2, lines_per_order=2)
+    _run(db, tmp_path, rows, single_header=single_header)
+    rows[0]["收货地址"] = "合成冲突地址甲"
+    rows[1]["收货地址"] = "合成冲突地址乙"
+    rows[2]["收货地址"] = rows[3]["收货地址"] = "合成另一单新地址"
+    # 全空源行不是业务事实，但地址回执仍须用去空行后保留的源数据行号定位。
+    rows = [{}] + rows[:1] + [{}] + rows[1:3] + [{}] + rows[3:]
+    batch = _run(db, tmp_path, rows, single_header=single_header)
+    report = batch.report_json["address_report"]
+    assert report["conflict"] == 1 and report["set"] == 1
+    warning = report["warnings"][0]
+    assert warning["order_no"] == "WBDD-20260001" and warning["data_rows"] == [2, 4]
+    error = db.scalar(select(SysImportError).where(
+        SysImportError.batch_id == batch.id,
+        SysImportError.error_type == "maintenance_address_conflict"))
+    assert error.row_no == 2
+    assert error.raw_row["data_rows"] == [2, 4]
+    assert "合成冲突地址" not in json.dumps(error.raw_row, ensure_ascii=False)
+    assert "合成冲突地址" not in json.dumps(batch.report_json, ensure_ascii=False)
+    orders = _orders(db)
+    assert orders["SYN-O001"].receiver_address == "合成市合成路1号"
+    assert orders["SYN-O002"].receiver_address == "合成另一单新地址"
+
+
+def test_collect_addresses_nonstandard_index_falls_back_to_ordinal():
+    frame = pd.DataFrame(
+        [
+            {"数据ID(不可修改)": "SYN-O001", "需求单号": "WBDD-20260001", "收货地址": "合成甲"},
+            {"数据ID(不可修改)": "SYN-O001", "需求单号": "WBDD-20260001", "收货地址": "合成乙"},
+        ],
+        index=["x", -1],
+    )
+    patch = collect_addresses(frame)["SYN-O001"]
+    assert patch.action == "conflict" and patch.rows == (1, 2)
+    assert "合成甲" not in patch.detail and "合成乙" not in patch.detail
 
 
 @pytest.mark.parametrize("same_value", [False, True])

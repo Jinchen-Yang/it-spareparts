@@ -576,10 +576,12 @@ def _collapsed_duplicate_order_lines(
 
 
 def _ensure_importable_result(result: TransformResult) -> None:
-    """数据库写入前的批次门禁：重复明细冲突必拒；全部数据行被拒且无事实不得成功。
+    """数据库写入前的批次门禁：重复明细冲突必拒；只有硬错误且无可导入事实才全错。
 
     合法的「有单头无明细」WBDD 由 result.orders 证明；空文件（无错误）不算全错；
     全部已存在 skip 会保留 result.lines，由 loader 按 skipped 计数，不在这里误杀。
+    只有软标记（草稿/已取消空 PN、在途缺日期等）且没有明细/单头时仍按成功处理，
+    由 loader 记 0 硬错误；软硬混合且无事实才整批拒绝。
     """
     conflicts = [
         error for error in result.errors
@@ -595,7 +597,7 @@ def _ensure_importable_result(result: TransformResult) -> None:
         return
     if result.lines or result.orders:
         return
-    if not result.errors:
+    if not any(error.error_type not in SOFT_ERROR_TYPES for error in result.errors):
         return
     raise ReaderError(
         f"本文件 {result.rows_total} 行数据均未形成可导入事实（详见批次错误明细），"
