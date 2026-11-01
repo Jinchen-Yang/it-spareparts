@@ -633,8 +633,8 @@ def test_invalid_tax_rate_alias_is_not_treated_as_blank(tmp_path):
     assert "abc" in str(exc_info.value) and "0.13" in str(exc_info.value)
 
 
-def test_same_invalid_tax_rate_alias_does_not_invent_rejection(tmp_path):
-    """同值非法税率不擅自在别名比较里拒单，业务处置仍留给 transform。"""
+def test_same_invalid_tax_rate_alias_merges_then_transform_rejects_order(tmp_path):
+    """同值非法税率在别名比较里合并不冲突；transform 按 D-0050 第五条拒整单。"""
     path = _write_workbook(
         tmp_path, "tax-rate-invalid-same.xlsx", _TAX_RATE_PURCHASE_HEADERS,
         [["CGDD-1", "O1", "abc", "abc", "L1", "PN-A", 1, 100]],
@@ -642,9 +642,21 @@ def test_same_invalid_tax_rate_alias_does_not_invent_rejection(tmp_path):
     )
 
     frame, file_type = reader.read_excel(path)
+    assert file_type == mapping.PURCHASE
+    # reader 必须保留非法原值，不能吞成空值让后续流程看似合法。
+    assert frame["税率(必填)"].iloc[0] == "abc"
+    assert "税率" not in frame.columns   # 同值别名列已合并，不产生冲突拒批
     result = transform(frame, file_type)
-    assert result.orders["O1"]["tax_rate"] is None
-    assert not result.errors
+    # 非法税率拒绝 O1 及其明细，不写入半张单。
+    assert result.orders == {}
+    assert result.lines == []
+    errors = [e for e in result.errors if e.error_type == "invalid_head_value"]
+    assert len(errors) == 1
+    error = errors[0]
+    assert error.row_no == 1
+    assert error.raw_row == {"tax_rate": "abc"}
+    assert "税率「abc」无法解析（税率非法: 'abc'）" in error.error_detail
+    assert "该单本次不导入，保留库内已有事实" in error.error_detail
 
 
 _FLAG_PURCHASE_HEADERS = [
