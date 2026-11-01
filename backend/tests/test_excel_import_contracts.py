@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.etl import mapping, pipeline, precheck, reader
-from app.etl.transform import transform
+from app.etl.transform import ErrorRec, TransformResult, transform
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.system import SysImportBatch, SysImportError, SysRawFile
 
@@ -476,6 +476,229 @@ def test_duplicate_raw_line_conflicting_content_rejected_before_load(tmp_path):
     assert exc_info.value.code == "duplicate_raw_line_id_conflict"
 
 
+_TAX_RATE_PURCHASE_HEADERS = [
+    "采购单号(必填)", "数据ID(不可修改)", "税率(必填)", "税率",
+    "明细.数据ID(不可修改)", "明细.产品名称(必填)",
+    "明细.采购数量(必填)", "明细.单价(必填)",
+]
+_TAX_RATE_SALES_HEADERS = [
+    "订单编号(必填)", "数据ID(不可修改)", "业务类型#", "税率", "税率(必填)",
+    "订单明细.数据ID(不可修改)", "订单明细.产品名称",
+    "订单明细.订单数量", "订单明细.单价", "订单明细.金额",
+]
+
+
+@pytest.mark.parametrize(
+    ("file_type", "headers", "row", "order_id"),
+    [
+        (mapping.PURCHASE, _TAX_RATE_PURCHASE_HEADERS,
+         ["CGDD-1", "O1", "13.0%", 0.13, "L1", "PN-A", 1, 100], "O1"),
+        (mapping.SALES, _TAX_RATE_SALES_HEADERS,
+         ["XSDD-1", "S1", "备件销售", 0.13, "13.0%", "S1-L1", "PN-A", 1, 100, 100], "S1"),
+    ],
+    ids=["purchase", "sales"],
+)
+def test_tax_rate_alias_equivalence_passes_precheck_and_execution(
+    tmp_path, file_type, headers, row, order_id,
+):
+    """13%、13.0%、numeric 0.13 按 cleaner.parse_rate 既有语义等价，不误报别名冲突。"""
+    path = _write_workbook(
+        tmp_path, "tax-rate-equivalent.xlsx", headers, [row], double_header=False)
+
+    preview = precheck.inspect_file(path, "tax-rate-equivalent.xlsx")
+    assert preview["can_import"] is True
+
+    frame, detected = reader.read_excel(path)
+    result = transform(frame, detected)
+    assert detected == file_type
+    assert result.orders[order_id]["tax_rate"] == Decimal("0.1300")
+    assert not result.errors
+
+
+@pytest.mark.parametrize(
+    ("headers", "row"),
+    [
+        (_TAX_RATE_PURCHASE_HEADERS,
+         ["CGDD-1", "O1", "13%", "6%", "L1", "PN-A", 1, 100]),
+        (_TAX_RATE_SALES_HEADERS,
+         ["XSDD-1", "S1", "备件销售", 0.13, "6%", "S1-L1", "PN-A", 1, 100, 100]),
+    ],
+    ids=["purchase", "sales"],
+)
+def test_tax_rate_alias_conflict_rejected_by_precheck_and_execution(
+    tmp_path, headers, row,
+):
+    path = _write_workbook(
+        tmp_path, "tax-rate-conflict.xlsx", headers, [row], double_header=False)
+
+    preview = precheck.inspect_file(path, "tax-rate-conflict.xlsx")
+    assert preview["can_import"] is False
+    selected = next(
+        sheet for sheet in preview["sheets"] if sheet["action"] == "selected")
+    issue = next(
+        issue for issue in selected["issues"]
+        if issue["code"] == "alias_column_conflict")
+    assert issue["severity"] == "error"
+    assert "税率" in issue["message"] and "取值不一致" in issue["message"]
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.read_excel(path)
+    assert exc_info.value.code == "alias_column_conflict"
+
+
+def test_invalid_tax_rate_alias_is_not_treated_as_blank(tmp_path):
+    """非法非空税率保持非空标记：不能落成 None 让合法别名静默补位。"""
+    path = _write_workbook(
+        tmp_path, "tax-rate-invalid-mixed.xlsx", _TAX_RATE_PURCHASE_HEADERS,
+        [["CGDD-1", "O1", "abc", 0.13, "L1", "PN-A", 1, 100]],
+        double_header=False,
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.read_excel(path)
+    assert exc_info.value.code == "alias_column_conflict"
+    assert "abc" in str(exc_info.value) and "0.13" in str(exc_info.value)
+
+
+def test_same_invalid_tax_rate_alias_does_not_invent_rejection(tmp_path):
+    """同值非法税率不擅自在别名比较里拒单，业务处置仍留给 transform。"""
+    path = _write_workbook(
+        tmp_path, "tax-rate-invalid-same.xlsx", _TAX_RATE_PURCHASE_HEADERS,
+        [["CGDD-1", "O1", "abc", "abc", "L1", "PN-A", 1, 100]],
+        double_header=False,
+    )
+
+    frame, file_type = reader.read_excel(path)
+    result = transform(frame, file_type)
+    assert result.orders["O1"]["tax_rate"] is None
+    assert not result.errors
+
+
+def test_blank_rows_keep_source_line_for_alias_conflict(tmp_path):
+    headers = ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
+               "明细.产品名称(必填)", "明细.采购数量(必填)", "明细.采购数量",
+               "明细.单价(必填)"]
+    path = _write_workbook(
+        tmp_path,
+        "blank-alias-conflict.xlsx",
+        headers,
+        [
+            ["" for _ in headers],
+            ["CGDD-1", "O1", "L1", "PN-A", 2, 99, 100],
+        ],
+        double_header=False,
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.read_excel(path)
+    assert exc_info.value.code == "alias_column_conflict"
+    assert "数据第 2 行" in str(exc_info.value)
+
+
+def test_blank_rows_keep_source_line_for_transform_errors(tmp_path):
+    headers = ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
+               "明细.产品名称(必填)", "明细.采购数量(必填)", "明细.单价(必填)"]
+    path = _write_workbook(
+        tmp_path,
+        "blank-transform-error.xlsx",
+        headers,
+        [
+            ["" for _ in headers],
+            ["CGDD-1", "O1", "L1", "PN-A", "abc", 100],
+        ],
+        double_header=False,
+    )
+
+    transformed = pipeline.transform_workbook(pipeline.load_workbook(path))
+
+    assert [error.row_no for error in transformed.result.errors] == [2]
+    assert transformed.result.errors[0].error_type == "bad_number"
+
+
+def test_blank_rows_keep_source_lines_for_duplicate_identity(tmp_path):
+    headers = ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
+               "明细.产品名称(必填)", "明细.采购数量(必填)", "明细.单价(必填)"]
+    path = _write_workbook(
+        tmp_path,
+        "blank-duplicate-conflict.xlsx",
+        headers,
+        [
+            ["" for _ in headers],
+            ["CGDD-1", "O1", "L1", "PN-A", 1, 100],
+            ["" for _ in headers],
+            ["CGDD-1", "O1", "L1", "PN-A", 2, 100],
+        ],
+        double_header=False,
+    )
+
+    transformed = pipeline.transform_workbook(pipeline.load_workbook(path))
+
+    conflict = next(
+        error for error in transformed.result.errors
+        if error.error_type == "duplicate_raw_line_id_conflict")
+    assert conflict.row_no == 4
+    assert conflict.identity["source_rows"] == [2, 4]
+    assert "数据行 2、4" in conflict.error_detail
+
+
+def test_import_gate_allows_soft_only_without_facts():
+    result = TransformResult(
+        file_type=mapping.SALES,
+        errors=[ErrorRec(1, "empty_pn_inactive", "草稿可忽略", {})],
+        rows_total=1,
+    )
+
+    pipeline._ensure_importable_result(result)   # 不抛：0 硬错误、无事实也成功
+
+
+def test_import_gate_rejects_mixed_soft_and_hard_without_facts():
+    result = TransformResult(
+        file_type=mapping.PURCHASE,
+        errors=[
+            ErrorRec(1, "empty_pn_inactive", "草稿可忽略", {}),
+            ErrorRec(2, "bad_number", "数量非法", {}),
+        ],
+        rows_total=2,
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        pipeline._ensure_importable_result(result)
+    assert exc_info.value.code == "no_importable_rows"
+
+
+def test_import_gate_duplicate_conflict_beats_soft_errors():
+    result = TransformResult(
+        file_type=mapping.SALES,
+        errors=[
+            ErrorRec(1, "empty_pn_inactive", "草稿可忽略", {}),
+            ErrorRec(2, "duplicate_raw_line_id_conflict", "重复冲突", {}),
+        ],
+        rows_total=2,
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        pipeline._ensure_importable_result(result)
+    assert exc_info.value.code == "duplicate_raw_line_id_conflict"
+
+
+def test_import_gate_keeps_headless_wbdd_and_all_skipped_lines():
+    headless = TransformResult(
+        file_type=mapping.MAINTENANCE,
+        orders={"M1": {"raw_order_id": "M1"}},
+        errors=[ErrorRec(1, "missing_date_in_progress", "在途", {})],
+        rows_total=1,
+    )
+    pipeline._ensure_importable_result(headless)   # 合法单头不算全错
+
+    skipped = TransformResult(
+        file_type=mapping.SALES,
+        lines=[{"raw_line_id": "L1"}],
+        errors=[ErrorRec(1, "empty_pn_inactive", "草稿可忽略", {})],
+        rows_total=1,
+    )
+    pipeline._ensure_importable_result(skipped)    # 已存在 skip 的明细仍保留
+
+
 class _FakeResult:
     def all(self):
         return []
@@ -510,6 +733,52 @@ def _fake_import(monkeypatch, tmp_path, path):
     with pytest.raises(reader.ReaderError) as exc_info:
         pipeline.run_import(session, path, Path(path).name)
     return exc_info.value, session
+
+
+@pytest.mark.parametrize("status", ["草稿", "已取消"])
+def test_run_import_soft_only_empty_pn_is_success_with_zero_hard_errors(
+    monkeypatch, tmp_path, status,
+):
+    """草稿/已取消空 PN：只有软标记、无事实也按成功批次提交，硬错误计数 0。"""
+    headers = ["订单编号(必填)", "数据ID(不可修改)", "业务类型#", "数据状态",
+               "订单明细.数据ID(不可修改)", "订单明细.产品名称",
+               "订单明细.订单数量", "订单明细.单价", "订单明细.金额"]
+    path = _write_workbook(
+        tmp_path,
+        "soft-only-empty-pn.xlsx",
+        headers,
+        [["XSDD-1", "S1", "备件销售", status, "S1-L1", None, 1, 100, 100]],
+        double_header=False,
+    )
+    monkeypatch.setattr(
+        pipeline, "get_settings",
+        lambda: SimpleNamespace(raw_file_dir=str(tmp_path / "raw")))
+    monkeypatch.setattr(
+        pipeline, "_archive", lambda *_args, **_kwargs: str(tmp_path / "raw" / "x.xlsx"))
+    monkeypatch.setattr(
+        pipeline.data_quality_amount_mismatch, "detect_imported_lines",
+        lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        pipeline.loader, "load",
+        lambda *_args, **_kwargs: {
+            "source_rows_total": 1,
+            "fact_rows_inserted": 0,
+            "fact_rows_updated": 0,
+            "fact_rows_skipped": 0,
+            "fact_rows_error": 0,
+            "rows_inactive": 0,
+        })
+
+    session = _FakeSession()
+    batch = pipeline.run_import(session, path, "soft-only-empty-pn.xlsx")
+
+    assert batch.status == "success"
+    assert batch.rows_error == 0
+    assert batch.rows_total == 1
+    assert batch.report_json["fact_rows_error"] == 0
+    soft_errors = [
+        obj for obj in session.added if isinstance(obj, SysImportError)]
+    assert [error.error_type for error in soft_errors] == ["empty_pn_inactive"]
 
 
 def test_run_import_rejects_conflicting_duplicates_before_loader(monkeypatch, tmp_path):

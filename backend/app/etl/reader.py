@@ -14,7 +14,7 @@ import pandas as pd
 from openpyxl import load_workbook as openpyxl_load_workbook
 
 from app import config
-from app.etl import mapping, sheet_selection
+from app.etl import cleaner, mapping, sheet_selection
 
 _FCODE = re.compile(r"^F\d{7}$")
 # 空表头单元格归一：pandas 以 dtype=object 读空单元格为 float('nan')→str 后是小写 'nan'，
@@ -674,12 +674,26 @@ def _alias_value_blank(value) -> bool:
         return False
 
 
+# 非法税率在别名比较里的显式标记：必须保持非空，否则 combine_first 会让
+# 合法别名悄悄补位。业务上是否拒单仍由 transform 的 D-0050 流程决定。
+_INVALID_TAX_RATE_ALIAS = "invalid_tax_rate"
+
+
 def _normalize_alias_value(value, internal: str | None):
-    """同义列冲突比较用：空值归一为 None；身份保字符串，价格/数量按 Decimal。"""
+    """同义列冲突比较用：空值归一为 None；身份保字符串，价格/数量按 Decimal。
+
+    税率按 cleaner.parse_rate 的既有语义比较（13%、13.0%、0.13 等价），
+    非法非空值保留非空标记而不是 None。
+    """
     if _alias_value_blank(value):
         return None
     if internal in mapping.IDENTITY_INTERNALS:
         return str(value).strip()
+    if internal == "tax_rate":
+        try:
+            return cleaner.parse_rate(value)
+        except ValueError:
+            return (_INVALID_TAX_RATE_ALIAS, str(value).strip())
     if internal in mapping.NUMERIC_ALIAS_INTERNALS:
         if isinstance(value, bool):
             return str(value).strip()
@@ -709,7 +723,8 @@ def _reject_alias_conflict(
     if not conflict.any():
         return
     first_label = conflict[conflict].index[0]
-    first_row = int(df.index.get_loc(first_label)) + 1
+    # 去空行后索引保留源数据行相对位置，不能按位置重算行号。
+    first_row = int(first_label) + 1
     pairs = "；".join(
         f"「{column}」={df.loc[[first_label], column].iloc[0]!s}"
         for column in columns
@@ -851,6 +866,8 @@ def _drop_blank_data_rows(df: pd.DataFrame) -> pd.DataFrame:
 
     pandas 对空单元格给 NaN，inline-string 读法给 None/空串；两种都算空白。
     只删整行全空，任何一格有值都保留（含仅明细ID的合法续行）。
+    刻意不 reset 索引：索引值即源数据行相对位置（表头后首行为 0），后续
+    别名冲突/transform/重复明细的「数据第 N 行」才能落在真实源行上。
     """
     if df.empty:
         return df
@@ -864,7 +881,7 @@ def _drop_blank_data_rows(df: pd.DataFrame) -> pd.DataFrame:
             blank[column] = blank[column] | series.map(
                 lambda value: isinstance(value, str) and not value.strip()
             )
-    return df.loc[~blank.all(axis=1)].reset_index(drop=True)
+    return df.loc[~blank.all(axis=1)]
 
 
 def _inspect_frame(
