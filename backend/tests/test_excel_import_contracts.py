@@ -546,6 +546,79 @@ def test_tax_rate_alias_conflict_rejected_by_precheck_and_execution(
     assert exc_info.value.code == "alias_column_conflict"
 
 
+_TAX_RATE_PURCHASE_REVERSED_HEADERS = [
+    "采购单号(必填)", "数据ID(不可修改)", "税率", "税率(必填)",
+    "明细.数据ID(不可修改)", "明细.产品名称(必填)",
+    "明细.采购数量(必填)", "明细.单价(必填)",
+]
+_TAX_RATE_SALES_REVERSED_HEADERS = [
+    "订单编号(必填)", "数据ID(不可修改)", "业务类型#", "税率(必填)", "税率",
+    "订单明细.数据ID(不可修改)", "订单明细.产品名称",
+    "订单明细.订单数量", "订单明细.单价", "订单明细.金额",
+]
+
+
+@pytest.mark.parametrize(
+    ("file_type", "headers", "row", "order_id", "target"),
+    [
+        (mapping.PURCHASE, _TAX_RATE_PURCHASE_HEADERS,
+         ["CGDD-1", "O1", "   ", "13%", "L1", "PN-A", 1, 100], "O1", "税率(必填)"),
+        (mapping.PURCHASE, _TAX_RATE_PURCHASE_HEADERS,
+         ["CGDD-1", "O1", "13%", "   ", "L1", "PN-A", 1, 100], "O1", "税率(必填)"),
+        (mapping.PURCHASE, _TAX_RATE_PURCHASE_REVERSED_HEADERS,
+         ["CGDD-1", "O1", "   ", "13%", "L1", "PN-A", 1, 100], "O1", "税率(必填)"),
+        (mapping.PURCHASE, _TAX_RATE_PURCHASE_REVERSED_HEADERS,
+         ["CGDD-1", "O1", "13%", "   ", "L1", "PN-A", 1, 100], "O1", "税率(必填)"),
+        (mapping.SALES, _TAX_RATE_SALES_HEADERS,
+         ["XSDD-1", "S1", "备件销售", "   ", "13%", "S1-L1", "PN-A", 1, 100, 100],
+         "S1", "税率"),
+        (mapping.SALES, _TAX_RATE_SALES_HEADERS,
+         ["XSDD-1", "S1", "备件销售", "13%", "   ", "S1-L1", "PN-A", 1, 100, 100],
+         "S1", "税率"),
+        (mapping.SALES, _TAX_RATE_SALES_REVERSED_HEADERS,
+         ["XSDD-1", "S1", "备件销售", "   ", "13%", "S1-L1", "PN-A", 1, 100, 100],
+         "S1", "税率"),
+        (mapping.SALES, _TAX_RATE_SALES_REVERSED_HEADERS,
+         ["XSDD-1", "S1", "备件销售", "13%", "   ", "S1-L1", "PN-A", 1, 100, 100],
+         "S1", "税率"),
+    ],
+    ids=["purchase-target-blank-first", "purchase-alias-blank-first",
+         "purchase-alias-blank-reversed", "purchase-target-blank-reversed",
+         "sales-target-blank-first", "sales-alias-blank-first",
+         "sales-alias-blank-reversed", "sales-target-blank-reversed"],
+)
+def test_whitespace_tax_rate_alias_fills_and_preserves_legal_rate(
+    tmp_path, file_type, headers, row, order_id, target,
+):
+    """空白列按同一口径置空：预检与执行都必须由合法别名补位，不误报冲突。"""
+    path = _write_workbook(
+        tmp_path, "tax-rate-whitespace.xlsx", headers, [row], double_header=False)
+
+    preview = precheck.inspect_file(path, "tax-rate-whitespace.xlsx")
+    assert preview["can_import"] is True
+
+    frame, detected = reader.read_excel(path)
+    assert detected == file_type
+    assert frame[target].iloc[0] == "13%"
+    result = transform(frame, detected)
+    assert result.orders[order_id]["tax_rate"] == Decimal("0.1300")
+    assert not result.errors
+
+
+def test_tax_rate_parse_none_on_nonblank_source_is_not_treated_as_blank(tmp_path):
+    """非空源值即使 parse_rate 返回 None，也保留非空标记，不能由合法别名补位。"""
+    path = _write_workbook(
+        tmp_path, "tax-rate-parse-none.xlsx", _TAX_RATE_PURCHASE_HEADERS,
+        [["CGDD-1", "O1", " nan ", 0.13, "L1", "PN-A", 1, 100]],
+        double_header=False,
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.read_excel(path)
+    assert exc_info.value.code == "alias_column_conflict"
+    assert "nan" in str(exc_info.value)
+
+
 def test_invalid_tax_rate_alias_is_not_treated_as_blank(tmp_path):
     """非法非空税率保持非空标记：不能落成 None 让合法别名静默补位。"""
     path = _write_workbook(

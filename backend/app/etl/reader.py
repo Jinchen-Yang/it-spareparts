@@ -664,14 +664,26 @@ def _scan_anchor(raw: pd.DataFrame, upto: int) -> str | None:
 
 
 def _alias_value_blank(value) -> bool:
+    """同义列合并层的源空白判定：None/NA 与纯空白字符串都算空。
+
+    冲突比较（_normalize_alias_value）与实际合并（_coalesce_value_aliases）
+    必须共用这一口径：只认 "" 会让「空白规范列 + 合法别名」在比较阶段放行，
+    合并阶段却保留规范列空格、压掉合法别名。
+    """
     if value is None:
         return True
     if isinstance(value, str):
-        return value == ""
+        return not value.strip()
     try:
         return bool(pd.isna(value))
     except (TypeError, ValueError):
         return False
+
+
+def _alias_nonblank_values(series: pd.Series) -> pd.Series:
+    """把空白源值置 NA，供 combine_first 让合法别名补位（仅别名合并层）。"""
+    blank = series.map(_alias_value_blank).astype(bool)
+    return series.mask(blank)
 
 
 # 非法税率在别名比较里的显式标记：必须保持非空，否则 combine_first 会让
@@ -691,9 +703,14 @@ def _normalize_alias_value(value, internal: str | None):
         return str(value).strip()
     if internal == "tax_rate":
         try:
-            return cleaner.parse_rate(value)
+            parsed = cleaner.parse_rate(value)
         except ValueError:
             return (_INVALID_TAX_RATE_ALIAS, str(value).strip())
+        if parsed is None:
+            # 源值非空但 parse_rate 仍返回 None（如 " nan "）：必须保留非空
+            # 标记，不能当成空值让合法别名静默补位。
+            return (_INVALID_TAX_RATE_ALIAS, str(value).strip())
+        return parsed
     if internal in mapping.NUMERIC_ALIAS_INTERNALS:
         if isinstance(value, bool):
             return str(value).strip()
@@ -761,10 +778,10 @@ def _coalesce_value_aliases(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
         if target not in df.columns and not present:
             continue
         _reject_alias_conflict(df, file_type, target, present)
-        values = (df[target].replace("", pd.NA) if target in df.columns
+        values = (_alias_nonblank_values(df[target]) if target in df.columns
                   else pd.Series(pd.NA, index=df.index, dtype=object))
         for alias in present:
-            values = values.combine_first(df[alias].replace("", pd.NA))
+            values = values.combine_first(_alias_nonblank_values(df[alias]))
         df[target] = values
         drop_columns.extend(present)
     if drop_columns:
