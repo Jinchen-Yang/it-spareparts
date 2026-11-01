@@ -28,6 +28,8 @@ export interface DashboardFilters {
   project?: string;
   /** 业务类型（单值：缺省=all，或单个业务类型码；与 boss-board 同枚举）。 */
   business_type?: string;
+  /** 项目有效销售归属（主档优先，未人工清空时来源兜底）。 */
+  salesperson?: string;
   /** PN/描述关键词（契约 v2 §6：quantity-checks 与其导出支持 q——按命中 PN
    * 选择整张需求单；orders/consumption 端点仍无此参数，发送前显式剥离）。 */
   q?: string;
@@ -376,6 +378,7 @@ export interface ReceiptLineRow {
   occurred_at: string | null;
   project_id: string;
   project_code: string | null;
+  project_name?: string | null;
   source_order_id: string | null;
   source_order_no: string | null;
   part_id: number | null;
@@ -566,6 +569,7 @@ export interface ConsumptionIssueRow {
 }
 
 export interface DashboardOptions {
+  salespersons?: string[];
   range_presets: string[];
   default_range: string;
   default_date_rule: string;

@@ -110,8 +110,11 @@ export default function ReceiptsDrillDrawer({
   const columns: ColumnsType<ReceiptLineRow> = [
     { title: "业务时间", dataIndex: "occurred_at", width: 150,
       render: (v: string | null) => v || "—" },
-    { title: "项目", dataIndex: "project_code", width: 120,
-      render: (v: string | null) => v || "—" },
+    { title: "项目", dataIndex: "project_name", width: 240,
+      render: (v: string | null, row) => <Space direction="vertical" size={0}>
+        <Text>{v || row.project_code || "—"}</Text>
+        {v && row.project_code && <Text type="secondary">{row.project_code}</Text>}
+      </Space> },
     { title: "来源需求单", dataIndex: "source_order_no", width: 130,
       render: (v: string | null) => v || "未关联" },
     {

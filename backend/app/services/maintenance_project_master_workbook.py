@@ -43,7 +43,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import config
-from app.services.excel_text_safety import SafeTextWorkbook, has_illegal_excel_upload_text
+from app.services.excel_text_safety import SafeTextWorkbook, excel_safe, has_illegal_excel_upload_text
 from app.business_time import BUSINESS_TZ, business_today
 from app.config import get_settings
 from app.models.dimensions import DimPart, PartAlias
@@ -148,7 +148,7 @@ V2_PART_HEADERS = [
     "PN", "描述", "需求数量", "SN", "退货数量", "成本来源", "置信度",
     "系统未税单位成本", "系统含税单位成本", "人工未税单位成本", "人工成本原因",
     "成本缺失类型", "可补价", "实体ID", "备件主键", "只读哈希",
-    "备注", "来源", "基线令牌",
+    "备注", "来源", "基线令牌", "收货地址（只读）",
 ]
 # 2026-08-19 全字段可编辑（1-based 列号）：操作列 + 行级数据列（PN/描述/数量/SN/
 # 退货数量）+ 人工成本两列 + 备注。维保单号/制单日期/XSDD/头级字段/系统成本/来源仍锁。
@@ -2722,6 +2722,8 @@ def _v2_part_row_values(line, order, override) -> dict[str, object]:
         "备件主键": line.part_id,
         "只读哈希": "",  # 占位，下方按锁定列回填
         "备注": line.line_note or "",
+        # D-26 / D-0051：跟需求单走的只读参考，不是项目地址或行级可写字段。
+        "收货地址（只读）": excel_safe(order.receiver_address or ""),
         # 三来源口径（v1.36）：workbook_manual→工作簿；page_manual→页面人工登记
         # （新建手工需求行，不得谎报 WBDD）；其余（wbdd）→ WBDD 原口径。
         "来源": (
@@ -2745,13 +2747,17 @@ def _v2_build_parts(wb, db, project_id: str, lines) -> None:
     base_hashes: dict[str, str] = {}
     for line, order, _pid in lines:
         values = _v2_part_row_values(line, order, overrides.get(line.id))
+        if len(str(values["收货地址（只读）"])) > 32767:
+            raise WorkbookError("text_too_long", "需求单收货地址超过Excel单元格上限，请核对原件后再下载")
         digest = _v2_hash([values[name] for name in V2_PART_HASH_COLUMNS])
         values["只读哈希"] = digest
         values[V2_BASE_COLUMN] = _v2_row_base_token(
             sheet="03_备件明细", entity_id=line.id,
-            values={name: values.get(name) for name in V2_PART_BASE_FIELDS})
+            values={**{name: values.get(name) for name in V2_PART_BASE_FIELDS},
+                    "收货地址参考哈希": _v2_hash([values["收货地址（只读）"]])})
         base_hashes[str(line.id)] = _v2_row_base_hash(values, V2_PART_BASE_FIELDS)
         ws.append([values[name] for name in V2_PART_HEADERS])
+        ws.cell(ws.max_row, V2_PART_HEADERS.index("收货地址（只读）") + 1).data_type = "s"
     # 空白新增行（无实体ID）：用户填操作=CREATE 的新明细
     for _ in range(5):
         ws.append([""] * len(V2_PART_HEADERS))
@@ -2772,8 +2778,9 @@ def _v2_build_parts(wb, db, project_id: str, lines) -> None:
                  editable=V2_PART_EDITABLE, operation_col=1)
     # 仅隐藏技术列：实体ID(22)/备件主键(23)/只读哈希(24)/基线令牌(27)。
     # 备注(25)/来源(26) 可见。
-    for col in (22, 23, 24, len(V2_PART_HEADERS)):
+    for col in (22, 23, 24, V2_PART_HEADERS.index(V2_BASE_COLUMN) + 1):
         ws.column_dimensions[ws.cell(1, col).column_letter].hidden = True
+    ws.column_dimensions[ws.cell(1, V2_PART_HEADERS.index("收货地址（只读）") + 1).column_letter].width = 54
     return base_hashes
 
 
@@ -3097,6 +3104,8 @@ def _v2_build_dictionary(wb) -> None:
          "真正的新领用请将领用单号留空自动编号（或使用尚未占用的单号）", "身份相同但内容不一致会拒绝并列出冲突差异"),
         ("领用地址", "实际领用地址（现场位置）", "maintenance_site_issue.site_location", "可编辑", "最多256字符；兼容地址/现场位置表头", "保留原值", "同单共用；不同新地址提示并保留原值"),
         ("地址操作", "明确设置或清空领用地址", "地址更新意图", "可编辑", "保留/设置/清空", "有值设置，空白保留", "清空只作用于地址，不影响领用明细"),
+        ("收货地址（只读）", "03中本行关联需求单的收货地址", "f_maintenance_order.receiver_address", "只读参考",
+         "按需求单跟单带出，不按项目推测", "原件未提供", "更正请到需求单，重新下载；此列不回写地址"),
     ]
     for row in rows:
         ws.append(row)
@@ -3130,7 +3139,7 @@ def _v2_build_return_ledger(wb, db, project_id) -> str:
     total = sum((Decimal(row.qty) for row, _ in records), Decimal(0))
     unassigned = sum((Decimal(row.qty) for row, _ in records if row.source_order_id is None), Decimal(0))
     ws = wb.create_sheet(V2_SHEET_RETURN_LEDGER)
-    ws.append(["收货事实只读快照；更正请到项目返还台账，免返不删除收货记录"])
+    ws.append(["收货事实只读快照；Excel更正请到项目“领用与返还→返还登记与台账→返还收货Excel编辑”，免返不删除收货记录"])
     ws.append(["项目已返还数量", str(total)])
     ws.append(["未关联需求单数量", str(unassigned)])
     by_demand = {}
@@ -3949,6 +3958,15 @@ def _v2_parse_parts(
         baseline = _parse_v2_row_base_token(
             _cell(row, index, V2_BASE_COLUMN), sheet="03_备件明细",
             entity_id=line.id, row_no=row_no)
+        # 新参考列独立签在原令牌内，不改变旧可编辑基线或缺行哈希。
+        # 旧模板没有该键仍兼容；新模板删列/改值不能绕过只读约束。
+        address_column = "收货地址（只读）"
+        address_hash = "收货地址参考哈希"
+        if address_hash in baseline or address_column in index:
+            if (address_hash not in baseline or address_column not in index
+                    or _v2_hash([_cell(row, index, address_column)]) != baseline[address_hash]):
+                raise WorkbookError("readonly_cell_modified",
+                                    f"第 {row_no} 行收货地址为只读参考，请在需求单中更正后重新下载")
         baseline_order = db.get(FMaintenanceOrder, line.order_id)
         baseline_override = db.scalar(
             select(MaintenanceManualCostOverride).where(

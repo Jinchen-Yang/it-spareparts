@@ -330,6 +330,78 @@ def test_query_busy_timeout_and_excerpt_are_explicit(db, facts, monkeypatch):
     assert db.scalar(text("SELECT current_setting('statement_timeout')")) == previous
 
 
+def test_sales_order_numbers_are_project_scoped_multiple_and_permissioned(db, facts):
+    projects, records, ctx = facts
+    records[0][2].linked_sales_order_no = "XSDD-20261101-0001"
+    second = _wbdd(db, project=projects[0], order_no=f"WBDD-{uuid4()}")
+    second.linked_sales_order_no = "20261101-0002"
+    records[1][2].linked_sales_order_no = "XSDD-20261101-0003"
+    db.commit()
+    rows = search(db, ctx, "AB-123", project_ids=[projects[0].project_id])["items"]
+    assert len(rows) == 2
+    assert all(row["project"]["sales_order_nos"] == ["XSDD-20261101-0001", "XSDD-20261101-0002"] for row in rows)
+    hidden = UserContext(user_id=ctx.user_id, role="boss", is_authenticated=True,
+                         permissions={"page_maintenance": True, "data_customer": False})
+    hidden_rows = search(db, hidden, "AB-123")["items"]
+    assert hidden_rows and all(row["project"]["sales_order_nos"] is None for row in hidden_rows)
+    assert "XSDD-20261101" not in json.dumps(hidden_rows)
+
+
+def test_canonical_sales_identity_survives_absent_source_links_in_search_and_export(db, facts):
+    import csv
+    from io import StringIO
+    from app.models.maintenance_project import MaintenanceProjectXsdd
+
+    projects, records, ctx = facts
+    records[0][2].linked_sales_order_no = None
+    db.add(MaintenanceProjectXsdd(project_id=projects[0].project_id,
+                                 xsdd_norm="20261101-0099", source="manual_test"))
+    db.commit()
+    rows = search(db, ctx, "AB-123", project_ids=[projects[0].project_id])["items"]
+    assert rows and all(row["project"]["sales_order_nos"] == ["XSDD-20261101-0099"] for row in rows)
+    response = _http(db, ctx).post("/api/maintenance/movements/export", json={
+        "q": "AB-123", "project_ids": [projects[0].project_id],
+    })
+    assert response.status_code == 200, response.text
+    exported = list(csv.DictReader(StringIO(response.content.decode("utf-8-sig"))))
+    assert exported and all(row["关联销售单号XSDD"] == "XSDD-20261101-0099" for row in exported)
+
+
+def test_export_uses_whole_filter_not_current_page_and_safe_text(db, facts):
+    import csv
+    from io import StringIO
+
+    projects, records, ctx = facts
+    projects[0].display_name = "=SUM(1,2)"
+    records[0][1].note = "长备注" * 150 + "AB-123"
+    db.commit()
+    response = _http(db, ctx).post("/api/maintenance/movements/export", json={
+        "q": "AB-123", "page": 2, "page_size": 1,
+    })
+    assert response.status_code == 200, response.text
+    rows = list(csv.DictReader(StringIO(response.content.decode("utf-8-sig"))))
+    assert len(rows) == 4
+    assert {row["项目名称"] for row in rows} == {"'=SUM(1,2)", projects[1].display_name}
+    assert max(len(row["匹配摘要"]) for row in rows) > 240
+    filtered = _http(db, ctx).post("/api/maintenance/movements/export", json={
+        "q": "AB-123", "entity": "receipt", "project_ids": [projects[0].project_id],
+    })
+    assert filtered.status_code == 200
+    assert len(list(csv.DictReader(StringIO(filtered.content.decode("utf-8-sig"))))) == 1
+
+
+def test_export_limit_and_page_permission_fail_closed(db, facts, monkeypatch):
+    from app.services import maintenance_movement_search as service
+
+    monkeypatch.setattr(service, "MAX_EXPORT_ROWS", 2)
+    response = _http(db, facts[2]).post("/api/maintenance/movements/export", json={"q": "AB-123"})
+    assert response.status_code == 413
+    assert "上限 2 行" in response.json()["detail"]
+    denied = UserContext(user_id=facts[2].user_id, role="sales", is_authenticated=True,
+                         permissions={"page_maintenance": False})
+    assert _http(db, denied).post("/api/maintenance/movements/export", json={"q": "AB-123"}).status_code == 403
+
+
 def test_local_benchmark_reproducible_small_scale(db, facts):
     from math import ceil
     from time import perf_counter

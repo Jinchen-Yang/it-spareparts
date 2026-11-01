@@ -179,6 +179,29 @@ def _project_rows(
     return {project.project_id: project for project in db.scalars(statement)}
 
 
+def project_salespersons(db: Session, projects: dict[str, MaintenanceProject]) -> dict[str, str | None]:
+    """与项目卡墙同源：主档优先，人工清空不回退，遗留空值取活单众数。"""
+    from app.services.maintenance_source_assignments import salesperson_modes_by_project
+
+    fallback_ids = [pid for pid, project in projects.items()
+                    if not project.salesperson and not project.salesperson_override_active]
+    modes = salesperson_modes_by_project(db, fallback_ids)
+    return {
+        pid: (project.salesperson or (
+            None if project.salesperson_override_active else modes.get(pid)
+        ))
+        for pid, project in projects.items()
+    }
+
+
+def narrow_scope_by_salesperson(db: Session, scope: set[str] | None, salesperson: str | None) -> set[str] | None:
+    person = (salesperson or "").strip()
+    if not person:
+        return scope
+    return {pid for pid, value in project_salespersons(db, _project_rows(db, scope)).items()
+            if value == person}
+
+
 def _escape_like(term: str) -> str:
     """关键词字面转义：%/\\_/反斜杠一律按字面匹配，不得变成通配符（B-F02）。"""
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -1984,6 +2007,7 @@ def build_receipt_detail_rows(
             "occurred_at": line.occurred_at.isoformat() if line.occurred_at else None,
             "project_id": line.project_id,
             "project_code": _project_field(filters, line.project_id, "project_code"),
+            "project_name": _project_field(filters, line.project_id, "display_name"),
             "source_order_id": line.source_order_id,
             "source_order_no": order_nos.get(line.source_order_id),
             "part_id": line.part_id,

@@ -84,6 +84,7 @@ const POLICY = {
 };
 
 const optionsWithAmounts: DashboardOptions = {
+  salespersons: ["销售甲", "销售乙"],
   range_presets: ["7d", "15d", "30d", "half_year", "year", "all", "custom"],
   default_range: "7d",
   default_date_rule: "近 7 天含今天（上海日历日）",
@@ -350,6 +351,7 @@ const receiptsFixture = {
     {
       rkd_line_id: "r1", occurred_at: "2026-10-18 10:00:00", project_id: "p1",
       project_code: "MDD-P1", source_order_id: "o1", source_order_no: "DD001",
+      project_name: "实际项目业务名称",
       part_id: 1, pn: "MDDA-PN-1", description: "硬盘", receipt_kind: "备件",
       unit: "件", test_result: "坏品", qty: "2.000", source: "维修返还",
       review_required: false, created_by: "zhangsan", created_by_name: "张三",
@@ -694,6 +696,18 @@ describe("维保数据看板页", () => {
       blob: new Blob(["csv"], { type: "text/csv" }),
       filename: "maintenance-dashboard-projects.csv",
     });
+  });
+
+  it("销售筛选从URL恢复并传给各视图，切换销售不丢其他筛选", async () => {
+    renderPage("/maintenance/dashboard?salesperson=%E9%94%80%E5%94%AE%E7%94%B2&project=p1");
+    await waitFor(() => expect(fetchDashboardSummary).toHaveBeenCalledWith(expect.objectContaining({ salesperson: "销售甲", project: "p1" })));
+    await selectOption("销售人员筛选", "销售乙");
+    await waitFor(() => expect(fetchDashboardSummary).toHaveBeenLastCalledWith(expect.objectContaining({ salesperson: "销售乙", project: "p1" })));
+    expect(query().get("salesperson")).toBe("销售乙");
+    fireEvent.click(screen.getByRole("tab", { name: "需求单核对" }));
+    await waitFor(() => expect(fetchDashboardQuantityChecks).toHaveBeenCalledWith(expect.objectContaining({ salesperson: "销售乙", project: "p1" })));
+    fireEvent.click(screen.getByRole("button", { name: "重置筛选" }));
+    await waitFor(() => expect(query().has("salesperson")).toBe(false));
   });
 
   it("默认进入总览页签：五个页签齐全、M01 期间下单卡与数量卡并列（M-AC01）", async () => {
@@ -1079,6 +1093,8 @@ describe("维保数据看板页", () => {
     const drawer = document.querySelector(".ant-drawer-content") as HTMLElement;
     expect(within(drawer).getByRole("columnheader", { name: "登记人" })).toBeInTheDocument();
     expect(await within(drawer).findByText("张三（zhangsan）")).toBeInTheDocument();
+    expect(within(drawer).getByText("实际项目业务名称")).toBeInTheDocument();
+    expect(within(drawer).getAllByText("MDD-P1")).toHaveLength(2);
   });
 
   it("M-AC09 总览下钻：Top 项目点击开返件明细 Drawer，导出 receipts 完整交集", async () => {

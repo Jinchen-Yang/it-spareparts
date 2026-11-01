@@ -2142,7 +2142,7 @@ export interface MaintenanceMovementQuery {
 export interface MaintenanceMovement {
   entity_type: MovementEntity;
   record_id: string;
-  project: { id: string; code: string; name: string };
+  project: { id: string; code: string; name: string; sales_order_nos?: string[] | null };
   document: { id: string; number: string; display_number: string | null; date: string | null; status: string; source: string };
   pn: string | null;
   serials: string[];
@@ -2163,3 +2163,6 @@ export interface MaintenanceMovementResult {
 }
 export const searchMaintenanceMovements = (input: MaintenanceMovementQuery) =>
   api.post<MaintenanceMovementResult>("/maintenance/movements/search", input);
+
+export const exportMaintenanceMovements = (input: MaintenanceMovementQuery) =>
+  api.post<Blob>("/maintenance/movements/export", input, { responseType: "blob" });
