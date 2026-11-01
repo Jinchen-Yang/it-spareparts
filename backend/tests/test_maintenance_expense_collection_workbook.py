@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import select
 
 from app import permissions
@@ -510,6 +510,71 @@ def test_void_marks_snapshot_void_rather_than_deleting(db, project):
     db.expire_all()
     snapshot = db.execute(select(MaintenanceCollectionSnapshot)).scalars().one()
     assert snapshot.status == "void"          # 仍在库，只是作废
+
+
+_REORDERED_COLLECTION_HEADERS = (
+    "累计回款金额(含税)", "合同编号", "备注", "报告月份",
+    "操作", "状态(系统)", "回款凭证号",
+)
+
+
+def _reordered_collection_workbook(*rows: dict) -> bytes:
+    """05 表列顺序与导出模板不同，报告月份写成真实 xlsx 日期（yyyy-mm 显示）。"""
+    wb = Workbook()
+    expense = wb.active
+    expense.title = wbk.SHEET_EXPENSE
+    expense.append(list(wbk._EXPENSE_HEADERS) + [wbk.RAW_LINE_ID_HEADER])
+    ws = wb.create_sheet(wbk.SHEET_COLLECTION)
+    ws.append(list(_REORDERED_COLLECTION_HEADERS))
+    for values in rows:
+        ws.append([values.get(name, "") for name in _REORDERED_COLLECTION_HEADERS])
+        month_cell = ws.cell(
+            row=ws.max_row,
+            column=_REORDERED_COLLECTION_HEADERS.index("报告月份") + 1)
+        if isinstance(month_cell.value, datetime):
+            month_cell.number_format = "yyyy-mm"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("operation", ["CREATE", "UPDATE", "VOID"])
+def test_collection_month_reads_real_date_cell_with_reordered_columns(
+    db, project, operation,
+):
+    """Excel 日期格（yyyy-mm 显示）不能先字符串化成带时分秒的文本。"""
+    if operation != "CREATE":
+        _seed_confirmed_snapshots(db, project, (date(2026, 7, 1), "20000.00"))
+    client = uploader(db, f"date-cell-{operation.lower()}")
+    content = _reordered_collection_workbook({
+        "操作": operation,
+        "合同编号": "HT-001",
+        "报告月份": datetime(2026, 7, 1),
+        "累计回款金额(含税)": 25000,
+    })
+    resp = _upload(client, project, content)
+    assert resp.status_code == 200, resp.text
+    db.expire_all()
+    snapshot = db.execute(select(MaintenanceCollectionSnapshot)).scalar_one()
+    assert snapshot.report_month == date(2026, 7, 1)
+    if operation == "VOID":
+        assert snapshot.status == "void"
+        assert snapshot.cumulative_amount == Decimal("20000.00")
+    else:
+        assert snapshot.cumulative_amount == Decimal("25000.00")
+
+
+def test_collection_month_rejects_invalid_text_after_column_reorder(db, project):
+    client = uploader(db, "date-cell-invalid")
+    content = _reordered_collection_workbook({
+        "操作": "CREATE",
+        "合同编号": "HT-001",
+        "报告月份": "2026-13",
+        "累计回款金额(含税)": 25000,
+    })
+    resp = _upload(client, project, content)
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"]["code"] == "invalid_month"
 
 
 def test_contract_outside_the_project_is_rejected(db, project):
