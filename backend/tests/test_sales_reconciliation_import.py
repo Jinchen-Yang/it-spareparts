@@ -576,10 +576,9 @@ def test_transform_sales_arithmetic_mismatch_kept_without_new_blocking(tmp_path)
 def test_transform_sales_rate_not_derived_by_mixing_rows(tmp_path):
     """D-0050：不含税额与税金来自不同源行时不得拼接推导税率。
 
-    端到端正确性依赖 reader 写入 df.attrs['_source_head_economic_pair_rows']
-    （A 分支的原始 index 元数据，root 随后同步）；本分支尚未同步该元数据，
-    因此本 xlsx 用例暂不能在当前 reader 下通过——pair 集合为空后才会稳定为
-    “不推导”。纯 transform 的空集合消费者契约见下方 attrs 用例。
+    reader 已按 ffill 前的源值写入 df.attrs['_source_head_economic_pair_rows']
+    （同源 pair 的原始 index）。本例两行各只提供未税或税金一项，源行都不成对
+    → pair 集合为空 → 不推导；纯 transform 的空集合消费者契约见下方 attrs 用例。
     """
     path = _write_xlsx(tmp_path / "s.xlsx", [
         _row(订单金额=None, 不含税金额=Decimal("100.00"),
@@ -598,8 +597,8 @@ def test_transform_sales_rate_not_derived_by_mixing_rows(tmp_path):
 def test_transform_sales_rate_from_later_complete_raw_pair(tmp_path):
     """首行仅未税 100、后行明确 100+13：同一原始源行成对 → 推 13%。
 
-    reader 同步原始 pair index 前按本行实际值兜底，同步后按 pair 集合命中；
-    两种状态都应推导，不能因经济字段“首见行”不同而漏掉后续完整 pair。
+    reader 的 pair 集合按 ffill 前源值判定：后行两项都在源行显式给出，故命中；
+    经济字段的逐行观测同样保留后行两值，不因首笔观测缺项而漏掉完整 pair。
     """
     path = _write_xlsx(tmp_path / "s.xlsx", [
         _row(税率=None, 税金=None, 不含税金额=Decimal("100.00")),
