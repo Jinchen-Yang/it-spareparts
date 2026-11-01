@@ -86,23 +86,38 @@ def _header_index(headers: list[str], name: str) -> int | None:
     return matches[0] if matches else None
 
 
-def _cell(row: tuple, index: int | None) -> str | None:
+def _cell(row: tuple, index: int | None, *, row_no: int | None = None,
+          field: str | None = None) -> str | None:
     if index is None or index > len(row):
         return None
     value = row[index - 1]
+    location = (
+        f"第 {row_no} 行" if row_no is not None else "数据行"
+    ) + (f"「{field}」" if field else "映射列")
+    oversized = getattr(value, "oversized_text_length", None)
+    if oversized is not None:
+        # 流式读取只带回长度信号；映射列上的超长文本必须明确拒绝，不能变 None。
+        raise CkdParseError(
+            f"{location}普通文本长度 {oversized} 超过 4096 字符，拒绝导入")
     if value is None:
         return None
     if isinstance(value, (bytes, bytearray)):
         return None
     text = str(value).strip()
     if len(text) > 4096:
-        return None  # 内嵌图片 base64：不落库
+        # bytes 图片已在上方跳过；这里只能是普通文本，静默置 None 会丢字段。
+        raise CkdParseError(f"{location}普通文本超过 4096 字符，拒绝导入")
     return text or None
 
 
 def _non_empty(row: tuple) -> bool:
+    # 超长文本信号本质是 bytes(b"")，不能因继承 bytes 被当成附件跳过，
+    # 否则该行唯一的映射文本永远不会进入 _cell 校验。
     return bool(row) and any(
-        v is not None and not isinstance(v, (bytes, bytearray)) and str(v).strip()
+        v is not None and (
+            getattr(v, "oversized_text_length", None) is not None
+            or (not isinstance(v, (bytes, bytearray)) and str(v).strip())
+        )
         for v in row
     )
 
@@ -117,9 +132,12 @@ def parse_ckd_workbook(
 
     if len(data) > import_safety.STREAM_THRESHOLD_BYTES:
         # 大文件：流式 XML 解析，剥离内嵌图片单元格（54MB 文件普通模式需 7.5 分钟）
-        rows = iter(import_safety.stream_first_sheet_rows(data))
+        rows = iter(import_safety.stream_first_sheet_rows(
+            data, signal_oversized_text=True))
         try:
             result = _parse_ckd_rows(rows, column_aliases)
+        except CkdParseError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise CkdParseError(f"流式解析失败：{type(exc).__name__}") from exc
         return _with_file_meta(result, data, filename)
@@ -130,7 +148,7 @@ def parse_ckd_workbook(
         raise CkdParseError(f"无法读取 Excel 文件：{type(exc).__name__}") from exc
     try:
         sheet = workbook["Sheet1"] if "Sheet1" in workbook.sheetnames else workbook.worksheets[0]
-        rows = sheet.iter_rows(values_only=True)
+        rows = import_safety.iter_sheet_rows(sheet)
         result = _parse_ckd_rows(rows, column_aliases)
     finally:
         workbook.close()
@@ -180,17 +198,22 @@ def _parse_ckd_rows(rows, column_aliases: dict | None) -> dict:
         for row in rows:
             if not _non_empty(row):
                 continue
-            head_anchor = _cell(row, head_indexes["出库单号"])
-            if head_anchor:
-                current = CkdHeadData(
-                    row_no=row_no,
-                    values={
-                        name: _cell(row, head_indexes[name]) for name in _HEAD_COLUMNS
-                    },
-                )
+            # 主表字段在每一非空行都读取：明细续行上若出现映射列超长普通文本，
+            # 也必须明确拒绝，不能因为该行没有出库单号就把值静默丢掉。
+            # 错误回执用源工作表行号（普通/流式由 StreamedSheetRow 统一）。
+            source_row = getattr(row, "excel_row", None) or row_no
+            head_values = {
+                name: _cell(row, head_indexes[name],
+                            row_no=source_row, field=name)
+                for name in _HEAD_COLUMNS
+            }
+            if head_values["出库单号"]:
+                current = CkdHeadData(row_no=row_no, values=head_values)
                 heads.append(current)
             line_values = {
-                name: _cell(row, line_indexes[name]) for name in _LINE_COLUMNS
+                name: _cell(row, line_indexes[name],
+                            row_no=source_row, field=name)
+                for name in _LINE_COLUMNS
             }
             if line_values["备件明细.备件PN"] or line_values["备件明细.出库数量"]:
                 line = CkdLineData(row_no=row_no, values=line_values)
