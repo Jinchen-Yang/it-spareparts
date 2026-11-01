@@ -692,10 +692,12 @@ def test_meta_has_business_language(db, admin_client):
             assert meta.get(field), f"{k} 缺业务语言字段 {field}"
     assert m["dependencies"]["action_data"]["action_pool_set_policy"] == "data_pool_price_governance"
     assert m["dependencies"]["action_page"]["action_account_manage"] == "page_accounts"
-    assert (
-        m["dependencies"]["action_additional_page"]["action_maintenance_project_manage"]
-        == "page_maintenance_beta"
-    )
+    for stable_action in (
+        "action_maintenance_project_manage",
+        "action_maintenance_demand_manage",
+        "action_maintenance_demand_delete",
+    ):
+        assert stable_action not in m["dependencies"]["action_additional_page"]
     assert m["dependencies"]["page_page"]["page_maintenance_beta"] == "page_maintenance"
     assert m["dependencies"]["data_data"]["data_profit"] == "data_purchase_cost"
     assert m["meta"]["page_maintenance_beta"]["label"] == "维保管理"
