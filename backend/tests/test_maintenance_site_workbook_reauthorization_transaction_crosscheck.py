@@ -171,6 +171,7 @@ def _scenario(db, monkeypatch, action):
 
 def _observe_block(observer, holder_pid, future, expected):
     deadline = monotonic() + 15
+    last = None
     while monotonic() < deadline:
         rows = observer.execute(text("""
             SELECT pid, wait_event_type, query FROM pg_stat_activity
@@ -178,12 +179,18 @@ def _observe_block(observer, holder_pid, future, expected):
         """), {"pid": holder_pid}).mappings().all()
         if rows:
             assert len(rows) == 1, rows
-            assert rows[0]["wait_event_type"] == "Lock"
-            assert expected in rows[0]["query"], rows[0]
-            return rows[0]["pid"]
+            last = rows[0]
+            query = last["query"] or ""
+            # pg_blocking_pids 与 wait_event_type 由锁管理器和活动快照分别采样，
+            # 等待队列登记后可短暂不一致；继续轮询到同一候选样本自证 Lock。
+            if (last["wait_event_type"] == "Lock" and expected in query
+                    and query.startswith("SELECT ")):
+                assert last["wait_event_type"] == "Lock"
+                assert expected in last["query"], last
+                return last["pid"]
         assert not future.done(), f"request did not wait: {future.result().text}"
         Event().wait(0.01)
-    pytest.fail("PostgreSQL did not report the expected real lock wait")
+    pytest.fail(f"PostgreSQL did not report the expected real lock wait; last={dict(last) if last else None}")
 
 
 def _assert_applied(case):
