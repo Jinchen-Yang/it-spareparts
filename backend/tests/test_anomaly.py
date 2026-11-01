@@ -65,6 +65,87 @@ def test_transform_purchase_uses_root():
     assert res.lines[0]["anomaly_flags"] == ["zero_price", "amount_mismatch"]
 
 
+def test_transform_purchase_conflicting_head_amount_rejects_whole_order():
+    """D-0050：同一采购单跨行出现不同有效采购金额 → 整单拒绝。"""
+    df = _purchase_df([
+        {"raw_order_id": "O1", "order_no": "O1", "order_date": "2026-01-01",
+         "data_status": "已生效", "raw_line_id": "L1", "line_no": 1,
+         "pn_raw": "PN-A", "qty": 1, "unit_price": 113, "line_amount": 113,
+         "amount_inc_tax": 113},
+        {"raw_order_id": "O1", "order_no": "O1", "order_date": "2026-01-01",
+         "data_status": "已生效", "raw_line_id": "L2", "line_no": 2,
+         "pn_raw": "PN-B", "qty": 1, "unit_price": 226, "line_amount": 226,
+         "amount_inc_tax": 226},
+    ])
+    res = transform.transform(df, mapping.PURCHASE)
+    assert res.orders == {}
+    assert res.lines == []
+    conflicts = [e for e in res.errors if e.error_type == "head_value_conflict"]
+    assert len(conflicts) == 1
+    assert "采购金额" in conflicts[0].error_detail
+    assert "113" in conflicts[0].error_detail and "226" in conflicts[0].error_detail
+
+
+def test_transform_purchase_bad_document_does_not_block_other_documents():
+    """D-0050：被拒采购单不写入，另一合法单照常导入。"""
+    df = _purchase_df([
+        {"raw_order_id": "O-BAD", "order_no": "O-BAD", "order_date": "2026-01-01",
+         "data_status": "已生效", "raw_line_id": "LB1", "line_no": 1,
+         "pn_raw": "PN-A", "qty": 1, "unit_price": 113, "line_amount": 113,
+         "amount_inc_tax": "不是金额"},
+        {"raw_order_id": "O-GOOD", "order_no": "O-GOOD", "order_date": "2026-01-01",
+         "data_status": "已生效", "raw_line_id": "LG1", "line_no": 1,
+         "pn_raw": "PN-B", "qty": 1, "unit_price": 226, "line_amount": 226,
+         "amount_inc_tax": 226},
+    ])
+    res = transform.transform(df, mapping.PURCHASE)
+    assert set(res.orders) == {"O-GOOD"}
+    assert [ln["raw_line_id"] for ln in res.lines] == ["LG1"]
+    assert res.orders["O-GOOD"]["amount_inc_tax"] == Decimal("226.00")
+
+
+def test_transform_purchase_later_invalid_head_value_rejects_order():
+    """D-0050：后一行非法金额不能因前一行合法而被忽略；整单拒绝。"""
+    df = _purchase_df([
+        {"raw_order_id": "O1", "order_no": "O1", "order_date": "2026-01-01",
+         "data_status": "已生效", "raw_line_id": "L1", "line_no": 1,
+         "pn_raw": "PN-A", "qty": 1, "unit_price": 113, "line_amount": 113,
+         "amount_inc_tax": 113},
+        {"raw_order_id": "O1", "order_no": "O1", "order_date": "2026-01-01",
+         "data_status": "已生效", "raw_line_id": "L2", "line_no": 2,
+         "pn_raw": "PN-B", "qty": 1, "unit_price": 0, "line_amount": 0,
+         "amount_inc_tax": "不是金额"},
+    ])
+    res = transform.transform(df, mapping.PURCHASE)
+    assert res.orders == {}
+    assert res.lines == []
+    errors = [e for e in res.errors if e.error_type == "invalid_head_value"]
+    assert len(errors) == 1
+    assert errors[0].row_no == 2
+    assert "采购金额" in errors[0].error_detail
+
+
+def test_transform_purchase_rate_derived_only_from_same_row_pair():
+    """D-0050：不含税额与税金来自不同源行时不得拼接推导税率。"""
+    df = _purchase_df([
+        {"raw_order_id": "O1", "order_no": "O1", "order_date": "2026-01-01",
+         "data_status": "已生效", "raw_line_id": "L1", "line_no": 1,
+         "pn_raw": "PN-A", "qty": 1, "unit_price": 100, "line_amount": 100,
+         "amount_ex_tax": 100},
+        {"raw_order_id": "O1", "order_no": "O1", "order_date": "2026-01-01",
+         "data_status": "已生效", "raw_line_id": "L2", "line_no": 2,
+         "pn_raw": "PN-B", "qty": 1, "unit_price": 13, "line_amount": 13,
+         "tax_amount": 13},
+    ])
+    res = transform.transform(df, mapping.PURCHASE)
+    head = res.orders["O1"]
+    assert head["amount_ex_tax"] == Decimal("100.00")
+    assert head["tax_amount"] == Decimal("13.00")
+    assert head["tax_rate"] is None
+    assert not [e for e in res.errors
+                if e.error_type in {"invalid_head_value", "head_value_conflict"}]
+
+
 def test_purchase_flags_persist_through_loader(db):
     df = _purchase_df([{
         "raw_order_id": "O9", "order_no": "O9", "order_date": "2026-01-01",

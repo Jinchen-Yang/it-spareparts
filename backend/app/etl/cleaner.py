@@ -213,7 +213,26 @@ def parse_tax_inclusive(x) -> bool | None:
     """氚云「是否含税」列：'含税'→True，'不含'/'未税'→False，空→None。
 
     顺序重要：'不含' 含子串 '含'，必须先判 '不含'/'未税' 再判 '含'。
+    D-0050：合同适配器已把 是/否/true/false/yes/no/1/0/y/n 作为受控含税标记；
+    这里对齐同一词表，避免明确的税标记被静默当 NULL。任意其它文本仍返回
+    None（不猜含义），不扩大税算法。
+
+    数值单元格（Excel/pandas/openpyxl/流式读取）可能是 1/0 或 1.0/0.0
+    （空行会让 DataFrame 把整列提升为 float，Decimal 也等同）；只认严格
+    == 1 / == 0，不用 truthiness、不四舍五入。2、-1、0.5、nan、inf 仍
+    返回 None，与未知文本一致。字符串「1.0」「0.0」不是受控词表，也不猜。
     """
+    if isinstance(x, numbers.Number) and not isinstance(x, bool):
+        if _is_blank(x):                 # nan（float/Decimal）按空处理
+            return None
+        try:
+            if x == 1:                   # 严格相等：1.0/Decimal('1.0') 命中
+                return True
+            if x == 0:                   # -0.0 也是精确 0
+                return False
+        except (InvalidOperation, TypeError, ValueError):
+            return None                  # 非有限 Decimal('sNaN') 等拒绝
+        return None
     s = clean_str(x)
     if s is None:
         return None
@@ -221,6 +240,11 @@ def parse_tax_inclusive(x) -> bool | None:
         return False
     if "含税" in s or s == "含":
         return True
+    token = s.strip().casefold()
+    if token in {"是", "true", "yes", "y", "1"}:
+        return True
+    if token in {"否", "false", "no", "n", "0"}:
+        return False
     return None
 
 

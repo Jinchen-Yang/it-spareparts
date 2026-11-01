@@ -138,6 +138,8 @@ def test_rule1_line_level_cost_and_source_restricted(db, tmp_path):
         assert row[field]["value"] is None
     assert "pool_sales" not in str(lines)
     assert 99.99 not in _numbers(lines)
+    # D-0050 原文证据不是成本组：无成本权限也应原样可见（不扩大权限、不误脱敏）
+    assert row["adjust_warehouse_raw"] == "否"
 
 
 def test_rule2_cost_sort_is_422_not_silent_downgrade(db, tmp_path):

@@ -23,6 +23,27 @@ def test_parse_tax_inclusive():
     assert cleaner.parse_tax_inclusive("未税") is False
     assert cleaner.parse_tax_inclusive(None) is None
     assert cleaner.parse_tax_inclusive("") is None
+    # D-0050：与合同适配器受控词表对齐，明确标记不再静默 NULL
+    for token in ("是", "true", "TRUE", "yes", "Y", "1"):
+        assert cleaner.parse_tax_inclusive(token) is True, token
+    for token in ("否", "false", "FALSE", "no", "N", "0"):
+        assert cleaner.parse_tax_inclusive(token) is False, token
+    assert cleaner.parse_tax_inclusive("随便写的") is None   # 任意文本不猜含义
+    # 数值 1.0/0.0 与 1/0 同义（空行把 DataFrame 列提升为 float 的真实形态）；
+    # Decimal 同理。只认精确 0/1，不按 truthiness/容差扩词。
+    for value in (1, 1.0, Decimal("1.0"), Decimal("1")):
+        assert cleaner.parse_tax_inclusive(value) is True, value
+    for value in (0, 0.0, Decimal("0.0"), -0.0):
+        assert cleaner.parse_tax_inclusive(value) is False, value
+    for value in (2, -1, 0.5, float("nan"), float("inf"), float("-inf"),
+                  Decimal("NaN"), Decimal("Infinity")):
+        assert cleaner.parse_tax_inclusive(value) is None, value
+    assert cleaner.parse_tax_inclusive(True) is True        # bool 仍按词表走
+    assert cleaner.parse_tax_inclusive(False) is False
+    # 文本「1.0」不是受控 token：数值单元格在两条读取路径都不会变成该字符串
+    # （openpyxl 给 float，xlsx_stream 给 int，整数化后由 pandas 提升 float）。
+    assert cleaner.parse_tax_inclusive("1.0") is None
+    assert cleaner.parse_tax_inclusive("0.0") is None
 
 
 def test_derive_tax_rate():

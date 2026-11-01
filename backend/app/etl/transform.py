@@ -1,7 +1,8 @@
 """行级清洗 + 校验：原始 DataFrame → 干净记录 + 错误 + 行级异常标记（§6.8/§11）。
 
 原则：坏行隔离、好行照常。每个明细行独立校验，错误进 errors，不阻断其它行。
-订单头从同一行（ffill 后头字段已补齐）解析，按 raw_order_id 首次出现去重。
+订单头在首个有效 PN/数量明细行解析（坏明细不冻结非经济头），按 raw_order_id
+首次有效明细出现去重。
 """
 import hashlib
 import re
@@ -59,6 +60,13 @@ class TransformResult:
     rows_display_issue: int = 0        # 展示补全列坏值（旗标非是/否、日期/数量解析失败）计数，不阻断行
     headless_order_ids: list = field(default_factory=list)  # 「有单头、无明细」订单（保留入库）
     maintenance_address_patches: dict[str, AddressPatch] = field(default_factory=dict)
+    # D-0050：本文件实际提供的源字段（内部键），按 head/line 分层，由 reader
+    # 规范化后的 df.columns 生成（不看值是否非空、不依赖 df.attrs）。loader 只
+    # 更新这里列出的 WBDD 字段：源列缺失保留旧值，源列存在但空白仍按既有规则
+    # 覆盖；采购/销售继续走各自 D-41 覆盖规则，不消费此掩码。None（旧调用方
+    # 直接构造 TransformResult）→ loader 保持全量更新；空 frozenset 表示该层
+    # 源列全部缺失，与 None 严格区分。
+    present_fields: dict[str, frozenset[str]] | None = None
     # D-40：销售文件是否带对账区列（至少「已对账金额」列存在）。旧格式文件为
     # False → loader 不写快照（对账区列一个都没有时不产生 NULL 快照）。
     has_reconciliation_columns: bool = False
@@ -91,9 +99,28 @@ _RECON_FIELD_LABELS = {
     "return_reconciled_amount": "退货已对账金额",
     "source_modified_at": "修改时间",
     "amount_inc_tax": "订单金额",
+    "amount_ex_tax": "不含税金额",
+    "tax_rate": "税率",
     "is_tax_inclusive": "是否含税",
     "tax_amount": "税金",
 }
+
+# D-0050（用户确认的口径）：采购/销售单头金额或税率——非空值无法解析，或同一
+# 字段在一张单的全部源行里出现不同的有效值——该单本次不导入，保留库内旧事实；
+# 其他合法单据继续。后出现的合法值不能豁免早先的非法值；也绝不引入
+# 「不含税×税率=税金」等算术等式或舍入阈值阻断（票面差异按源值保留）。
+_HEAD_ECONOMIC_LABELS = {
+    "amount_ex_tax": "不含税金额",
+    "amount_inc_tax": "申报金额",
+    "tax_amount": "税金",
+    "tax_rate": "税率",
+}
+
+
+def _head_economic_label(file_type: str, field_name: str) -> str:
+    if field_name == "amount_inc_tax":
+        return "采购金额" if file_type == mapping.PURCHASE else "订单金额"
+    return _HEAD_ECONOMIC_LABELS[field_name]
 
 
 def _fmt_head_value(value):
@@ -105,6 +132,80 @@ def _fmt_head_value(value):
     return value
 
 
+def _observe_head_value(slot: dict, field: str, value, row_no: int) -> None:
+    """登记单头金额/税率的有效观测；同字段出现不同有效值 → 记为冲突待整单拒绝。
+
+    比较用解析后的值（Decimal），"100" 与 "100.00" 不算冲突。首个观测行号
+    记录在 _row_by_field，仅用于冲突告警定位；税率同源判定改用 reader 的
+    原始 pair index，不看这里。
+    """
+    row_by_field = slot.setdefault("_row_by_field", {})
+    if field not in slot:
+        slot[field] = value
+        row_by_field[field] = row_no
+        return
+    if slot[field] != value:
+        slot.setdefault("_conflicts", []).append({
+            "field": field,
+            "row_no": row_no,
+            "first_row_no": row_by_field.get(field),
+            "first": slot[field],
+            "value": value,
+        })
+
+
+def _collect_head_economics(res, row, row_no: int, raw_order_id: str,
+                            inv_head: dict, head_obs: dict,
+                            source_index, pair_rows: frozenset | None) -> None:
+    """逐行收集采购/销售单头经济字段观测（D-0050）。
+
+    调用于父单身份校验之后、明细身份（明细 ID）与明细级校验（PN/数量/单价）
+    闸门之前：缺明细 ID 或明细校验失败的行同样携带单头值，不能因坏行静默
+    漏掉非法观测。非空非法值按源行留痕（即使后续行有合法值也不豁免）；
+    跨行不同值按字段留痕，最终由 _finalize_head_economics 整单拒绝。
+
+    税率同源候选只在本行未税与税金都解析成功、且本行是 reader 记录的「ffill
+    前两值同时非空」原始源行时登记。pair_rows 为空 frozenset 表示确定没有
+    同源对，绝不回退到 ffill 后看似齐全的本行；pair_rows 为 None（调用方直接
+    传入未 ffill 的原始 DataFrame）才按本行实际两值判定。
+    """
+    slot = head_obs.setdefault(raw_order_id, {})
+    parsed = {}
+
+    def g(internal):
+        col = inv_head.get(internal)
+        return row.get(col) if col is not None else None
+
+    for field_name in ("amount_ex_tax", "amount_inc_tax", "tax_amount"):
+        raw = g(field_name)
+        try:
+            value = cleaner.parse_money(raw)
+        except ValueError as exc:
+            slot.setdefault("_invalid", []).append({
+                "field": field_name, "row_no": row_no,
+                "raw": str(raw), "detail": str(exc),
+            })
+            continue
+        if value is not None:
+            parsed[field_name] = value
+            _observe_head_value(slot, field_name, value, row_no)
+    if ("amount_ex_tax" in parsed and "tax_amount" in parsed
+            and (pair_rows is None or source_index in pair_rows)):
+        slot.setdefault("_same_source_pair",
+                        (parsed["amount_ex_tax"], parsed["tax_amount"]))
+    raw_rate = g("tax_rate")
+    try:
+        rate = cleaner.parse_rate(raw_rate)
+    except ValueError as exc:
+        slot.setdefault("_invalid", []).append({
+            "field": "tax_rate", "row_no": row_no,
+            "raw": str(raw_rate), "detail": str(exc),
+        })
+    else:
+        if rate is not None:
+            _observe_head_value(slot, "tax_rate", rate, row_no)
+
+
 def _merge_recon_value(res, slot, raw_order_id, field, value, row_no) -> None:
     """首个非空原始值生效（键在 slot 即视为已占用——坏值锁定 NULL，不被后续
     行的好值悄悄顶掉）；后续行解析值不同 → 软警告留痕（可忽略）。
@@ -112,6 +213,9 @@ def _merge_recon_value(res, slot, raw_order_id, field, value, row_no) -> None:
     比较用解析后的值（Decimal/datetime/bool），"100" 与 "100.00" 不算冲突。"""
     if field not in slot:
         slot[field] = value
+        # D-0050：记录首个有效观测所在数据行，仅用于冲突告警定位；税率同源
+        # 判定改用 reader 的原始 pair index。
+        slot.setdefault("_row_by_field", {})[field] = row_no
         return
     prev = slot[field]
     if prev != value:
@@ -127,16 +231,19 @@ def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
                                   head_obs) -> None:
     """按行收集销售单头观测值：D-40 对账区四列 + D-41 含税三件套。
 
-    调用于订单/行 ID 校验之后、明细级校验（PN/数量/单价）闸门**之前**——
-    明细校验失败的行同样携带该订单的单头值，绝不静默跳过（Codex 审查 P1）。
+    调用于父单身份校验之后、明细身份（明细 ID）与明细级校验（PN/数量/单价）
+    闸门**之前**——缺明细 ID 或明细校验失败的行同样携带该订单的单头值，
+    绝不静默跳过（Codex 审查 P1）。
     常规布局「值在首行、下方存活行留空」由 reader 按单向下 ffill 兜住；本
     收集点再兜住 ffill 兜不住的形态（值只在末行坏行上、坏行值与存活行不同）。
 
     对账区（仅新格式文件）：坏值置 NULL 记行级错误（bad_reconciliation_amount /
     bad_source_modified_time，逐行上报不阻断），首个非空是坏值 → 锁定 NULL。
-    含税三件套（新旧格式都有）：坏值沿用 _build_head 旧口径静默置 None
-    （不加新错误码），空/坏不参与聚合。全部行校验失败的订单不并入订单头
-    （订单不入库，快照/头字段无从落），但已上报的行级错误仍然可见。
+    单头金额/税率（新旧格式都有）由 _collect_head_economics 按同一调用时点
+    逐行收集：非空非法或同字段跨行不同有效值 → 整单拒绝（D-0050）。
+    是否含税不是金额/税率字段，保持既有「首个非空 + 软告警」口径。
+    全部行校验失败的订单不并入订单头（订单不入库，快照/头字段无从落），但
+    已上报的行级错误仍然可见。
     比较用解析后的值（Decimal/datetime），"100" 与 "100.00" 不算冲突。
     """
     slot = head_obs.setdefault(raw_order_id, {})
@@ -145,10 +252,6 @@ def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
         col = inv_head.get(internal)
         return row.get(col) if col is not None else None
 
-    for field_name in ("amount_inc_tax", "tax_amount"):
-        value = _safe_money(g(field_name))
-        if value is not None:
-            _merge_recon_value(res, slot, raw_order_id, field_name, value, row_no)
     tax_inclusive = cleaner.parse_tax_inclusive(g("is_tax_inclusive"))
     if tax_inclusive is not None:
         _merge_recon_value(res, slot, raw_order_id, "is_tax_inclusive",
@@ -188,6 +291,52 @@ def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
                                modified.astimezone(timezone.utc), row_no)
 
 
+def _finalize_head_economics(res, file_type: str, raw_order_id: str,
+                             values: dict, head: dict) -> bool:
+    """按整单观测收口采购/销售单头金额与税率；返回是否需要整单拒绝。
+
+    D-0050（用户确认）：任一源行出现非空无法解析的金额/税率，或同一字段在
+    不同源行出现不同的有效值 → 该单本次不导入（不写头/行/快照/合同），
+    保留库内旧事实；回执逐字段报告源行与原因。后出现的合法值不能豁免早先
+    的非法值。不做任何算术等式/舍入阈值判断，票面差异按源值保留。
+    税率显式值优先；缺失时只接受「ffill 前同一原始源行同时给出未税金额与
+    税金」的候选（由 reader 的原始 pair index 限定），禁止用 ffill 后看似
+    齐全的本行或跨行拼接自造税率。
+    """
+    blocked = False
+    for rec in values.get("_invalid", []):
+        label = _head_economic_label(file_type, rec["field"])
+        res.errors.append(ErrorRec(
+            rec["row_no"], "invalid_head_value",
+            f"{label}「{rec['raw']}」无法解析（{rec['detail']}）；"
+            "该单本次不导入，保留库内已有事实，请修正后重传",
+            {rec["field"]: rec["raw"]}))
+        blocked = True
+    for rec in values.get("_conflicts", []):
+        label = _head_economic_label(file_type, rec["field"])
+        res.errors.append(ErrorRec(
+            rec["row_no"], "head_value_conflict",
+            f"{label}同单多行取值不一致：第{rec['first_row_no']}行"
+            f"{_fmt_head_value(rec['first'])}，第{rec['row_no']}行"
+            f"{_fmt_head_value(rec['value'])}；该单本次不导入，保留库内已有事实",
+            {rec["field"]: str(rec["value"])}))
+        blocked = True
+    if blocked:
+        return True
+
+    head["amount_ex_tax"] = values.get("amount_ex_tax")
+    head["amount_inc_tax"] = values.get("amount_inc_tax")
+    head["tax_amount"] = values.get("tax_amount")
+    explicit_rate = values.get("tax_rate")
+    if explicit_rate is not None:
+        head["tax_rate"] = explicit_rate
+    else:
+        pair = values.get("_same_source_pair")
+        head["tax_rate"] = (
+            cleaner.derive_tax_rate(*pair) if pair is not None else None)
+    return False
+
+
 def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
     res = TransformResult(file_type=file_type)
     head_map = mapping.MAPPINGS[file_type]["head"]
@@ -195,9 +344,28 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
     inv_head = {v: k for k, v in head_map.items()}   # internal -> chinese
     inv_line = {v: k for k, v in line_map.items()}
     res.rows_total = len(df)
+    # D-0050：按 reader 规范化后的实际列判定字段是否由本文件提供。采购/销售
+    # loader 不消费此掩码（各自 D-41 规则不变），仅随结果返回供回执/测试核对。
+    res.present_fields = {
+        "head": frozenset(
+            internal for source, internal in head_map.items()
+            if source in df.columns
+        ),
+        "line": frozenset(
+            internal for source, internal in line_map.items()
+            if source in df.columns
+        ),
+    }
     # D-40：对账区列存在性 = 至少「已对账金额」列；按订单聚合的单头观测值
-    # （D-40 对账区 + D-41 含税三件套，见 _collect_sales_reconciliation）
+    # （D-40 对账区 + D-41 含税三件套 + D-0050 金额/税率，见收集函数）
     head_obs_by_order: dict = {}
+    invalid_order_ids: set[str] = set()
+    # D-0050：reader 在 alias coalesce 后、ffill 前记录「未税金额与税金同时
+    # 非空」的原始 index。空 frozenset 表示确定没有同源对，不得回退到 ffill
+    # 后两值齐全的行；键缺失（直接 transform 原始 DataFrame）才按本行判定。
+    pair_rows = df.attrs.get("_source_head_economic_pair_rows")
+    if pair_rows is not None:
+        pair_rows = frozenset(pair_rows)
     res.has_reconciliation_columns = (
         file_type == mapping.SALES and inv_head.get("reconciled_amount") in df.columns
     )
@@ -209,16 +377,25 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
         raw_order_id = cleaner.clean_str(row.get(inv_head["raw_order_id"]))
         raw_line_id = cleaner.clean_str(row.get(inv_line["raw_line_id"]))
 
-        if not raw_line_id or not raw_order_id:
+        if not raw_order_id:
+            # 无父单身份：只报本行错误，观测值不得归到任何订单。
             res.errors.append(ErrorRec(row_no, "missing_raw_id",
                                        "缺少订单/明细数据ID", _row_dict(row, full_map)))
             continue
 
-        # D-40/D-41 单头观测在明细级校验（PN/数量/单价）之前收集：校验失败的行
-        # 同样携带该订单的对账区/含税三件套值，绝不静默跳过（Codex 审查 P1）。
+        # D-0050：父单可识别的源行先参与金额/税率观测，再走明细身份门禁——
+        # 缺明细ID不能成为跳过非法/冲突单头值的理由（用户确认的第五项：同一单
+        # 的所有可识别父单源行）。D-40/D-41 同为按行观测，随同前移。
+        _collect_head_economics(res, row, row_no, raw_order_id,
+                                inv_head, head_obs_by_order, idx, pair_rows)
         if file_type == mapping.SALES:
             _collect_sales_reconciliation(res, row, row_no, raw_order_id,
                                           inv_head, head_obs_by_order)
+
+        if not raw_line_id:
+            res.errors.append(ErrorRec(row_no, "missing_raw_id",
+                                       "缺少订单/明细数据ID", _row_dict(row, full_map)))
+            continue
 
         pn_std, pn_raw, needs_review = cleaner.standardize_pn(row.get(inv_line["pn_raw"]))
         if pn_std is None:
@@ -262,36 +439,56 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
             line["serial_numbers"] = cleaner.clean_str(row.get(inv_line["serial_numbers"]))
         res.lines.append(line)
 
-        # 订单头（首次出现）
+        # 单头在首个有效 PN/数量明细之后解析：坏明细行不得冻结非经济头，
+        # 客户/日期/状态取首个有效明细行。
         if raw_order_id not in res.orders:
-            head = _build_head(row, file_type, inv_head, row_no, res)
-            res.orders[raw_order_id] = head
-            if head.get("data_status") and head["data_status"] != "已生效":
-                pass  # inactive 计数在 line 级更直观，见下
-    # inactive 行数：按行所属订单状态统计
+            res.orders[raw_order_id] = _build_head(
+                row, file_type, inv_head, row_no, res)
+    # 单头观测聚合值并回订单头（只并给本文件中至少一行有效的订单——其余订单
+    # 不入库，快照/头字段都无从落，收集时上报的行级错误仍可见）。对账区四个键
+    # 补齐为 None：列存在但整单为空/坏值时键仍在，值为 NULL——下游（快照 NULL
+    # 语义）与测试断言都按此口径。含税三件套用聚合值覆盖头行原值；是否含税
+    # 沿用「首个非空 + 软告警」。D-0050：金额/税率任一非法或同字段跨行不同值
+    # → 整单拒绝；税率显式值优先，缺失时只在 reader 提供的原始同源 pair 上推导。
+    for raw_id, values in head_obs_by_order.items():
+        head = res.orders.get(raw_id)
+        if head is None:
+            # 全部明细行被拒的订单不入库，但其非法/冲突单头值仍须逐字段可见。
+            _finalize_head_economics(res, file_type, raw_id, values, {})
+            continue
+        if file_type == mapping.SALES:
+            head["is_tax_inclusive"] = values.get("is_tax_inclusive")
+        if file_type == mapping.SALES and res.has_reconciliation_columns:
+            for field_name in (*_RECON_MONEY_FIELDS, "source_modified_at"):
+                head[field_name] = values.get(field_name)
+        if _finalize_head_economics(res, file_type, raw_id, values, head):
+            invalid_order_ids.add(raw_id)
+
+    if invalid_order_ids:
+        # 单据级阻断：单头非法/不一致时该单的头和行都不进入入库计划，避免
+        # 只写半张单或用 NULL 覆盖既有票面原值；错误已逐字段留痕。
+        for raw_id in invalid_order_ids:
+            res.orders.pop(raw_id, None)
+        res.lines = [
+            line for line in res.lines
+            if line["_order_raw_id"] not in invalid_order_ids
+        ]
+    # inactive 行数：只数最终保留明细（经济坏单剔除后），rows_total 仍为全源行数。
     res.rows_inactive = sum(
         1 for ln in res.lines
         if res.orders.get(ln["_order_raw_id"], {}).get("data_status") not in (None, "已生效")
     )
-    # 单头观测聚合值并回订单头（只并给本文件中至少一行有效的订单——其余订单
-    # 不入库，快照/头字段都无从落，收集时上报的行级错误仍可见）。对账区四个键
-    # 补齐为 None：列存在但整单为空/坏值时键仍在，值为 NULL——下游（快照 NULL
-    # 语义）与测试断言都按此口径。含税三件套用聚合值覆盖头行原值：「首个非空」
-    # 取代「首个存活行」（各行一致时结果不变；跨行不同时按文件序首个非空为准，
-    # 且已留冲突告警）。税率仍按订单头行的 不含税金额×税金 推导，不随覆盖重算。
-    for raw_id, values in head_obs_by_order.items():
-        head = res.orders.get(raw_id)
-        if head is None:
-            continue
-        if res.has_reconciliation_columns:
-            for field_name in (*_RECON_MONEY_FIELDS, "source_modified_at"):
-                head[field_name] = values.get(field_name)
-        for field_name in _TAX_TRIO_FIELDS:
-            head[field_name] = values.get(field_name)
     return res
 
 
-def _build_head(row, file_type, inv_head, row_no, res) -> dict:
+def _build_head(row, file_type: str, inv_head: dict, row_no: int,
+                res) -> dict:
+    """构建单头中与金额/税率无关的字段（D-0050）。
+
+    金额与税率由 _collect_head_economics 逐行观测、_finalize_head_economics
+    整单收口；这里只负责日期、状态、供应商/客户等非经济字段，避免先按首行
+    吞错或提前推导税率。
+    """
     def g(internal):
         return row.get(inv_head[internal]) if internal in inv_head else None
 
@@ -300,25 +497,18 @@ def _build_head(row, file_type, inv_head, row_no, res) -> dict:
     except ValueError as exc:
         order_date = None
         res.errors.append(ErrorRec(row_no, "bad_date", str(exc), {"order_date": str(g("order_date"))}))
-    try:
-        tax_rate = cleaner.parse_rate(g("tax_rate"))
-    except ValueError:
-        tax_rate = None
+
     head = {
         "raw_order_id": cleaner.clean_str(g("raw_order_id")),
         "order_no": cleaner.clean_str(g("order_no")),
         "order_date": order_date,
-        "tax_rate": tax_rate,
-        "amount_ex_tax": _safe_money(g("amount_ex_tax")),
+        "tax_rate": None,
+        "amount_ex_tax": None,
         "data_status": cleaner.clean_str(g("data_status")),
     }
     if file_type == mapping.PURCHASE:
         name_raw, name_norm = cleaner.normalize_supplier_name(g("supplier_name"))
         supplier_type = cleaner.clean_str(g("supplier_type"))
-        tax_amount = _safe_money(g("tax_amount"))
-        # 税率列实测常空 → 用 税金/不含税金额 反推（含税单），保证含税未税换算可用
-        if head["tax_rate"] is None:
-            head["tax_rate"] = cleaner.derive_tax_rate(head["amount_ex_tax"], tax_amount)
         head.update({
             "purchaser": cleaner.clean_str(g("purchaser")),
             "supplier_name_raw": name_raw,
@@ -332,49 +522,34 @@ def _build_head(row, file_type, inv_head, row_no, res) -> dict:
             "linked_sales_order_no": cleaner.clean_str(g("linked_sales_order_no")),
             "linked_maintenance_order_no": cleaner.clean_str(g("linked_maintenance_order_no")),
             "is_tax_inclusive": cleaner.parse_tax_inclusive(g("is_tax_inclusive")),
-            "tax_amount": tax_amount,
-            "amount_inc_tax": _safe_money(g("amount_inc_tax")),
+            "tax_amount": None,
+            "amount_inc_tax": None,
         })
-    else:  # sales
-        tax_amount = _safe_money(g("tax_amount"))
-        amount_inc_tax = _safe_money(g("amount_inc_tax"))
-        is_tax_inclusive = cleaner.parse_tax_inclusive(g("is_tax_inclusive"))
-        # 真实销售导出经常把税率列写成带“(必填)”的采购同名列；reader 已按
-        # 文件类型合并别名。仍缺税率时，只允许用同一行显式未税额和税金反推，
-        # 绝不把 NULL 税率当 0 后把未税额冒充含税额。
-        if head["tax_rate"] is None:
-            head["tax_rate"] = cleaner.derive_tax_rate(
-                head["amount_ex_tax"], tax_amount
-            )
-        head.update({
-            "salesperson": cleaner.clean_str(g("salesperson")),
-            "customer_name": cleaner.clean_str(g("customer_name")),
-            "customer_type": cleaner.clean_str(g("customer_type")),
-            "customer_source": cleaner.clean_str(g("customer_source")),
-            "customer_city": cleaner.clean_str(g("customer_city")),
-            "maintenance_business": cleaner.clean_str(g("maintenance_business")),
-            "business_type": cleaner.clean_str(g("business_type")),
-            "maintenance_project_name": cleaner.clean_str(
-                g("maintenance_project_name")
-            ),
-            "maintenance_project_manager": cleaner.clean_str(
-                g("maintenance_project_manager")
-            ),
-            "maintenance_period_from": g("maintenance_period_from"),
-            "maintenance_period_to": g("maintenance_period_to"),
-            "warehouse": cleaner.clean_str(g("warehouse")),
-            "is_tax_inclusive": is_tax_inclusive,
-            "tax_amount": tax_amount,
-            "amount_inc_tax": amount_inc_tax,
-        })
+        return head
+
+    # 销售：经济字段由整单观测收口；是否含税保持首个非空 + 软告警口径。
+    head.update({
+        "salesperson": cleaner.clean_str(g("salesperson")),
+        "customer_name": cleaner.clean_str(g("customer_name")),
+        "customer_type": cleaner.clean_str(g("customer_type")),
+        "customer_source": cleaner.clean_str(g("customer_source")),
+        "customer_city": cleaner.clean_str(g("customer_city")),
+        "maintenance_business": cleaner.clean_str(g("maintenance_business")),
+        "business_type": cleaner.clean_str(g("business_type")),
+        "maintenance_project_name": cleaner.clean_str(
+            g("maintenance_project_name")
+        ),
+        "maintenance_project_manager": cleaner.clean_str(
+            g("maintenance_project_manager")
+        ),
+        "maintenance_period_from": g("maintenance_period_from"),
+        "maintenance_period_to": g("maintenance_period_to"),
+        "warehouse": cleaner.clean_str(g("warehouse")),
+        "is_tax_inclusive": None,
+        "tax_amount": None,
+        "amount_inc_tax": None,
+    })
     return head
-
-
-def _safe_money(x):
-    try:
-        return cleaner.parse_money(x)
-    except ValueError:
-        return None
 
 
 # 项目名规范化：剥「预交付-」前缀（聚合键；原值另存 project_raw 供追溯）。
@@ -386,21 +561,21 @@ from app.services.project_names import PRE_DELIVERY_PREFIX as _PROJECT_PREFIX  #
 _WBDD_HEAD_DISPLAY_SPEC: dict[str, tuple[str, int | None]] = {
     "head_demand_qty": ("qty", None), "head_purchase_qty": ("qty", None),
     "head_shipped_qty": ("qty", None), "head_returned_qty": ("qty", None),
-    "maintainer_raw": ("str", 64), "work_order_no": ("str", 64),
-    "created_by_raw": ("str", 64), "purchaser_raw": ("str", 64),
-    "purchaser2_raw": ("str", 64), "project_manager_raw": ("str", 64),
-    "project_manager_staff_raw": ("str", 64), "co_salesperson_raw": ("str", 64),
-    "partner_raw": ("str", 64), "sales_dept_raw": ("str", 64),
-    "warehouse_keeper_raw": ("str", 64), "storage_center": ("str", 64),
-    "warehouse_raw": ("str", 64), "change_warehouse_flag": ("bool", None),
-    "change_warehouse": ("str", 64), "change_warehouse_handler": ("str", 64),
-    "warehouse_handler": ("str", 64), "supply_deadline": ("date", None),
-    "delivery_address_option": ("str", 128), "receiver": ("str", 64),
-    "receiver_phone": ("str", 32), "receiver_address": ("str", None),
-    "express_no": ("str", 128), "express_no2": ("str", 128),
+    "maintainer_raw": ("str", None), "work_order_no": ("str", None),
+    "created_by_raw": ("str", None), "purchaser_raw": ("str", None),
+    "purchaser2_raw": ("str", None), "project_manager_raw": ("str", None),
+    "project_manager_staff_raw": ("str", None), "co_salesperson_raw": ("str", None),
+    "partner_raw": ("str", None), "sales_dept_raw": ("str", None),
+    "warehouse_keeper_raw": ("str", None), "storage_center": ("str", None),
+    "warehouse_raw": ("str", None), "change_warehouse_flag": ("bool", None),
+    "change_warehouse": ("str", None), "change_warehouse_handler": ("str", None),
+    "warehouse_handler": ("str", None), "supply_deadline": ("date", None),
+    "delivery_address_option": ("str", None), "receiver": ("str", None),
+    "receiver_phone": ("str", None), "receiver_address": ("str", None),
+    "express_no": ("str", None), "express_no2": ("str", None),
     "image_urls": ("str", None), "attachments": ("str", None),
-    "whole_machine_check": ("str", 16), "accept_generic_flag": ("bool", None),
-    "created_at_raw": ("str", 32), "modified_at_raw": ("str", 32),
+    "whole_machine_check": ("str", None), "accept_generic_flag": ("bool", None),
+    "created_at_raw": ("str", None), "modified_at_raw": ("str", None),
 }
 _WBDD_LINE_DISPLAY_SPEC: dict[str, tuple[str, int | None]] = {
     "purchase_qty": ("qty", None), "change_warehouse_purchase_qty": ("qty", None),
@@ -409,19 +584,23 @@ _WBDD_LINE_DISPLAY_SPEC: dict[str, tuple[str, int | None]] = {
     "warehouse_shipped_qty": ("qty", None), "supplied_qty": ("qty", None),
     "pending_supply_qty": ("qty", None), "returned_qty": ("qty", None),
     "pending_return_qty": ("qty", None), "consumed_qty": ("qty", None),
-    "demand_pending_return_qty": ("qty", None), "return_old_part": ("str", 16),
-    "whole_or_part": ("str", 8), "whole_machine_purchase_part": ("str", None),
-    "whole_machine_part_purchased": ("str", 16), "purchase_note": ("str", None),
+    "demand_pending_return_qty": ("qty", None), "return_old_part": ("str", None),
+    "whole_or_part": ("str", None), "whole_machine_purchase_part": ("str", None),
+    "whole_machine_part_purchased": ("str", None), "purchase_note": ("str", None),
     "line_note": ("str", None), "line_image_urls": ("str", None),
     "warehouse_stock_raw": ("str", None), "adjust_warehouse_flag": ("bool", None),
-    "adjust_warehouse": ("str", 64), "adjust_storage_center": ("str", 64),
-    "adjust_keeper": ("str", 64), "ship_warehouse": ("str", 64),
-    "ship_warehouse_object_id": ("str", 64), "ship_stock": ("qty", None),
+    "adjust_warehouse": ("str", None), "adjust_storage_center": ("str", None),
+    "adjust_keeper": ("str", None), "ship_warehouse": ("str", None),
+    "ship_warehouse_object_id": ("str", None), "ship_stock": ("qty", None),
 }
 
 
 def _wbdd_display_extras(row, inv_map: dict, spec: dict, res: TransformResult) -> dict:
-    """按规格解析展示补全列：坏值 → NULL＋rows_display_issue+=1，绝不阻断行（只展示用途）。"""
+    """按规格解析展示补全列：坏值 → NULL＋rows_display_issue+=1，绝不阻断行（只展示用途）。
+
+    例外（D-0050）：`adjust_warehouse_flag` 源列真实语义可能是仓库名；非是/否
+    文本不再计坏布尔，只保留在 `adjust_warehouse_raw`，兼容布尔列置 NULL。
+    """
     out: dict = {}
     for field_name, (kind, clip) in spec.items():
         source_col = inv_map.get(field_name)
@@ -438,6 +617,11 @@ def _wbdd_display_extras(row, inv_map: dict, spec: dict, res: TransformResult) -
                 out[field_name] = None
             elif s in ("是", "否"):
                 out[field_name] = (s == "是")
+            elif field_name == "adjust_warehouse_flag":
+                # D-0050：该源列真实语义是「个别调整发货仓」，可能是仓库名。
+                # 只有明确的是/否进兼容布尔列；其余合法文本保留在
+                # adjust_warehouse_raw，不再当作坏布尔累计展示告警。
+                out[field_name] = None
             else:
                 out[field_name] = None
                 res.rows_display_issue += 1
@@ -450,9 +634,47 @@ def _wbdd_display_extras(row, inv_map: dict, spec: dict, res: TransformResult) -
         else:
             s = cleaner.clean_str(raw)
             out[field_name] = (s[:clip] if (s and clip) else s)
+    # D-0050：个别调整发货仓的源单元格可能是仓库名，布尔列只承载明确的
+    # 是/否；原文另存 adjust_warehouse_raw，不猜主数据、不把仓库名当布尔。
+    adjust_source = inv_map.get("adjust_warehouse_flag")
+    if "adjust_warehouse_flag" in spec and adjust_source:
+        out["adjust_warehouse_raw"] = cleaner.clean_str(row.get(adjust_source))
     return out
 # 预建单容忍窗：制单日期晚于导入日超过此天数 → 记 future_date 异常（不拦截，实测存在预建单）
 _FUTURE_TOLERANCE_DAYS = 30
+
+# D-0050：核心身份/受限列不做静默截断；超长时按字段/行明确报错。展示文本列已
+# 迁 Text，不受这些上限约束。上限与 SQLAlchemy 模型一致。
+_WBDD_ORDER_TEXT_LIMITS = {
+    "raw_order_id": (64, "维保单数据ID"),
+    "order_no": (64, "需求单号"),
+    "linked_sales_order_no": (64, "销售订单"),
+    "project_raw": (256, "项目名"),
+    "customer_name": (256, "客户名称"),
+    "end_customer": (256, "最终客户名"),
+    "demand_type": (16, "需求类型"),
+    "business_type": (16, "业务类型"),
+    "salesperson": (64, "销售人员"),
+    "warehouse": (64, "出库仓库"),
+    "data_status": (16, "数据状态"),
+}
+_WBDD_LINE_TEXT_LIMITS = {
+    "raw_line_id": (64, "需求明细数据ID"),
+    "pn_raw": (256, "需供货产品"),
+    "pn_std": (128, "归一产品名"),
+}
+
+
+def _wbdd_too_long(res: TransformResult, row_no: int, field_name: str,
+                   value: str | None, limit: int, label: str) -> bool:
+    if value is None or len(value) <= limit:
+        return False
+    res.errors.append(ErrorRec(
+        row_no, "field_too_long",
+        f"{label}超过模型上限 {limit} 字符（实际 {len(value)}），"
+        "本次不导入该字段所在行；请缩短后重传",
+        {field_name: value}))
+    return True
 
 
 def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
@@ -463,7 +685,22 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
     inv_head = {v: k for k, v in head_map.items()}
     inv_line = {v: k for k, v in line_map.items()}
     res.rows_total = len(df)
+    res.present_fields = {
+        "head": frozenset(
+            internal for source, internal in head_map.items()
+            if source in df.columns
+        ),
+        "line": frozenset(
+            internal for source, internal in line_map.items()
+            if source in df.columns
+        ),
+    }
     future_cutoff = date.today() + timedelta(days=_FUTURE_TOLERANCE_DAYS)
+    bad_order_ids: set[str] = set()
+
+    def head_text(current_row, field_name: str) -> str | None:
+        source = inv_head.get(field_name)
+        return cleaner.clean_str(current_row.get(source)) if source else None
 
     for idx, row in df.iterrows():
         row_no = int(idx) + 1
@@ -480,6 +717,24 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
         if not order_no:
             res.errors.append(ErrorRec(row_no, "missing_order_no",
                                        "需求单号为空（无法关联成本，整行跳过）", _row_dict(row, full_map)))
+            continue
+
+        # D-0050：核心单头字段不做静默截断；任一超长 → 该单本次不导入（头/行
+        # 都不进入写入计划），错误逐字段可见。已注册的头/行在末尾统一剔除。
+        order_too_long = False
+        for field_name, (limit, label) in _WBDD_ORDER_TEXT_LIMITS.items():
+            if _wbdd_too_long(
+                res, row_no, field_name, head_text(row, field_name), limit, label
+            ):
+                order_too_long = True
+        if order_too_long:
+            bad_order_ids.add(raw_order_id)
+            continue
+        if raw_line_id and _wbdd_too_long(
+            res, row_no, "raw_line_id", raw_line_id,
+            *_WBDD_LINE_TEXT_LIMITS["raw_line_id"],
+        ):
+            _register_wbdd_order(res, row, row_no, inv_head, future_cutoff)
             continue
         # 「有单头、无明细」订单保留（plan v1.3 M1-2）：单头照常注册入库、明细 0 行，
         # 不再记 missing_raw_id 错误。ffill 使空白间隔行携带上一单头值——它们落到
@@ -498,6 +753,19 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
             res.errors.append(_empty_pn_error(
                 row_no, cleaner.clean_str(row.get(inv_head["data_status"])),
                 cleaner.clean_str(row.get(inv_head["order_no"])), _row_dict(row, full_map)))
+            continue
+        pn_too_long = False
+        if _wbdd_too_long(
+            res, row_no, "pn_raw", pn_raw,
+            *_WBDD_LINE_TEXT_LIMITS["pn_raw"],
+        ):
+            pn_too_long = True
+        if _wbdd_too_long(
+            res, row_no, "pn_std", pn_std,
+            *_WBDD_LINE_TEXT_LIMITS["pn_std"],
+        ):
+            pn_too_long = True
+        if pn_too_long:
             continue
 
         try:
@@ -534,6 +802,14 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
                  "data_rows": list(patch.rows)},
             ))
 
+    if bad_order_ids:
+        for raw_id in bad_order_ids:
+            res.orders.pop(raw_id, None)
+            res.maintenance_address_patches.pop(raw_id, None)
+        res.lines = [
+            line for line in res.lines
+            if line["_order_raw_id"] not in bad_order_ids
+        ]
     res.rows_inactive = sum(
         1 for ln in res.lines
         if res.orders.get(ln["_order_raw_id"], {}).get("data_status") not in (None, "已生效")
@@ -595,9 +871,29 @@ def _register_wbdd_order(res: TransformResult, row, row_no: int,
 _BXD_RX = re.compile(r"BXD-\d{8}-\d+")
 
 
-def _clip(s: str | None, limit: int = 64) -> str | None:
-    """手填自由文本进定长列前钳制长度：超长截断而非流到 DB 炸整批（坏行隔离原则）。"""
-    return s[:limit] if s else s
+# D-0050：报销明细的身份/受限文本列不再静默截断；超过模型列宽即整批拒绝，
+# 回执带源数据行、字段、实际长度与上限。展示文本列（reason 等）已是 Text，不在此表。
+_EXPENSE_TEXT_LIMITS = {
+    "linked_sales_order_no": (64, "销售订单"),
+    "bxd_no": (64, "单号"),
+    "person": (64, "报销人员"),
+    "expense_type": (64, "报销类别"),
+    "fee_category": (64, "费用分类"),
+    "data_status": (16, "流程状态"),
+}
+
+
+def _expense_text(value: str | None, field_name: str, row_no: int) -> str | None:
+    """报销明细受限文本：合法值原样保留，超长整批拒绝（不截断、不静默）。"""
+    limit, label = _EXPENSE_TEXT_LIMITS[field_name]
+    if value is None or len(value) <= limit:
+        return value
+    from app.etl.reader import ReaderError     # 延迟导入：reader 不依赖 transform
+    raise ReaderError(
+        f"报销明细第 {row_no} 行「{label}」源文本长度 {len(value)} 超过字段上限 "
+        f"{limit} 字符，整批未导入；请缩短后重传",
+        code="expense_field_too_long",
+    )
 
 
 def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> TransformResult:
@@ -905,21 +1201,35 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
         amount_ex_tax = tax_policy.round_money(amount_ex_tax)
         amount_inc_tax = tax_policy.round_money(amount_inc_tax)
 
-        # 头级字段走 gvh：延续行继承头行值（#168 形态）；行级明细列仍走 gv
-        xsdd = _clip(cleaner.clean_str(gvh("维保销售订单", "销售订单")) or anchor)
+        # 头级字段走 gvh：延续行继承头行值（#168 形态）；行级明细列仍走 gv。
+        # D-0050：六个受限源字段先校验长度再使用——超长即整批拒绝，不依赖该行
+        # 后续是否 missing_link/撞键，任何静默截断都不许进入业务事实或错误身份。
+        xsdd = _expense_text(
+            cleaner.clean_str(gvh("维保销售订单", "销售订单")) or anchor,
+            "linked_sales_order_no", row_no)
 
         # 身份提取必须早于 missing_link 判定：修复模式放行这类行后，loader 要靠
         # 这套身份证明「被丢的行不对应任何将被作废的旧行」。此处仍在 raw_line_id/
         # duplicate_key 之前——复合键 ck/scope 依赖 xsdd，那部分不能上移。
         title = cleaner.clean_str(gvh("数据标题"))
         m = _BXD_RX.search(title or "")
-        bxd_no = _clip(m.group(0) if m
-                       else cleaner.clean_str(gvh("单号", "费用单号", "报销单号")))
+        bxd_no = _expense_text(
+            m.group(0) if m else cleaner.clean_str(gvh("单号", "费用单号", "报销单号")),
+            "bxd_no", row_no)
         line_no = cleaner.parse_int(gv("报销明细.序号", "序号"))
-        person = _clip(cleaner.clean_str(gvh("报销人员", "申请人")))
+        person = _expense_text(
+            cleaner.clean_str(gvh("报销人员", "申请人")), "person", row_no)
         reason = cleaner.clean_str(gvh("支出事由", "报销主题"))
         native_line_id = cleaner.clean_str(gv("报销明细.数据ID(不可修改)",
                                               "报销明细.数据ID"))
+        data_status = _expense_text(
+            cleaner.clean_str(gvh("流程状态")), "data_status", row_no,
+        ) or config.MAINT_EXPENSE_ACTIVE_STATUS
+        expense_type = _expense_text(
+            cleaner.clean_str(gvh("报销类别", "费用类型")), "expense_type", row_no)
+        fee_category = _expense_text(
+            cleaner.clean_str(gv("报销明细.费用分类", "费用分类")),
+            "fee_category", row_no)
 
         if not xsdd:
             # expense_date/amount 在此必非空：无金额行已在 rows_skipped_no_data
@@ -970,12 +1280,11 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
 
         res.lines.append({
             "raw_line_id": raw_line, "bxd_no": bxd_no, "line_no": line_no,
-            "data_status": _clip(cleaner.clean_str(gvh("流程状态")), 16)
-                           or config.MAINT_EXPENSE_ACTIVE_STATUS,
+            "data_status": data_status,
             "expense_date": expense_date,
             "person": person,
-            "expense_type": _clip(cleaner.clean_str(gvh("报销类别", "费用类型"))),
-            "fee_category": _clip(cleaner.clean_str(gv("报销明细.费用分类", "费用分类"))),
+            "expense_type": expense_type,
+            "fee_category": fee_category,
             "reason": reason,
             "linked_sales_order_no": xsdd,
             "amount": amount,
