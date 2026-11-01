@@ -306,11 +306,23 @@ def test_proven_truncation_fields_keep_full_source_text(db, tmp_path):
 
 
 def test_overlong_core_identity_reports_field_and_skips_order(db, tmp_path):
-    """D-0050：核心身份超长必须明确报错，不能截断或落到数据库整批失败。"""
+    """D-0050：核心身份超长必须明确报错；唯一工单被拒后整批失败，不以 0 行冒充成功。"""
     rows = make_rows(orders=1, lines_per_order=1)
     rows[0]["数据ID(不可修改)"] = "O" * 65
-    batch = _run(db, tmp_path, COLUMNS_91, rows)
+    path = write_workbook(str(tmp_path / "wbdd.xlsx"), COLUMNS_91, rows)
+    with pytest.raises(reader.ReaderError) as exc_info:
+        pipeline.run_import(db, path, "wbdd.xlsx", uploaded_by="tester", mode="upsert")
+    db.commit()
+
+    assert exc_info.value.code == "no_importable_rows"
+    batch = db.scalar(select(SysImportBatch).order_by(SysImportBatch.id.desc()))
+    assert batch.status == "failed"
+    assert batch.rows_total == 1 and batch.rows_error == 1
+    assert "均未形成可导入事实" in batch.report_json["error"]
     assert db.execute(select(FMaintenanceOrder)).scalars().all() == []
     assert db.execute(select(FMaintenanceLine)).scalars().all() == []
     errors = batch.report_json["errors_preview"]
-    assert any(item["error_type"] == "field_too_long" for item in errors)
+    too_long = [item for item in errors if item["error_type"] == "field_too_long"]
+    assert too_long, errors
+    detail = too_long[0]["detail"]
+    assert "维保单数据ID" in detail and "64" in detail and "65" in detail

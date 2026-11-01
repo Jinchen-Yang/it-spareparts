@@ -169,9 +169,15 @@ def test_waiting_earlier_transaction_exports_a_later_version(db):
 
 def test_trigger_covers_every_ordinary_column_and_preserves_schema(db):
     scripts = ScriptDirectory.from_config(_alembic_cfg())
-    assert scripts.get_heads() == [REVISION]
     revision = scripts.get_revision(REVISION)
     assert revision.down_revision == PARENT
+    # 后续迁移（D-0050 c7e1a3b5d9f2）可以线性追加；本迁移仍须位于唯一链头的
+    # 祖先路径，且其自身父 revision 不变——不能把本契约钉死为终点。
+    heads = scripts.get_heads()
+    assert len(heads) == 1, "迁移链必须保持单 head，不开分叉"
+    assert REVISION in {
+        item.revision for item in scripts.iterate_revisions(heads[0], "base")
+    }
     columns = inspect(db.get_bind()).get_columns("dim_part")
     assert set(revision.module.COMPARED_COLUMNS) == {
         column["name"] for column in columns if not column.get("computed")}
