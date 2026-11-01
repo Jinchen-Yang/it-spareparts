@@ -9,15 +9,26 @@
   - 抑制/不适用形态不需要令牌。
 """
 from decimal import Decimal
+from datetime import date
+from pathlib import Path
+import uuid
 
 import pytest
 from openpyxl import Workbook
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.etl import expense_void, pipeline
 from app.etl.reader import ReaderError
 from app.models.maintenance import FProjectExpense
+from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
+from app.models.maintenance_project_operations import (
+    MaintenanceProjectExpenseAttribution,
+    MaintenanceProjectOperationAudit,
+    MaintenanceProjectWorkbookState,
+)
+from app.models.system import SysAuditLog, SysImportBatch, SysRawFile
 from app.services import import_void_preview
+from app.services import maintenance_project_operations as ops
 
 
 def _set_amount(row, value):
@@ -53,6 +64,33 @@ R3 = ["2026-05-03", "丙", "租金", 1200, "BXD-3", 1]
 def _seed(db, tmp_path, rows=(R1, R2, R3), anchor="XSDD-P"):
     pipeline.run_import(db, _anchored(tmp_path, "seed.xlsx", list(rows), anchor), "seed.xlsx")
     db.commit()
+
+
+def _seed_project(db, contract="XSDD-P"):
+    """建一个带合同的维保项目，使报销归因与工作簿状态行真实参与装载。"""
+    project = MaintenanceProject(
+        project_id=str(uuid.uuid4()),
+        project_code=f"VOID-{uuid.uuid4().hex[:8]}",
+        display_name="作废预演项目",
+        lifecycle_status="ongoing",
+    )
+    db.add(project)
+    db.flush()
+    db.add(MaintenanceProjectContract(
+        project_contract_id=str(uuid.uuid4()),
+        project_id=project.project_id,
+        contract_id=f"VOID-C-{uuid.uuid4().hex[:8]}",
+        contract_no=contract,
+        amount_inc_tax=Decimal("10000.00"),
+        included_in_total=True,
+        status_mapping_state="mapped",
+        status_mapping_version="test",
+        effective_from=date(2026, 1, 1),
+        source="ledger",
+        version=1,
+    ))
+    db.commit()
+    return project.project_id
 
 
 def _rows(db):
@@ -310,6 +348,95 @@ def test_contract_change_inside_probe_to_lock_window_is_caught(db, tmp_path, mon
     assert len(calls) == 2                                   # 第二次（加锁重读后）才抓到
     db.expire_all()
     assert _rows(db)["租金"].data_status == "已结束"
+
+
+def test_second_guard_drift_commit_keeps_only_failed_batch(db, tmp_path, monkeypatch):
+    """第二道复核失配 + API 式 commit：保存点内副作用全部回滚，只留失败批次。
+
+    loader 在第二道复核之前会经 lock_workbook_states 为缺失项目补建 revision=0
+    的工作簿状态行。这里故意删掉状态行，用真实的 assert_fingerprint 在第二次
+    指纹比对时判定失配，再按 API 契约 commit：失败批次留痕，原件行、补建状态行、
+    事实、归因、revision 与审计一项都不能留下。
+    """
+    project_id = _seed_project(db)
+    _seed(db, tmp_path)
+    # 另一个同合同项目：已有 revision=5 的状态行，用于证明失败批次不会 bump
+    # 既有 revision；本项目状态行则被删掉，用于证明补建的 revision=0 不落库。
+    other_project_id = _seed_project(db)
+    ops.get_or_create_workbook_state(db, project_id=other_project_id)
+    db.get(MaintenanceProjectWorkbookState, other_project_id).revision = 5
+    db.commit()
+
+    db.expire_all()
+    state = db.get(MaintenanceProjectWorkbookState, project_id)
+    assert state is not None and state.revision == 1
+    db.delete(state)
+    db.commit()
+    assert db.get(MaintenanceProjectWorkbookState, project_id) is None
+
+    def fact_snapshot():
+        return {
+            row.raw_line_id: (row.amount, row.amount_ex_tax, row.amount_inc_tax,
+                              row.data_status, row.import_batch_id)
+            for row in db.scalars(select(FProjectExpense))
+        }
+
+    def attribution_snapshot():
+        return {
+            row.expense_id: (row.project_id, row.normalized_status,
+                             row.amount_ex_tax, row.amount_inc_tax, row.version)
+            for row in db.scalars(select(MaintenanceProjectExpenseAttribution))
+        }
+
+    facts_before = fact_snapshot()
+    attributions_before = attribution_snapshot()
+    audit_counts_before = (
+        db.scalar(select(func.count()).select_from(SysAuditLog)),
+        db.scalar(select(func.count()).select_from(MaintenanceProjectOperationAudit)),
+    )
+    raw_rows_before = db.scalar(select(func.count()).select_from(SysRawFile))
+    archive_dir = Path(pipeline.get_settings().raw_file_dir)
+    archived_before = sum(1 for path in archive_dir.rglob("*") if path.is_file())
+
+    page = _anchored(tmp_path, "page.xlsx", [R1, R2])              # R3 将作废
+    pv = pipeline.preview_expense_void(db, page, mode="upsert")
+    assert pv["status"] == "ready" and pv["void"]["rows"] == 1
+
+    real_fingerprint = expense_void.fingerprint
+    calls = []
+
+    def drifting_fingerprint(decision, inputs, existing):
+        actual = real_fingerprint(decision, inputs, existing)
+        calls.append(actual)
+        if len(calls) == 2:
+            # 第二道复核之前 lock_workbook_states 已补建 revision=0 状态行
+            assert db.get(MaintenanceProjectWorkbookState, project_id) is not None
+            return actual[:-1] + ("0" if actual[-1] != "0" else "1")
+        return actual
+
+    monkeypatch.setattr(expense_void, "fingerprint", drifting_fingerprint)
+    with pytest.raises(expense_void.VoidPlanDrift):
+        pipeline.run_import(db, page, "page.xlsx", mode="upsert",
+                            expected_void_fingerprint=pv["fingerprint"],
+                            require_void_preview=True)
+    assert len(calls) == 2
+    db.commit()             # 与 API 层一致：409 只提交失败批次留痕
+    db.expire_all()
+
+    failed = db.scalars(select(SysImportBatch).order_by(SysImportBatch.id.desc())).first()
+    assert failed.status == "failed" and "重新预演" in failed.report_json["error"]
+    assert fact_snapshot() == facts_before                            # 事实与作废未落地
+    assert attribution_snapshot() == attributions_before              # 归因未改
+    assert db.get(MaintenanceProjectWorkbookState, project_id) is None  # 补建状态行已回滚
+    assert db.get(MaintenanceProjectWorkbookState, other_project_id).revision == 5
+    assert db.scalar(select(func.count()).select_from(SysRawFile)
+                     .where(SysRawFile.batch_id == failed.id)) == 0
+    assert db.scalar(select(func.count()).select_from(SysRawFile)) == raw_rows_before
+    assert (db.scalar(select(func.count()).select_from(SysAuditLog)),
+            db.scalar(select(func.count()).select_from(
+                MaintenanceProjectOperationAudit))) == audit_counts_before
+    archived_after = sum(1 for path in archive_dir.rglob("*") if path.is_file())
+    assert archived_after == archived_before                          # 预演失效不归档
 
 
 def test_preview_over_row_cap_withholds_token(db, tmp_path, monkeypatch):
