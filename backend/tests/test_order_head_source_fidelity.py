@@ -12,18 +12,26 @@
 """
 from datetime import date
 from decimal import Decimal
+import re
+import zipfile
 
 import openpyxl
+from openpyxl.utils import get_column_letter
 import pytest
 from sqlalchemy import select
 
-from app.etl import mapping, pipeline, precheck, reader, transform
+from app.etl import cleaner, mapping, pipeline, precheck, reader, transform
 from app.models.dimensions import DimCustomer, DimSupplier
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 
 SALES_LINE_ID = "订单明细.数据ID(不可修改)"
 PURCHASE_LINE_ID = "明细.数据ID(不可修改)"
+_SHEET_XML = "xl/worksheets/sheet1.xml"
+_INLINE_CELL = re.compile(
+    r'<c r="(?P<ref>[A-Z]+\d+)"(?P<attrs>[^>]*)><is>(?P<body>.*?)</is></c>',
+    re.S,
+)
 
 
 def _write_xlsx(path, rows):
@@ -37,6 +45,144 @@ def _write_xlsx(path, rows):
         sheet.append([row.get(header) for header in headers])
     workbook.save(path)
     return str(path)
+
+
+def _rewrite_xlsx(path, mutate, *, add=None):
+    """重写 xlsx 成员；mutate(name, data)->bytes，add 为新增成员。"""
+    with zipfile.ZipFile(path) as archive:
+        items = [
+            (info.filename, archive.read(info.filename))
+            for info in archive.infolist()
+        ]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in items:
+            archive.writestr(name, mutate(name, data))
+        for name, data in (add or {}).items():
+            archive.writestr(name, data)
+
+
+def _patch_numeric_tax_cell(path, header, headers, value):
+    """openpyxl 把 float 1.0 序列化成 <v>1</v>；直接改成真实源形态 <v>1.0</v>。
+
+    返回列引用，供断言原 XML 确实不是整数文本。
+    """
+    ref = f"{get_column_letter(headers.index(header) + 1)}3"
+
+    def mutate(name, data):
+        if name != _SHEET_XML:
+            return data
+        xml = data.decode("utf-8")
+        pattern = re.compile(rf'(<c r="{ref}"[^>]*><v>)(-?\d+(?:\.\d+)?)(</v>)')
+        xml, count = pattern.subn(
+            lambda match: match.group(1) + f"{value:.1f}" + match.group(3), xml
+        )
+        assert count == 1, ("税标记单元格缺失", ref, count)
+        return xml.encode("utf-8")
+
+    _rewrite_xlsx(path, mutate)
+    with zipfile.ZipFile(path) as archive:
+        xml = archive.read(_SHEET_XML).decode("utf-8")
+    assert re.search(rf'<c r="{ref}"[^>]*><v>{value:.1f}</v></c>', xml), (ref, xml)
+    return ref
+
+
+def _force_inline_cell(path, ref, text):
+    """把指定文本单元格改写成 inlineStr，真实触发 xlsx_stream 读取路径。"""
+
+    def mutate(name, data):
+        if name != _SHEET_XML:
+            return data
+        xml = data.decode("utf-8")
+        match = re.search(rf'<c r="{ref}"[^>]*>.*?</c>', xml, re.S)
+        assert match is not None, ("目标单元格缺失", ref)
+        attrs = re.match(r'<c r="[^"]+"([^>]*)>', match.group(0)).group(1)
+        attrs = re.sub(r'\st="[^"]*"', "", attrs)
+        replacement = (
+            f'<c r="{ref}"{attrs} t="inlineStr"><is><t>{text}</t></is></c>'
+        )
+        return (xml[:match.start()] + replacement + xml[match.end():]).encode("utf-8")
+
+    _rewrite_xlsx(path, mutate)
+
+
+def _convert_inline_strings_to_shared(path):
+    """把所有 inlineStr 改写为 sharedStrings，真实触发 pandas/openpyxl 读取路径。"""
+    with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+        sheet_xml = archive.read(_SHEET_XML).decode("utf-8")
+    if "inlineStr" not in sheet_xml:
+        assert "xl/sharedStrings.xml" in names, "既非 inlineStr 也缺 sharedStrings"
+        return
+
+    strings, index = [], {}
+
+    def replace(match):
+        attrs = re.sub(r'\st="inlineStr"', "", match.group("attrs"))
+        body = match.group("body")
+        if body not in index:
+            index[body] = len(strings)
+            strings.append(body)
+        return (
+            f'<c r="{match.group("ref")}"{attrs} t="s">'
+            f'<v>{index[body]}</v></c>'
+        )
+
+    sheet_xml = _INLINE_CELL.sub(replace, sheet_xml)
+    assert "inlineStr" not in sheet_xml
+    shared_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+        f' count="{len(strings)}" uniqueCount="{len(strings)}">'
+        + "".join(f"<si>{body}</si>" for body in strings)
+        + "</sst>"
+    )
+    relation = (
+        '<Relationship Type="http://schemas.openxmlformats.org/officeDocument/'
+        '2006/relationships/sharedStrings" Target="sharedStrings.xml" Id="rIdSst"/>'
+    )
+    content_type = (
+        '<Override PartName="/xl/sharedStrings.xml" ContentType="application/'
+        'vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>'
+    )
+
+    def mutate(name, data):
+        if name == _SHEET_XML:
+            return sheet_xml.encode("utf-8")
+        if name == "xl/_rels/workbook.xml.rels" and b"sharedStrings" not in data:
+            return data.replace(
+                b"</Relationships>", relation.encode("utf-8") + b"</Relationships>")
+        if name == "[Content_Types].xml" and b"sharedStrings.xml" not in data:
+            return data.replace(
+                b"</Types>", content_type.encode("utf-8") + b"</Types>")
+        return data
+
+    _rewrite_xlsx(path, mutate, add={"xl/sharedStrings.xml": shared_xml.encode("utf-8")})
+
+
+def _numeric_tax_rows(business, value, alias):
+    """同单两行：首行税标记为数值单元格 + 同义文本列，次行留空（缺行形态）。"""
+    if business == "sales":
+        first = _sales_row(**{"是否含税": value, "是否含税(必填)": alias})
+        second = _sales_row(**{
+            SALES_LINE_ID: "LINE-2", "订单明细.序号": 2,
+            "订单明细.产品名称": "TEST-PN-2",
+            "订单明细.单价": Decimal("113.00"),
+            "订单明细.金额": Decimal("113.00"),
+            "是否含税": None, "是否含税(必填)": None,
+        })
+        return [first, second], "是否含税", "是否含税(必填)", "RAW-HEAD-1"
+    first = _purchase_row(**{"是否含税(必填)": value, "是否含税": alias})
+    second = _purchase_row(**{
+        PURCHASE_LINE_ID: "PL-2", "明细.序号": 2,
+        "明细.产品名称(必填)": "TEST-PN-2",
+        "明细.单价(必填)": Decimal("113.00"),
+        "明细.合计金额": Decimal("113.00"),
+        "是否含税(必填)": None, "是否含税": None,
+    })
+    return [first, second], "是否含税(必填)", "是否含税", "PUR-HEAD-1"
+
+
+# ---------- DB upsert：坏明细行不冻结/不清空单头 ----------
 
 
 def _sales_row(**over):
@@ -293,4 +439,56 @@ def test_sales_tax_flag_blank_target_is_filled_by_legal_alias(tmp_path):
 
     assert frame["是否含税"].iloc[0] == "否"
     assert result.orders["RAW-HEAD-1"]["is_tax_inclusive"] is False
+    assert not result.errors
+
+
+@pytest.mark.parametrize("business", ["sales", "purchase"])
+@pytest.mark.parametrize(
+    ("value", "alias", "expected"),
+    [(1.0, "是", True), (0.0, "否", False)],
+    ids=["numeric-1.0", "numeric-0.0"],
+)
+@pytest.mark.parametrize("storage", ["shared", "inline"], ids=["shared", "inline"])
+def test_numeric_tax_flag_xml_matches_alias_across_readers(
+    tmp_path, business, value, alias, expected, storage,
+):
+    """真实 XLSX：源 <v> 为 1.0/0.0 时，shared 与 inline/mixed 两条读取入口
+    都必须把它当受控税标记，并与同义文本列（是/否）一致；次行留空覆盖缺行。
+
+    openpyxl 写 float 常序列化为 <v>1</v>，这里直接改回真实源形态并断言原 XML，
+    避免「夹具其实写的是整数」的假覆盖。
+    """
+    filename = f"{business}-numeric-tax-{storage}.xlsx"
+    rows, canonical, alias_column, raw_id = _numeric_tax_rows(business, value, alias)
+    path = _write_xlsx(tmp_path / filename, rows)
+    headers = list(rows[0])
+    ref = _patch_numeric_tax_cell(path, canonical, headers, value)
+    alias_ref = f"{get_column_letter(headers.index(alias_column) + 1)}3"
+    if storage == "shared":
+        _convert_inline_strings_to_shared(path)
+    else:
+        _force_inline_cell(path, alias_ref, alias)
+
+    with zipfile.ZipFile(path) as archive:
+        xml = archive.read(_SHEET_XML).decode("utf-8")
+        assert re.search(rf'<c r="{ref}"[^>]*><v>{value:.1f}</v></c>', xml)
+        if storage == "shared":
+            assert "inlineStr" not in xml
+            assert "xl/sharedStrings.xml" in archive.namelist()
+        else:
+            assert 't="inlineStr"' in xml
+
+    prechecked = precheck.inspect_file(path, filename)
+    assert prechecked["can_import"] is True
+
+    frame, file_type = reader.read_excel(path)
+    assert file_type == (
+        mapping.SALES if business == "sales" else mapping.PURCHASE)
+    cell = frame[canonical].iloc[0]
+    assert not isinstance(cell, str)          # 真实数值单元格，不是文本 "1.0"
+    assert cell == value
+    assert cleaner.parse_tax_inclusive(cell) is expected
+
+    result = transform.transform(frame, file_type)
+    assert result.orders[raw_id]["is_tax_inclusive"] is expected
     assert not result.errors
