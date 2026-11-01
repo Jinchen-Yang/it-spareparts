@@ -15,6 +15,12 @@ v1 明确不做（AB-3 裁剪）：氚云 BXD 逐条对账、凭证附件、进�
 与冻结的「项目工作簿 v3 导出」的关系：两张 sheet 的列定义原样取自 v3 模板
 （`maintenance_project_workbook_v3.py`），但本模块是**独立的两表工作簿**，
 不导出 v3 的其余四表，因此不解冻 v3。
+
+行身份是技术守卫，不是业务身份：04 表第 12 列是隐藏的 ``行标识(系统)``。
+新导出（含空项目）总会写出该列表头；旧版有数据导出保留无名隐藏列，仅在
+前 11 列与模板逐列一致时按原位置读取。旧版空模板没有该列，无法证明上传前
+文件原本是空模板还是被删掉标识列的有数据导出，故失败关闭：要求重新下载新
+模板，不把既有行当新增，也不猜测任何业务身份。
 """
 from __future__ import annotations
 
@@ -48,6 +54,11 @@ from app.models.system import SysImportBatch
 PROTOCOL_VERSION = "expense-collection-v1"
 SHEET_EXPENSE = "04_报销订单"
 SHEET_COLLECTION = "05_项目经理回款单"
+# 隐藏元数据列的表头名。旧版导出该列没有表头（只看位置），新导出写名字后
+# 解析按名称定位，用户移动可见列不会再把别人的值当成行标识。
+RAW_LINE_ID_HEADER = "行标识(系统)"
+# Excel 单元格文本硬上限；超过即明确报错，不截断。
+EXCEL_CELL_MAX_CHARS = 32_767
 _META_SHEET = "99_元数据"
 
 # 与 ck_maintenance_collection_status 一致；状态列是自由文本，不校验就会在
@@ -360,13 +371,21 @@ def _build_expense_sheet(wb, db: Session, *, project_id: str) -> None:
     _style_header(ws, _EXPENSE_HEADERS,
                   [_EDITABLE] * 7 + [_EDITABLE, _READONLY, _EDITABLE, _EDITABLE])
     for expense in expenses:
+        reason = expense.reason or ""
+        if len(reason) > EXCEL_CELL_MAX_CHARS:
+            # 不截断：未编辑往返会把截断值写回业务事实（P1）。
+            raise WorkbookError(
+                "cell_text_too_long",
+                f"报销行 {expense.raw_line_id} 的支出事由长度 {len(reason)} "
+                f"超过 Excel 单元格上限 {EXCEL_CELL_MAX_CHARS}，无法生成可回传工作簿",
+            )
         ws.append([
             expense.bxd_no or "",
             expense.expense_date.isoformat() if expense.expense_date else "",
             expense.person or "",
             expense.expense_type or "",
             expense.fee_category or "",
-            (expense.reason or "")[:120],
+            reason,
             expense.linked_sales_order_no or "",
             float(expense.amount_ex_tax) if expense.amount_ex_tax is not None else "",
             float(expense.amount_inc_tax) if expense.amount_inc_tax is not None else "",
@@ -376,8 +395,9 @@ def _build_expense_sheet(wb, db: Session, *, project_id: str) -> None:
         # 行标识写进隐藏元数据列，避免用可编辑列做主键（改了单号就对不上行）
         ws.cell(row=ws.max_row, column=len(_EXPENSE_HEADERS) + 1,
                 value=expense.raw_line_id)
-    ws.column_dimensions[ws.cell(row=1, column=len(_EXPENSE_HEADERS) + 1)
-                         .column_letter].hidden = True
+    id_header = ws.cell(row=1, column=len(_EXPENSE_HEADERS) + 1)
+    id_header.value = RAW_LINE_ID_HEADER
+    ws.column_dimensions[id_header.column_letter].hidden = True
 
 def _build_collection_sheet(wb, db: Session, project_id: str, contracts) -> None:
     """05_项目经理回款单（月度累计快照）。同样抽出供总表复用。"""
@@ -479,19 +499,93 @@ def validate_partial(db: Session, *, project_id: str, workbook) -> WorkbookPlan:
                         collection_ops=tuple(collection_ops))
 
 
+def _sheet_headers(ws, sheet_name: str) -> list[str]:
+    row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+    if row is None:
+        raise WorkbookError("missing_header", f"{sheet_name} 缺少表头行")
+    return [str(value).strip() if value is not None else "" for value in row]
+
+
+def _map_columns(headers: list[str], names: list[str], sheet_name: str) -> dict[str, int]:
+    """按唯一名称定位列；缺列或同名列重复一律拒绝，不按位置猜。"""
+    positions: dict[str, int] = {}
+    for index, header in enumerate(headers):
+        if header not in names:
+            continue
+        if header in positions:
+            raise WorkbookError(
+                "duplicate_header",
+                f"{sheet_name} 表头「{header}」在第 {positions[header] + 1} 列与"
+                f"第 {index + 1} 列重复，无法确定取值",
+            )
+        positions[header] = index
+    missing = [name for name in names if name not in positions]
+    if missing:
+        raise WorkbookError(
+            "missing_header",
+            f"{sheet_name} 缺少表头：{'、'.join(missing)}；请重新下载系统导出模板",
+        )
+    return positions
+
+
+def _expense_id_column(headers: list[str]) -> int:
+    """定位隐藏行标识列；找不到就整表拒绝，绝不按位置猜身份。
+
+    兼容性（技术身份守卫）：
+    - 新导出：第 12 列表头为 ``行标识(系统)``（空项目也写），按名称定位；
+    - 旧版有数据导出：前 11 列与当前模板逐列一致、第 12 列表头为空，数据行
+      带隐藏行标识；只在这种严格有序签名下按原第 12 列读取。
+    旧版空导出模板没有隐藏行标识列，无法证明上传前的文件状态，失败关闭。
+    """
+    matches = [index for index, header in enumerate(headers)
+               if header == RAW_LINE_ID_HEADER]
+    if len(matches) > 1:
+        raise WorkbookError(
+            "duplicate_header",
+            f"{SHEET_EXPENSE} 表头「{RAW_LINE_ID_HEADER}」重复，无法确定行标识列",
+        )
+    if matches:
+        return matches[0]
+    # 旧版导出：前 11 列与系统模板逐列一致，第 12 列表头为空（隐藏列）。
+    if headers[:len(_EXPENSE_HEADERS)] == _EXPENSE_HEADERS:
+        tail = headers[len(_EXPENSE_HEADERS):]
+        if not tail:
+            raise WorkbookError(
+                "missing_row_identity",
+                f"{SHEET_EXPENSE} 缺少隐藏「{RAW_LINE_ID_HEADER}」列（旧版空模板或"
+                "标识列已被删除），无法确认每行的业务身份；请重新下载系统导出的"
+                "最新模板后再录入，旧模板不能继续追加或修改报销行",
+            )
+        if tail[0] == "":
+            return len(_EXPENSE_HEADERS)
+        raise WorkbookError(
+            "invalid_header",
+            f"{SHEET_EXPENSE} 隐藏行标识列的位置被表头「{tail[0]}」占用，"
+            "拒绝按位置猜测行标识；请重新下载系统导出模板",
+        )
+    raise WorkbookError(
+        "invalid_header",
+        f"{SHEET_EXPENSE} 表头与系统导出模板不一致，且未找到"
+        f"「{RAW_LINE_ID_HEADER}」列；请重新下载后编辑",
+    )
+
+
 def _parse_expenses(db: Session, ws, *, project_id: str) -> list[ExpenseUpdate]:
-    id_col = len(_EXPENSE_HEADERS) + 1
+    headers = _sheet_headers(ws, SHEET_EXPENSE)
+    columns = _map_columns(headers, _EXPENSE_HEADERS, SHEET_EXPENSE)
+    id_index = _expense_id_column(headers)
     writable_contracts = _current_unique_contracts(db, project_id)
     updates: list[ExpenseUpdate] = []
     seen_ids: set[str] = set()
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         if not row or all(_text(v) == "" for v in row):
             continue
-        def _col(idx: int) -> str:
-            return _text(row[idx]) if len(row) > idx else ""
+        def _col(name: str) -> str:
+            index = columns[name]
+            return _text(row[index]) if len(row) > index else ""
 
-        bxd_no = _col(0) or None
-        raw_date = _col(1)
+        bxd_no = _col("报销单号") or None
+        raw_date = _col("报销日期")
         dt = None
         if raw_date:
             for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S"):
@@ -505,16 +599,23 @@ def _parse_expenses(db: Session, ws, *, project_id: str) -> list[ExpenseUpdate]:
                     "invalid_expense_date",
                     f"第 {row_no} 行报销日期 {raw_date!r} 格式无效（需 YYYY-MM-DD）")
 
-        person = _col(2) or None
-        expense_type = _col(3) or None
-        fee_category = _col(4) or None
-        reason = _col(5) or None
-        contract_no = _col(6) or None
-        data_status = _col(9) or None
+        person = _col("报销人员") or None
+        expense_type = _col("报销类别") or None
+        fee_category = _col("费用分类") or None
+        reason = _col("支出事由") or None
+        if reason is not None and len(reason) > EXCEL_CELL_MAX_CHARS:
+            raise WorkbookError(
+                "cell_text_too_long",
+                f"第 {row_no} 行支出事由长度 {len(reason)} "
+                f"超过 Excel 单元格上限 {EXCEL_CELL_MAX_CHARS}",
+            )
+        contract_no = _col("合同编号") or None
+        data_status = _col("流程状态") or None
 
-        raw_amount = row[7] if len(row) > 7 else None
-        remark_col = _EXPENSE_HEADERS.index("备注")
-        raw_remark = row[remark_col] if len(row) > remark_col else None
+        amount_index = columns["未税金额"]
+        raw_amount = row[amount_index] if len(row) > amount_index else None
+        remark_index = columns["备注"]
+        raw_remark = row[remark_index] if len(row) > remark_index else None
         remark = _text(raw_remark) or None
 
         ex_tax = inc_tax = None
@@ -527,7 +628,8 @@ def _parse_expenses(db: Session, ws, *, project_id: str) -> list[ExpenseUpdate]:
             )
             inc_tax = (ex_tax * (Decimal("1") + TAX_RATE)).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP)
-        raw_line_id = _text(row[id_col - 1]) if len(row) >= id_col else ""
+        # _expense_id_column 已保证标识列存在，不允许缺列时把既有行当新增。
+        raw_line_id = _text(row[id_index]) if len(row) > id_index else ""
         is_create = False
         expense = None
         if contract_no and contract_no not in writable_contracts:
@@ -624,25 +726,31 @@ def _parse_expenses(db: Session, ws, *, project_id: str) -> list[ExpenseUpdate]:
 
 
 def _parse_collections(db: Session, ws, *, project_id: str) -> list[CollectionOp]:
+    headers = _sheet_headers(ws, SHEET_COLLECTION)
+    columns = _map_columns(headers, _COLLECTION_HEADERS, SHEET_COLLECTION)
     contracts = _current_unique_contracts(db, project_id)
     ops: list[CollectionOp] = []
     seen: set[tuple[str, date]] = set()
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         if not row or all(_text(v) == "" for v in row):
             continue
-        operation = _text(row[0]).upper()
+        def _col(name: str) -> str:
+            index = columns[name]
+            return _text(row[index]) if len(row) > index else ""
+
+        operation = _col("操作").upper()
         if operation == "":
             continue
         if operation not in ("CREATE", "VOID", "UPDATE"):
             raise WorkbookError("invalid_operation",
                                 f"第 {row_no} 行操作必须是 CREATE、UPDATE 或 VOID")
-        contract_no = _text(row[1])
+        contract_no = _col("合同编号")
         contract = contracts.get(contract_no)
         if contract is None:
             raise WorkbookError(
                 "contract_not_found",
                 f"第 {row_no} 行合同编号 {contract_no!r} 不属于本项目")
-        report_month = _month(row[2] if len(row) > 2 else None, row_no=row_no)
+        report_month = _month(_col("报告月份") or None, row_no=row_no)
         key = (contract.project_contract_id, report_month)
         if key in seen:
             raise WorkbookError(
@@ -651,12 +759,13 @@ def _parse_collections(db: Session, ws, *, project_id: str) -> list[CollectionOp
         seen.add(key)
         amount = None
         if operation in ("CREATE", "UPDATE"):
-            if _text(row[3] if len(row) > 3 else None) == "":
+            amount_raw = _col("累计回款金额(含税)")
+            if amount_raw == "":
                 raise WorkbookError("missing_amount",
                                     f"第 {row_no} 行 {operation} 必须填累计回款金额")
-            amount = _decimal(row[3], label="累计回款金额", row_no=row_no)
+            amount = _decimal(amount_raw, label="累计回款金额", row_no=row_no)
         # 2026-08-17 全面放开：状态列也可编辑；只认三个库内取值，留空 = 不动
-        status_raw = _text(row[5] if len(row) > 5 else None) or None
+        status_raw = _col("状态(系统)") or None
         if status_raw is not None and status_raw not in _COLLECTION_STATUSES:
             raise WorkbookError(
                 "invalid_status",
@@ -668,8 +777,8 @@ def _parse_collections(db: Session, ws, *, project_id: str) -> list[CollectionOp
             contract_no=contract_no,
             report_month=report_month,
             cumulative_amount=amount,
-            receipt_reference=_text(row[4] if len(row) > 4 else None) or None,
-            remark=_text(row[6] if len(row) > 6 else None) or None,
+            receipt_reference=_col("回款凭证号") or None,
+            remark=_col("备注") or None,
             collection_status=status_raw,
         ))
     return ops

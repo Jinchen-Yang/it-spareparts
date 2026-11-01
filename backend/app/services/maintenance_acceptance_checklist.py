@@ -29,6 +29,11 @@ from app.models.maintenance_project import MaintenanceProject
 
 MAX_CHECKLIST_BYTES = 8 * 1024 * 1024
 MAX_CHECKLIST_ROWS = 2000
+# 资源上限：超过后明确拒绝，而不是把文件当成 2000 行截取成功/按列截断。
+# 允许关键列正常右移，但拒绝把表头放到极右列后整表放大扫描面积。
+MAX_SCAN_ROWS = 100_000
+MAX_SCAN_COLUMNS = 256
+MAX_SCAN_CELLS = 2_000_000
 
 SHEET_CANDIDATES = ("验收清单", "验收需求")
 HEADER_SCAN_ROWS = 10
@@ -71,24 +76,59 @@ def parse_checklist_workbook(data: bytes, filename: str) -> dict:
         if ws is None:
             raise ChecklistParseError("工作簿没有任何工作表")
 
-        rows = list(ws.iter_rows(min_row=1, max_row=HEADER_SCAN_ROWS + MAX_CHECKLIST_ROWS,
-                                 max_col=8, values_only=True))
-        # 表头定位：前 HEADER_SCAN_ROWS 行内找「验收需求」列
+        # 表头定位：前 HEADER_SCAN_ROWS 行内按名称找「验收需求」列。整行扫描
+        # 而不是只看前 8 列，避免关键列右移后被误判为缺列；同名列重复即拒绝，
+        # 不静默取最后一列。
         header_idx = None
         req_col = done_col = None
-        for i, row in enumerate(rows[:HEADER_SCAN_ROWS]):
-            texts = {_cell_text(v): j for j, v in enumerate(row) if _cell_text(v)}
-            if COL_REQUIREMENT in texts:
-                header_idx = i
-                req_col = texts[COL_REQUIREMENT]
-                done_col = texts.get(COL_DONE)
-                break
+        header_rows = ws.iter_rows(min_row=1, max_row=HEADER_SCAN_ROWS, values_only=True)
+        for i, row in enumerate(header_rows):
+            requirement_cols: list[int] = []
+            done_cols: list[int] = []
+            for j, value in enumerate(row or ()):
+                text = _cell_text(value)
+                if text == COL_REQUIREMENT:
+                    requirement_cols.append(j)
+                elif text == COL_DONE:
+                    done_cols.append(j)
+            if not requirement_cols:
+                continue
+            if len(requirement_cols) > 1:
+                raise ChecklistParseError(
+                    f"表头「{COL_REQUIREMENT}」存在重复列，无法确定取值")
+            if len(done_cols) > 1:
+                raise ChecklistParseError(
+                    f"表头「{COL_DONE}」存在重复列，无法确定取值")
+            header_idx = i
+            req_col = requirement_cols[0]
+            done_col = done_cols[0] if done_cols else None
+            break
         if header_idx is None or req_col is None:
             raise ChecklistParseError(
                 f"未找到表头：需要「{COL_REQUIREMENT}」列（可选「{COL_DONE}」列）")
 
+        # 数据行只读取表头实际用到的列，但一直扫描到工作表末尾：超过 2000 条
+        # 数据行不能靠 break 截取成“2000 条成功”，尾端的非空行也必须被看到。
+        needed_cols = max(req_col, done_col if done_col is not None else 0) + 1
+        if needed_cols > MAX_SCAN_COLUMNS:
+            raise ChecklistParseError(
+                f"清单关键列位于第 {needed_cols} 列，超过可扫描上限 "
+                f"{MAX_SCAN_COLUMNS} 列，拒绝导入")
+        # 至少扫到第 2001 条数据所在行，不能依赖可能被低报的 sheet dimension；
+        # 超过资源上限则明确拒绝，而不是静默截取。
+        dimension_rows = ws.max_row or 0
+        if dimension_rows > HEADER_SCAN_ROWS + MAX_SCAN_ROWS:
+            raise ChecklistParseError(
+                f"清单行数超过可扫描上限 {MAX_SCAN_ROWS} 行，拒绝导入")
+        scan_rows = max(dimension_rows, HEADER_SCAN_ROWS + MAX_CHECKLIST_ROWS + 1)
+        if scan_rows * needed_cols > MAX_SCAN_CELLS:
+            raise ChecklistParseError(
+                f"清单扫描范围超过 {MAX_SCAN_CELLS} 个单元格的安全上限"
+                f"（{scan_rows} 行 × {needed_cols} 列），拒绝导入")
+
         items: list[dict] = []
-        data_rows = rows[header_idx + 1:]
+        data_rows = ws.iter_rows(min_row=header_idx + 2, max_row=scan_rows,
+                                 max_col=needed_cols, values_only=True)
         for offset, row in enumerate(data_rows):
             row_no = header_idx + offset + 2  # Excel 实际行号（1 基）
             raw_req = _cell_text(row[req_col]) if req_col < len(row) else ""
@@ -98,6 +138,11 @@ def parse_checklist_workbook(data: bytes, filename: str) -> dict:
                 continue  # 整行空白跳过
             if raw_req.startswith(EXAMPLE_PREFIX):
                 continue  # 模板灰底示例行——防呆跳过（同总表 V2.3.0 示例行约定）
+            if len(items) >= MAX_CHECKLIST_ROWS:
+                raise ChecklistParseError(
+                    f"清单数据行超过 {MAX_CHECKLIST_ROWS} 行上限，已整本拒绝导入；"
+                    "本功能是整表替换，不能分批上传追加，请删减内容后重试，"
+                    "或联系管理员申请扩容支持")
             done: bool | None = None
             issues: list[str] = []
             if not raw_req:
@@ -122,8 +167,6 @@ def parse_checklist_workbook(data: bytes, filename: str) -> dict:
                 "raw": {"row_no": row_no, "requirement": raw_req, "done": raw_done},
                 "issues": issues,
             })
-            if len(items) >= MAX_CHECKLIST_ROWS:
-                break
         if not items:
             raise ChecklistParseError("清单没有任何数据行")
         return {
