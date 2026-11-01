@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from app.services import maintenance_dashboard as dash
 from tests.test_maintenance_dashboard_api import (
-    BASE, _assign_manager, _freeze_today, client_for, seeded,
+    BASE, _assign_manager, _freeze_today, _project, client_for, seeded,
 )
 from tests.test_maintenance_return_receipts_api import _wbdd
 
@@ -15,9 +15,9 @@ def test_salesperson_scope_uses_master_then_source_but_never_overrides_manual_cl
     p1, p2, _ = seeded
     o1 = _wbdd(db, project=p1, order_no=f"WBDD-{uuid4()}")
     o2 = _wbdd(db, project=p2, order_no=f"WBDD-{uuid4()}")
-    o1.salesperson = "来源销售"
-    o2.salesperson = "来源销售"
-    p1.salesperson = "主档销售"
+    o1.salesperson = "  来源销售 "
+    o2.salesperson = "\t 来源销售  "
+    p1.salesperson = "  主档销售\t"
     db.commit()
     assert dash.narrow_scope_by_salesperson(db, None, "主档销售") == {p1.project_id}
     assert dash.narrow_scope_by_salesperson(db, None, "来源销售") == {p2.project_id}
@@ -29,7 +29,7 @@ def test_salesperson_scope_uses_master_then_source_but_never_overrides_manual_cl
 
 def test_salesperson_applies_to_all_views_and_exports_with_same_project_scope(db, seeded):
     p1, p2, _ = seeded
-    p1.salesperson, p2.salesperson = "销售甲", "销售乙"
+    p1.salesperson, p2.salesperson = "  销售甲\t", "销售乙"
     p1.display_name = "实际项目甲"
     db.commit()
     client = client_for(db, username="salesperson-all-views", role="admin")
@@ -61,7 +61,7 @@ def test_salesperson_applies_to_all_views_and_exports_with_same_project_scope(db
 
 def test_salesperson_options_and_filter_do_not_expand_authorized_projects(db, seeded):
     p1, p2, _ = seeded
-    p1.salesperson, p2.salesperson = "可见销售", "隐藏销售"
+    p1.salesperson, p2.salesperson = "  可见销售\t", " 隐藏销售 "
     db.commit()
     client = client_for(db, username="salesperson-own-project", role="maintenance_manager")
     _assign_manager(db, "salesperson-own-project", p1)
@@ -70,3 +70,40 @@ def test_salesperson_options_and_filter_do_not_expand_authorized_projects(db, se
     assert rows == []
     checks = client.get(f"{BASE}/quantity-checks", params={"salesperson": "隐藏销售"}).json()
     assert checks["rows"] == [] and checks["cards"]["unassigned_receipt_qty"] == "0.000"
+
+    # 同一个规范姓名属于多个项目时，仍只返回用户获授权的项目。
+    p2.salesperson = "可见销售 "
+    db.commit()
+    assert client.get(f"{BASE}/options").json()["salespersons"] == ["可见销售"]
+    for value in ("可见销售", "\t可见销售 ", " \t"):
+        response = client.get(f"{BASE}/projects", params={"salesperson": value})
+        assert response.status_code == 200, response.text
+        assert {row["project_id"] for row in response.json()["rows"]} == {p1.project_id}
+
+
+def test_salesperson_options_deduplicate_and_omit_blank_selected_names(db, seeded):
+    p1, p2, _ = seeded
+    p1.salesperson = "  同名销售\t"
+    source = _wbdd(db, project=p2, order_no=f"WBDD-{uuid4()}")
+    source.salesperson = "同名销售 "
+
+    # 保持卡墙归属选择：空白主档仍权威，不跳过它改用订单姓名。
+    blank_master = _project(db, "MDDA-BLANK-MASTER")
+    blank_master.salesperson = " \t"
+    unused_source = _wbdd(db, project=blank_master, order_no=f"WBDD-{uuid4()}")
+    unused_source.salesperson = "不应回退的来源销售"
+
+    # 公共众数按原值选出空白冠军后，只省略选项，不改取第二名。
+    blank_mode = _project(db, "MDDA-BLANK-MODE")
+    for value in ("   ", "   ", "不应改选的第二名"):
+        order = _wbdd(db, project=blank_mode, order_no=f"WBDD-{uuid4()}")
+        order.salesperson = value
+    db.commit()
+
+    client = client_for(db, username="salesperson-normalized-options", role="admin")
+    options = client.get(f"{BASE}/options")
+    assert options.status_code == 200, options.text
+    assert options.json()["salespersons"] == ["同名销售"]
+    selected = client.get(f"{BASE}/projects", params={"salesperson": options.json()["salespersons"][0]})
+    assert selected.status_code == 200, selected.text
+    assert {row["project_id"] for row in selected.json()["rows"]} == {p1.project_id, p2.project_id}
