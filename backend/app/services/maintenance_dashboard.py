@@ -180,18 +180,21 @@ def _project_rows(
 
 
 def project_salespersons(db: Session, projects: dict[str, MaintenanceProject]) -> dict[str, str | None]:
-    """与项目卡墙同源：主档优先，人工清空不回退，遗留空值取活单众数。"""
+    """与卡墙同源选择归属，再统一选项和筛选所用的姓名空白处理。"""
     from app.services.maintenance_source_assignments import salesperson_modes_by_project
 
     fallback_ids = [pid for pid, project in projects.items()
                     if not project.salesperson and not project.salesperson_override_active]
     modes = salesperson_modes_by_project(db, fallback_ids)
-    return {
-        pid: (project.salesperson or (
-            None if project.salesperson_override_active else modes.get(pid)
-        ))
-        for pid, project in projects.items()
-    }
+    result = {}
+    for pid, project in projects.items():
+        name = project.salesperson
+        if not name and not project.salesperson_override_active:
+            name = modes.get(pid)
+        # 只规范化选定结果，不改变主档/人工清空优先级或公共活单众数。
+        # 空白主档或空白众数不改取另一来源；也不生成可清空筛选的空白选项。
+        result[pid] = (name or "").strip() or None
+    return result
 
 
 def narrow_scope_by_salesperson(db: Session, scope: set[str] | None, salesperson: str | None) -> set[str] | None:
