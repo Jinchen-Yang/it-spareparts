@@ -310,7 +310,13 @@ def _formula_cache_error(
         return None
     if cell_type == "str":
         return None  # 空字符串也是合法结果
-    if cell_type in ("e", "d"):
+    if cell_type == "e":
+        # t="e" 是公式的错误结果（#DIV/0! 等）。Excel 会缓存错误文本，data_only
+        # 读到的是错误值字符串；这类“看起来成功”的导入必须明确拒绝，空缓存同样拒绝。
+        if not value_text:
+            return "公式的错误缓存为空；请用 Excel 重新保存后再导入"
+        return f"公式缓存为错误值：{value_text[:32]}；请修正公式后重新保存"
+    if cell_type == "d":
         if not value_text:
             return "公式的错误/日期缓存为空；请用 Excel 重新保存后再导入"
         return None

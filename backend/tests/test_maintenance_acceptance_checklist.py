@@ -716,6 +716,22 @@ def test_parse_keeps_legal_zero_and_false_formula_caches():
         '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
         "缺少缓存",
     ),
+    # t="e" 是公式的错误缓存：错误文本不能被当成业务文本接受。
+    (
+        '<row r="2"><c r="A2" t="e"><f>1/0</f><v>#DIV/0!</v></c>'
+        '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+        r"错误值：#DIV/0!",
+    ),
+    (
+        '<row r="2"><c r="A2" t="e"><f>NA()</f><v>#REF!</v></c>'
+        '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+        r"错误值：#REF!",
+    ),
+    (
+        '<row r="2"><c r="A2" t="e"><f>1/0</f><v></v></c>'
+        '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+        "错误缓存为空",
+    ),
 ])
 def test_parse_rejects_missing_or_invalid_formula_cache(row_xml, message):
     with pytest.raises(svc.ChecklistParseError, match=message):
@@ -967,6 +983,9 @@ def test_checklist_api_permission_gate_and_roundtrip(db):
     '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
     '<row r="2"><c r="A2" t="inlineStr"><is><t>条目</t></is></c>'
     '<c r="B2" t="b"><f>TRUE()</f><v>2</v></c></row>',
+    # 公式错误缓存（t="e"）同样必须 422，而不是把 #DIV/0! 当业务文本。
+    '<row r="2"><c r="A2" t="e"><f>1/0</f><v>#DIV/0!</v></c>'
+    '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
     # openpyxl 迭代阶段的坏数字缓存
     '<row r="2"><c r="A2" t="n"><v>bad</v></c>'
     '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
