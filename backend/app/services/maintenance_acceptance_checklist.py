@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import hashlib
 import io
+import re
 import uuid
+import zipfile
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
 from openpyxl import Workbook, load_workbook
@@ -21,11 +24,14 @@ from openpyxl.styles import Font, PatternFill
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import config
+from app.etl import reader
 from app.models.maintenance_acceptance_checklist import (
     MaintenanceAcceptanceChecklistBatch,
     MaintenanceAcceptanceChecklistItem,
 )
 from app.models.maintenance_project import MaintenanceProject
+from app.services.import_safety import UploadSafetyError, validate_xlsx_zip
 
 MAX_CHECKLIST_BYTES = 8 * 1024 * 1024
 MAX_CHECKLIST_ROWS = 2000
@@ -34,6 +40,8 @@ MAX_CHECKLIST_ROWS = 2000
 MAX_SCAN_ROWS = 100_000
 MAX_SCAN_COLUMNS = 256
 MAX_SCAN_CELLS = 2_000_000
+# 预扫是逐元素流式的；元素总数兜底防“每个单元格塞大量空白节点”。
+MAX_CHECKLIST_XML_ELEMENTS = 4 * MAX_SCAN_CELLS
 
 SHEET_CANDIDATES = ("验收清单", "验收需求")
 HEADER_SCAN_ROWS = 10
@@ -59,29 +67,363 @@ def _cell_text(value) -> str:
     return str(value).strip()
 
 
+class _ScanBudget:
+    """一次导入预扫共享的资源预算（选中 sheet + 共享字符串 + 关系文件）。"""
+
+    __slots__ = ("elements", "decompressed_bytes")
+
+    def __init__(self) -> None:
+        self.elements = 0
+        self.decompressed_bytes = 0
+
+    def count_element(self) -> None:
+        self.elements += 1
+        if self.elements > MAX_CHECKLIST_XML_ELEMENTS:
+            raise ChecklistParseError(
+                f"清单 XML 元素数量超过 {MAX_CHECKLIST_XML_ELEMENTS} 个安全上限，"
+                "拒绝导入")
+
+    def count_bytes(self, length: int) -> None:
+        self.decompressed_bytes += length
+        if self.decompressed_bytes > config.IMPORT_XLSX_MAX_UNCOMPRESSED_BYTES:
+            raise ChecklistParseError(
+                "清单解压后数据量超过 XLSX 解压安全上限，拒绝导入")
+
+
+class _BoundedReader:
+    """按实际解压字节计数，不信任 ZIP 中央目录里的声明大小。"""
+
+    __slots__ = ("_source", "_budget")
+
+    def __init__(self, source, budget: _ScanBudget) -> None:
+        self._source = source
+        self._budget = budget
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._source.read(size)
+        self._budget.count_bytes(len(data))
+        return data
+
+
+@contextmanager
+def _open_bounded_member(archive: zipfile.ZipFile, path: str,
+                         budget: _ScanBudget):
+    try:
+        source = archive.open(path)
+    except KeyError as exc:
+        raise ChecklistParseError(f"Excel 文件缺少部件：{path}") from exc
+    with source:
+        yield _BoundedReader(source, budget)
+
+
+def _check_archive_budget(archive: zipfile.ZipFile) -> None:
+    total = 0
+    for info in archive.infolist():
+        total += info.file_size
+        if total > config.IMPORT_XLSX_MAX_UNCOMPRESSED_BYTES:
+            raise ChecklistParseError("清单解压后总大小超过安全上限，拒绝导入")
+        if (info.file_size > 0
+                and info.file_size / max(info.compress_size, 1)
+                > config.IMPORT_XLSX_MAX_COMPRESSION_RATIO):
+            raise ChecklistParseError("清单压缩比异常，拒绝导入")
+
+
+def _selected_worksheet_part(archive: zipfile.ZipFile) -> tuple[str, str]:
+    """按现有候选顺序选中 worksheet 部件，排除 chartsheet。"""
+    try:
+        parts = reader._workbook_sheet_parts(archive)
+    except reader.ReaderError as exc:
+        raise ChecklistParseError(f"无法读取 Excel 文件：{exc}") from exc
+    if not parts:
+        raise ChecklistParseError("工作簿没有任何工作表")
+    by_name = {name: path for name, path in parts}
+    for candidate in SHEET_CANDIDATES:
+        if candidate in by_name:
+            return candidate, by_name[candidate]
+    return parts[0]
+
+
+def _shared_strings_part(archive: zipfile.ZipFile,
+                         budget: _ScanBudget) -> str | None:
+    """定位 sharedStrings。标准路径优先，非标准路径按关系目标兜底。"""
+    member_names = set(archive.namelist())
+    if "xl/sharedStrings.xml" in member_names:
+        return "xl/sharedStrings.xml"
+    relationships_path = "xl/_rels/workbook.xml.rels"
+    if relationships_path not in member_names:
+        return None
+    found: str | None = None
+    open_elements: list = []
+    open_tags: list[str] = []
+    with _open_bounded_member(archive, relationships_path, budget) as source:
+        for event, element in reader._safe_xml_iterparse(source):
+            tag = reader._xml_local_name(element.tag)
+            if event == "start":
+                budget.count_element()
+                if len(open_tags) + 1 > reader._XML_DEPTH_LIMIT:
+                    raise ChecklistParseError("工作簿 XML 层级超过安全上限")
+                if tag == "Relationship":
+                    rel_type = element.attrib.get("Type", "")
+                    if rel_type.endswith("/sharedStrings"):
+                        if found is not None:
+                            raise ChecklistParseError(
+                                "工作簿包含多个 sharedStrings 部件")
+                        if element.attrib.get("TargetMode", "").lower() == "external":
+                            raise ChecklistParseError(
+                                "sharedStrings 部件不允许外部引用")
+                        target = reader._normalize_internal_target(
+                            source_path="xl/workbook.xml",
+                            target=element.attrib.get("Target", ""),
+                        )
+                        if target not in member_names:
+                            raise ChecklistParseError("sharedStrings 部件不存在")
+                        found = target
+                open_elements.append(element)
+                open_tags.append(tag)
+                continue
+            if not open_tags or open_tags[-1] != tag:
+                raise ChecklistParseError("工作簿 XML 结构无效")
+            parent = open_elements[-2] if len(open_elements) > 1 else None
+            open_elements.pop()
+            open_tags.pop()
+            element.clear()
+            if parent is not None:
+                parent.remove(element)
+    return found
+
+
+def _scan_shared_strings(archive: zipfile.ZipFile,
+                         budget: _ScanBudget) -> bytearray | None:
+    """只保留每条共享字符串的“空/非空”标记，不复制文本。"""
+    part = _shared_strings_part(archive, budget)
+    if part is None:
+        return None
+    flags = bytearray()
+    open_elements: list = []
+    open_tags: list[str] = []
+    saw_root = False
+    in_item = False
+    item_has_text = False
+    with _open_bounded_member(archive, part, budget) as source:
+        for event, element in reader._safe_xml_iterparse(source):
+            tag = reader._xml_local_name(element.tag)
+            if event == "start":
+                budget.count_element()
+                if len(open_tags) + 1 > reader._XML_DEPTH_LIMIT:
+                    raise ChecklistParseError("sharedStrings XML 层级超过安全上限")
+                parent = open_tags[-1] if open_tags else None
+                if not open_tags:
+                    if tag != "sst":
+                        raise ChecklistParseError("sharedStrings 结构无效")
+                    saw_root = True
+                elif tag == "si":
+                    if parent != "sst" or in_item:
+                        raise ChecklistParseError("sharedStrings 结构无效")
+                    in_item = True
+                    item_has_text = False
+                open_elements.append(element)
+                open_tags.append(tag)
+                continue
+            if not open_tags or open_tags[-1] != tag:
+                raise ChecklistParseError("sharedStrings 结构无效")
+            if (tag == "t" and in_item and "rPh" not in open_tags
+                    and (element.text or "").strip()):
+                item_has_text = True
+            elif tag == "si":
+                if not in_item:
+                    raise ChecklistParseError("sharedStrings 结构无效")
+                flags.append(1 if item_has_text else 0)
+                in_item = False
+            parent = open_elements[-2] if len(open_elements) > 1 else None
+            open_elements.pop()
+            open_tags.pop()
+            element.clear()
+            if parent is not None:
+                parent.remove(element)
+    if not saw_root or in_item:
+        raise ChecklistParseError("sharedStrings 结构无效")
+    return flags
+
+
+def _scan_worksheet_value_bounds(
+    archive: zipfile.ZipFile,
+    worksheet_path: str,
+    shared_strings: bytearray | None,
+    budget: _ScanBudget,
+) -> tuple[int, int]:
+    """返回 (真实有值最大行, 前 HEADER_SCAN_ROWS 行有值最大列)。
+
+    只认实际 XML 值/公式占用；dimension、row 声明和纯样式空 c 都不算边界。
+    仍然逐元素扫描到 EOF，并受 cell/元素/深度/解压预算约束。
+    """
+    real_max_row = 0
+    header_max_col = 0
+    current_row = 0
+    current_col = 0
+    in_cell = False
+    cell_row = 0
+    cell_col = 0
+    cell_type = ""
+    cell_has_value = False
+    cell_has_formula = False
+    cell_nodes = 0
+    open_elements: list = []
+    open_tags: list[str] = []
+    saw_root = False
+    with _open_bounded_member(archive, worksheet_path, budget) as source:
+        for event, element in reader._safe_xml_iterparse(source):
+            tag = reader._xml_local_name(element.tag)
+            if event == "start":
+                budget.count_element()
+                depth = len(open_tags) + 1
+                if depth > reader._XML_DEPTH_LIMIT:
+                    raise ChecklistParseError("工作表 XML 层级超过安全上限")
+                parent = open_tags[-1] if open_tags else None
+                if depth == 1:
+                    if tag != "worksheet":
+                        raise ChecklistParseError("工作表 XML 结构无效")
+                    saw_root = True
+                elif tag == "row":
+                    if in_cell or parent == "row":
+                        raise ChecklistParseError("工作表 XML 结构无效")
+                    row_ref = element.attrib.get("r")
+                    if row_ref is None:
+                        current_row += 1
+                    else:
+                        if re.fullmatch(r"[0-9]{1,7}", row_ref) is None:
+                            raise ChecklistParseError("工作表的行号无效")
+                        current_row = int(row_ref)
+                    current_col = 0
+                elif tag == "c" and parent == "row":
+                    if in_cell:
+                        raise ChecklistParseError("工作表 XML 结构无效")
+                    cell_type = (element.attrib.get("t") or "").lower()
+                    ref = element.attrib.get("r")
+                    if ref is None:
+                        current_col += 1
+                        cell_row = current_row
+                        cell_col = current_col
+                    else:
+                        bounds = reader._cell_reference_bounds(ref)
+                        if bounds is None:
+                            raise ChecklistParseError("工作表单元格坐标无效")
+                        cell_row, cell_col = bounds
+                        if cell_row != current_row:
+                            raise ChecklistParseError(
+                                "工作表单元格坐标与行号不一致")
+                        current_col = cell_col
+                    in_cell = True
+                    cell_has_value = False
+                    cell_has_formula = False
+                elif tag == "f" and in_cell:
+                    cell_has_formula = True
+                open_elements.append(element)
+                open_tags.append(tag)
+                continue
+            if not open_tags or open_tags[-1] != tag:
+                raise ChecklistParseError("工作表 XML 结构无效")
+            if tag == "v" and in_cell:
+                text = (element.text or "").strip()
+                if cell_type == "s":
+                    if not text or not text.isdigit():
+                        raise ChecklistParseError("共享字符串索引无效")
+                    index = int(text)
+                    if shared_strings is None or index >= len(shared_strings):
+                        raise ChecklistParseError(
+                            "共享字符串索引越界或 sharedStrings 部件缺失")
+                    if shared_strings[index]:
+                        cell_has_value = True
+                elif text:
+                    cell_has_value = True
+            elif tag == "t" and in_cell:
+                if ("is" in open_tags and "rPh" not in open_tags
+                        and (element.text or "").strip()):
+                    cell_has_value = True
+            elif tag == "c" and in_cell:
+                cell_nodes += 1
+                if cell_nodes > MAX_SCAN_CELLS:
+                    raise ChecklistParseError(
+                        f"清单实际单元格数量超过 {MAX_SCAN_CELLS} 个安全上限，"
+                        "拒绝导入")
+                if cell_has_value or cell_has_formula:
+                    if cell_row > real_max_row:
+                        real_max_row = cell_row
+                    if cell_row <= HEADER_SCAN_ROWS and cell_has_value:
+                        if cell_col > header_max_col:
+                            header_max_col = cell_col
+                in_cell = False
+            elif tag == "row":
+                current_col = 0
+            parent = open_elements[-2] if len(open_elements) > 1 else None
+            open_elements.pop()
+            open_tags.pop()
+            element.clear()
+            if parent is not None:
+                parent.remove(element)
+    if not saw_root:
+        raise ChecklistParseError("工作表 XML 结构无效")
+    return real_max_row, header_max_col
+
+
 def parse_checklist_workbook(data: bytes, filename: str) -> dict:
     """解析清单：定位表头 → 逐行归一化。返回 preview 载荷（不含 batch_id）。"""
     try:
-        wb = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
-    except Exception as exc:  # noqa: BLE001
-        raise ChecklistParseError(f"无法读取 Excel 文件：{type(exc).__name__}") from exc
-    try:
-        ws = None
-        for name in SHEET_CANDIDATES:
-            if name in wb.sheetnames:
-                ws = wb[name]
-                break
-        if ws is None:
-            ws = wb.worksheets[0] if wb.worksheets else None
-        if ws is None:
-            raise ChecklistParseError("工作簿没有任何工作表")
+        validate_xlsx_zip(data, max_bytes=MAX_CHECKLIST_BYTES)
+    except UploadSafetyError as exc:
+        raise ChecklistParseError(f"无法读取 Excel 文件：{exc}") from exc
 
-        # 表头定位：前 HEADER_SCAN_ROWS 行内按名称找「验收需求」列。整行扫描
-        # 而不是只看前 8 列，避免关键列右移后被误判为缺列；同名列重复即拒绝，
-        # 不静默取最后一列。
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise ChecklistParseError(
+            f"无法读取 Excel 文件：{type(exc).__name__}") from exc
+    wb = None
+    try:
+        # 预扫必须先于 openpyxl：dimension 可能被纯样式抬高或低报，不能作为
+        # 真实边界；这里逐元素扫描到 EOF，并执行 cell/元素/深度/解压预算。
+        try:
+            _check_archive_budget(archive)
+            sheet_name, worksheet_path = _selected_worksheet_part(archive)
+            budget = _ScanBudget()
+            shared_strings = _scan_shared_strings(archive, budget)
+            real_max_row, header_max_col = _scan_worksheet_value_bounds(
+                archive, worksheet_path, shared_strings, budget)
+        except ChecklistParseError:
+            raise
+        except reader.ReaderError as exc:
+            raise ChecklistParseError(f"无法读取 Excel 文件：{exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise ChecklistParseError(
+                f"无法读取 Excel 文件：{type(exc).__name__}") from exc
+
+        if header_max_col == 0:
+            raise ChecklistParseError(
+                f"未找到表头：需要「{COL_REQUIREMENT}」列（可选「{COL_DONE}」列）")
+        if header_max_col > MAX_SCAN_COLUMNS:
+            raise ChecklistParseError(
+                f"清单表头实际列数达到第 {header_max_col} 列，超过可扫描上限 "
+                f"{MAX_SCAN_COLUMNS} 列，拒绝导入")
+        if real_max_row > HEADER_SCAN_ROWS + MAX_SCAN_ROWS:
+            raise ChecklistParseError(
+                f"清单行数超过可扫描上限 {MAX_SCAN_ROWS} 行，拒绝导入")
+
+        try:
+            wb = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+        except Exception as exc:  # noqa: BLE001
+            raise ChecklistParseError(
+                f"无法读取 Excel 文件：{type(exc).__name__}") from exc
+        if sheet_name not in wb.sheetnames:
+            raise ChecklistParseError("工作簿没有任何工作表")
+        ws = wb[sheet_name]
+
+        # 表头定位：前 HEADER_SCAN_ROWS 行内按名称找「验收需求」列。只扫描
+        # 预扫得到的真实有值列宽，避免信任虚报的 dimension 造成 dense 扫表头；
+        # 同名列重复即拒绝，不静默取最后一列。
         header_idx = None
         req_col = done_col = None
-        header_rows = ws.iter_rows(min_row=1, max_row=HEADER_SCAN_ROWS, values_only=True)
+        header_rows = ws.iter_rows(
+            min_row=1, max_row=HEADER_SCAN_ROWS, max_col=header_max_col,
+            values_only=True)
         for i, row in enumerate(header_rows):
             requirement_cols: list[int] = []
             done_cols: list[int] = []
@@ -107,27 +449,21 @@ def parse_checklist_workbook(data: bytes, filename: str) -> dict:
             raise ChecklistParseError(
                 f"未找到表头：需要「{COL_REQUIREMENT}」列（可选「{COL_DONE}」列）")
 
-        # 数据行只读取表头实际用到的列，但一直扫描到工作表末尾：超过 2000 条
-        # 数据行不能靠 break 截取成“2000 条成功”，尾端的非空行也必须被看到。
+        # 数据行只读取表头实际用到的列，但一直扫描到预扫得到的真实尾行：
+        # 超过 2000 条数据行不能靠 break 截取成“2000 条成功”，尾端的非空行
+        # 也必须被看到。真实尾行已由 XML 预扫确定，低报 dimension 不会截断。
         needed_cols = max(req_col, done_col if done_col is not None else 0) + 1
         if needed_cols > MAX_SCAN_COLUMNS:
             raise ChecklistParseError(
                 f"清单关键列位于第 {needed_cols} 列，超过可扫描上限 "
                 f"{MAX_SCAN_COLUMNS} 列，拒绝导入")
-        # 至少扫到第 2001 条数据所在行，不能依赖可能被低报的 sheet dimension；
-        # 超过资源上限则明确拒绝，而不是静默截取。
-        dimension_rows = ws.max_row or 0
-        if dimension_rows > HEADER_SCAN_ROWS + MAX_SCAN_ROWS:
-            raise ChecklistParseError(
-                f"清单行数超过可扫描上限 {MAX_SCAN_ROWS} 行，拒绝导入")
-        scan_rows = max(dimension_rows, HEADER_SCAN_ROWS + MAX_CHECKLIST_ROWS + 1)
-        if scan_rows * needed_cols > MAX_SCAN_CELLS:
+        if real_max_row * needed_cols > MAX_SCAN_CELLS:
             raise ChecklistParseError(
                 f"清单扫描范围超过 {MAX_SCAN_CELLS} 个单元格的安全上限"
-                f"（{scan_rows} 行 × {needed_cols} 列），拒绝导入")
+                f"（{real_max_row} 行 × {needed_cols} 列），拒绝导入")
 
         items: list[dict] = []
-        data_rows = ws.iter_rows(min_row=header_idx + 2, max_row=scan_rows,
+        data_rows = ws.iter_rows(min_row=header_idx + 2, max_row=real_max_row,
                                  max_col=needed_cols, values_only=True)
         for offset, row in enumerate(data_rows):
             row_no = header_idx + offset + 2  # Excel 实际行号（1 基）
@@ -177,7 +513,9 @@ def parse_checklist_workbook(data: bytes, filename: str) -> dict:
             "issue_rows": sum(1 for it in items if it["issues"]),
         }
     finally:
-        wb.close()
+        if wb is not None:
+            wb.close()
+        archive.close()
 
 
 def store_preview(
