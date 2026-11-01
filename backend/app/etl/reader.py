@@ -1078,11 +1078,19 @@ def inspect_workbook(path: str, *, load_data: bool = True) -> list[SheetInspecti
                             path,
                             next(sheet for sheet in layout.sheets if sheet.name == name),
                             max_rows=None if load_data else _HEADER_SCAN_ROWS,
+                            # 表头探测只读前 3 行，不能让被忽略页的公式缓存缺失
+                            # 拖垮整本；选中页由 precheck/load_selected 全行校验。
+                            strict_formula_cache=load_data,
                         )
                     )
                 )
                 for name in (sheet.name for sheet in layout.sheets)
             }
+        except xlsx_stream.FormulaCacheError as exc:
+            raise ReaderError(
+                f"工作簿包含无法安全读取的公式缓存：{exc}",
+                code="unsupported_cell_encoding",
+            ) from exc
         except xlsx_stream.UnsupportedCellEncoding as exc:
             raise ReaderError(
                 f"工作簿包含暂不支持的单元格编码：{exc}",
@@ -1104,6 +1112,16 @@ def inspect_workbook(path: str, *, load_data: bool = True) -> list[SheetInspecti
             )
             for name in frames
         ]
+    if load_data:
+        # 兼容入口会物化全部工作表；普通 shared-string 路径同样不能把无缓存
+        # 公式静默读成 None。表头级探测（load_data=False）不做整页扫描。
+        try:
+            xlsx_stream.assert_formula_caches(path)
+        except xlsx_stream.FormulaCacheError as exc:
+            raise ReaderError(
+                f"工作簿包含无法安全读取的公式缓存：{exc}",
+                code="unsupported_cell_encoding",
+            ) from exc
     try:
         sheets = pd.read_excel(path, sheet_name=None, header=None, dtype=object,
                                engine="openpyxl",
@@ -1151,6 +1169,11 @@ def load_selected_workbook(
     if layout.is_mixed_or_inline:
         try:
             frames = xlsx_stream.load_selected_frames(path, sheet_names)
+        except xlsx_stream.FormulaCacheError as exc:
+            raise ReaderError(
+                f"工作簿包含无法安全读取的公式缓存：{exc}",
+                code="unsupported_cell_encoding",
+            ) from exc
         except xlsx_stream.UnsupportedCellEncoding as exc:
             raise ReaderError(
                 f"工作簿包含暂不支持的单元格编码：{exc}",
@@ -1160,6 +1183,9 @@ def load_selected_workbook(
             raise ReaderError("工作簿 XML 结构无法读取。", code="invalid_ooxml_structure") from exc
     else:
         try:
+            # 只校验本次选中的工作表全行：被忽略页的缺缓存公式不阻断业务页，
+            # 选中页即使公式在表头之后也必须明确失败，而不是 data_only=None。
+            xlsx_stream.assert_formula_caches(path, sheet_names)
             frames = pd.read_excel(
                 path,
                 sheet_name=list(sheet_names),
@@ -1169,6 +1195,11 @@ def load_selected_workbook(
             )
             if isinstance(frames, pd.DataFrame):
                 frames = {sheet_names[0]: frames}
+        except xlsx_stream.FormulaCacheError as exc:
+            raise ReaderError(
+                f"工作簿包含无法安全读取的公式缓存：{exc}",
+                code="unsupported_cell_encoding",
+            ) from exc
         except Exception as exc:
             raise ReaderError(
                 "文件无法按 .xlsx 解析：可能是旧版 .xls 格式、非 Excel 文件或文件已损坏。",
@@ -1198,8 +1229,23 @@ def read_workbook(path: str) -> list[SheetData]:
 
 
 def read_excel(path: str) -> tuple[pd.DataFrame, str]:
-    """单表读取（兼容入口）：取第一个可识别 sheet → (DataFrame, file_type)。"""
-    parsed = read_workbook(path)
+    """单表读取（兼容入口）：按工作簿顺序取第一个可识别 sheet → (DataFrame, file_type)。
+
+    历史语义是 ``read_workbook()[0]``，即工作簿原始顺序的第一张可识别页；
+    不能换成预检/正式导入的报销优先选表规则，否则工作簿里只要附带一张报销页，
+    原本可导入的业务页就会被挤掉。这里只做有界表头探测，然后只物化并校验该页，
+    被忽略页的坏公式不影响本入口。
+    """
+    inspected = inspect_workbook(path, load_data=False)
+    first = next(
+        (sheet for sheet in inspected if sheet.file_type is not None), None)
+    if first is None:
+        raise ReaderError(
+            "无法识别文件类型，请确认是采购/销售/库存/维保出库/报销明细导出文件",
+            code="no_recognized_sheet",
+        )
+    parsed = load_selected_workbook(
+        path, [first.sheet_name], inspections=inspected)
     if not parsed:
         raise ReaderError(
             "无法识别文件类型，请确认是采购/销售/库存/维保出库/报销明细导出文件",

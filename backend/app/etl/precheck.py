@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 
-from app.etl import expense_void, mapping, reader, sheet_selection
+from app.etl import expense_void, mapping, reader, sheet_selection, xlsx_stream
 
 # 修复模式预检解析数据行的**每请求**预算。实测（客户 3802 行氚云 inline-string 导出，
 # 4 核开发机）：复用表头扫描后 ≈3.6ms/行（物化 + transform，transform 只占 ~15%），
@@ -71,6 +71,15 @@ def inspect_file(path: str, filename: str, *, mode: str = "skip",
     reader.reject_roundtrip_workbook(path)
     inspected = reader.inspect_workbook(path, load_data=False)
     selection = sheet_selection.select_workbook_sheets(inspected)
+    # 选中页必须在预检阶段就暴露无缓存公式（表头行之后也算）。这里只流式扫描
+    # 选中页，被忽略页即使前 3 行有公式也不会阻断可导入的业务页。
+    formula_cache_errors: dict[str, str] = {}
+    if selection.selected:
+        try:
+            xlsx_stream.assert_formula_caches(
+                path, [sheet.sheet_name for sheet in selection.selected])
+        except xlsx_stream.FormulaCacheError as exc:
+            formula_cache_errors[exc.sheet] = str(exc)
     file_issues: list[dict] = []
     if not selection.selected:
         file_issues.append(_issue(
@@ -95,6 +104,13 @@ def inspect_file(path: str, filename: str, *, mode: str = "skip",
                 "info",
                 "sheet_ignored_unrecognized",
                 f"工作表「{sheet.sheet_name}」无法识别，本次不会导入。",
+            ))
+
+        if action == sheet_selection.SELECTED and sheet.sheet_name in formula_cache_errors:
+            issues.append(_issue(
+                "error",
+                "formula_cache_unavailable",
+                formula_cache_errors[sheet.sheet_name],
             ))
 
         if sheet.dup_cols:
@@ -123,8 +139,10 @@ def inspect_file(path: str, filename: str, *, mode: str = "skip",
                 ))
             # 表头级只能看出「同一关键字段命中多个源列」；同值/异值必须读值。
             # 只有存在这种歧义时才物化本页，复用 reader 的同一冲突判定，
-            # 不做第二套比较逻辑。正常单列导出不触发。
-            if (not sheet.dup_cols
+            # 不做第二套比较逻辑。正常单列导出不触发。已发现公式缓存错误时
+            # 不再物化：本次文件已不可导入，重复物化只会把预检变成抛错。
+            if (not formula_cache_errors
+                    and not sheet.dup_cols
                     and mapping.critical_alias_columns(sheet.columns, sheet.file_type)):
                 try:
                     reader.load_selected_workbook(
