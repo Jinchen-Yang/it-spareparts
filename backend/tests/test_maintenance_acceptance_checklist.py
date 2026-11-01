@@ -6,6 +6,7 @@ API 层：权限门（无 action 403）、GET 清单、模板下载。
 
 import io
 import uuid
+import zipfile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -102,6 +103,95 @@ def _custom_xlsx(headers: list, rows: list[tuple]) -> bytes:
     return buf.getvalue()
 
 
+_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_DOC_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+
+
+def _raw_xlsx(
+    sheet_data: str,
+    *,
+    dimension: str = "A1:B2",
+    shared_items: list[str] | None = None,
+    sheet_xml: str | None = None,
+    shared_part: str = "xl/sharedStrings.xml",
+    shared_rel_target: str = "sharedStrings.xml",
+    shared_override_parts: list[str] | None = None,
+    extra_members: dict[str, str] | None = None,
+) -> bytes:
+    """构造最小 OOXML：可精确控制 dimension、sharedStrings 与 worksheet XML。"""
+    worksheet = sheet_xml or (
+        f'<worksheet xmlns="{_MAIN_NS}">'
+        f'<dimension ref="{dimension}"/>'
+        f"<sheetData>{sheet_data}</sheetData>"
+        "</worksheet>"
+    )
+    relationships = [
+        f'<Relationship Id="rId1" Type="{_DOC_REL_NS}/worksheet" '
+        'Target="worksheets/sheet1.xml"/>',
+    ]
+    overrides = [
+        '<Override PartName="/xl/workbook.xml" ContentType='
+        '"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType='
+        '"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>',
+    ]
+    members = {
+        "_rels/.rels": (
+            f'<Relationships xmlns="{_PKG_REL_NS}">'
+            f'<Relationship Id="rId1" Type="{_DOC_REL_NS}/officeDocument" '
+            'Target="xl/workbook.xml"/></Relationships>'
+        ),
+        "xl/workbook.xml": (
+            f'<workbook xmlns="{_MAIN_NS}" xmlns:r="{_DOC_REL_NS}">'
+            '<sheets><sheet name="验收清单" sheetId="1" r:id="rId1"/></sheets>'
+            "</workbook>"
+        ),
+        "xl/worksheets/sheet1.xml": worksheet,
+    }
+    if shared_items is not None:
+        relationships.append(
+            f'<Relationship Id="rId2" Type="{_DOC_REL_NS}/sharedStrings" '
+            f'Target="{shared_rel_target}"/>'
+        )
+        for override_part in (shared_override_parts or [shared_part]):
+            overrides.append(
+                f'<Override PartName="/{override_part}" ContentType='
+                '"application/vnd.openxmlformats-officedocument.spreadsheetml.'
+                'sharedStrings+xml"/>'
+            )
+        members[shared_part] = (
+            f'<sst xmlns="{_MAIN_NS}" count="{len(shared_items)}" '
+            f'uniqueCount="{len(shared_items)}">'
+            + "".join(shared_items) + "</sst>"
+        )
+    if extra_members:
+        members.update(extra_members)
+    members["[Content_Types].xml"] = (
+        f'<Types xmlns="{_CT_NS}">'
+        '<Default Extension="rels" ContentType='
+        '"application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        + "".join(overrides) + "</Types>"
+    )
+    members["xl/_rels/workbook.xml.rels"] = (
+        f'<Relationships xmlns="{_PKG_REL_NS}">'
+        + "".join(relationships) + "</Relationships>"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+    return buf.getvalue()
+
+
+_INLINE_HEADER = (
+    '<row r="1"><c r="A1" t="inlineStr"><is><t>验收需求</t></is></c>'
+    '<c r="B1" t="inlineStr"><is><t>是否完成</t></is></c></row>'
+)
+
+
 def test_parse_accepts_exactly_the_row_limit():
     rows = [(f"任务{i}", "是") for i in range(1, svc.MAX_CHECKLIST_ROWS + 1)]
     parsed = svc.parse_checklist_workbook(
@@ -196,6 +286,514 @@ def test_parse_rejects_total_scanned_cells_beyond_limit():
     wb.save(buf)
     with pytest.raises(svc.ChecklistParseError, match="单元格"):
         svc.parse_checklist_workbook(buf.getvalue(), "too-large-scan.xlsx")
+
+
+def test_parse_shared_string_index_zero_empty_and_rich_text():
+    shared = [
+        "<si><t>索引零需求</t></si>",
+        "<si><t>验收需求</t></si>",
+        "<si><t>是否完成</t></si>",
+        "<si><t></t></si>",
+        "<si><r><t>富文本</t></r><r><t>需求</t></r></si>",
+        "<si><t>是</t></si>",
+    ]
+    sheet_data = (
+        '<row r="1"><c r="A1" t="s"><v>1</v></c>'
+        '<c r="B1" t="s"><v>2</v></c></row>'
+        '<row r="2"><c r="A2" t="s"><v>0</v></c>'
+        '<c r="B2" t="s"><v>5</v></c></row>'
+        '<row r="3"><c r="A3" t="s"><v>4</v></c>'
+        '<c r="B3" t="s"><v>5</v></c></row>'
+        '<row r="4"><c r="A4" t="s"><v>3</v></c>'
+        '<c r="B4" t="s"><v>3</v></c></row>'
+    )
+    parsed = svc.parse_checklist_workbook(
+        _raw_xlsx(sheet_data, dimension="A1:B4", shared_items=shared),
+        "shared.xlsx",
+    )
+    assert [(it["requirement"], it["done"]) for it in parsed["items"]] == [
+        ("索引零需求", True),
+        ("富文本需求", True),
+    ]
+
+
+@pytest.mark.parametrize("bad_index", ["99", "abc", ""])
+def test_parse_rejects_broken_shared_string_index(bad_index):
+    shared = ["<si><t>验收需求</t></si>", "<si><t>是否完成</t></si>"]
+    sheet_data = (
+        '<row r="1"><c r="A1" t="s"><v>0</v></c>'
+        '<c r="B1" t="s"><v>1</v></c></row>'
+        f'<row r="2"><c r="A2" t="s"><v>{bad_index}</v></c></row>'
+    )
+    with pytest.raises(svc.ChecklistParseError, match="共享字符串"):
+        svc.parse_checklist_workbook(
+            _raw_xlsx(sheet_data, shared_items=shared), "bad-index.xlsx")
+
+
+def test_parse_shared_strings_follow_content_types_not_standard_path():
+    """标准路径放空串 decoy，真实 sharedStrings 在 manifest 的非标准部件。
+
+    与 openpyxl 一致：只看 [Content_Types].xml 的 Override；按旧“标准路径优先”
+    会拿 decoy 预扫成空，把第 5000 行真实尾项漏掉并“成功”返回。
+    """
+    shared = [
+        "<si><t>验收需求</t></si>",
+        "<si><t>是否完成</t></si>",
+        "<si><t>非标准部件尾项</t></si>",
+        "<si><t>是</t></si>",
+        "<si><t>正常条目</t></si>",
+        "<si><t>否</t></si>",
+    ]
+    decoy_items = [
+        "<si><t>验收需求</t></si>",
+        "<si><t>是否完成</t></si>",
+        "<si><t></t></si>",
+        "<si><t></t></si>",
+        "<si><t>正常条目</t></si>",
+        "<si><t>否</t></si>",
+    ]
+    decoy = (
+        f'<sst xmlns="{_MAIN_NS}" count="{len(decoy_items)}" '
+        f'uniqueCount="{len(decoy_items)}">'
+        + "".join(decoy_items) + "</sst>"
+    )
+    sheet_data = (
+        '<row r="1"><c r="A1" t="s"><v>0</v></c>'
+        '<c r="B1" t="s"><v>1</v></c></row>'
+        '<row r="2"><c r="A2" t="s"><v>4</v></c>'
+        '<c r="B2" t="s"><v>5</v></c></row>'
+        '<row r="5000"><c r="A5000" t="s"><v>2</v></c>'
+        '<c r="B5000" t="s"><v>3</v></c></row>'
+    )
+    parsed = svc.parse_checklist_workbook(
+        _raw_xlsx(
+            sheet_data,
+            dimension="A1:B2",
+            shared_items=shared,
+            shared_part="xl/strings/actualSharedStrings.xml",
+            shared_rel_target="strings/actualSharedStrings.xml",
+            extra_members={"xl/sharedStrings.xml": decoy},
+        ),
+        "nonstandard-shared.xlsx",
+    )
+    assert parsed["item_rows"] == 2
+    assert parsed["items"][-1]["row_no"] == 5000
+    assert parsed["items"][-1]["requirement"] == "非标准部件尾项"
+
+
+def test_parse_rejects_ambiguous_shared_strings_content_types():
+    shared = ["<si><t>验收需求</t></si>", "<si><t>是否完成</t></si>"]
+    sheet_data = (
+        '<row r="1"><c r="A1" t="s"><v>0</v></c>'
+        '<c r="B1" t="s"><v>1</v></c></row>'
+    )
+    with pytest.raises(svc.ChecklistParseError, match="多个 sharedStrings"):
+        svc.parse_checklist_workbook(
+            _raw_xlsx(
+                sheet_data,
+                shared_items=shared,
+                shared_part="xl/sharedStrings.xml",
+                shared_override_parts=[
+                    "xl/sharedStrings.xml", "xl/other/sharedStrings.xml",
+                ],
+                extra_members={
+                    "xl/other/sharedStrings.xml": (
+                        f'<sst xmlns="{_MAIN_NS}" count="0" '
+                        'uniqueCount="0"></sst>'
+                    ),
+                },
+            ),
+            "ambiguous-shared.xlsx",
+        )
+
+
+def test_parse_rejects_missing_shared_strings_content_type_target():
+    shared = ["<si><t>验收需求</t></si>", "<si><t>是否完成</t></si>"]
+    sheet_data = (
+        '<row r="1"><c r="A1" t="s"><v>0</v></c>'
+        '<c r="B1" t="s"><v>1</v></c></row>'
+    )
+    with pytest.raises(svc.ChecklistParseError, match="不存在"):
+        svc.parse_checklist_workbook(
+            _raw_xlsx(
+                sheet_data,
+                shared_items=shared,
+                shared_override_parts=["xl/missing-sharedStrings.xml"],
+            ),
+            "missing-shared.xlsx",
+        )
+
+
+def test_parse_empty_shared_string_does_not_inflate_tail_bounds():
+    shared = [
+        "<si><t>验收需求</t></si>",
+        "<si><t>是否完成</t></si>",
+        "<si><t></t></si>",
+        "<si><t>真实条目</t></si>",
+        "<si><t>是</t></si>",
+    ]
+    reserved_row = svc.HEADER_SCAN_ROWS + svc.MAX_SCAN_ROWS + 1
+    sheet_data = (
+        '<row r="1"><c r="A1" t="s"><v>0</v></c>'
+        '<c r="B1" t="s"><v>1</v></c></row>'
+        '<row r="2"><c r="A2" t="s"><v>3</v></c>'
+        '<c r="B2" t="s"><v>4</v></c></row>'
+        f'<row r="{reserved_row}"><c r="A{reserved_row}" t="s"><v>2</v></c></row>'
+    )
+    parsed = svc.parse_checklist_workbook(
+        _raw_xlsx(sheet_data, shared_items=shared), "empty-shared.xlsx")
+    assert parsed["item_rows"] == 1
+    assert parsed["items"][0]["requirement"] == "真实条目"
+
+
+def test_parse_reads_header_beyond_underreported_dimension():
+    shared = [
+        "<si><t>验收需求</t></si>",
+        "<si><t>是否完成</t></si>",
+        "<si><t>右移需求</t></si>",
+        "<si><t>否</t></si>",
+    ]
+    sheet_data = (
+        '<row r="1"><c r="J1" t="s"><v>0</v></c>'
+        '<c r="K1" t="s"><v>1</v></c></row>'
+        '<row r="2"><c r="J2" t="s"><v>2</v></c>'
+        '<c r="K2" t="s"><v>3</v></c></row>'
+    )
+    parsed = svc.parse_checklist_workbook(
+        _raw_xlsx(sheet_data, dimension="A1:B2", shared_items=shared),
+        "header-low-dimension.xlsx",
+    )
+    assert parsed["items"][0]["requirement"] == "右移需求"
+    assert parsed["items"][0]["done"] is False
+
+
+def test_parse_ignores_style_only_dimension_tail():
+    shared = [
+        "<si><t>验收需求</t></si>",
+        "<si><t>是否完成</t></si>",
+        "<si><t>是</t></si>",
+    ]
+    rows = [
+        '<row r="1"><c r="A1" t="s"><v>0</v></c>'
+        '<c r="B1" t="s"><v>1</v></c></row>'
+    ]
+    for row_no in range(2, 7):
+        rows.append(
+            f'<row r="{row_no}"><c r="A{row_no}" t="inlineStr">'
+            f"<is><t>任务{row_no}</t></is></c>"
+            f'<c r="B{row_no}" t="s"><v>2</v></c></row>'
+        )
+    rows.append('<row r="1048576"><c r="A1048576"/></row>')
+    parsed = svc.parse_checklist_workbook(
+        _raw_xlsx("".join(rows), dimension="A1:B1048576",
+                  shared_items=shared),
+        "style-tail.xlsx",
+    )
+    assert parsed["item_rows"] == 5
+
+
+def test_parse_reads_real_tail_when_dimension_is_underreported():
+    shared = [
+        "<si><t>验收需求</t></si>",
+        "<si><t>是否完成</t></si>",
+        "<si><t>尾端需求</t></si>",
+        "<si><t>否</t></si>",
+    ]
+    sheet_data = (
+        '<row r="1"><c r="A1" t="s"><v>0</v></c>'
+        '<c r="B1" t="s"><v>1</v></c></row>'
+        '<row r="5000"><c r="A5000" t="s"><v>2</v></c>'
+        '<c r="B5000" t="s"><v>3</v></c></row>'
+    )
+    parsed = svc.parse_checklist_workbook(
+        _raw_xlsx(sheet_data, dimension="A1:B2", shared_items=shared),
+        "far-tail.xlsx",
+    )
+    assert parsed["item_rows"] == 1
+    assert parsed["items"][0]["row_no"] == 5000
+    assert parsed["items"][0]["requirement"] == "尾端需求"
+
+
+def test_parse_rejects_far_tail_2001st_item_beyond_old_scan_window():
+    shared = [
+        "<si><t>验收需求</t></si>",
+        "<si><t>是否完成</t></si>",
+        "<si><t>是</t></si>",
+    ]
+    rows = [
+        '<row r="1"><c r="A1" t="s"><v>0</v></c>'
+        '<c r="B1" t="s"><v>1</v></c></row>'
+    ]
+    for row_no in range(2, svc.MAX_CHECKLIST_ROWS + 2):
+        rows.append(
+            f'<row r="{row_no}"><c r="A{row_no}" t="inlineStr">'
+            f"<is><t>任务{row_no}</t></is></c>"
+            f'<c r="B{row_no}" t="s"><v>2</v></c></row>'
+        )
+    rows.append(
+        '<row r="5000"><c r="A5000" t="inlineStr">'
+        "<is><t>第2001条</t></is></c>"
+        '<c r="B5000" t="s"><v>2</v></c></row>'
+    )
+    with pytest.raises(svc.ChecklistParseError, match="整本拒绝"):
+        svc.parse_checklist_workbook(
+            _raw_xlsx("".join(rows), dimension="A1:B2",
+                      shared_items=shared),
+            "far-2001.xlsx",
+        )
+
+
+def test_parse_rejects_real_tail_beyond_scan_limit():
+    tail_row = svc.HEADER_SCAN_ROWS + svc.MAX_SCAN_ROWS + 1
+    sheet_data = (
+        '<row r="1"><c r="A1" t="inlineStr"><is><t>验收需求</t></is></c>'
+        '<c r="B1" t="inlineStr"><is><t>是否完成</t></is></c></row>'
+        f'<row r="{tail_row}"><c r="A{tail_row}" t="inlineStr">'
+        "<is><t>远尾真实值</t></is></c></row>"
+    )
+    with pytest.raises(svc.ChecklistParseError, match="可扫描上限"):
+        svc.parse_checklist_workbook(
+            _raw_xlsx(sheet_data), "real-far-tail.xlsx")
+
+
+def test_parse_infers_omitted_row_and_cell_coordinates():
+    """省略 r 属性时按 openpyxl 规则推断，推断后仍要满足递增与范围约束。"""
+    sheet_data = (
+        '<row><c t="inlineStr"><is><t>验收需求</t></is></c>'
+        '<c t="inlineStr"><is><t>是否完成</t></is></c></row>'
+        '<row><c t="inlineStr"><is><t>省略坐标条目</t></is></c>'
+        '<c t="inlineStr"><is><t>是</t></is></c></row>'
+    )
+    parsed = svc.parse_checklist_workbook(
+        _raw_xlsx(sheet_data), "omitted-coords.xlsx")
+    assert parsed["item_rows"] == 1
+    assert parsed["items"][0]["row_no"] == 2
+    assert parsed["items"][0]["requirement"] == "省略坐标条目"
+    assert parsed["items"][0]["done"] is True
+
+
+@pytest.mark.parametrize(("sheet_data", "message"), [
+    (
+        _INLINE_HEADER
+        + '<row r="2"><c r="A2" t="inlineStr"><is><t>甲</t></is></c></row>'
+        + '<row r="2"><c r="A2" t="inlineStr"><is><t>乙</t></is></c></row>',
+        "严格递增",
+    ),
+    (
+        _INLINE_HEADER
+        + '<row r="3"><c r="A3" t="inlineStr"><is><t>甲</t></is></c></row>'
+        + '<row r="2"><c r="A2" t="inlineStr"><is><t>乙</t></is></c></row>',
+        "严格递增",
+    ),
+    (
+        _INLINE_HEADER
+        + '<row r="2"><c r="A2" t="inlineStr"><is><t>甲</t></is></c>'
+        + '<c r="A2" t="inlineStr"><is><t>乙</t></is></c></row>',
+        "列号必须严格递增",
+    ),
+    (
+        _INLINE_HEADER
+        + '<row r="2"><c r="B2" t="inlineStr"><is><t>是</t></is></c>'
+        + '<c r="A2" t="inlineStr"><is><t>甲</t></is></c></row>',
+        "列号必须严格递增",
+    ),
+    ('<row r="0"/>', "行号超出"),
+    ('<row r="1048577"/>', "行号超出"),
+    (
+        _INLINE_HEADER
+        + '<row r="2"><c r="A1048577" t="inlineStr">'
+        + "<is><t>越界</t></is></c></row>",
+        "行号超出",
+    ),
+    (
+        _INLINE_HEADER
+        + '<row r="2"><c r="A0" t="inlineStr">'
+        + "<is><t>零行</t></is></c></row>",
+        "行号超出",
+    ),
+    (
+        _INLINE_HEADER
+        + '<row r="2"><c r="XFE2" t="inlineStr">'
+        + "<is><t>越界列</t></is></c></row>",
+        "列号超出",
+    ),
+    (
+        _INLINE_HEADER
+        + '<row r="2"><c r="A3" t="inlineStr">'
+        + "<is><t>行号错位</t></is></c></row>",
+        "不一致",
+    ),
+])
+def test_parse_rejects_non_monotonic_or_out_of_range_coordinates(
+    sheet_data, message,
+):
+    with pytest.raises(svc.ChecklistParseError, match=message):
+        svc.parse_checklist_workbook(
+            _raw_xlsx(sheet_data), "bad-coordinates.xlsx")
+
+
+def test_parse_counts_uncached_formula_as_occupied_boundary():
+    tail_row = svc.HEADER_SCAN_ROWS + svc.MAX_SCAN_ROWS + 1
+    sheet_data = (
+        '<row r="1"><c r="A1" t="inlineStr"><is><t>验收需求</t></is></c>'
+        '<c r="B1" t="inlineStr"><is><t>是否完成</t></is></c></row>'
+        f'<row r="{tail_row}"><c r="A{tail_row}"><f>1+1</f></c></row>'
+    )
+    with pytest.raises(svc.ChecklistParseError, match="可扫描上限"):
+        svc.parse_checklist_workbook(
+            _raw_xlsx(sheet_data), "formula-tail.xlsx")
+
+
+def test_parse_cached_formula_zero_and_false_are_values():
+    sheet_data = (
+        '<row r="1"><c r="A1" t="inlineStr"><is><t>验收需求</t></is></c>'
+        '<c r="B1" t="inlineStr"><is><t>是否完成</t></is></c></row>'
+        '<row r="2"><c r="A2"><f>1+1</f><v>0</v></c>'
+        '<c r="B2" t="b"><v>0</v></c></row>'
+    )
+    parsed = svc.parse_checklist_workbook(
+        _raw_xlsx(sheet_data), "zero-false.xlsx")
+    assert parsed["item_rows"] == 1
+    assert parsed["items"][0]["requirement"] == "0"
+    assert parsed["items"][0]["done"] is False
+
+
+def test_parse_keeps_legal_empty_string_formula_cache():
+    """t="str" 的空字符串结果是合法缓存：允许，不按“无缓存”拒绝。"""
+    sheet_data = (
+        _INLINE_HEADER
+        + '<row r="2"><c r="A2" t="inlineStr"><is><t>条目</t></is></c>'
+        + '<c r="B2" t="str"><f>""</f><v></v></c></row>'
+    )
+    parsed = svc.parse_checklist_workbook(
+        _raw_xlsx(sheet_data), "empty-string-formula.xlsx")
+    assert parsed["item_rows"] == 1
+    assert parsed["items"][0]["done"] is False
+    assert parsed["items"][0]["issues"] == []
+
+
+def test_parse_keeps_legal_zero_and_false_formula_caches():
+    sheet_data = (
+        _INLINE_HEADER
+        + '<row r="2"><c r="A2"><f>1+1</f><v>0</v></c>'
+        + '<c r="B2" t="b"><f>FALSE()</f><v>0</v></c></row>'
+    )
+    parsed = svc.parse_checklist_workbook(
+        _raw_xlsx(sheet_data), "zero-false-formula.xlsx")
+    assert parsed["item_rows"] == 1
+    assert parsed["items"][0]["requirement"] == "0"
+    assert parsed["items"][0]["done"] is False
+
+
+@pytest.mark.parametrize(("row_xml", "message"), [
+    (
+        '<row r="2"><c r="A2"><f>1+1</f></c>'
+        '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+        "缺少缓存",
+    ),
+    (
+        '<row r="2"><c r="A2"><f>1+1</f><v></v></c>'
+        '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+        "数字缓存为空",
+    ),
+    (
+        '<row r="2"><c r="A2"><f>1+1</f><v>bad</v></c>'
+        '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+        "数字缓存无效",
+    ),
+    (
+        '<row r="2"><c r="A2" t="inlineStr"><is><t>条目</t></is></c>'
+        '<c r="B2" t="b"><f>TRUE()</f><v>2</v></c></row>',
+        "布尔缓存无效",
+    ),
+    (
+        '<row r="2"><c r="A2" t="inlineStr"><is><t>条目</t></is></c>'
+        '<c r="B2" t="b"><f>TRUE()</f><v>maybe</v></c></row>',
+        "布尔缓存无效",
+    ),
+    (
+        '<row r="2"><c r="A2" t="str"><f>""</f></c>'
+        '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+        "缺少缓存",
+    ),
+    # t="e" 是公式的错误缓存：错误文本不能被当成业务文本接受。
+    (
+        '<row r="2"><c r="A2" t="e"><f>1/0</f><v>#DIV/0!</v></c>'
+        '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+        r"错误值：#DIV/0!",
+    ),
+    (
+        '<row r="2"><c r="A2" t="e"><f>NA()</f><v>#REF!</v></c>'
+        '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+        r"错误值：#REF!",
+    ),
+    (
+        '<row r="2"><c r="A2" t="e"><f>1/0</f><v></v></c>'
+        '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+        "错误缓存为空",
+    ),
+])
+def test_parse_rejects_missing_or_invalid_formula_cache(row_xml, message):
+    with pytest.raises(svc.ChecklistParseError, match=message):
+        svc.parse_checklist_workbook(
+            _raw_xlsx(_INLINE_HEADER + row_xml), "bad-formula-cache.xlsx")
+
+
+@pytest.mark.parametrize("row_xml", [
+    '<row r="2"><c r="A2" t="n"><v>bad</v></c>'
+    '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+    '<row r="2"><c r="A2" t="inlineStr"><is><t>条目</t></is></c>'
+    '<c r="B2" t="b"><v>maybe</v></c></row>',
+    # 未使用的 C 列同样不能被静默跳过，更不能把 ValueError 泄露成 500。
+    '<row r="2"><c r="A2" t="inlineStr"><is><t>条目</t></is></c>'
+    '<c r="B2" t="inlineStr"><is><t>是</t></is></c>'
+    '<c r="C2" t="n"><v>bad</v></c></row>',
+])
+def test_parse_wraps_openpyxl_bad_cached_values(row_xml):
+    with pytest.raises(svc.ChecklistParseError, match="无法读取 Excel 文件"):
+        svc.parse_checklist_workbook(
+            _raw_xlsx(_INLINE_HEADER + row_xml), "bad-cached-value.xlsx")
+
+
+def test_parse_rejects_actual_cell_nodes_beyond_limit(monkeypatch):
+    monkeypatch.setattr(svc, "MAX_SCAN_CELLS", 10)
+    sheet_data = (
+        '<row r="1"><c r="A1" t="inlineStr"><is><t>验收需求</t></is></c>'
+        '<c r="B1" t="inlineStr"><is><t>是否完成</t></is></c></row>'
+        "<row r=\"2\">"
+        + "".join(
+            f'<c r="{column}2"/>'
+            for column in "ABCDEFGHIJK"
+        )
+        + "</row>"
+    )
+    with pytest.raises(svc.ChecklistParseError, match="实际单元格数量"):
+        svc.parse_checklist_workbook(
+            _raw_xlsx(sheet_data), "too-many-cells.xlsx")
+
+
+def test_parse_rejects_xml_element_budget(monkeypatch):
+    monkeypatch.setattr(svc, "MAX_CHECKLIST_XML_ELEMENTS", 10)
+    shared = ["<si><t>验收需求</t></si>", "<si><t>是否完成</t></si>"]
+    sheet_data = (
+        '<row r="1"><c r="A1" t="s"><v>0</v></c>'
+        '<c r="B1" t="s"><v>1</v></c></row>'
+        '<row r="2"><c r="A2" t="inlineStr"><is><t>条目</t></is></c></row>'
+    )
+    with pytest.raises(svc.ChecklistParseError, match="XML 元素"):
+        svc.parse_checklist_workbook(
+            _raw_xlsx(sheet_data, shared_items=shared), "too-many-elements.xlsx")
+
+
+def test_parse_rejects_worksheet_xml_depth():
+    nested = "<x>" * 70 + "</x>" * 70
+    sheet_xml = (
+        f'<worksheet xmlns="{_MAIN_NS}">'
+        f"<sheetData>{nested}</sheetData></worksheet>"
+    )
+    with pytest.raises(svc.ChecklistParseError, match="层级"):
+        svc.parse_checklist_workbook(
+            _raw_xlsx("", sheet_xml=sheet_xml), "too-deep.xlsx")
 
 
 def _preview(db, project, data, *, key=None, by="tester"):
@@ -375,6 +973,40 @@ def test_checklist_api_permission_gate_and_roundtrip(db):
         headers={"Idempotency-Key": "admin-key-67890"},
     )
     assert bad.status_code == 415
+
+
+@pytest.mark.parametrize("row_xml", [
+    # 预扫本地缓存校验
+    '<row r="2"><c r="A2"><f>1+1</f></c>'
+    '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+    '<row r="2"><c r="A2"><f>1+1</f><v>bad</v></c>'
+    '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+    '<row r="2"><c r="A2" t="inlineStr"><is><t>条目</t></is></c>'
+    '<c r="B2" t="b"><f>TRUE()</f><v>2</v></c></row>',
+    # 公式错误缓存（t="e"）同样必须 422，而不是把 #DIV/0! 当业务文本。
+    '<row r="2"><c r="A2" t="e"><f>1/0</f><v>#DIV/0!</v></c>'
+    '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+    # openpyxl 迭代阶段的坏数字缓存
+    '<row r="2"><c r="A2" t="n"><v>bad</v></c>'
+    '<c r="B2" t="inlineStr"><is><t>是</t></is></c></row>',
+])
+def test_checklist_preview_bad_cached_values_are_422(db, row_xml):
+    suffix = uuid.uuid4().hex[:10]
+    project = _project(db, name=f"坏缓存项目-{suffix}")
+    admin = _client(db, username=f"cl-bad-cache-{suffix}", role="admin",
+                    permissions={})
+    base = (f"/api/maintenance/projects/stable/{project.project_id}"
+            "/acceptance/checklist")
+    data = _raw_xlsx(_INLINE_HEADER + row_xml)
+    resp = admin.post(
+        f"{base}/preview",
+        files={"file": ("bad-cache.xlsx", data,
+                        "application/vnd.openxmlformats-officedocument"
+                        ".spreadsheetml.sheet")},
+        headers={"Idempotency-Key": f"bad-cache-{suffix}-key"},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"]["code"] == "invalid_doc"
 
 
 def test_checklist_apply_enforces_project_row_scope(db):

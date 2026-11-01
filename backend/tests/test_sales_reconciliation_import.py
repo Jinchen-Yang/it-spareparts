@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import openpyxl
+import pandas as pd
 import pytest
 from sqlalchemy import func, select
 
@@ -573,7 +574,12 @@ def test_transform_sales_arithmetic_mismatch_kept_without_new_blocking(tmp_path)
 
 
 def test_transform_sales_rate_not_derived_by_mixing_rows(tmp_path):
-    """D-0050：不含税额与税金来自不同源行时不得拼接推导税率。"""
+    """D-0050：不含税额与税金来自不同源行时不得拼接推导税率。
+
+    reader 已按 ffill 前的源值写入 df.attrs['_source_head_economic_pair_rows']
+    （同源 pair 的原始 index）。本例两行各只提供未税或税金一项，源行都不成对
+    → pair 集合为空 → 不推导；纯 transform 的空集合消费者契约见下方 attrs 用例。
+    """
     path = _write_xlsx(tmp_path / "s.xlsx", [
         _row(订单金额=None, 不含税金额=Decimal("100.00"),
              税率=None, 税金=None),
@@ -586,6 +592,119 @@ def test_transform_sales_rate_not_derived_by_mixing_rows(tmp_path):
     assert head["tax_rate"] is None
     assert not [e for e in result.errors
                 if e.error_type in {"invalid_head_value", "head_value_conflict"}]
+
+
+def test_transform_sales_rate_from_later_complete_raw_pair(tmp_path):
+    """首行仅未税 100、后行明确 100+13：同一原始源行成对 → 推 13%。
+
+    reader 的 pair 集合按 ffill 前源值判定：后行两项都在源行显式给出，故命中；
+    经济字段的逐行观测同样保留后行两值，不因首笔观测缺项而漏掉完整 pair。
+    """
+    path = _write_xlsx(tmp_path / "s.xlsx", [
+        _row(税率=None, 税金=None, 不含税金额=Decimal("100.00")),
+        _second_line(税率=None, 税金=Decimal("13.00"),
+                     不含税金额=Decimal("100.00"))])
+    result = _transform_file(path)
+    assert result.orders["RAW-RECON-1"]["tax_rate"] == Decimal("0.1300")
+
+
+def test_transform_real_xlsx_positive_negative_pairs_derive_rate(tmp_path):
+    """真实 xlsx：正负成对的两张单各自同一源行给出未税/税金 → 均推 13%。"""
+    negative = _row(**{
+        "订单编号(必填)": "XSDD-20260630-0002",
+        "数据ID(不可修改)": "RAW-RECON-NEG",
+        LINE_ID: "LINE-NEG", LINE_NO: 1,
+        "订单金额": Decimal("-113.00"),
+        "不含税金额": Decimal("-100.00"),
+        "税率": None,
+        "税金": Decimal("-13.00"),
+        "订单明细.订单数量": -1,
+        "订单明细.单价": Decimal("113.00"),
+        "订单明细.金额": Decimal("-113.00"),
+    })
+    path = _write_xlsx(tmp_path / "s.xlsx", [_row(税率=None), negative])
+    result = _transform_file(path)
+    assert result.orders["RAW-RECON-1"]["tax_rate"] == Decimal("0.1300")
+    assert result.orders["RAW-RECON-NEG"]["tax_rate"] == Decimal("0.1300")
+    assert not [e for e in result.errors
+                if e.error_type in {"invalid_head_value", "head_value_conflict"}]
+
+
+def _raw_sales_frame(rows, attrs=None):
+    frame = pd.DataFrame(rows)
+    if attrs is not None:
+        frame.attrs["_source_head_economic_pair_rows"] = attrs
+    return frame
+
+
+def test_transform_tax_pair_uses_reader_source_pair_rows():
+    """消费者契约：attrs 命中原始源行且本行两值解析成功 → 记录同源 pair。"""
+    frame = _raw_sales_frame([
+        _row(税率=None, 税金=None, 不含税金额=Decimal("100.00")),
+        _second_line(税率=None, 税金=Decimal("13.00"),
+                     不含税金额=Decimal("100.00")),
+    ], attrs=frozenset({1}))
+    result = transform.transform(frame, mapping.SALES)
+    assert result.orders["RAW-RECON-1"]["tax_rate"] == Decimal("0.1300")
+
+
+def test_transform_tax_pair_empty_source_rows_never_falls_back():
+    """空 pair 集合 = 确定没有同源对：ffill 后看似两值齐全也禁止推导。"""
+    frame = _raw_sales_frame([
+        _row(税率=None, 税金=None, 不含税金额=Decimal("100.00")),
+        _second_line(税率=None, 税金=Decimal("13.00"),
+                     不含税金额=Decimal("100.00")),
+    ], attrs=frozenset())
+    result = transform.transform(frame, mapping.SALES)
+    assert result.orders["RAW-RECON-1"]["tax_rate"] is None
+
+
+def test_transform_tax_pair_without_attrs_uses_actual_input_row():
+    """键缺失（直接 transform 未 ffill 的原始 DataFrame）按本行实际两值判定。"""
+    frame = _raw_sales_frame([
+        _row(税率=None, 税金=None, 不含税金额=Decimal("100.00")),
+        _second_line(税率=None, 税金=Decimal("13.00"),
+                     不含税金额=Decimal("100.00")),
+    ])
+    result = transform.transform(frame, mapping.SALES)
+    assert result.orders["RAW-RECON-1"]["tax_rate"] == Decimal("0.1300")
+
+
+@pytest.mark.parametrize(
+    "bad_detail",
+    [{"订单明细.产品名称": None}, {"订单明细.订单数量": "abc"}],
+    ids=["bad-pn", "bad-qty"],
+)
+def test_transform_head_fields_take_first_valid_detail_not_bad_row(
+    tmp_path, bad_detail,
+):
+    """D-0050：坏 PN/数量行不得冻结非经济头，客户/日期取首个有效明细。"""
+    bad = _row(**{"客户名称": "错误客户", "订单日期": "2026-06-30",
+                  **bad_detail})
+    good = _second_line(客户名称="正确客户", 订单日期="2026-07-01")
+    path = _write_xlsx(tmp_path / "s.xlsx", [bad, good])
+    result = _transform_file(path)
+    head = result.orders["RAW-RECON-1"]
+    assert head["customer_name"] == "正确客户"
+    assert head["order_date"].isoformat() == "2026-07-01"
+    assert [ln["raw_line_id"] for ln in result.lines] == ["LINE-2"]
+
+
+def test_transform_rows_inactive_counts_only_retained_lines(tmp_path):
+    """坏 inactive 单被剔除后不计数；好 active 单保留，rows_total 仍全源。"""
+    bad_inactive = _row(数据状态="已取消", 订单金额="不是金额")
+    good_active = _row(**{
+        "订单编号(必填)": "XSDD-20260630-0002",
+        "数据ID(不可修改)": "RAW-RECON-2",
+        LINE_ID: "LINE-2",
+    })
+    path = _write_xlsx(tmp_path / "s.xlsx", [bad_inactive, good_active])
+    result = _transform_file(path)
+    assert "RAW-RECON-1" not in result.orders
+    assert "RAW-RECON-2" in result.orders
+    assert [ln["raw_line_id"] for ln in result.lines] == ["LINE-2"]
+    assert result.rows_inactive == 0
+    assert result.rows_total == 2
 
 
 def test_transform_multi_sheet_with_hidden_sheet(tmp_path):

@@ -750,7 +750,9 @@ def _parse_collections(db: Session, ws, *, project_id: str) -> list[CollectionOp
             raise WorkbookError(
                 "contract_not_found",
                 f"第 {row_no} 行合同编号 {contract_no!r} 不属于本项目")
-        report_month = _month(_col("报告月份") or None, row_no=row_no)
+        month_index = columns["报告月份"]
+        raw_month = row[month_index] if len(row) > month_index else None
+        report_month = _month(raw_month, row_no=row_no)
         key = (contract.project_contract_id, report_month)
         if key in seen:
             raise WorkbookError(
