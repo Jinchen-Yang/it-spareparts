@@ -800,11 +800,11 @@ def _csv_rows(resp):
 def test_orders_export_matches_list_order(db, seeded):
     client = _client(db, "d44-export", role="boss")
     rows = _csv_rows(client.get(EXPORT, params={"sort": "order_date", "order": "asc"}))
-    assert rows[0] == ["订单号", "订单日期", "客户", "客户类型", "销售人员", "业务类型",
-                       "不含税金额", "含税订单金额", "营收", "毛利", "毛利率"]
+    assert rows[0] == ["订单号", "订单日期", "客户", "销售人员", "业务类型",
+                       "PN（按明细顺序）", "含税单价（按明细顺序）", "含税订单金额", "毛利", "毛利率"]
     assert [r[0] for r in rows[1:]] == [f"SO-A{i}" for i in range(1, 7)]
     a4 = rows[4]
-    assert a4[6] == "-500.0"                       # 负数是数值，不被当公式加撇号
+    assert a4[7] == "-565.0"                       # 负数是数值，不被当公式加撇号
     assert rows[5][2] == ""                        # A5 无客户
 
 
@@ -812,7 +812,7 @@ def test_orders_export_drops_masked_columns(db, seeded):
     client = _client(db, "d44-export-mask", role="boss", overrides={
         "data_purchase_cost": False, "data_profit": False, "data_customer": False})
     rows = _csv_rows(client.get(EXPORT))
-    assert rows[0] == ["订单号", "订单日期", "销售人员", "业务类型", "营收"]
+    assert rows[0] == ["订单号", "订单日期", "销售人员", "业务类型", "PN（按明细顺序）"]
     # 默认按不含税排序被遮蔽 → 退回营收降序
     assert rows[1][0] == "SO-A6"
 
@@ -841,10 +841,10 @@ def test_orders_export_formula_safety(db, seeded):
     rows = _csv_rows(client.get(EXPORT, params={"sort": "order_date", "order": "asc"}))
     inj = rows[-1]
     assert inj[0] == "'=SUM(A1:A9)"
-    assert inj[4] == "'+HYPERLINK(\"http://x\")"
-    assert inj[5] == "'@cmd|'/c calc'!A0"
+    assert inj[3] == "'+HYPERLINK(\"http://x\")"
+    assert inj[4] == "'@cmd|'/c calc'!A0"
     a4 = rows[4]                                       # SO-A4：-500 / -565 负数
-    assert a4[6] == "-500.0" and a4[7] == "-565.0"     # 数值不被当公式
+    assert a4[7] == "-565.0"                           # 数值不被当公式
 
 
 def test_orders_export_too_long_cell_413(db, seeded, monkeypatch):

@@ -42,13 +42,17 @@
 from datetime import date, timezone
 from decimal import Decimal
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session
 
-from app import security, tax_policy
+from app import config, security, tax_policy
 from app.business_time import business_today
 from app.models.dimensions import DimCustomer
 from app.models.sales import FSalesLine, FSalesOrder, FSalesReconciliationSnapshot
+from app.models.maintenance import FProjectExpense
+from app.models.maintenance_project import MaintenanceProjectContract
+from app.models.maintenance_project_operations import MaintenanceProjectExpenseAttribution
+from app.services.maintenance_project_assignments import maintenance_scope_project_ids
 from app.services.query_filters import active_orders
 from app.services.sales_reconciliation import latest_snapshots_by_raw_order_id
 
@@ -649,9 +653,11 @@ def orders(
     rows = db.execute(stmt).all()
     snaps = {} if recon_hidden or not with_recon_blocks else latest_snapshots_by_raw_order_id(
         db, [r.raw_order_id for r in rows])
+    products = _order_products(db, [r.id for r in rows], user_ctx, **filters)
     items = []
     for r in rows:
         item = {**_order_fields(r, today)}
+        item["products"] = products.get(r.id, [])
         if with_recon_blocks:
             item["reconciliation"] = _reconciliation_block(
                 snaps.get(r.raw_order_id), include_returns=include_returns
@@ -667,6 +673,81 @@ def orders(
         "include_returns": include_returns,
         "items": items,
     }
+
+
+def _order_products(db: Session, order_ids: list[int], user_ctx=None, **filters) -> dict[int, list]:
+    """同页单据的产品与价格同序配对，不将一单多行变为多张订单。"""
+    if not order_ids:
+        return {}
+    sl = FSalesLine
+    stmt = select(sl.order_id, sl.id, sl.pn_std, sl.pn_raw, sl.unit_price).where(sl.order_id.in_(order_ids))
+    cats, brands = _clean_multi(filters.get("categories")), _clean_multi(filters.get("brands"))
+    if cats:
+        stmt = stmt.where(_category_match(sl, cats))
+    if brands:
+        stmt = stmt.where(_norm_dim(sl.brand).in_(brands))
+    hidden = user_ctx is not None and security.is_field_hidden(user_ctx, "unit_price")
+    result: dict[int, list] = {}
+    for row in db.execute(stmt.order_by(sl.order_id, sl.line_no.asc().nulls_last(), sl.id)):
+        result.setdefault(row.order_id, []).append({
+            "line_id": row.id, "pn": row.pn_std or row.pn_raw,
+            "unit_price": None if hidden else _f(row.unit_price),
+        })
+    return result
+
+
+def recorded_expenses(db: Session, user_ctx, *, page: int = 1, page_size: int = 50,
+                      with_items: bool = False, **filters) -> dict:
+    """入选XSDD的已记录费用，整单累计到今天；不冒充完整费用报备。"""
+    if (security.is_field_hidden(user_ctx, "gross_profit")
+            or security.is_field_hidden(user_ctx, "amount_ex_tax")):
+        return {"status": "restricted", "amount_inc_tax": None, "total": None,
+                "missing_amounts": None, "items": []}
+    base, _ = _order_query(**filters)
+    selected = base.subquery()
+    nos = select(selected.c.order_no).where(selected.c.order_no.is_not(None)).distinct()
+    raw, attr, contract = FProjectExpense, MaintenanceProjectExpenseAttribution, MaintenanceProjectContract
+    today = business_today()
+    # 原始事实与无原始行的人工事实互斥。raw的归因投影绝不再次加入。
+    raw_stmt = select(
+        literal("source").label("source"), raw.raw_line_id.label("id"),
+        raw.linked_sales_order_no.label("order_no"), raw.bxd_no.label("reference"),
+        raw.expense_date.label("expense_date"), raw.fee_category.label("category"),
+        raw.amount_inc_tax.label("amount_inc_tax"),
+    ).where(raw.linked_sales_order_no.in_(nos),
+            raw.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS,
+            raw.expense_date <= today)
+    manual_stmt = select(
+        literal("manual").label("source"), attr.expense_id.label("id"),
+        contract.contract_no.label("order_no"), attr.expense_ref.label("reference"),
+        attr.expense_date.label("expense_date"), attr.category.label("category"),
+        attr.amount_inc_tax.label("amount_inc_tax"),
+    ).join(contract, and_(attr.project_contract_id == contract.project_contract_id,
+                         attr.project_id == contract.project_id)).where(
+        attr.raw_expense_line_id.is_(None), contract.contract_no.in_(nos),
+        attr.status_mapping_state == "mapped", attr.normalized_status == "approved",
+        attr.ownership_mapping_state == "mapped", attr.expense_date <= today,
+    )
+    scope = maintenance_scope_project_ids(db, user_ctx)
+    if scope is not None:
+        raw_stmt = raw_stmt.where(raw.raw_line_id.in_(select(attr.raw_expense_line_id).where(
+            attr.project_id.in_(scope), attr.ownership_mapping_state == "mapped")))
+        manual_stmt = manual_stmt.where(attr.project_id.in_(scope))
+    evidence = union_all(raw_stmt, manual_stmt).subquery()
+    agg = db.execute(select(func.count().label("total"),
+        func.sum(evidence.c.amount_inc_tax).label("amount"),
+        func.count().filter(evidence.c.amount_inc_tax.is_(None)).label("missing"))
+        .select_from(evidence)).one()
+    items = []
+    if with_items:
+        rows = db.execute(select(evidence).order_by(evidence.c.expense_date.desc(),
+            evidence.c.source, evidence.c.id).offset((page - 1) * page_size).limit(page_size))
+        items = [{**row._mapping, "expense_date": row.expense_date.isoformat(),
+                  "amount_inc_tax": _f(row.amount_inc_tax)} for row in rows]
+    return {"status": "recorded" if agg.total else "no_evidence",
+            "amount_inc_tax": _f(agg.amount), "total": agg.total,
+            "missing_amounts": agg.missing, "as_of": today.isoformat(),
+            "page": page, "page_size": page_size, "items": items}
 
 
 def _order_fields(r, today: date) -> dict:

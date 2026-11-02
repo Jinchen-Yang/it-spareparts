@@ -54,6 +54,9 @@ export interface AnalyticsUrlState {
   salesperson: string[];
   customerIds: number[];
   category: string[];
+  supplier: string;
+  purchaseOrderNo: string;
+  salesOrderNo: string;
   groupBy: string;
   /** 非空 = 分组下钻层；值是分组键（文本 / 客户 id 字符串 / 哨兵值）。 */
   groupKey: string | null;
@@ -84,6 +87,9 @@ export function parseAnalyticsUrl(sp: URLSearchParams): AnalyticsUrlState {
         .filter((n): n is number => n !== null),
     )),
     category: parseUrlList(sp, "category"),
+    supplier: sp.get("supplier") || "",
+    purchaseOrderNo: sp.get("purchase_order_no") || "",
+    salesOrderNo: sp.get("sales_order_no") || "",
     groupBy: GROUP_BY_KEYS.includes(groupByRaw ?? "") ? groupByRaw! : DEFAULT_GROUP_BY,
     groupKey: sp.get("group_key") || null,
     sort: (SORT_KEYS as readonly string[]).includes(sortRaw ?? "")
@@ -110,6 +116,9 @@ export function serializeAnalyticsState(
   next: Partial<AnalyticsUrlState>,
 ): UrlPatch {
   const out: UrlPatch = serializeAnalyticsDates(next);
+  if (next.supplier !== undefined) out.supplier = next.supplier || undefined;
+  if (next.purchaseOrderNo !== undefined) out.purchase_order_no = next.purchaseOrderNo || undefined;
+  if (next.salesOrderNo !== undefined) out.sales_order_no = next.salesOrderNo || undefined;
   if (next.sourceType !== undefined) {
     out.source_type = serializeUrlList(next.sourceType);
   }
@@ -185,6 +194,9 @@ export function toAnalyticsApiFilters(
     ...(state.salesperson.length ? { salesperson: state.salesperson } : {}),
     ...(state.customerIds.length ? { customer_id: state.customerIds } : {}),
     ...(state.category.length ? { category: state.category } : {}),
+    ...(state.supplier?.trim() ? { supplier: state.supplier.trim() } : {}),
+    ...(state.purchaseOrderNo?.trim() ? { order_no: state.purchaseOrderNo.trim() } : {}),
+    ...(state.salesOrderNo?.trim() ? { linked_sales_order_no: state.salesOrderNo.trim() } : {}),
   };
 }
 

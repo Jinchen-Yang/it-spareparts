@@ -649,8 +649,9 @@ EXPORT_MAX_ROWS = 10000
 # (键, 表头)：导出列与订单列表同口径；被遮蔽的列整列不导出
 EXPORT_COLUMNS = (
     ("order_no", "订单号"), ("order_date", "订单日期"), ("customer", "客户"),
-    ("customer_type", "客户类型"), ("salesperson", "销售人员"), ("business_type", "业务类型"),
-    ("amount_ex_tax", "不含税金额"), ("amount_inc_tax", "含税订单金额"), ("revenue", "营收"),
+    ("salesperson", "销售人员"), ("business_type", "业务类型"),
+    ("pn", "PN（按明细顺序）"), ("unit_price", "含税单价（按明细顺序）"),
+    ("amount_inc_tax", "含税订单金额"),
     ("gross_profit", "毛利"), ("gross_margin", "毛利率"),
 )
 
@@ -673,4 +674,9 @@ def export_orders(db: Session, *, sort: str, order: str, **filters) -> tuple[int
                    with_recon_blocks=False, **filters)
     for item in data["items"]:
         item.pop("reconciliation", None)
+        products = item.pop("products", [])
+        item["pn"] = "\n".join(product["pn"] or "/" for product in products)
+        item["unit_price"] = "\n".join(
+            "/" if product["unit_price"] is None else str(product["unit_price"])
+            for product in products)
     return total, data["items"]

@@ -171,6 +171,8 @@ export default function OrderDetailDrawer({ orderId, category, basis, ownerToken
               { key: "sales", label: "销售人员", children: detail.salesperson || "—" },
               { key: "customer", label: "客户", children: detail.customer || "—" },
               { key: "linked", label: "关联销售单号", children: detail.linked_sales_order_no || "—" },
+              { key: "supplier", label: "供应商", children: detail.supplier || "/" },
+              { key: "projects", label: "项目名称", children: detail.project_names?.join("、") || "/" },
               { key: "tax", label: "税率口径", children: <TaxTag detail={detail} /> },
               { key: "lines", label: "明细行数", children: `${detail.lines_count}（只计单头所属批次）` },
             ]}

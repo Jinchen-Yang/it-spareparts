@@ -39,8 +39,8 @@ export const COMPACT_METRIC_LABELS: Record<CompactMetric, string> = {
 
 /** 紧凑图维度顺序：主维度在前，客户类属维度随客户权限。 */
 export const COMPACT_DIMS: readonly SalesGroupDim[] = [
-  "customer", "salesperson", "category", "brand", "pn",
-  "business_type", "warehouse", "customer_type", "customer_city",
+  "customer", "salesperson", "brand", "pn",
+  "business_type", "warehouse", "customer_type",
 ];
 
 export interface CompactTabProps {

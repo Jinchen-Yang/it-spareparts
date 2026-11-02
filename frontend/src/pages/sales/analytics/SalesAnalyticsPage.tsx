@@ -36,6 +36,7 @@ import FilterBar from "./FilterBar";
 import SummaryView from "./SummaryView";
 import DrillTable from "./DrillTable";
 import DetailDrawer from "./DetailDrawer";
+import RecordedExpensesDrawer from "./RecordedExpensesDrawer";
 import {
   AMOUNT_SORT_KEY,
   parseSalesAnalyticsUrl,
@@ -78,6 +79,7 @@ export default function SalesAnalyticsPage() {
   // 后旧会话的任何新请求一律拒发（sessionExpired），迟到响应仍由各处落地守卫作废。
   const ownerToken = useSessionOwner();
   const [sessionDead, setSessionDead] = useState(false);
+  const [expensesOpen, setExpensesOpen] = useState(false);
   /** 所属会话失效：拒发请求并清旧会话上下文（金额汇总 / 筛选候选 / 订单列表与
    * 排序回显 / 导出中状态）。幂等；置死后面板换专用提示，重试不再发请求。 */
   const sessionExpired = () => {
@@ -93,6 +95,7 @@ export default function SalesAnalyticsPage() {
   const notifyOwnerStale = () => {
     if (!sessionStale(ownerToken)) return;
     setSessionDead(true);
+    setExpensesOpen(false);
     setBusinessTypeOptions([]);
     setOptions(null);
     setSummary(null);
@@ -134,13 +137,10 @@ export default function SalesAnalyticsPage() {
   // 请求排序键：D-41 §2 只按已显示金额倒序——排序键对应的金额口径未显示时
   // 收敛到首个已显示口径（纯展示切换不触发重拉，仅这一种边缘会换键重拉）
   // 非金额排序键（毛利 / 日期 / 客户 / 销售，D-44 §4）不受口径显示影响
-  const sortAmount = (Object.keys(AMOUNT_SORT_KEY) as AmountKey[]).find(
-    (k) => AMOUNT_SORT_KEY[k] === state.sort,
-  );
+  // 列表只显示含税金额；旧深链的已移除列排序收敛到可见金额。
   const requestSort: SalesAnalyticsSortKey =
-    !sortAmount || state.amounts.includes(sortAmount)
-      ? state.sort
-      : AMOUNT_SORT_KEY[state.amounts[0]];
+    ["amount_ex_tax", "revenue", "customer_type"].includes(state.sort)
+      ? "amount_inc_tax" : state.sort;
 
   const [businessTypeOptions, setBusinessTypeOptions] = useState<SalesAnalyticsBusinessTypeOption[]>([]);
   const [options, setOptions] = useState<SalesAnalyticsOptions | null>(null);
@@ -398,7 +398,8 @@ export default function SalesAnalyticsPage() {
           <SummaryView
             summary={summaryLoading || !summary ? null : state.compare ? summary : { ...summary, compare: null, compare_available: undefined }}
             amounts={state.amounts}
-            profitRestricted={profitRestricted} />
+            profitRestricted={profitRestricted}
+            onOpenExpenses={() => { if (!sessionExpired()) setExpensesOpen(true); }} />
         )}
 
         {sessionDead ? null : (
@@ -465,6 +466,8 @@ export default function SalesAnalyticsPage() {
         )}
       </Card>
 
+      {expensesOpen && !sessionDead && <RecordedExpensesDrawer key={filterKey} filters={apiFilters} ownerToken={ownerToken}
+        onOwnerStale={notifyOwnerStale} onClose={() => setExpensesOpen(false)} />}
       <DetailDrawer
         orderId={state.orderId}
         includeReturns={state.includeReturns}

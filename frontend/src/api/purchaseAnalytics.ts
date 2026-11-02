@@ -25,6 +25,9 @@ export interface PurchaseAnalyticsFilters {
   salesperson?: string[];
   customer_id?: number[];
   category?: string[];
+  supplier?: string;
+  order_no?: string;
+  linked_sales_order_no?: string;
 }
 
 /** 后端 filters_echo：把可缺省字段回显为完整形态（null = 未筛）。 */
@@ -89,6 +92,10 @@ export interface PurchaseAnalyticsOrderRow {
   salesperson: string | null;
   customer_id: number | null;
   customer: string | null;
+  supplier?: string | null;
+  linked_sales_order_no?: string | null;
+  project_names?: string[];
+  products?: { line_id: number; pn_std: string | null; description: string | null }[];
   lines: number | null;
   amount_inc: number | null;
   amount_ex: number | null;
@@ -156,6 +163,8 @@ export interface PurchaseAnalyticsOrderDetail {
   salesperson: string | null;
   customer_id: number | null;
   customer: string | null;
+  supplier?: string | null;
+  project_names?: string[];
   lines_count: number;
   lines: PurchaseAnalyticsOrderLine[];
   category_matched?: {
@@ -175,6 +184,9 @@ export function toAnalyticsParams(
   extra: Record<string, string | number> = {},
 ): URLSearchParams {
   const p = new URLSearchParams();
+  for (const key of ["supplier", "order_no", "linked_sales_order_no"] as const) {
+    if (filters[key]?.trim()) p.set(key, filters[key]!.trim());
+  }
   if (filters.date_from) p.set("date_from", filters.date_from);
   if (filters.date_to) p.set("date_to", filters.date_to);
   appendList(p, "source_type", filters.source_type);
