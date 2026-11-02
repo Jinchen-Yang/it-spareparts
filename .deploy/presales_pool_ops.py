@@ -238,6 +238,7 @@ class Release(hf.Hotfix):
     def preflight(self):
         self.writers_exact({self.old_app})
         result = super().preflight()
+        self.plan_caddy_change(result)
         h.need(self.alembic(["heads"]) == TARGET + " (head)", "release has unrelated/multiple migration heads")
         history = self.alembic(["show", TARGET])
         h.need(re.search(r"(?m)^Parent: " + OLD_HEAD + r"\s*$", history), "candidate includes an intermediate migration")
@@ -251,6 +252,7 @@ class Release(hf.Hotfix):
 
     def freeze(self):
         self.writers_exact({self.old_app})
+        self.plan_caddy_change(self.marker("preflight"))
         result = super().freeze()
         self.writers_exact(set())
         result["impact"] = self.impact()
@@ -298,10 +300,54 @@ class Release(hf.Hotfix):
         self.writers_exact(set())
         return super().bluegreen()
 
+    def mounted_caddy(self):
+        path = self.caddy_destination()
+        cwd = str(Path(path).parent)
+        return json.loads(self.run(["docker", "exec", "-w", cwd, h.CADDY,
+                                    "caddy", "adapt", "--config", path, "--adapter", "caddyfile"]))
+
+    def plan_caddy_change(self, pre):
+        before = (self.root / "Caddyfile.baseline").read_bytes()
+        active, inode = pre["active"], pre["inode"]
+        self.cas(before, active, inode)
+        h.need(self.mounted_caddy() == active, "mounted Caddyfile adaptation differs from baseline runtime")
+        old, new = self.old_front + ":80", self.front + ":80"
+        h.need(before.count(old.encode()) == 1, "old source upstream is not singular")
+        after = before.replace(old.encode(), new.encode())
+        desired = h.replace_active(active, old, new)
+        # Caddy file_server hides the input filename. Use exactly the same input name and
+        # import directory for both source versions; keep the real runtime as the /load payload.
+        cwd = str(Path(self.caddy_destination()).parent)
+        command = ["docker", "exec", "-i", "-w", cwd, h.CADDY, "caddy"]
+        options = ["--config", "-", "--adapter", "caddyfile"]
+        adapted = []
+        for source in (before, after):
+            self.run([*command, "validate", *options], input=source)
+            adapted.append(json.loads(self.run([*command, "adapt", *options], input=source)))
+        h.need(h.replace_active(adapted[0], old, new) == adapted[1], "source adaptation changed other settings")
+        self.cas(before, active, inode)
+        return after, desired
+
     def cutover(self):
         self.writers_exact({self.app})
         h.need(self.schema() == TARGET, "schema drift before cutover")
-        return super().cutover()
+        blue = self.marker("bluegreen")
+        self.frozen()
+        h.need(h.fingerprint(self.inspect(self.app)) == blue["app"] and
+               h.fingerprint(self.inspect(self.front)) == blue["frontend"], "candidate changed")
+        pre = self.marker("preflight")
+        after, desired = self.plan_caddy_change(pre)
+        h.write_new(self.root / "Caddyfile.candidate", after)
+        h.save(self.root / "exposure-started.json", {"release": self.sha, "active_after": desired,
+                                                   "after_sha256": h.digest(after)})
+        self.cas((self.root / "Caddyfile.baseline").read_bytes(), pre["active"], pre["inode"])
+        self.write_caddy(after, pre["inode"])
+        self.cas(after, pre["active"], pre["inode"])
+        h.need(self.mounted_caddy() == desired, "mounted candidate differs from desired live configuration")
+        self.cas(after, pre["active"], pre["inode"])
+        self.load_active(desired)
+        self.cas(after, desired, pre["inode"])
+        return {"active": desired, "data_preserving_rollback": True}
 
     def smoke(self, base):
         result = {path: self.http(base + path) for path in ("/health", "/health/db", "/presales/pool")}
