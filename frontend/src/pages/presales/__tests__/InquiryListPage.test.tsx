@@ -114,8 +114,8 @@ it("PN 状态按报价和版本去重，采购明确不报的行显示原因而�
       ref_offer_id: quoted.id, ref_offer: quoted, linked_offers: [quoted] },
     { id: 12, inquiry_id: 1, line_key: "skipped", seq: 2, pn_raw: "PN-SKIPPED", qty: 1, status: "active", version: 1 },
   ], line_responses: [
-    { line_id: 11, mode: "reuse", created_by: 2, offer: quoted, ref_offer_id: quoted.id },
-    { line_id: 12, mode: "skip", created_by: 2, reason: "已停产，无法供货" },
+    { line_id: 11, mode: "reuse", created_by: 2, offer: quoted, ref_offer_id: quoted.id, work_item_id: 11, expired: false },
+    { line_id: 12, mode: "skip", created_by: 2, reason: "已停产，无法供货", work_item_id: 11, expired: false },
   ], work_items: [{ id: 11, assignee_id: 2, status: "done", paused: false, version: 1 }] });
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
   await screen.findByText("PN-QUOTED");
@@ -182,8 +182,8 @@ it("草稿沿用和不报标为未回复，不显示为有效报价或正式不�
     unit_price: "123", valid_from: "2020-01-01T00:00:00Z" };
   listSummary({ ...row, offers: [], work_items: [{ id: 11, assignee_id: 2, status: "in_progress", paused: false, version: 1 }],
     lines: [11, 12].map((id) => ({ id, line_key: `line-${id}`, inquiry_id: 1, seq: id, pn_raw: `DRAFT-${id}`, qty: 1, status: "active", version: 1 })),
-    line_responses: [{ line_id: 11, mode: "reuse", ref_offer_id: 90, offer: reused, is_draft: true, created_by: 2 },
-      { line_id: 12, mode: "skip", reason: "草稿无货", is_draft: true, created_by: 2 }] });
+    line_responses: [{ line_id: 11, mode: "reuse", ref_offer_id: 90, offer: reused, is_draft: true, created_by: 2, work_item_id: 11, expired: false },
+      { line_id: 12, mode: "skip", reason: "草稿无货", is_draft: true, created_by: 2, work_item_id: 11, expired: false }] });
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
   await screen.findByText("DRAFT-11");
   expect(screen.getByText("DRAFT-12")).toBeVisible();
