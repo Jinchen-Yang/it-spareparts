@@ -104,16 +104,23 @@ class CaddyCutoverTests(TestCase):
         image = os.environ.get("ITSP_CADDY_CONTRACT_IMAGE")
         if not image and not shutil.which("caddy"):
             self.skipTest("Caddy binary or ITSP_CADDY_CONTRACT_IMAGE required")
-        mount = "/fixture" if image else str(r.root)
+        # Only expose the synthetic Caddyfiles. The host's private TemporaryDirectory and
+        # receipt directory remain 0700; the container runs as an unrelated uid/gid.
+        fixture = r.root / "source"
+        fixture.mkdir()
+        fixture.chmod(0o755)
+        mount = "/fixture" if image else str(fixture)
         actual = Path(mount) / "Caddyfile"
-        (r.root / "Caddyfile").write_bytes(self.before)
         after = self.before.replace(b"previous:80", b"candidate:80")
-        (r.root / "Caddyfile.candidate").write_bytes(after)
+        for name, content in (("Caddyfile", self.before), ("Caddyfile.candidate", after)):
+            path = fixture / name
+            path.write_bytes(content)
+            path.chmod(0o644)
         r.caddy_destination.return_value = str(actual)
         if image:
-            cid = subprocess.check_output(["docker", "run", "-d", "--network", "none", "--read-only",
+            cid = subprocess.check_output(["docker", "run", "-d", "--user", "65534:65534", "--network", "none", "--read-only",
                 "--cap-drop", "ALL", "--cap-add", "NET_BIND_SERVICE", "--tmpfs", "/data", "--tmpfs", "/config", "--mount",
-                "type=bind,source=" + str(r.root) + ",target=/fixture,readonly",
+                "type=bind,source=" + str(fixture) + ",target=/fixture,readonly",
                 "--entrypoint", "sleep", image, "180"], text=True).strip()
             self.addCleanup(subprocess.run, ["docker", "rm", "-f", "-v", cid], check=True, capture_output=True)
 
@@ -122,7 +129,7 @@ class CaddyCutoverTests(TestCase):
             args = cmd[split:]
             if image:
                 args = ["docker", "exec", "-i", "-w", mount, cid, *args]
-            result = subprocess.run(args, input=input, cwd=r.root, capture_output=True, timeout=20)
+            result = subprocess.run(args, input=input, cwd=fixture, capture_output=True, timeout=20)
             self.assertEqual(result.returncode, 0, (result.stderr + result.stdout).decode(errors="replace"))
             return result.stdout
 
@@ -135,7 +142,7 @@ class CaddyCutoverTests(TestCase):
         self.assertIn(str(actual) + ".candidate", json.dumps(different_name))
         self.assertIn(str(actual), json.dumps(desired))
         self.assertEqual(r.plan_caddy_change({"active": baseline, "inode": [1, 2]}), (after, desired))
-        (r.root / "Caddyfile").write_bytes(after)
+        (fixture / "Caddyfile").write_bytes(after)
         self.assertEqual(r.mounted_caddy(), desired)
 
 
