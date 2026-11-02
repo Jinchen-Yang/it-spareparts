@@ -109,42 +109,6 @@ def test_shared_scope_excludes_own_before_pagination(db, users):
     assert len(set(seen)) == 6 and set(seen) == set(shared)
 
 
-@pytest.mark.parametrize('mode', ['skip', 'reuse'])
-def test_excel_draft_response_hidden_until_reply(db, quote_data, mode):
-    data = quote_data
-    original = _published(db, data) if mode == 'reuse' else None
-    inquiry = inquiries.create_draft(db, data.sales.id, assignee_ids=[data.buyer.id, data.peer.id],
-        lines=[{'part_id': data.parts[0].id}])
-    inquiries.submit(db, inquiry.id, data.sales.id, inquiry.version)
-    data.other.template_perms = {**data.other.template_perms, 'action_presales_supervise': True}
-    db.flush()
-    line = inquiries.lines_for(db, inquiry.id)[0]
-    changes = {'处理方式': '不报', '不报原因': '草稿供应商无货'} if mode == 'skip' else {'处理方式': '沿用', '沿用报价编号': original.id}
-    content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
-    _apply_quote(db, data, _edit_quote(content, {2: changes}))
-    for viewer in (data.sales, data.peer):
-        view = visibility.inquiry_view(db, inquiry, _ctx(db, viewer))
-        assert view['line_responses'] == []
-        assert view['progress']['quoted_lines'] == 0
-        if original:
-            assert original.id not in {offer['id'] for offer in view['offers']}
-    supervisor = visibility.inquiry_view(db, inquiry, _ctx(db, data.other))
-    assert supervisor['line_responses'][0]['is_draft'] is True
-    assert supervisor['progress']['quoted_lines'] == 0
-    own = visibility.inquiry_view(db, inquiry, _ctx(db, data.buyer))
-    assert own['line_responses'][0]['is_draft'] is True
-    assert own['progress']['quoted_lines'] == 0
-    if original:
-        assert own['line_responses'][0]['offer']['unit_price'] == original.unit_price
-        assert original.id not in {offer['id'] for offer in own['offers']}
-    choice = {'line_id': line.id, 'mode': mode, **({'reason': '正式无货'} if mode == 'skip' else {'ref_offer_id': original.id})}
-    offers.reply(db, inquiry.id, data.buyer.id, expected_version=inquiry.version, line_responses=[choice])
-    for viewer in (data.sales, data.buyer):
-        view = visibility.inquiry_view(db, inquiry, _ctx(db, viewer))
-        assert len(view['line_responses']) == 1 and not view['line_responses'][0].get('is_draft')
-        assert view['progress']['quoted_lines'] == 1
-
-
 @pytest.mark.parametrize('legacy', [False, True])
 def test_quote_workbook_reads_the_same_delivery_date(db, quote_data, legacy):
     data = quote_data

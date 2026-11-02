@@ -1,9 +1,15 @@
 import { useEffect, useState } from "react";
 import { Space, Tag, Typography } from "antd";
+import { readPermissionMap } from "../../nav";
 import type { Offer } from "../../api/presales";
 import { moneyExact } from "../../utils/format";
 import { useApiError } from "../../components/ApiErrorFeedback";
 import { formatBusinessDateTime } from "../../utils/date";
+
+export function isPresalesSupervisor() {
+  return readPermissionMap().action_presales_supervise === true
+    || ["admin", "boss"].includes(localStorage.getItem("role") || "");
+}
 
 /** 服务端截止可带微秒；浏览器以毫秒为单位，向上对齐才不会提前失效。 */
 export function offerDeadline(value: string | null | undefined): number {

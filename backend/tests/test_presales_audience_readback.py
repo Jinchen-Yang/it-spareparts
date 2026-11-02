@@ -14,64 +14,32 @@ def _rule(mode, users, group):
     return result
 
 
-@pytest.mark.parametrize("mode", ["public", "private", "include", "exclude"])
-@pytest.mark.parametrize("viewer", ["seller", "buyer", "other", "peer", "supervisor"])
-def test_http_rules_follow_each_field_author_without_exposing_hidden_values(db, users, mode, viewer):
-    buyer_ctx, seller_ctx = _ctx(db, users.buyer), _ctx(db, users.seller)
-    group = audience.create_group(db, "可见销售", "personal", [users.other.username],
-                                  buyer_ctx, bypass=common.bypass)
-    inquiry, offer = _quoted(db, users, rule=_rule(mode, users, group))
+def test_shared_values_do_not_disclose_personal_audience_lists(db, users):
+    buyer, seller = _ctx(db, users.buyer), _ctx(db, users.seller)
+    group = audience.create_group(db, "采购的个人组", "personal", [users.other.username],
+                                  buyer, bypass=common.bypass)
+    inquiry, offer = _quoted(db, users, rule=_rule("include", users, group))
     line = inquiries.lines_for(db, inquiry.id)[0]
-    inquiry.notes = "单头私密备注"
-    line.notes = "行私密备注"
-    private = common.rule_id(db, {"mode": "private"}, seller_ctx)
-    inquiry.notes_audience_rule_id = line.notes_audience_rule_id = private
-    for subject_id, level in ((f"inquiry:{inquiry.id}", "header"), (f"line:{line.id}", "line")):
-        field_pool.save_values(db, field_pool.Subject("presales_inquiry", subject_id, level), [
-            {"new_name": "公开字段", "value": "可以看"},
-            {"new_name": "私密字段", "value": "不可泄漏", "rule": {"mode": "private"}},
-        ], seller_ctx)
+    for target, level in ((f"inquiry:{inquiry.id}", "header"), (f"line:{line.id}", "line")):
+        field_pool.save_values(db, field_pool.Subject("presales_inquiry", target, level), [
+            {"new_name": "历史备注", "value": "全员可见", "rule": {"mode": "private"}}], seller)
     db.commit()
-
-    client = _client(getattr(users, viewer))
-    response = client.get(f"/api/presales/inquiries/{inquiry.id}")
-    assert response.status_code == 200, response.text
-    detail = response.json()
-    manages_header = viewer in {"seller", "supervisor"}
-    for row in (detail, detail["lines"][0]):
-        assert ("notes_audience" in row) is manages_header
-        assert ("notes" in row) is manages_header
-        if manages_header:
-            assert row["notes_audience"] == {"mode": "private", "users": [], "groups": []}
-        values = {value["name"]: value for value in row["field_values"]}
-        assert ("私密字段" in values) is manages_header
-        assert ("rule" in values["公开字段"]) is manages_header
-        if manages_header:
-            assert values["公开字段"]["rule"] == {"mode": "public", "users": [], "groups": []}
-            assert values["私密字段"]["rule"] == {"mode": "private", "users": [], "groups": []}
-    assert ("offer_audience" in detail) is manages_header
-    if manages_header:
-        assert detail["offer_audience"] == {"mode": "public", "users": [], "groups": []}
-
-    library = client.get(f"/api/presales/library?part_ids={users.part.id}")
-    assert library.status_code == 200, library.text
-    quote = library.json()[str(users.part.id)][0]
-    assert quote == {**detail["offers"][0], "more": []}
-    manages_offer = viewer in {"buyer", "supervisor"}
-    sees_offer_values = manages_offer or mode == "public" or (
-        mode == "include" and viewer == "other") or (mode == "exclude" and viewer != "other")
-    expected = {"mode": mode, "users": [], "groups": []}
-    if mode in {"include", "exclude"}:
-        expected.update(users=[{"id": users.other.username, "name": users.other.display_name}],
-                        groups=[{"id": group.id, "name": group.name}])
-    for field in ("supplier_audience", "reporter_audience", "notes_audience"):
-        assert (field in quote) is manages_offer
-        if manages_offer:
-            assert quote[field] == expected
-    for field in ("supplier_id", "source_key", "reporter", "notes"):
-        assert (field in quote) is sees_offer_values
-    if not manages_header:
-        assert "单头私密备注" not in response.text and "不可泄漏" not in response.text
+    for viewer in (users.other, users.seller, users.buyer, users.supervisor):
+        client = _client(viewer)
+        detail = client.get(f"/api/presales/inquiries/{inquiry.id}")
+        history = client.get(f"/api/presales/offers/{offer.id}/revisions")
+        assert detail.status_code == history.status_code == 200
+        header = detail.json()
+        for row in (header, header["lines"][0]):
+            field = next(f for f in row["field_values"] if f["name"] == "历史备注")
+            assert field["value"] == "全员可见"
+            assert ("rule" in field) == (viewer in (users.seller, users.supervisor))
+            assert ("notes_audience" in row) == (viewer in (users.seller, users.supervisor))
+        for quote in (header["offers"][0], history.json()[-1]["snapshot"]):
+            assert quote["notes"] == "采购机密" and quote["reporter"]["name"] == "buyer"
+            assert ("notes_audience" in quote) == (viewer in (users.buyer, users.supervisor))
+            if "notes_audience" in quote:
+                assert quote["notes_audience"]["groups"] == [{"id": group.id, "name": "采购的个人组"}]
 
 
 def test_inquiry_and_line_rules_read_back_selected_names_for_author_and_bypass(db, users):
@@ -126,24 +94,3 @@ def test_rule_readback_uses_current_names_and_falls_back_to_username(db, users):
     assert view["supplier_audience"] == {"mode": "include", "users": [
         {"id": users.other.username, "name": users.other.username}],
         "groups": [{"id": group.id, "name": "新分组名"}]}
-
-
-def test_revision_rule_changes_are_only_disclosed_to_offer_author_and_bypass(db, users):
-    inquiry, offer = _quoted(db, users)
-    offers.update_offer(db, offer.id, users.buyer.id, {"unit_price": "60.00",
-        "supplier_audience": {"mode": "public"}, "notes_audience": {"mode": "private"}},
-        expected_version=offer.version)
-    db.commit()
-    rule_keys = {"supplier_audience", "reporter_audience", "notes_audience"}
-    for viewer in (users.seller, users.buyer, users.supervisor):
-        response = _client(viewer).get(f"/api/presales/offers/{offer.id}/revisions")
-        assert response.status_code == 200, response.text
-        rows = response.json()
-        if viewer == users.seller:
-            assert all(not rule_keys.intersection(row["snapshot"]) for row in rows)
-            assert all(not rule_keys.intersection(row["changed_fields"]) for row in rows)
-            assert all("notes" not in row["snapshot"] for row in rows)
-        else:
-            assert all(rule_keys <= row["snapshot"].keys() for row in rows)
-            assert rows[-1]["snapshot"]["supplier_audience"]["mode"] == "public"
-            assert rows[-1]["snapshot"]["notes_audience"]["mode"] == "private"

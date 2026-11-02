@@ -17,7 +17,7 @@ from app.models.presales import (
     OfferPriceDaily, PresalesInquiry, PresalesInquiryLine, PresalesOffer, PresalesOfferRevision,
 )
 from app.models.system import SysUser
-from app.services.presales import common, daily, library, offers, visibility
+from app.services.presales import common, daily, inquiries, library, offers, visibility
 from app.services.presales.registration import register_subjects
 from app.services.workflow import work_items
 from app.services.workflow.registry import Conflict, Forbidden, InvalidTransition, Subject
@@ -237,7 +237,7 @@ def test_repeat_publish_conflicts_when_original_header_is_locked(db, actors, mon
 def test_two_assignees_reply_independently_and_require_all_lines(db, actors, monkeypatch):
     monkeypatch.setattr(common, "now", lambda: FIXED)
     inquiry, lines = _inquiry(db, actors, kind="sales_inquiry", line_count=2)
-    inquiry.status = "submitted"
+    inquiries.submit(db, inquiry.id, actors.sales.id, inquiry.version, open_tasks=False)
     work_items.open_items(db, Subject("presales_inquiry", inquiry.id),
         [actors.buyer.id, actors.buyer2.id], "presales_inquiry", actors.sales.id)
     own = _draft(db, inquiry, lines[0], actors.buyer)
@@ -262,7 +262,7 @@ def test_two_assignees_reply_independently_and_require_all_lines(db, actors, mon
 def test_reopened_handler_reuses_own_line_and_source_quote(db, actors, monkeypatch):
     monkeypatch.setattr(common, "now", lambda: FIXED)
     inquiry, lines = _inquiry(db, actors, kind="sales_inquiry")
-    inquiry.status = "submitted"
+    inquiries.submit(db, inquiry.id, actors.sales.id, inquiry.version, open_tasks=False)
     work_items.open_items(db, Subject("presales_inquiry", inquiry.id),
         [actors.buyer.id], "presales_inquiry", actors.sales.id)
     original = _draft(db, inquiry, lines[0], actors.buyer, source_key="same")
@@ -281,8 +281,8 @@ def test_draft_follows_part_binding_done_after_draft_was_saved(db, actors, monke
     monkeypatch.setattr(common, "now", lambda: FIXED)
     inquiry, lines = _inquiry(db, actors, kind="sales_inquiry")
     lines[0].part_id = None
-    inquiry.status = "submitted"
     db.flush()
+    inquiries.submit(db, inquiry.id, actors.sales.id, inquiry.version, open_tasks=False)
     work_items.open_items(db, Subject("presales_inquiry", inquiry.id),
         [actors.buyer.id], "presales_inquiry", actors.sales.id)
     draft = _draft(db, inquiry, lines[0], actors.buyer)
@@ -364,20 +364,6 @@ def test_concurrent_draft_creates_do_not_overwrite_the_winner(db, actors):
     assert db.get(PresalesOffer, results[0][1]).version == 1
 
 
-def test_other_actor_and_stale_version_rejected_but_owner_can_update_closed_quote(db, actors, monkeypatch):
-    inquiry, offer = _published(db, actors, monkeypatch)
-    with pytest.raises(Forbidden):
-        offers.update_offer(db, offer.id, actors.buyer2.id, {"unit_price": "1.00"}, expected_version=offer.version)
-    with pytest.raises(Conflict):
-        offers.update_offer(db, offer.id, actors.buyer.id, {"unit_price": "1.00"}, expected_version=1)
-    inquiry.status = "closed"
-    db.flush()
-    offers.update_offer(db, offer.id, actors.buyer.id, {"unit_price": "1.00"}, expected_version=offer.version)
-    assert offer.unit_price == Decimal("1.00") and inquiry.status == "closed"
-    offers.withdraw(db, offer.id, actors.buyer.id, "撤销", expected_version=offer.version)
-    assert offer.status == "withdrawn" and inquiry.status == "closed"
-
-
 def test_repeat_quote_does_not_change_closed_inquiry(db, actors, monkeypatch):
     previous, old = _published(db, actors, monkeypatch)
     previous.status = "closed"
@@ -395,38 +381,6 @@ def test_no_stock_not_in_library_and_not_boosted(db, actors, monkeypatch):
     assert offer.status == "published" and offer.unit_price is None
     assert library.batch(db, [actors.part.id], actors.sales.id)[actors.part.id] == []
     assert library.boost_part_ids(db, "PRESALES", actors.sales.id) == []
-
-
-def test_private_inquiry_has_no_library_or_search_weight_side_channel(db, actors, monkeypatch):
-    inquiry, offer = _published(db, actors, monkeypatch)
-    _, ctx = common.resolve_actor(db, actors.buyer.id)
-    inquiry.offer_audience_rule_id = common.rule_id(db, {"mode": "private"}, ctx)
-    db.flush()
-    assert library.batch(db, [actors.part.id], actors.sales.id)[actors.part.id] == []
-    assert library.boost_part_ids(db, "PRESALES", actors.sales.id) == []
-    assert library.boost_part_ids(db, "PRESALES") == []
-    assert library.boost_part_ids(db, "PRESALES", actors.buyer.id) == [actors.part.id]
-    assert library.boost_part_ids(db, "PRESALES", actors.boss.id) == [actors.part.id]
-
-
-def test_proactive_notice_targets_must_be_allowed_to_view_published_inquiry(db, actors, monkeypatch):
-    monkeypatch.setattr(common, "now", lambda: FIXED)
-    inquiry, lines = _inquiry(db, actors)
-    draft = _draft(db, inquiry, lines[0], actors.buyer)
-    _, ctx = common.resolve_actor(db, actors.buyer.id)
-    inquiry.offer_audience_rule_id = common.rule_id(db, {"mode": "private"}, ctx)
-    db.flush()
-    with pytest.raises(InvalidTransition):
-        offers.publish_proactive(db, inquiry.id, actors.buyer.id,
-            expected_version=inquiry.version, notice_user_ids=[actors.sales.id])
-    assert inquiry.status == "draft" and draft.status == "draft" and draft.revision_no == 0
-    assert work_items.subject_items(db, Subject("presales_offer_notice", inquiry.id), actors.buyer.id) == []
-    inquiry.offer_audience_rule_id = common.rule_id(db, {"mode": "public"}, ctx)
-    db.flush()
-    offers.publish_proactive(db, inquiry.id, actors.buyer.id,
-        expected_version=inquiry.version, notice_user_ids=[actors.sales.id])
-    items = work_items.subject_items(db, Subject("presales_offer_notice", inquiry.id), actors.sales.id)
-    assert len(items) == 1 and items[0].assignee_id == actors.sales.id
 
 
 @pytest.mark.parametrize("statement", [

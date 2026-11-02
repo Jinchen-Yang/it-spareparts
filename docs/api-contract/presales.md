@@ -1,4 +1,19 @@
+> **D-0052 共享池**：询价报价页面通过 `/api/presales/pool/*` 按行读写，PN 查重与绑定继续使用下文的 `/lines/{line_id}` 接口。
+> `PUT .../price`、`POST .../skip`、`PATCH /lines/{id}` 都带行版本 `expected_version`，成功返回本行最新视图；
+> 版本过期返回 409 `version_conflict` 并带 `latest`；改价格条件且已有答复时未带 `confirm_reset` 返回 409 `price_reset_required`。
+> 下文的领取、指派、整单回复和受众规则接口仅为过渡保留，不再有页面入口，将在后续清理。
+
+共享池仅收录实际提交过的询价。删除未提交草稿形成的软关单仍按草稿隔离。报价、供应商和备注等业务值按 D-0052 共享，历史权限规则中的个人用户及分组清单仍只供字段作者和主管回读。行历史读取已发布的价格修订，保留与本行解除关联时可证明的版本。修改备注或交期保留当前“不报”或沿用答复。
+
+报价工作簿通过所选行确定未关单的询价单，导出其中未直接引用旧报价的活动行；旧版直接引用行可以在共享池页面改价。按签名导出编号复核访问权，复核覆盖首次预览、缓存预览、确认与回放。含未发布私稿的文件限导出人和主管，旧导出缺少私稿来源证明时同样处理。公开文件不受同一来源行的其他导出影响。
+
+未关单时，有售前权限的用户可修改公开行条件和答复。整单客户、行集、撤回重提和关单仍由发起人或主管办理。已关单的询价可以查阅历史，不能追加一项新的行答复。已发布的长效报价仍可通过报价实体接口按版本更新或撤回，原成交快照保留。关单采纳报价时同时提交所选报价的 `expected_offer_revision_no`，若修订已变化，返回 409，原单保持打开。缺少修订号的旧客户端仅可确认从未改版的第一版。
+
 # 售前询价接口契约
+
+撤回修改中的整单编辑若只改单头，可以省略 `lines`。替换、删除或重排活动行时应提交读取时的 `expected_line_versions`（行键到行版本）；旧客户端仅在服务器保存的原基线仍相同时可继续。修改报价条件或删除已有答复的行会先返回 409 `price_reset_required`。核对影响后以相同基线和 `confirm_reset: true` 重试。签名询价工作簿通过预览和确认执行同一检查。生效时保留可追溯的旧答复和关联历史。
+
+升级前已经撤回修改的询价，若无法证明旧答复适用于当前行条件，行返回 `answer_requires_review: true` 和待报价状态。历史修订仍可查，旧价不参与当前价、报价工作簿默认值或成交采纳。业务人员可按当下条件重新报价或填写不报；原来已经钉住的成交快照保留原数值。旧快照没有“坏件返回”字段时按历史默认值“返回”比较。
 
 路径统一挂在 `/api/presales`。所有接口要求在职实名账号和 `page_presales`，不接受共享口令身份。
 服务仅 flush，HTTP 接口提交；业务时间线和访问审计与写动作同事务。未知输入字段返回 422。
@@ -7,14 +22,14 @@
 
 | 方法 | 路径 | 行为与动作权限 |
 |---|---|---|
-| GET | `/customers?q=&limit=20` | 客户搜索候选；需 `action_presales_inquire`，且 `data_customer` 字段组可见，否则 403；遵守 `own_customers_only` |
-| GET | `/suppliers?q=&limit=20` | 供应商搜索候选；需 `action_presales_quote` 或 `action_presales_offer`，且 `data_supplier` 字段组可见，否则 403 |
+| GET | `/customers?q=&limit=20` | 客户候选要求售前菜单及客户字段权限，遵守 `own_customers_only` |
+| GET | `/suppliers?q=&limit=20` | 有售前菜单权限的账号可搜索供应商 |
 | GET | `/inquiries?kind=&scope=mine\|all&status=&page=&page_size=` | 仅返回有权查看的单据；mine 包括本人发起或本人处理，all 包括可见共享单 |
-| POST | `/inquiries` | 草稿建单；销售单需 `action_presales_inquire`，主动报价需 `action_presales_offer` |
+| POST | `/inquiries` | 售前草稿建单，草稿限作者和主管查看 |
 | GET | `/inquiries/{inquiry_id}` | 单头、活动行、受控报价、本人可见待办、字段值与按 PN 空白模板 |
 | PATCH | `/inquiries/{inquiry_id}` | 草稿或 revising 可修改；lines 为完整活动行集合，按 line_key 对齐，缺行逻辑删除 |
 | DELETE | `/inquiries/{inquiry_id}` | 仅草稿，204；保守软关单并保留历史 |
-| POST | `/inquiries/{inquiry_id}/submit` | 销售草稿提交；多处理人或公共池，没有待询价行时不派单 |
+| POST | `/inquiries/{inquiry_id}/submit` | 销售草稿提交后进入共享范围，HTTP 提交不再生成待办 |
 | POST | `/inquiries/{inquiry_id}/withdraw` | 撤回为 revising，暂停未结束待办 |
 | POST | `/inquiries/{inquiry_id}/resubmit` | 按 line_key 比较上一提交版，报价 stale、恢复或重开待办，revision 加一 |
 | POST | `/inquiries/{inquiry_id}/lines` | 追加新行，不需撤回；body 为 expected_version、lines |
@@ -24,10 +39,10 @@
 | POST | `/inquiries/{inquiry_id}/lines/{line_id}/offers` | 创建或保存报价草稿；采购需 `action_presales_quote` 且为本单处理人，主动报价需 `action_presales_offer` |
 | POST | `/inquiries/{inquiry_id}/reply` | 独立回复；所有未引用活动行必须报新价、沿用或不报，锁定本人草稿、发布快照并完成本人待办 |
 | POST | `/inquiries/{inquiry_id}/publish` | 主动报价发布；notice_user_ids 可定向通知在职且有 page_presales 的账号 |
-| POST | `/offers/direct` | D-0048 单 PN 直接发布或更新本人报价；需 `action_presales_offer`，不创建 BJ 单据、询价行或通知待办 |
-| PATCH | `/offers/{offer_id}` | 更新发布报价、追加完整快照；报价本人或主管，需对应 quote/offer 动作权限 |
+| POST | `/offers/direct` | 有售前菜单权限的账号可直接报价，按现有报价 ID 与版本处理重复报价，不创建 BJ 单据或通知待办 |
+| PATCH | `/offers/{offer_id}` | 更新已发布报价，校验报价版本并追加修订，记录实际更新人 |
 | POST | `/offers/{offer_id}/withdraw` | 立即下架，reason 必填且非空白；追加撤销快照 |
-| GET | `/offers/{offer_id}/revisions` | 仅发起人、报价本人、主管；历史和当前可见性取交集，屏蔽作者旁路和私密字段 |
+| GET | `/offers/{offer_id}/revisions` | 有售前菜单权限的账号可读取已发布报价修订。旧修订缺少更新人时显示原作者，未发布草稿和个人受众名单分别受控 |
 | GET | `/lines/{line_id}/part-check?pn_std=` | 待建档查重，复用 master_edit.find_near_duplicates |
 | POST | `/lines/{line_id}/bind-part` | body 为 part_id、expected_version；绑定已有 PN，仅可绑定一次 |
 | POST | `/lines/{line_id}/create-part` | body 为 pn_std、主数据字段、expected_version；查重有候选时拒绝新建，要求绑定 |
@@ -38,14 +53,15 @@
 D-0047 新增字段：询价单 `priority`（normal/urgent，默认 normal，建单与修改可写）、`urge_count`、`last_urged_at`（只读）；
 询价行 `return_defective`（布尔，默认 true）；报价 `price_basis`（sale/cost，默认 sale，保存与更新可写，按报价原有受众规则可见）。
 
-建档两种写动作以及查重均要求 `action_presales_bind_part` 和 `page_master_data`，且必须为处理人、
-主动报价发起人或主管。公共池先领单。主数据字段包括 description、brand、manufacturer、summary、
+待建档行的查重、绑定和新建并绑定均要求 `action_presales_bind_part` 和 `page_master_data`。
+有这两项权限的账号可直接处理共享池中已提交或修订中的询价行；主动报价草稿仅发起人或主管可建档。
+主数据字段包括 description、brand、manufacturer、summary、
 category_major、category_minor、machine_or_part、unit，以及 `spec_updates`；主数据不随询价自动合并。
 
 按 [D-0045](../decisions/0025-售前PN建档与操作诊断.md)，询价/主动报价编辑器还可从 PN 联想入口显式打开主数据建档。
 该入口复用 `GET /parts/master/check`、`GET /parts/master/categories` 和 `POST /parts/master`，不依赖已保存的询价行；
 要求主数据权限及实名身份。建档回执的 `id` 与 `pn_std` 加入当前草稿，保存/提交单据仍是后续独立动作。
-已提交询价行继续使用本节的原子建档/绑定入口，要求原有售前动作权限及处理人身份。
+已提交询价行使用本节的原子建档或绑定入口，服务端检查双权限与行版本。
 
 `spec_updates` 为 `{参数键: {value: 字符串, unit: 字符串或null, numeric_value: 十进制字符串或null}}`。
 标准参数键、标签、单位来自 `/parts/master/categories` 的 `spec_fields` 数组；数值遵守原规格单位校验。
@@ -59,10 +75,11 @@ q 为空时返回权限范围内的候选，非空时对原始名称、归一化
 既有销售接口没有独立的客户归属关系，因此受 `own_customers_only` 限制的账号只返回
 `f_sales_order.salesperson` 匹配账号 `salesperson_name` 的客户，或本人询价中用过的客户；
 未绑定 salesperson_name 时仅返回本人询价中用过的客户。
-客户与供应商字段组的可见性均复用 `is_field_hidden`，与 `apply_field_visibility` 使用同一判定来源。
-客户端使用售前专用候选接口，不复用分析页 options；没有对应字段权限时不展示客户或供应商选择器。
+客户字段组的可见性复用 `is_field_hidden`。客户端使用售前专用候选接口，缺少客户字段权限时不展示客户选择器。D-0052 对售前供应商使用售前菜单准入。
 
-## 无单据主动报价与当前行答复（D-0048）
+## 无单据主动报价与当前行答复（D-0048 历史契约）
+
+以下保留旧入口的版本、快照和回滚背景。D-0052 覆盖其中的授予对象、私密受众、领取派单、整单回复及工作簿草稿行为。当前共享池以本文开头的接口和 [D-0052](../decisions/0032-售前询价报价共享池.md) 为准。
 
 `POST /offers/direct` 接受报价字段及 `part_id`、`on_existing=update|new`（默认 update）、
 `existing_offer_id`、`expected_version`、仅新建时的 `offer_audience`。

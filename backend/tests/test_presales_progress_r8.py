@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models.presales import PresalesLineResponse
-from app.services.presales import common, inquiries, offers, visibility
+from app.services.presales import common, inquiries, offers, pool, visibility
 from app.services.workflow import work_items
 from tests.test_presales_r6_existing import r6_actors
 from tests.test_presales_r6_responses import _pending, _reply
@@ -16,6 +16,8 @@ def test_skipped_line_must_be_handled_again_after_withdraw_and_edit(db, r6_actor
     line = lines[0]
     _reply(db, inquiry, users.buyer,
            [{"line_id": line.id, "mode": "skip", "reason": "原数量暂无货"}])
+    answered_at = db.scalars(select(PresalesLineResponse.created_at).where(
+        PresalesLineResponse.line_id == line.id)).one()
     contexts = [common.resolve_actor(db, viewer.id)[1]
                 for viewer in (users.sales, users.buyer, users.boss)]
     for ctx in contexts:
@@ -26,7 +28,10 @@ def test_skipped_line_must_be_handled_again_after_withdraw_and_edit(db, r6_actor
     inquiries.update_draft(db, inquiry.id, users.sales.id, inquiry.version,
         lines=[{"line_key": line.line_key, "qty": 2}])
     response = db.scalar(select(PresalesLineResponse).where(PresalesLineResponse.line_id == line.id))
-    assert response.line_version != line.version
+    assert response is None
+    skipped = [event for event in pool.history(db, line.id, users.sales.id) if event["kind"] == "line.skipped"]
+    assert [(event["actor"], event["at"], event["reason"]) for event in skipped] == [
+        (users.buyer.display_name, answered_at, "原数量暂无货")]
     for ctx in contexts:
         for detail in (True, False):
             assert visibility.inquiry_view(db, inquiry, ctx, detail=detail)["progress"] == {
@@ -54,7 +59,7 @@ def test_return_defective_change_reopens_reply_and_invalidates_old_quote(db, r6_
         work_items.list_by_subject(db, inquiries.subject(inquiry), u.sales.id))
     view = visibility.inquiry_view(db, inquiry, common.resolve_actor(db, u.sales.id)[1])
     assert view["line_answers"] == [{"line_id": line.id, "state": "pending", "responded": False}]
-    assert view["can_urge"] is True
+    assert view["can_urge"] is False
 
 
 def test_legacy_snapshot_without_return_defective_keeps_default_true_reply_done(db, r6_actors):

@@ -1,3 +1,4 @@
+import { parseApiError } from "../../utils/apiError";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Alert, App, Button, Descriptions, Drawer, Form, Modal, Radio, Select, Space, Spin, Table, Tag, Typography } from "antd";
@@ -11,7 +12,7 @@ import { hasValue, FieldValues, OfferPrice, offersForLine, OfferDetails, history
 import "./presales.css";
 import { formatBusinessDateTime } from "../../utils/date";
 import { formatMoney } from "../../utils/format";
-import { usePresalesError, isOfferActive, OfferBadge, taxLabel, useNow, OfferUpdates, basisLabel } from "./shared";
+import { isPresalesSupervisor, usePresalesError, isOfferActive, OfferBadge, taxLabel, useNow, OfferUpdates, basisLabel } from "./shared";
 
 const statusLabels: Record<string, string> = { draft: "草稿", submitted: "已提交", revising: "撤回修改中", closed: "已结束" };
 const outcomeLabels: Record<string, string> = { won: "成交", lost: "未成交", cancelled: "取消" };
@@ -42,7 +43,11 @@ function InquiryDetailContent({ id }: { id: number }) {
   const [historyError, setHistoryError] = useState("");
   const [closeOpen, setCloseOpen] = useState(false);
   const [outcome, setOutcome] = useState<"won" | "lost" | "cancelled">("won");
-  const [wonOfferId, setWonOfferId] = useState<number>();
+  const [wonOffer, setWonOffer] = useState<{ id: number; revision: number }>();
+  const wonOfferId = wonOffer?.id;
+  const selectWonOffer = (offer?: Offer) => setWonOffer(offer ? {
+    id: offer.id, revision: offer.latest?.revision_no ?? offer.revision_no,
+  } : undefined);
   const generation = useRef(0);
   const historyGeneration = useRef(0);
   const now = useNow([...(inquiry?.offers ?? []), ...(inquiry?.lines ?? []).flatMap((line) => [...(line.linked_offers ?? []), ...(line.ref_offer ? [line.ref_offer] : [])]),
@@ -77,16 +82,6 @@ function InquiryDetailContent({ id }: { id: number }) {
     } finally { if (current === historyGeneration.current) setHistoryLoading(false); }
   };
 
-  const withdraw = async () => {
-    if (!inquiry || busy) return;
-    setBusy(true);
-    try {
-      await presales.withdrawInquiry(id, { expected_version: inquiry.version });
-      navigate(`/presales/inquiries/${id}/edit`);
-    } catch (error) { await handlePresalesError(error, load); }
-    finally { setBusy(false); }
-  };
-
   const copy = async () => {
     if (!inquiry || busy) return;
     setBusy(true);
@@ -103,10 +98,16 @@ function InquiryDetailContent({ id }: { id: number }) {
     setBusy(true);
     try {
       const data = await presales.closeInquiry(id, { expected_version: inquiry.version, outcome,
-        ...(outcome === "won" && wonOfferId ? { won_offer_id: wonOfferId } : {}) });
+        ...(outcome === "won" && wonOffer ? { won_offer_id: wonOffer.id, expected_offer_revision_no: wonOffer.revision } : {}) });
       setInquiry(data); setCloseOpen(false); message.success("已关单");
-    } catch (error) { await handlePresalesError(error, load); }
-    finally { setBusy(false); }
+    } catch (error) {
+      if (parseApiError(error).code === "offer_revision_conflict") {
+        setWonOffer(undefined);
+        setCloseOpen(false);
+        void message.warning("报价已更新，请重新选择要成交的报价");
+        await load();
+      } else await handlePresalesError(error, load);
+    } finally { setBusy(false); }
   };
 
   if (!inquiry) return <>{loading && <Spin aria-label="询价单加载中" />}{error && <Alert type="error" message={error}
@@ -114,23 +115,24 @@ function InquiryDetailContent({ id }: { id: number }) {
 
   const lines = inquiry.lines ?? [];
   const offers = inquiry.offers ?? [];
-  const canAmend = inquiry.kind === "sales_inquiry";
+  const canManage = inquiry.is_owner === true || isPresalesSupervisor();
+  const canAmend = canManage && inquiry.kind === "sales_inquiry";
   const adopted = inquiry.won_offer;
-  const lineForOffer = (offer: Offer) => lines.find((line) => line.id === offer.line_id || line.ref_offer_id === offer.id
-    || line.linked_offer_ids?.includes(offer.id) || line.linked_offers?.some((linked) => linked.id === offer.id) || inquiry.line_responses?.some((row) => !row.is_draft && row.line_id === line.id && row.mode === "reuse" && row.ref_offer_id === offer.id));
+  const lineForOffer = (offer: Offer) => lines.find((line) => !line.answer_requires_review && (line.id === offer.line_id || line.ref_offer_id === offer.id
+    || line.linked_offer_ids?.includes(offer.id) || line.linked_offers?.some((linked) => linked.id === offer.id) || inquiry.line_responses?.some((row) => !row.is_draft && row.line_id === line.id && row.mode === "reuse" && row.ref_offer_id === offer.id)));
   const closeOptions = [...new Map([...offers, ...lines.flatMap((line) => [...(line.linked_offers ?? []), ...(line.ref_offer ? [line.ref_offer] : [])]),
     ...(inquiry.line_responses ?? []).flatMap((row) => !row.is_draft && row.mode === "reuse" && row.offer ? [row.offer] : [])]
-    .map((offer) => [offer.id, offer])).values()].filter((offer) => isOfferActive(offer, now) && !!lineForOffer(offer));
+    .filter((offer) => isOfferActive(offer, now) && !!lineForOffer(offer)).map((offer) => [offer.id, offer])).values()];
   const galleryItems = lines.filter((line) => line.part_id).map((line) => ({ partId: line.part_id!, pn: line.pn_raw }));
 
   const lineOffers = new Map(lines.map((line) => [line.id, offersForLine(line, inquiry)]));
   const referenceIds = (line: InquiryLine) => new Set([...(line.linked_offer_ids ?? []), ...(line.linked_offers ?? []).map((offer) => offer.id),
     ...(line.ref_offer_id ? [line.ref_offer_id] : []), ...(inquiry.line_responses ?? []).filter((response) => !response.is_draft && response.line_id === line.id && response.mode === "reuse")
       .flatMap((response) => response.ref_offer_id ? [response.ref_offer_id] : [])]);
-  const canClose = !readOnly && ["submitted", "revising"].includes(inquiry.status);
+  const canClose = !readOnly && canManage && ["submitted", "revising"].includes(inquiry.status);
   const renderOffer = (line: InquiryLine, offer: Offer) => {
-    const active = isOfferActive(offer, now);
-    const candidates = (lineOffers.get(line.id) ?? []).filter((candidate) => isOfferActive(candidate, now) && !candidate.no_stock
+    const active = !line.answer_requires_review && isOfferActive(offer, now);
+    const candidates = (lineOffers.get(line.id) ?? []).filter((candidate) => !line.answer_requires_review && isOfferActive(candidate, now) && !candidate.no_stock
       && hasValue(candidate.unit_price) && candidate.is_tax_inclusive === offer.is_tax_inclusive);
     const lowest = active && !offer.no_stock && typeof offer.is_tax_inclusive === "boolean" && hasValue(offer.unit_price)
       && Number(offer.unit_price) === Math.min(...candidates.map((candidate) => Number(candidate.unit_price)));
@@ -140,7 +142,7 @@ function InquiryDetailContent({ id }: { id: number }) {
       <button type="button" aria-label={`采纳 ${line.pn_raw} 报价 ${offer.id}`} aria-pressed={wonOfferId === offer.id}
         className={`presales-offer-choice ${wonOfferId === offer.id ? "is-selected" : lowest ? "is-lowest" : ""}`}
         disabled={!canClose || busy || !active || !!offer.no_stock} title={detail}
-        onClick={() => setWonOfferId(wonOfferId === offer.id ? undefined : offer.id)}><OfferPrice offer={offer} />
+        onClick={() => selectWonOffer(wonOfferId === offer.id ? undefined : offer)}><OfferPrice offer={offer} />
         {lowest && <span className="presales-muted">{taxLabel(offer.is_tax_inclusive)}最低价</span>}
         {active && <Tag color="green">有效</Tag>}
         {offer.status === "stale" && <span>基于旧版本</span>}
@@ -160,11 +162,11 @@ function InquiryDetailContent({ id }: { id: number }) {
   return <section className="presales-page">
     <PageHeader title={`询价单 ${inquiry.inquiry_no}`} subtitle={<><Tag>{statusLabels[inquiry.status]}</Tag>{lines.length} 行 · 版本 {inquiry.revision}</>} extra={<Space wrap>
       <Button onClick={() => navigate("/presales/inquiries")}>返回列表</Button>
-      {!readOnly && (inquiry.status === "closed" ? <Button loading={busy} onClick={() => void copy()}>复制为新单</Button> : <>
-        {inquiry.kind === "proactive_offer" && inquiry.status === "draft" && <Button disabled={busy} onClick={() => navigate(`/presales/offers/new?draft=${id}`)}>继续填写主动报价</Button>}
+      {!readOnly && (inquiry.status === "closed" ? canManage && <Button loading={busy} onClick={() => void copy()}>复制为新单</Button> : <>
+        {canManage && inquiry.kind === "proactive_offer" && inquiry.status === "draft" && <Button disabled={busy} onClick={() => navigate(`/presales/offers/new?draft=${id}`)}>继续填写主动报价</Button>}
         {inquiry.kind === "proactive_offer" && inquiry.status === "submitted" && <Button disabled={busy} onClick={() => navigate(`/presales/workbench/${id}`)}>更新 / 撤销报价</Button>}
         {canAmend && ["draft", "revising"].includes(inquiry.status) && <Button disabled={busy} onClick={() => navigate(`/presales/inquiries/${id}/edit`)}>编辑询价</Button>}
-        {canAmend && inquiry.status === "submitted" && <><Button loading={busy} onClick={() => void withdraw()}>撤回修改</Button><Button disabled={busy} onClick={() => navigate(`/presales/inquiries/${id}/edit?append=1`)}>追加行</Button></>}
+        {canAmend && inquiry.status === "submitted" && <Button disabled={busy} onClick={() => navigate(`/presales/inquiries/${id}/edit?append=1`)}>追加行</Button>}
       </>)}
       <Button onClick={() => setTimelineOpen(true)}>查看动态</Button>
     </Space>} />
@@ -178,7 +180,6 @@ function InquiryDetailContent({ id }: { id: number }) {
       ]} />
       <FieldValues values={inquiry.field_values} />
       {adopted && <Space wrap><Button type="link" onClick={() => void showHistory(adopted)}>报价 #{adopted.id} · 第 {adopted.revision_no} 版</Button><OfferBadge offer={adopted} /></Space>}
-      <div className="presales-toolbar">{inquiry.work_items?.map((work) => <Tag key={work.id}>{hasValue(work.claimed_by) || hasValue(work.assignee_id) ? `处理人 ${work.claimed_by ?? work.assignee_id} · ` : "公共池 · "}{workLabels[work.status]}{work.paused ? " · 已暂停" : ""}</Tag>)}</div>
       <p className="presales-muted">最低价按同一含税口径比较，仅计入有效报价。</p>
       <Table aria-label="询价比价矩阵" rowKey="id" dataSource={lines} loading={loading} tableLayout="fixed" pagination={{ defaultPageSize: 20 }} columns={[
         { title: "PN / 描述", key: "pn", render: (_, line) => <><Space>{line.part_id && <PartThumb partId={line.part_id} pn={line.pn_raw} size={24} />}{line.pn_raw}{line.require_exact_pn && <Tag>一致</Tag>}</Space><div className="presales-muted">{line.description}</div></> },
@@ -192,7 +193,7 @@ function InquiryDetailContent({ id }: { id: number }) {
         { title: "操作", key: "actions", width: 120, render: (_, line) => <Space direction="vertical"><Button type="link" aria-label={`查看 ${line.pn_raw} 详情`} onClick={() => setLineId(line.id)}>查看详情</Button>{line.part_id && <Button type="link" onClick={() => { setGalleryLineId(line.id); setGalleryOpen(true); }}>图库多选下载</Button>}</Space> },
       ]} />
     </div>
-    <footer className="presales-footer"><span>{readOnly ? "报价通知 · 只读" : wonOfferId ? `已选择报价 #${wonOfferId}` : "点报价格子选择成交采纳报价"}</span>
+    <footer className="presales-footer"><span>{readOnly ? "报价通知 · 只读" : wonOfferId ? `已选择报价 #${wonOfferId}` : canClose ? "点报价格子选择成交采纳报价" : "询价详情"}</span>
       {canClose && <Space><Button disabled={busy} onClick={() => { setOutcome("lost"); setCloseOpen(true); }}>未成交关单</Button><Button type="primary" aria-label="关单" disabled={busy} onClick={() => { setOutcome("won"); setCloseOpen(true); }}>成交关单</Button></Space>}
     </footer>
     <Drawer title="询价动态" open={timelineOpen} onClose={() => setTimelineOpen(false)} width={480} destroyOnHidden>
@@ -214,7 +215,7 @@ function InquiryDetailContent({ id }: { id: number }) {
     </Drawer>
     <Modal open={closeOpen} title="关单" onCancel={() => { if (!busy) setCloseOpen(false); }} onOk={() => void close()} confirmLoading={busy} okText="确认关单" cancelButtonProps={{ disabled: busy }} maskClosable={!busy} closable={!busy}>
       <Form layout="vertical"><Form.Item label="关单结果"><Radio.Group value={outcome} onChange={(event) => setOutcome(event.target.value)}><Radio value="won">成交</Radio><Radio value="lost">未成交</Radio><Radio value="cancelled">取消</Radio></Radio.Group></Form.Item>
-        {outcome === "won" && <Form.Item label="采纳本单报价（可选）"><Select aria-label="采纳报价" allowClear value={wonOfferId} onChange={setWonOfferId} placeholder="选择采纳的本单报价（可选）" options={closeOptions.map((offer) => ({ value: offer.id,
+        {outcome === "won" && <Form.Item label="采纳本单报价（可选）"><Select aria-label="采纳报价" allowClear value={wonOfferId} onChange={(id) => selectWonOffer(closeOptions.find((offer) => offer.id === id))} placeholder="选择采纳的本单报价（可选）" options={closeOptions.map((offer) => ({ value: offer.id,
           label: `${lineForOffer(offer)?.pn_raw || ""} · 报价 #${offer.id}${offer.reporter ? ` · ${offer.reporter.name}` : ""} · ${offer.latest ? `当前${formatMoney(offer.latest.unit_price, { prefix: "¥" })} · ${taxLabel(offer.latest.is_tax_inclusive)}${offer.latest.price_basis ? ` · ${basisLabel(offer.latest)}` : ""} · 第 ${offer.latest.revision_no} 版` : `${formatMoney(offer.unit_price, { prefix: "¥" })} · ${taxLabel(offer.is_tax_inclusive)} · ${basisLabel(offer)}`}`,
         }))} /></Form.Item>}
       </Form>

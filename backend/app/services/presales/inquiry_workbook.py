@@ -62,7 +62,6 @@ class _WorkbookSession:
 def _editable_inquiry(db, inquiry_id, ctx, *, lock=False):
     user, ctx = common.resolve_actor(db, ctx)
     common.require(ctx, "page_presales")
-    common.require(ctx, "action_presales_inquire")
     query = select(PresalesInquiry).where(PresalesInquiry.id == inquiry_id)
     if lock:
         query = query.with_for_update().execution_options(populate_existing=True)
@@ -78,7 +77,6 @@ def can_access(db, ctx, subject_type, subject_id):
     try:
         _, ctx = common.resolve_actor(db, ctx)
         common.require(ctx, "page_presales")
-        common.require(ctx, "action_presales_inquire")
         if not _exports_accessible(db, ctx, subject_id):
             return False
         if subject_type is None and subject_id is None:
@@ -448,7 +446,9 @@ def apply_inquiry(db, plan, ctx):
         payload = [{"line_key": line.line_key, **(changes.get(line.id) or {})}
                    for line in existing if line.id not in changes or changes[line.id] is not None]
         if plan.rows:
-            inquiry = inquiries.update_draft(db, inquiry.id, ctx, inquiry.version, lines=[*payload, *added])
+            # 引擎已核对签名行基线，其他行在锁内从当前数据库构造，不能使用旧页面快照。
+            inquiry = inquiries.update_draft(db, inquiry.id, ctx, inquiry.version, lines=[*payload, *added],
+                expected_line_versions={row.line_key: row.version for row in existing})
     return {"inquiry_id": inquiry.id, "inquiry_no": inquiry.inquiry_no, "status": inquiry.status,
             "version": inquiry.version, "line_count": len(inquiries.lines_for(db, inquiry.id))}
 

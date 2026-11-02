@@ -106,10 +106,15 @@ def test_customer_candidates_without_scope_can_search_all_dimensions(db, choices
     assert {row["id"] for row in response.json()} == {row.id for row in choices.customers}
 
 
-@pytest.mark.parametrize("viewer", ["buyer", "no_page", "no_inquire", "no_customer"])
-def test_customer_candidates_require_page_inquire_and_customer_permissions(db, choices, viewer):
+@pytest.mark.parametrize("viewer", ["buyer", "no_page", "no_customer"])
+def test_customer_candidates_require_page_and_customer_permissions(db, choices, viewer):
     response = _client(getattr(choices, viewer)).get("/api/presales/customers")
     assert response.status_code == 403, response.text
+
+
+def test_customer_candidates_do_not_require_inquire_action(db, choices):
+    # D-0052：询价不再区分动作权限，客户名只看数据权限。
+    assert _client(choices.no_inquire).get("/api/presales/customers").status_code == 200
 
 
 def test_customer_search_matches_raw_and_normalized_and_limits_after_scope(db, choices):
@@ -123,18 +128,17 @@ def test_customer_search_matches_raw_and_normalized_and_limits_after_scope(db, c
     assert literal.json() == [{"id": choices.customers[4].id, "name": "客户 100%_档案"}]
 
 
-@pytest.mark.parametrize("viewer", ["buyer", "quote_only", "offer_only"])
-def test_supplier_candidates_allow_either_quote_or_offer_permission(db, choices, viewer):
+@pytest.mark.parametrize("viewer", ["buyer", "quote_only", "offer_only", "seller", "no_actions", "no_supplier"])
+def test_supplier_candidates_open_to_every_presales_account(db, choices, viewer):
+    # D-0052：能进售前菜单就能选供应商，不再看动作权限和 data_supplier。
     response = _client(getattr(choices, viewer)).get("/api/presales/suppliers")
     assert response.status_code == 200, response.text
     assert {row["id"] for row in response.json()} == {row.id for row in choices.suppliers}
     assert all(set(row) == {"id", "name"} for row in response.json())
 
 
-@pytest.mark.parametrize("viewer", ["seller", "no_actions", "no_supplier", "no_page"])
-def test_supplier_candidates_deny_missing_action_page_or_data_permissions(db, choices, viewer):
-    response = _client(getattr(choices, viewer)).get("/api/presales/suppliers")
-    assert response.status_code == 403, response.text
+def test_supplier_candidates_require_page_permission(db, choices):
+    assert _client(choices.no_page).get("/api/presales/suppliers").status_code == 403
 
 
 def test_supplier_search_matches_raw_normalized_and_literal_wildcards(db, choices):

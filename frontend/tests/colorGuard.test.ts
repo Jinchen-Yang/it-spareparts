@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import baseline from "./color-baseline.json";
@@ -46,9 +46,10 @@ describe("十六进制颜色只减不增 (#408)", () => {
   });
 
   it("扫描全部 src；迁完的文件清零，从 baseline 删除后不能回流", () => {
-    const counts = Object.fromEntries(sourceFiles(sourceRoot).map((path) => [
-      relative(sourceRoot, path), colorCount(readFileSync(path, "utf8"), relative(sourceRoot, path)),
-    ]));
+    const counts = Object.fromEntries(sourceFiles(sourceRoot).map((path) => {
+      const key = relative(sourceRoot, path).split(sep).join("/");
+      return [key, colorCount(readFileSync(path, "utf8"), key)];
+    }));
     expect(exceedsBaseline(counts, baseline)).toEqual([]);
     // 配额随减少同步收紧，不保留已经用不上的旧额度。
     for (const [path, limit] of Object.entries(baseline)) expect(counts[path], path).toBe(limit);

@@ -1,6 +1,7 @@
 """销售模板通过 M4 注册回调往返，保持领域编辑与权限约束。"""
 
 from datetime import date
+from decimal import Decimal
 from io import BytesIO
 import os
 import shutil
@@ -13,11 +14,12 @@ from sqlalchemy import select
 from app.models.fields_audience import FieldAnchorUsage
 from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesWorkbookExport
 from app.services import audience, field_pool
-from app.services.presales import common, inquiries, inquiry_workbook as workbook
+from app.services.presales import common, inquiries, inquiry_workbook as workbook, pool
 from app.services.workbook import operations, registry
 from app.services.workbook.registry import ApplyFailed, Conflict, Forbidden as WorkbookForbidden, WorkbookSpec
 from app.services.workbook.schema import WorkbookError
 from app.services.workflow.registry import Forbidden, InvalidTransition
+from tests.test_presales_api_visibility import _client
 from tests.test_presales_inquiries import _offer, presales_parts, presales_users
 
 
@@ -81,6 +83,42 @@ def test_empty_template_creates_draft_exact_match_and_pending_raw(db, presales_u
     assert len(db.scalars(select(PresalesInquiry)).all()) == 1
 
 
+def test_revising_signed_workbook_checks_current_line_versions_after_shared_edit(db, presales_users, presales_parts):
+    user, peer = presales_users.sales, presales_users.buyer
+    inquiry = inquiries.create_draft(db, user.id, lines=[{"part_id": p.id} for p in presales_parts[:2]])
+    inquiries.submit(db, inquiry.id, user.id, inquiry.version, open_tasks=False)
+    inquiries.withdraw(db, inquiry.id, user.id, inquiry.version)
+    original = workbook.export_inquiry(db, inquiry.id, _ctx(db, user))
+    edit_first = lambda sheet, cols: _set(sheet, cols, 2, **{"数量": 6})
+    preview = _preview(db, user, _edit(original, edit_first), inquiry)
+    first, _ = inquiries.lines_for(db, inquiry.id)
+    pool.edit_line(db, first.id, _ctx(db, peer), {"qty": 2}, expected_version=first.version)
+    with pytest.raises(Conflict):
+        _apply(db, user, preview)
+    fresh = workbook.export_inquiry(db, inquiry.id, _ctx(db, user))
+    edit_second = lambda sheet, cols: _set(sheet, cols, 3, **{"数量": 9})
+    _apply(db, user, _preview(db, user, _edit(fresh, edit_second), inquiry))
+    assert [row.qty for row in inquiries.lines_for(db, inquiry.id)] == [2, 9]
+
+
+def test_signed_condition_change_only_invalidates_price_when_applied(db, presales_users, presales_parts):
+    user, buyer = presales_users.sales, presales_users.buyer
+    inquiry = inquiries.create_draft(db, user.id, lines=[{"part_id": presales_parts[0].id}])
+    inquiries.submit(db, inquiry.id, user.id, inquiry.version, open_tasks=False)
+    inquiries.withdraw(db, inquiry.id, user.id, inquiry.version)
+    line = inquiries.lines_for(db, inquiry.id)[0]
+    quoted = pool.set_price(db, line.id, _ctx(db, buyer), {"unit_price": Decimal("18")}, expected_version=line.version)
+    assert quoted["answer_state"] == "quoted"
+    content = _edit(workbook.export_inquiry(db, inquiry.id, _ctx(db, user)),
+                    lambda sheet, cols: _set(sheet, cols, 2, **{"数量": 4}))
+    preview = _preview(db, user, content, inquiry)
+    assert pool.line_view(db, line.id, user.id)["answer_state"] == "quoted"
+    _apply(db, user, preview)
+    current = pool.line_view(db, line.id, user.id)
+    assert current["answer_state"] == "pending" and Decimal(current["qty"]) == 4
+    assert any(row.get("unit_price") and Decimal(row["unit_price"]) == 18 for row in pool.history(db, line.id, user.id))
+
+
 def test_delete_insert_modify_only_confirmed_deletions(db, presales_users, presales_parts):
     user = presales_users.sales
     inquiry = inquiries.create_draft(db, user.id, lines=[{"part_id": part.id} for part in presales_parts[:2]])
@@ -115,7 +153,7 @@ def test_unconfirmed_delete_preserves_line_and_omitted_columns(db, presales_user
     assert len(rows) == 2 and rows[0].notes == "保留" and rows[0].qty == 8
 
 
-def test_submitted_rejected_and_withdrawn_edit_uses_existing_stale_diff(db, presales_users, presales_parts):
+def test_submitted_rejected_and_confirming_withdrawn_edit_invalidates_price_immediately(db, presales_users, presales_parts):
     user = presales_users.sales
     inquiry = inquiries.create_draft(db, user.id, assignee_ids=[presales_users.buyer.id],
                                     lines=[{"part_id": presales_parts[0].id}])
@@ -130,7 +168,7 @@ def test_submitted_rejected_and_withdrawn_edit_uses_existing_stale_diff(db, pres
     content = _edit(workbook.export_inquiry(db, inquiry.id, _ctx(db, user)),
                     lambda sheet, cols: _set(sheet, cols, 2, **{"数量": 5}))
     _apply(db, user, _preview(db, user, content, inquiry))
-    assert inquiry.status == "revising" and offer.status == "published"
+    assert inquiry.status == "revising" and offer.status == "stale"
     inquiries.resubmit(db, inquiry.id, user.id, inquiry.version)
     assert offer.status == "stale"
 
@@ -288,9 +326,18 @@ def test_history_replay_rejects_custom_field_after_visibility_narrows(db, presal
         _apply(db, user, preview)
 
 
-def test_template_requires_sales_inquiry_permission(db, presales_users):
-    with pytest.raises(Forbidden):
-        workbook.export_template(db, _ctx(db, presales_users.buyer))
+def test_template_download_requires_page_but_not_sales_inquiry_action(db, presales_users):
+    buyer = presales_users.buyer
+    buyer.perm_overrides = {"page_presales": True, "action_presales_inquire": False}
+    db.commit()
+    client = _client(buyer)
+    path = "/api/presales/workbooks/inquiry-template"
+    response = client.get(path)
+    assert response.status_code == 200, response.text
+    assert "询价明细" in load_workbook(BytesIO(response.content), read_only=True).sheetnames
+    buyer.perm_overrides = {"page_presales": False, "action_presales_inquire": True}
+    db.commit()
+    assert client.get(path).status_code == 403
 
 
 @pytest.mark.parametrize("create_from_template", [False, True])

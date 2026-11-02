@@ -24,3 +24,10 @@ POST	/api/presales/lines/{line_id}/bind-part	bind_part_api_presales_lines__line_
 POST	/api/presales/lines/{line_id}/create-part	create_part_api_presales_lines__line_id__create_part_post	沿用presales.md基础契约
 POST	/api/presales/offers/{offer_id}/withdraw	withdraw_offer_api_presales_offers__offer_id__withdraw_post	沿用presales.md基础契约
 POST	/api/presales/reference	reference_api_presales_reference_post	r7: inquiry_id候选取查看者与所有人M8/字段组交集；去重+more
+GET	/api/presales/pool/lines	list_lines_api_presales_pool_lines_get	D-0052: 按行读写，写入返回本行最新视图，冲突 409 带 latest
+GET	/api/presales/pool/counts	counts_api_presales_pool_counts_get	D-0052: 按行读写，写入返回本行最新视图，冲突 409 带 latest
+POST	/api/presales/pool/inquiries	create_inquiry_api_presales_pool_inquiries_post	D-0052: 按行读写，写入返回本行最新视图，冲突 409 带 latest
+PUT	/api/presales/pool/lines/{line_id}/price	set_price_api_presales_pool_lines__line_id__price_put	D-0052: 按行读写，写入返回本行最新视图，冲突 409 带 latest
+POST	/api/presales/pool/lines/{line_id}/skip	skip_api_presales_pool_lines__line_id__skip_post	D-0052: 按行读写，写入返回本行最新视图，冲突 409 带 latest
+PATCH	/api/presales/pool/lines/{line_id}	edit_line_api_presales_pool_lines__line_id__patch	D-0052: 按行读写，写入返回本行最新视图，冲突 409 带 latest
+GET	/api/presales/pool/lines/{line_id}/history	history_api_presales_pool_lines__line_id__history_get	D-0052: 按行读写，写入返回本行最新视图，冲突 409 带 latest

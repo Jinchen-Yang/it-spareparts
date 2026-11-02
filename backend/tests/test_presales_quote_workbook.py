@@ -1,4 +1,4 @@
-"""采购往返模板的合并分发、草稿确认与可见性契约。"""
+"""共享池报价表的合并分发、立即生效、草稿隔离与回执契约。"""
 
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -18,12 +18,11 @@ from app.db import SessionLocal
 from app.models.dimensions import DimPart, DimSupplier
 from app.models.presales import PresalesLineResponse, PresalesOffer, PresalesWorkbookExport
 from app.models.system import SysUser
-from app.services.presales import common, inquiries, offers, quote_workbook, visibility
+from app.services.presales import common, inquiries, offers, pool, quote_workbook, visibility
 from app.services.presales.workbook_registration import register_workbooks
 from app.services.workbook import operations
 from app.services.workbook.registry import ApplyFailed, Conflict, Forbidden
 from app.services.workbook.protocol import read_metadata
-from app.services.workflow import work_items
 from app.services.workflow.registry import InvalidTransition
 
 
@@ -81,8 +80,44 @@ def _published(db, data, *, private=False):
         expected_version=inquiry.version, on_existing="new")[0]
 
 
+def test_review_required_row_exports_blank_and_can_explicitly_reuse_an_independent_offer(db, quote_data):
+    data = quote_data
+    original = _published(db, data)
+    inquiry = _submitted(db, data)
+    line, = inquiries.lines_for(db, inquiry.id)
+    priced = pool.set_price(db, line.id, data.peer.id, {"unit_price": "3.00"}, expected_version=line.version)
+    uncertain_id = priced["price"]["offer_id"]
+    inquiry.status = "revising"
+    ctx = common.resolve_actor(db, data.buyer.id)[1]
+    previous = _edit(quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id), {2: {"单价": 4}})
+    old_preview = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, previous, ctx=ctx)
+    line.answer_requires_review = True
+    line.answer_state, line.current_offer_id = "pending", None
+    db.add(PresalesLineResponse(line_id=line.id, line_version=line.version, mode="skip",
+                                reason="旧数量不供应", created_by=data.buyer.id))
+    db.commit()
+    with pytest.raises(Conflict):
+        operations.apply(db, old_preview["operation_id"], data.buyer.id, old_preview["plan_digest"])
+
+    content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
+    sheet = load_workbook(BytesIO(content))["采购报价表"]
+    cells = {cell.value: sheet.cell(2, cell.column).value for cell in sheet[1]}
+    assert all(cells[label] is None for label in ("处理方式", "不报原因", "单价"))
+    assert f"#{original.id}：" in cells["已有有效报价"] and f"#{uncertain_id}：" not in cells["已有有效报价"]
+    invalid = _edit(content, {2: {"处理方式": "沿用", "沿用报价编号": uncertain_id}})
+    preview = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, invalid, ctx=ctx)
+    assert preview["plan"]["errors"]
+    changed = _edit(content, {2: {"处理方式": "沿用", "沿用报价编号": original.id}})
+    _apply(db, data, changed)
+    db.refresh(line)
+    assert not line.answer_requires_review and line.current_offer_id not in (uncertain_id, original.id)
+    assert db.get(PresalesOffer, line.current_offer_id).unit_price == Decimal("19.00")
+
+
 def test_same_pn_merges_and_distributes_without_reply(db, quote_data):
     data = quote_data
+    original = _published(db, data)
+    original_revision = original.revision_no
     first = _submitted(db, data)
     second = _submitted(db, data, owner=data.other)
     content = quote_workbook.export_quote_sheet(db, [first.id, second.id], data.buyer.id)
@@ -93,17 +128,17 @@ def test_same_pn_merges_and_distributes_without_reply(db, quote_data):
     assert first.inquiry_no in sheet.cell(2, headers["来源单号"]).value
     assert second.inquiry_no in sheet.cell(2, headers["来源单号"]).value
     changed = _edit(content, {2: {"处理方式": "报价", "单价": "１２.５０", "含税": "是", "供应商": data.supplier.name_raw}})
-    result = _apply(db, data, changed)
-    rows = list(db.scalars(select(PresalesOffer).order_by(PresalesOffer.id)))
+    _apply(db, data, changed)
+    rows = list(db.scalars(select(PresalesOffer).where(PresalesOffer.id != original.id)))
     assert len(rows) == 2 and {row.inquiry_id for row in rows} == {first.id, second.id}
-    assert all(row.status == "draft" and row.unit_price == Decimal("12.50") for row in rows)
+    # D-0052：Excel 与页面同一写入口，上传即生效，每个来源行一个当前价。
+    assert all(row.status == "published" and row.unit_price == Decimal("12.50") for row in rows)
     assert all(row.supplier_id == data.supplier.id for row in rows)
-    assert result["response"]["replied"] is False
-    assert all(item.status == "pending" for inquiry in (first, second)
-        for item in work_items.subject_items(db, inquiries.subject(inquiry), data.buyer.id))
+    assert {line.answer_state for inquiry in (first, second) for line in inquiries.lines_for(db, inquiry.id)} == {"quoted"}
     replay = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, changed,
         ctx=common.resolve_actor(db, data.buyer.id)[1])
-    assert replay["replayed"] and len(list(db.scalars(select(PresalesOffer)))) == 2
+    assert replay["replayed"] and len(list(db.scalars(select(PresalesOffer)))) == 3
+    assert original.revision_no == original_revision and original.unit_price == Decimal("19")
 
 
 @pytest.mark.parametrize("bound", [True, False], ids=["part", "raw-pn"])
@@ -127,130 +162,167 @@ def test_opposite_return_defective_terms_split_and_are_readonly(db, quote_data, 
 
 
 @pytest.mark.parametrize("label,basis", [("成本价", "cost"), ("售价", "sale")])
-def test_workbook_price_basis_import_export_and_existing_draft_patch_preserve(db, quote_data, label, basis):
+def test_workbook_price_basis_import_export_and_price_only_patch(db, quote_data, label, basis):
     data = quote_data
     inquiry = _submitted(db, data)
     content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
     _apply(db, data, _edit(content, {2: {"处理方式": "报价", "单价": 25, "价格性质": label}}))
-    draft = db.scalar(select(PresalesOffer).where(PresalesOffer.inquiry_id == inquiry.id))
-    assert draft.price_basis == basis
+    line = inquiries.lines_for(db, inquiry.id)[0]
+    current = db.get(PresalesOffer, line.current_offer_id)
+    assert current.price_basis == basis and current.is_tax_inclusive is True
+    offers.update_offer(db, current.id, data.buyer.id, {"is_tax_inclusive": None}, expected_version=current.version)
     exported = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
     sheet = load_workbook(BytesIO(exported))["采购报价表"]
     columns = {cell.value: cell.column for cell in sheet[1]}
     assert sheet.cell(2, columns["价格性质"]).value == label
     _apply(db, data, _edit(exported, {2: {"单价": 30}}))
-    assert draft.price_basis == basis and draft.unit_price == Decimal("30")
-    published = offers.reply(db, inquiry.id, data.buyer.id, expected_version=inquiry.version)[0]
-    assert published.price_basis == basis
-
-
-@pytest.mark.parametrize("explicit_basis", [None, "售价"])
-def test_excel_update_cost_quote_preserves_unedited_basis_and_null_tax(db, quote_data, explicit_basis):
-    data = quote_data
-    original = _published(db, data)
-    offers.update_offer(db, original.id, data.buyer.id,
-        {"price_basis": "cost", "is_tax_inclusive": None}, expected_version=original.version)
-    inquiry = _submitted(db, data)
-    content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
-    sheet = load_workbook(BytesIO(content))["采购报价表"]
-    columns = {cell.value: cell.column for cell in sheet[1]}
-    assert "成本价" in sheet.cell(2, columns["已有有效报价"]).value
-    values = {"处理方式": "报价", "单价": 22, "已有报价时的选择": "更新", "目标报价编号": original.id}
-    if explicit_basis is not None:
-        values["价格性质"] = explicit_basis
-    _apply(db, data, _edit(content, {2: values}))
-    draft = db.scalar(select(PresalesOffer).where(PresalesOffer.inquiry_id == inquiry.id))
-    expected = "sale" if explicit_basis else "cost"
-    assert draft.price_basis == expected and draft.is_tax_inclusive is None
-    published = offers.reply(db, inquiry.id, data.buyer.id, expected_version=inquiry.version)[0]
-    assert published.id == original.id and published.price_basis == expected and published.is_tax_inclusive is None
+    assert line.current_offer_id == current.id and current.status == "published"
+    assert current.price_basis == basis and current.is_tax_inclusive is None and current.unit_price == Decimal("30")
 
 
 def test_exact_requirement_splits_and_unknown_pn_can_skip(db, quote_data):
     data = quote_data
-    first = _submitted(db, data)
-    second = _submitted(db, data, exact=True)
-    third = _submitted(db, data, lines=[{"pn_raw": "新型号", "qty": 1}])
-    content = quote_workbook.export_quote_sheet(db, [first.id, second.id, third.id], data.buyer.id)
+    sources = [_submitted(db, data), _submitted(db, data, exact=True),
+               _submitted(db, data, lines=[{"pn_raw": "新型号", "qty": 1}])]
+    content = quote_workbook.export_quote_sheet(db, [inquiry.id for inquiry in sources], data.buyer.id)
     sheet = load_workbook(BytesIO(content))["采购报价表"]
-    assert sheet.max_row == 4
+    columns = {cell.value: cell.column for cell in sheet[1]}
+    rows = {(sheet.cell(n, columns["来源单号"]).value, sheet.cell(n, columns["PN"]).value,
+             sheet.cell(n, columns["要求 PN 一致"]).value) for n in range(2, sheet.max_row + 1)}
+    assert rows == {(sources[0].inquiry_no, data.parts[0].pn_std, False),
+                    (sources[1].inquiry_no, data.parts[0].pn_std, True),
+                    (sources[2].inquiry_no, "新型号", False)}
     result = _apply(db, data, _edit(content, {n: {"处理方式": "不报", "不报原因": "待确认"} for n in range(2, 5)}))
-    assert len(result["response"]["saved"]) == 3
+    lines = [inquiries.lines_for(db, inquiry.id)[0] for inquiry in sources]
+    assert {row["line_id"] for row in result["response"]["saved"]} == {line.id for line in lines}
     responses = list(db.scalars(select(PresalesLineResponse)))
-    assert len(responses) == 3 and all(row.mode == "skip" and row.is_draft for row in responses)
-    assert visibility.inquiry_view(db, first, common.resolve_actor(db, data.sales.id)[1])["progress"]["quoted_lines"] == 0
+    assert len(responses) == 3 and all(row.mode == "skip" and not row.is_draft for row in responses)
+    assert all(line.answer_state == "skip" and line.answer_reason == "待确认" and line.current_offer_id is None
+               for line in lines)
+    assert lines[2].part_id is None
+    for inquiry in sources:
+        view = visibility.inquiry_view(db, inquiry, common.resolve_actor(db, data.sales.id)[1])
+        assert view["progress"]["quoted_lines"] == 1 and view["progress"]["effective_quoted_lines"] == 0
+    peer_sheet = load_workbook(BytesIO(quote_workbook.export_quote_sheet(
+        db, [inquiry.id for inquiry in sources], data.peer.id)))["采购报价表"]
+    assert all(peer_sheet.cell(n, columns["处理方式"]).value == "不报" and
+               peer_sheet.cell(n, columns["不报原因"]).value == "待确认" for n in range(2, 5))
 
 
-def test_reuse_pins_version_only_when_every_owner_can_view(db, quote_data):
+def test_price_only_patch_preserves_different_source_drafts_and_hidden_columns(db, quote_data):
     data = quote_data
-    offer = _published(db, data)
-    first = _submitted(db, data)
-    second = _submitted(db, data, owner=data.other)
-    content = quote_workbook.export_quote_sheet(db, [first.id, second.id], data.buyer.id)
-    result = _apply(db, data, _edit(content, {2: {"处理方式": "沿用", "沿用报价编号": offer.id}}))
-    responses = list(db.scalars(select(PresalesLineResponse)))
-    assert len(responses) == 2
-    assert all(row.ref_offer_id == offer.id and row.ref_offer_revision_no == offer.revision_no for row in responses)
-    assert result["response"]["replied"] is False
-    for inquiry in (first, second):
-        offers.reply(db, inquiry.id, data.buyer.id, expected_version=inquiry.version)
-    assert all(not row.is_draft for row in responses)
+    sources = [_submitted(db, data), _submitted(db, data)]
+    lines = [inquiries.lines_for(db, inquiry.id)[0] for inquiry in sources]
+    for index, (inquiry, line) in enumerate(zip(sources, lines)):
+        offers.save_draft(db, inquiry.id, line.id, data.buyer.id, {
+            "unit_price": str(10 + index), "supplier_id": data.supplier.id,
+            "price_basis": ("cost", "sale")[index], "is_tax_inclusive": (None, False)[index],
+            "notes": f"来源备注{index}", "stock_location": f"仓库{index}",
+        }, expected_version=inquiry.version)
+    content = quote_workbook.export_quote_sheet(db, [row.id for row in sources], data.buyer.id,
+        visible_columns={"lines": ["unit_price"]})
+    sheet = load_workbook(BytesIO(content))["采购报价表"]
+    assert sheet.max_row == 2 and [cell.value for cell in sheet[1]] == ["_row_token", "来源单号", "PN", "单价"]
+    _apply(db, data, _edit(content, {2: {"单价": "25.00"}}))
+    current = [db.get(PresalesOffer, line.current_offer_id) for line in lines]
+    assert current[0].id != current[1].id
+    assert all(offer.status == "published" and offer.unit_price == Decimal("25.00")
+               and offer.supplier_id == data.supplier.id for offer in current)
+    assert [offer.notes for offer in current] == ["来源备注0", "来源备注1"]
+    assert [offer.stock_location for offer in current] == ["仓库0", "仓库1"]
+    assert [offer.price_basis for offer in current] == ["cost", "sale"]
+    assert [offer.is_tax_inclusive for offer in current] == [None, False]
+    sheet = load_workbook(BytesIO(quote_workbook.export_quote_sheet(
+        db, [row.id for row in sources], data.buyer.id)))["采购报价表"]
+    columns = {cell.value: cell.column for cell in sheet[1]}
+    assert sheet.cell(2, columns["单价"]).value == 25
 
 
-def test_hidden_reuse_fails_and_rolls_back(db, quote_data):
+def test_deleted_own_draft_does_not_block_first_receipt_replay(db, quote_data):
     data = quote_data
-    offer = _published(db, data, private=True)
-    first = _submitted(db, data)
-    content = quote_workbook.export_quote_sheet(db, [first.id], data.buyer.id)
-    assert f"#{offer.id}：" not in str(list(load_workbook(BytesIO(content))["采购报价表"].values))
-    with pytest.raises(ApplyFailed) as error:
-        _apply(db, data, _edit(content, {2: {"处理方式": "沿用", "沿用报价编号": offer.id}}))
-    assert "不可见" in str(error.value.__cause__)
-    assert not list(db.scalars(select(PresalesLineResponse)))
-
-
-@pytest.mark.parametrize("choice", ["更新", "另报"])
-def test_existing_quote_requires_explicit_choice_and_saves_for_reply(db, quote_data, choice):
-    data = quote_data
-    original = _published(db, data)
     inquiry = _submitted(db, data)
-    content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
-    result = _apply(db, data, _edit(content, {2: {"处理方式": "报价", "单价": 22,
-        "已有报价时的选择": choice, "目标报价编号": original.id if choice == "更新" else None}}))
-    draft = db.scalar(select(PresalesOffer).where(PresalesOffer.inquiry_id == inquiry.id))
-    assert draft.status == "draft" and original.unit_price == Decimal("19.00")
-    assert result["response"]["replied"] is False
-    published = offers.reply(db, inquiry.id, data.buyer.id, expected_version=inquiry.version)
-    assert len(published) == 1
-    assert (published[0].id == original.id) == (choice == "更新")
-    assert published[0].unit_price == Decimal("22.00")
+    line = inquiries.lines_for(db, inquiry.id)[0]
+    draft = offers.save_draft(db, inquiry.id, line.id, data.buyer.id,
+        {"unit_price": "12.00", "notes": "本人草稿备注"}, expected_version=inquiry.version)
+    content = _edit(quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id),
+        {2: {"处理方式": "不报", "不报原因": "本轮不报"}})
+    result = _apply(db, data, content)
+    assert line.answer_state == "skip" and line.current_offer_id is None
+    assert draft.status == "draft"
+    # 模拟本人随后清掉未发布草稿；回执不能依赖草稿实体仍存在。
+    db.delete(draft)
+    db.flush()
+    version = line.version
+    ctx = common.resolve_actor(db, data.buyer.id)[1]
+    replay = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, content, ctx=ctx)
+    assert replay["replayed"] and replay["response"] == result["response"]
+    assert line.version == version and len(list(db.scalars(select(PresalesLineResponse)))) == 1
+    data.buyer.perm_overrides = {"page_presales": False}
+    db.flush()
+    with pytest.raises(Forbidden):
+        operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, content, ctx=ctx)
+    with pytest.raises(Forbidden):
+        operations.apply(db, result["operation_id"], data.buyer.id, result["plan_digest"])
 
 
-@pytest.mark.parametrize("split", [False, True])
-def test_batch_cannot_save_multiple_updates_to_same_target(db, quote_data, split):
+def test_another_assignees_line_can_export_but_stale_version_conflicts(db, quote_data):
     data = quote_data
-    original = _published(db, data)
-    first = _submitted(db, data)
-    second = _submitted(db, data, exact=split)
-    content = quote_workbook.export_quote_sheet(db, [first.id, second.id], data.buyer.id)
-    rows = [2, 3] if split else [2]
-    changed = _edit(content, {row: {"处理方式": "报价", "单价": 25,
-        "已有报价时的选择": "更新", "目标报价编号": original.id} for row in rows})
+    inquiry = _submitted(db, data, assigned=data.peer)
+    line = inquiries.lines_for(db, inquiry.id)[0]
+    content = _edit(quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id),
+        {2: {"处理方式": "不报", "不报原因": "无货"}})
+    preview = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, content,
+        ctx=common.resolve_actor(db, data.buyer.id)[1])
+    pool.set_price(db, line.id, data.peer.id, {"unit_price": 15}, expected_version=line.version)
+    with pytest.raises(Conflict):
+        operations.apply(db, preview["operation_id"], data.buyer.id, preview["plan_digest"])
+    assert line.answer_state == "quoted" and db.get(PresalesOffer, line.current_offer_id).unit_price == Decimal("15")
+
+
+def test_reuse_copies_shared_price_and_historical_tax_to_each_source(db, quote_data):
+    data = quote_data
+    original = _published(db, data, private=True)
+    offers.update_offer(db, original.id, data.buyer.id,
+        {"price_basis": "cost", "is_tax_inclusive": None}, expected_version=original.version)
+    sources = [_submitted(db, data), _submitted(db, data, owner=data.other)]
+    content = quote_workbook.export_quote_sheet(db, [inquiry.id for inquiry in sources], data.peer.id)
+    sheet = load_workbook(BytesIO(content))["采购报价表"]
+    columns = {cell.value: cell.column for cell in sheet[1]}
+    assert f"#{original.id}：" in sheet.cell(2, columns["已有有效报价"]).value
+    content = _edit(content, {2: {"处理方式": "沿用", "沿用报价编号": original.id}})
+    preview = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, content,
+        ctx=common.resolve_actor(db, data.peer.id)[1])
+    operations.apply(db, preview["operation_id"], data.peer.id, preview["plan_digest"])
+    lines = [inquiries.lines_for(db, inquiry.id)[0] for inquiry in sources]
+    copies = [db.get(PresalesOffer, line.current_offer_id) for line in lines]
+    assert len({original.id, *(offer.id for offer in copies)}) == 3
+    assert all(offer.unit_price == Decimal("19") and offer.price_basis == "cost"
+               and offer.is_tax_inclusive is None and offer.updated_by == data.peer.id for offer in copies)
+    assert [offer.line_id for offer in copies] == [line.id for line in lines]
+    pool.set_price(db, lines[0].id, data.sales.id, {"unit_price": 28}, expected_version=lines[0].version)
+    assert [offer.unit_price for offer in (original, *copies)] == [Decimal("19"), Decimal("28"), Decimal("19")]
+
+
+@pytest.mark.parametrize("invalid", ["other_pn", "stale", "draft"])
+def test_reuse_rejects_wrong_pn_and_ineffective_offers(db, quote_data, invalid):
+    data = quote_data
+    if invalid == "draft":
+        source = _submitted(db, data)
+        line = inquiries.lines_for(db, source.id)[0]
+        original = offers.save_draft(db, source.id, line.id, data.buyer.id, {"unit_price": 19},
+            expected_version=source.version)
+    else:
+        original = _published(db, data)
+        if invalid == "stale":
+            offers.mark_stale(db, original, data.buyer.id, "来源价格失效")
+    part = data.parts[1] if invalid == "other_pn" else data.parts[0]
+    target = _submitted(db, data, lines=[{"part_id": part.id}])
+    content = quote_workbook.export_quote_sheet(db, [target.id], data.buyer.id)
     with pytest.raises(ApplyFailed) as error:
-        _apply(db, data, changed)
-    assert "多次更新同一有效报价" in str(error.value.__cause__)
-    assert not list(db.scalars(select(PresalesOffer).where(PresalesOffer.status == "draft")))
-    assert original.unit_price == Decimal("19.00")
-
-
-def test_missing_existing_choice_fails_without_persisting_draft(db, quote_data):
-    data = quote_data
-    _published(db, data)
-    inquiry = _submitted(db, data)
-    content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
-    with pytest.raises(ApplyFailed):
-        _apply(db, data, _edit(content, {2: {"处理方式": "报价", "单价": 22}}))
-    assert not list(db.scalars(select(PresalesOffer).where(PresalesOffer.inquiry_id == inquiry.id)))
+        _apply(db, data, _edit(content, {2: {"处理方式": "沿用", "沿用报价编号": original.id}}))
+    assert "沿用" in str(error.value.__cause__)
+    assert inquiries.lines_for(db, target.id)[0].answer_state == "pending"
+    assert db.scalar(select(PresalesOffer).where(PresalesOffer.inquiry_id == target.id)) is None
 
 
 def test_missing_supplier_fails_without_persisting_draft(db, quote_data):
@@ -275,32 +347,16 @@ def test_late_source_failure_rolls_back_earlier_distribution(db, quote_data, mon
     first = _submitted(db, data)
     second = _submitted(db, data)
     content = quote_workbook.export_quote_sheet(db, [first.id, second.id], data.buyer.id)
-    actual = offers.save_line_decision
-    def reject_second(db, inquiry_id, *args, **kwargs):
-        if inquiry_id == second.id:
+    second_line = inquiries.lines_for(db, second.id)[0].id
+    actual = pool.set_price
+    def reject_second(db, line_id, *args, **kwargs):
+        if line_id == second_line:
             raise ValueError("第二张来源单校验失败")
-        return actual(db, inquiry_id, *args, **kwargs)
-    monkeypatch.setattr(offers, "save_line_decision", reject_second)
+        return actual(db, line_id, *args, **kwargs)
+    monkeypatch.setattr(pool, "set_price", reject_second)
     with pytest.raises(ApplyFailed):
         _apply(db, data, _edit(content, {2: {"处理方式": "报价", "单价": 22}}))
     assert not list(db.scalars(select(PresalesOffer)))
-
-
-def test_only_own_active_task_exports_and_source_version_conflicts(db, quote_data):
-    data = quote_data
-    other = _submitted(db, data, assigned=data.peer)
-    with pytest.raises(Exception, match="待办"):
-        quote_workbook.export_quote_sheet(db, [other.id], data.buyer.id)
-    inquiry = _submitted(db, data)
-    content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
-    changed = _edit(content, {2: {"处理方式": "不报", "不报原因": "无货"}})
-    preview = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, changed,
-        ctx=common.resolve_actor(db, data.buyer.id)[1])
-    line = inquiries.lines_for(db, inquiry.id)[0]
-    line.version += 1
-    db.flush()
-    with pytest.raises(Conflict):
-        operations.apply(db, preview["operation_id"], data.buyer.id, preview["plan_digest"])
 
 
 def test_reuse_offer_updated_after_preview_requires_fresh_export(db, quote_data):
@@ -364,94 +420,6 @@ def test_identity_columns_survive_selection_and_rows_cannot_be_added_or_deleted(
     assert corrected["plan"]["counts"]["unchanged"] == 1
 
 
-def test_price_only_patch_preserves_different_source_drafts_and_hidden_columns(db, quote_data):
-    data = quote_data
-    sources = [_submitted(db, data), _submitted(db, data)]
-    drafts = []
-    for index, inquiry in enumerate(sources):
-        line = inquiries.lines_for(db, inquiry.id)[0]
-        drafts.append(offers.save_draft(db, inquiry.id, line.id, data.buyer.id,
-            {"unit_price": str(10 + index), "supplier_id": data.supplier.id,
-             "price_basis": "cost" if index == 0 else "sale",
-             "notes": f"来源备注{index}", "stock_location": f"仓库{index}"},
-            expected_version=inquiry.version))
-    content = quote_workbook.export_quote_sheet(db, [row.id for row in sources], data.buyer.id,
-        visible_columns={"lines": ["unit_price"]})
-    _apply(db, data, _edit(content, {2: {"单价": "25.00"}}))
-    assert [row.unit_price for row in drafts] == [Decimal("25.00"), Decimal("25.00")]
-    assert [row.notes for row in drafts] == ["来源备注0", "来源备注1"]
-    assert [row.stock_location for row in drafts] == ["仓库0", "仓库1"]
-    assert [row.price_basis for row in drafts] == ["cost", "sale"]
-    assert all(row.supplier_id == data.supplier.id for row in drafts)
-
-
-def test_historical_scope_replay_rechecks_task_ownership(db, quote_data):
-    data = quote_data
-    inquiry = _submitted(db, data)
-    content = _edit(quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id),
-        {2: {"处理方式": "不报", "不报原因": "无货"}})
-    _apply(db, data, content)
-    task = work_items.subject_items(db, inquiries.subject(inquiry), data.buyer.id)[0]
-    task.assignee_id = data.peer.id
-    db.flush()
-    with pytest.raises(Forbidden):
-        operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, content,
-            ctx=common.resolve_actor(db, data.buyer.id)[1])
-
-
-@pytest.mark.parametrize("level", ["header", "line"])
-@pytest.mark.parametrize("preview_before_change", [False, True])
-def test_deleted_error_plan_cannot_replay_newly_private_requirements(db, quote_data, level, preview_before_change):
-    data = quote_data
-    inquiry = _submitted(db, data, lines=[{"part_id": data.parts[0].id, "qty": 2,
-        "notes": "原公开行备注"}])
-    inquiry.notes = "原公开单头备注"
-    db.flush()
-    content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
-    book = load_workbook(BytesIO(content))
-    book["采购报价表"].delete_rows(2)
-    output = BytesIO()
-    book.save(output)
-    content = output.getvalue()
-    ctx = common.resolve_actor(db, data.buyer.id)[1]
-    preview = None
-    if preview_before_change:
-        preview = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, content, ctx=ctx)
-        assert preview["plan"]["errors"]
-        assert "原公开" in preview["plan"]["rows"][0]["values"]["customer_requirements"]
-    target = inquiry if level == "header" else inquiries.lines_for(db, inquiry.id)[0]
-    target.notes_audience_rule_id = common.rule_id(db, {"mode": "private"},
-        common.resolve_actor(db, data.sales.id)[1])
-    db.flush()
-    with pytest.raises(Forbidden):
-        operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, content, ctx=ctx)
-    if preview is not None:
-        with pytest.raises(Forbidden):
-            operations.apply(db, preview["operation_id"], data.buyer.id, preview["plan_digest"])
-
-
-@pytest.mark.parametrize("preview_before_change", [False, True])
-def test_deleted_error_plan_cannot_replay_newly_hidden_offer_summary(db, quote_data, preview_before_change):
-    data = quote_data
-    original = _published(db, data)
-    inquiry = _submitted(db, data)
-    content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
-    book = load_workbook(BytesIO(content))
-    book["采购报价表"].delete_rows(2)
-    output = BytesIO()
-    book.save(output)
-    content = output.getvalue()
-    ctx = common.resolve_actor(db, data.buyer.id)[1]
-    if preview_before_change:
-        preview = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, content, ctx=ctx)
-        assert f"#{original.id}：" in preview["plan"]["rows"][0]["values"]["active_offers"]
-    origin = common.get_inquiry(db, original.inquiry_id)
-    origin.offer_audience_rule_id = common.rule_id(db, {"mode": "private"}, ctx)
-    db.flush()
-    with pytest.raises(Forbidden):
-        operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, content, ctx=ctx)
-
-
 def test_export_scope_only_tracks_selected_visible_fields_and_contains_no_values(db, quote_data):
     data = quote_data
     inquiry = _submitted(db, data)
@@ -469,39 +437,6 @@ def test_export_scope_only_tracks_selected_visible_fields_and_contains_no_values
     preview = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, content,
         ctx=common.resolve_actor(db, data.buyer.id)[1])
     assert preview["plan"]["counts"]["unchanged"] == 1
-
-
-@pytest.mark.parametrize("preview_before_change", [False, True])
-def test_forwarded_supervisor_export_cannot_leak_private_requirements(db, quote_data, preview_before_change):
-    data = quote_data
-    data.peer.perm_overrides = {"action_presales_supervise": True}
-    db.flush()
-    inquiry = inquiries.create_draft(db, data.sales.id, assignee_ids=[data.buyer.id, data.peer.id],
-        lines=[{"part_id": data.parts[0].id, "notes": "主管导出的受控客户要求"}])
-    inquiries.submit(db, inquiry.id, data.sales.id, inquiry.version)
-    line = inquiries.lines_for(db, inquiry.id)[0]
-    private = common.rule_id(db, {"mode": "private"}, common.resolve_actor(db, data.sales.id)[1])
-    if not preview_before_change:
-        line.notes_audience_rule_id = private
-        db.flush()
-    content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.peer.id)
-    book = load_workbook(BytesIO(content))
-    assert "主管导出的受控客户要求" in str(list(book["采购报价表"].values))
-    book["采购报价表"].delete_rows(2)
-    output = BytesIO()
-    book.save(output)
-    content = output.getvalue()
-    ctx = common.resolve_actor(db, data.buyer.id)[1]
-    if preview_before_change:
-        previous = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, content, ctx=ctx)
-        assert previous["plan"]["errors"]
-        line.notes_audience_rule_id = private
-        db.flush()
-    with pytest.raises(Forbidden):
-        operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, content, ctx=ctx)
-    if preview_before_change:
-        with pytest.raises(Forbidden):
-            operations.apply(db, previous["operation_id"], data.buyer.id, previous["plan_digest"])
 
 
 def test_other_rows_in_another_export_do_not_expand_authorization_scope(db, quote_data):
@@ -537,27 +472,111 @@ def test_forwarded_buyer_draft_cannot_leak_private_purchase_notes(db, quote_data
             ctx=common.resolve_actor(db, data.buyer.id)[1])
 
 
-def test_deleted_own_draft_does_not_block_first_receipt_replay(db, quote_data):
+def _remove_quote_row(content):
+    book = load_workbook(BytesIO(content))
+    book["采购报价表"].delete_rows(2)
+    output = BytesIO()
+    book.save(output)
+    return output.getvalue()
+
+
+@pytest.mark.parametrize(("mode", "field"), [("skip", "reason"), ("reuse", "ref_offer_id")])
+def test_forwarded_draft_response_stays_private_after_delete_and_permission_revocation(db, quote_data, mode, field):
     data = quote_data
     inquiry = _submitted(db, data)
     line = inquiries.lines_for(db, inquiry.id)[0]
-    draft = offers.save_draft(db, inquiry.id, line.id, data.buyer.id,
-        {"unit_price": "12.00", "notes": "本人草稿备注", "notes_audience": {"mode": "private"}},
-        expected_version=inquiry.version)
-    content = _edit(quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id),
-        {2: {"处理方式": "不报", "不报原因": "本轮不报"}})
-    result = _apply(db, data, content)
-    assert db.get(PresalesOffer, draft.id) is None
-    replay = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, content,
-        ctx=common.resolve_actor(db, data.buyer.id)[1])
-    assert replay["replayed"] and replay["response"] == result["response"]
+    value = "采购暂存的原因" if mode == "skip" else _published(db, data).id
+    draft = PresalesLineResponse(line_id=line.id, line_version=line.version, created_by=data.buyer.id,
+        mode=mode, is_draft=True, **{field: value})
+    db.add(draft)
+    db.flush()
+    schema = quote_workbook.QUOTE_SCHEMA.name
+    buyer = common.resolve_actor(db, data.buyer.id)[1]
+    peer = common.resolve_actor(db, data.peer.id)[1]
+    content = quote_workbook.export_quote_sheet(db, [inquiry.id], buyer, visible_columns={"lines": [field]})
+    removed = _remove_quote_row(content)
+    assert operations.preview(db, schema, removed, ctx=buyer)["plan"]["rows"][0]["values"][field] == value
+    with pytest.raises(Forbidden):
+        operations.preview(db, schema, removed, ctx=peer)
+
+    data.peer.perm_overrides = {"action_presales_supervise": True}
+    db.flush()
+    allowed = operations.preview(db, schema, removed, ctx=peer)
+    assert allowed["plan"]["rows"][0]["values"][field] == value
+    db.delete(draft)
+    data.peer.perm_overrides = {}
+    db.flush()
+    with pytest.raises(Forbidden):
+        operations.preview(db, schema, removed, ctx=peer)
+    with pytest.raises(Forbidden):
+        operations.apply(db, allowed["operation_id"], data.peer.id, allowed["plan_digest"])
+    with pytest.raises(Forbidden):
+        operations.preview(db, schema, content, ctx=peer)
+
+
+def test_only_exported_private_fields_restrict_the_file_for_a_shared_line(db, quote_data):
+    data = quote_data
+    inquiry = _submitted(db, data)
+    line = inquiries.lines_for(db, inquiry.id)[0]
+    db.add(PresalesLineResponse(line_id=line.id, line_version=line.version, created_by=data.buyer.id,
+        mode="skip", reason="私有原因", is_draft=True))
+    db.flush()
+    def export(keys):
+        return quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id, visible_columns={"lines": keys})
+    private = export(["mode"])
+    public = export(["qty"])
+    schema = quote_workbook.QUOTE_SCHEMA.name
+    peer = common.resolve_actor(db, data.peer.id)[1]
+    assert operations.preview(db, schema, _remove_quote_row(public), ctx=peer)["plan"]["rows"][0]["values"]["qty"] == "2.000"
+    pool.skip(db, line.id, data.peer.id, "公开的不报原因", expected_version=line.version)
+    published = export(["mode", "reason"])
+    row = operations.preview(db, schema, _remove_quote_row(published), ctx=peer)["plan"]["rows"][0]
+    assert (row["values"]["mode"], row["values"]["reason"]) == ("skip", "公开的不报原因")
+    with pytest.raises(Forbidden):
+        operations.preview(db, schema, _remove_quote_row(private), ctx=peer)
+
+
+def test_legacy_export_scope_requires_owner_or_supervisor_on_applied_replay(db, quote_data):
+    data = quote_data
+    inquiry = _submitted(db, data)
+    schema = quote_workbook.QUOTE_SCHEMA.name
+    content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
+    stored = db.scalar(select(PresalesWorkbookExport))
+    stored.scope = {"rows": stored.scope["rows"]}  # 升级前只记录来源范围，不记录是否带出未发布答复。
+    db.flush()
+    buyer = common.resolve_actor(db, data.buyer.id)[1]
+    peer = common.resolve_actor(db, data.peer.id)[1]
+    assert operations.preview(db, schema, content, ctx=buyer)["plan"]["counts"]["unchanged"] == 1
+    changed = _edit(content, {2: {"处理方式": "报价", "单价": 14}})
+    with pytest.raises(Forbidden):
+        operations.preview(db, schema, changed, ctx=peer)
+    data.peer.perm_overrides = {"action_presales_supervise": True}
+    db.flush()
+    invalid = _edit(content, {2: {"处理方式": "不报"}})
+    rejected = operations.preview(db, schema, invalid, ctx=peer)
+    with pytest.raises(ApplyFailed) as failed:
+        operations.apply(db, rejected["operation_id"], data.peer.id, rejected["plan_digest"])
+    assert failed.value.result["status"] == "failed"
+    preview = operations.preview(db, schema, changed, ctx=peer)
+    first = operations.apply(db, preview["operation_id"], data.peer.id, preview["plan_digest"])
+    assert operations.preview(db, schema, changed, ctx=peer)["response"] == first["response"]
+    data.peer.perm_overrides = {}
+    db.flush()
+    with pytest.raises(Forbidden):
+        operations.preview(db, schema, changed, ctx=peer)
+    with pytest.raises(Forbidden):
+        operations.apply(db, preview["operation_id"], data.peer.id, preview["plan_digest"])
+    with pytest.raises(Forbidden):
+        operations.preview(db, schema, invalid, ctx=peer)
+    with pytest.raises(Forbidden):
+        operations.apply(db, rejected["operation_id"], data.peer.id, rejected["plan_digest"])
 
 
 def test_optional_source_can_be_cleared_without_clearing_supplier(db, quote_data):
     data = quote_data
     inquiry = _submitted(db, data)
     line = inquiries.lines_for(db, inquiry.id)[0]
-    draft = offers.save_draft(db, inquiry.id, line.id, data.buyer.id,
+    offers.save_draft(db, inquiry.id, line.id, data.buyer.id,
         {"unit_price": "12.00", "source_key": "仓库A", "supplier_id": data.supplier.id},
         expected_version=inquiry.version)
     content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
@@ -568,7 +587,9 @@ def test_optional_source_can_be_cleared_without_clearing_supplier(db, quote_data
     output = BytesIO()
     book.save(output)
     _apply(db, data, output.getvalue())
-    assert draft.source_key == "" and draft.supplier_id == data.supplier.id
+    db.refresh(line)
+    current = db.get(PresalesOffer, line.current_offer_id)
+    assert current.source_key == "" and current.supplier_id == data.supplier.id and current.unit_price == Decimal("12.00")
 
 
 @pytest.mark.skipif(os.getenv("RUN_SOFFICE_ROUNDTRIP") != "1", reason="显式开启 LibreOffice 往返")

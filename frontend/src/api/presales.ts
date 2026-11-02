@@ -33,6 +33,7 @@ export interface LineInput {
 }
 
 export interface InquiryLine extends Omit<LineInput, "notes_audience" | "field_values"> {
+  answer_requires_review?: boolean;
   id: number;
   inquiry_id: number;
   line_key: string;
@@ -247,7 +248,7 @@ export const presales = {
     return (await api.get<Inquiry>(`${root}/inquiries/${id}`, { signal })).data;
   },
   async createInquiry(body: InquiryInput) { return (await api.post<Inquiry>(`${root}/inquiries`, body)).data; },
-  async updateInquiry(id: number, body: Omit<InquiryInput, "kind"> & VersionInput) {
+  async updateInquiry(id: number, body: Omit<InquiryInput, "kind"> & VersionInput & { expected_line_versions?: Record<string, number>; confirm_reset?: boolean }) {
     return (await api.patch<Inquiry>(`${root}/inquiries/${id}`, body)).data;
   },
   submitInquiry: (id: number, body: VersionInput) => inquiryAction(id, "submit", body),
@@ -259,7 +260,7 @@ export const presales = {
   async appendLines(id: number, body: VersionInput & { lines: LineInput[] }) {
     return (await api.post<Inquiry>(`${root}/inquiries/${id}/lines`, body)).data;
   },
-  async closeInquiry(id: number, body: VersionInput & { outcome: "won" | "lost" | "cancelled"; won_offer_id?: number }) {
+  async closeInquiry(id: number, body: VersionInput & { outcome: "won" | "lost" | "cancelled"; won_offer_id?: number; expected_offer_revision_no?: number }) {
     return (await api.post<Inquiry>(`${root}/inquiries/${id}/close`, body)).data;
   },
   async saveOffer(inquiryId: number, lineId: number, body: OfferInput & VersionInput & { offer_id?: number; work_item_id?: number }) {

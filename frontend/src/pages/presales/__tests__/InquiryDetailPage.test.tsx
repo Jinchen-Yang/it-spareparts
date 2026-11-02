@@ -29,7 +29,7 @@ function offer(id: number, patch: Partial<Offer> = {}): Offer {
 
 function inquiry(patch: Partial<Inquiry> = {}): Inquiry {
   return {
-    id: 5, inquiry_no: "XJ0005", kind: "sales_inquiry", status: "submitted", revision: 1, version: 4,
+    id: 5, is_owner: true, inquiry_no: "XJ0005", kind: "sales_inquiry", status: "submitted", revision: 1, version: 4,
     created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-02T00:00:00Z", customer_id: 31,
     notes: "需要质保", line_count: 1, progress: { quoted_lines: 1, line_count: 1 },
     lines: [{ id: 11, inquiry_id: 5, seq: 1, part_id: 8, pn_raw: "PN-8", line_key: "line-a", qty: "2",
@@ -59,6 +59,23 @@ beforeEach(() => { vi.clearAllMocks(); mocks.library.mockResolvedValue({}); });
 afterEach(() => { cleanup(); });
 
 describe("询价详情", () => {
+  it("待核对的旧报价保留历史展示且不可采纳", async () => {
+    const data = inquiry();
+    const lines = data.lines!.map((line) => ({ ...line, answer_requires_review: true }));
+    await openPage(inquiry({ lines, line_answers: [{ line_id: 11, state: "pending", responded: false }] }));
+    expect(await screen.findByText("待核对，请按当前条件重新报价")).toBeVisible();
+    const oldPrice = screen.getByRole("button", { name: "采纳 PN-8 报价 1" });
+    expect(oldPrice).toBeDisabled();
+    expect(within(oldPrice).queryByText(/最低价/)).not.toBeInTheDocument();
+  });
+
+  it("他人可以看已提交询价与报价，不能从详情追加行或代表发起人关单", async () => {
+    await openPage(inquiry({ is_owner: false }));
+    expect(screen.queryByRole("button", { name: "追加行" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "关单" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "未成交关单" })).toBeNull();
+  });
+
   it("逐行横向比价，同口径找最低；旧版本及过期不参与，撤销报价不出现", async () => {
     await openPage(inquiry({ offers: [
       offer(1, { unit_price: "100.00" }), offer(2, { unit_price: "90.00" }),
@@ -135,7 +152,7 @@ describe("询价详情", () => {
     await user.click(screen.getByRole("combobox", { name: "采纳报价" }));
     await user.click(await screen.findByText(/PN-8 · 报价 #2/));
     await user.click(screen.getByRole("button", { name: "确认关单" }));
-    await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 2 }));
+    await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 2, expected_offer_revision_no: 1 }));
     expect(await screen.findByText("已结束")).toBeInTheDocument();
   });
 
@@ -182,14 +199,10 @@ describe("询价详情", () => {
     await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome }));
   });
 
-  it("撤回成功后进入编辑；复制已关单后进入新单编辑", async () => {
+  it("已提交询价不再提供撤回；复制已关单后进入新单编辑", async () => {
     const user = userEvent.setup();
-    mocks.withdrawInquiry.mockResolvedValue(inquiry({ status: "revising" }));
     await openPage();
-    await user.click(screen.getByRole("button", { name: "撤回修改" }));
-    expect(await screen.findByText("编辑路由")).toBeInTheDocument();
-    expect(screen.getByLabelText("编辑地址")).toHaveTextContent("/presales/inquiries/5/edit");
-    expect(mocks.withdrawInquiry).toHaveBeenCalledWith(5, { expected_version: 4 });
+    expect(screen.queryByRole("button", { name: "撤回修改" })).not.toBeInTheDocument();
     cleanup();
     mocks.copyInquiry.mockResolvedValue(inquiry({ id: 6, status: "draft" }));
     await openPage(inquiry({ status: "closed" }));
@@ -199,19 +212,12 @@ describe("询价详情", () => {
     expect(mocks.copyInquiry).toHaveBeenCalledWith(5, { expected_version: 4 });
   });
 
-  it("追加行进入追加模式，409 刷新最新版本", async () => {
+  it("追加行进入追加模式", async () => {
     const user = userEvent.setup();
     await openPage();
     await user.click(screen.getByRole("button", { name: "追加行" }));
     expect(await screen.findByText("编辑路由")).toBeInTheDocument();
     expect(screen.getByLabelText("编辑地址")).toHaveTextContent("/presales/inquiries/5/edit?append=1");
-    cleanup();
-    mocks.withdrawInquiry.mockRejectedValue({ response: { status: 409, data: { detail: "版本冲突" } } });
-    await openPage();
-    mocks.getInquiry.mockResolvedValue(inquiry({ version: 7, status: "revising" }));
-    await user.click(screen.getByRole("button", { name: "撤回修改" }));
-    expect(await screen.findByText("撤回修改中")).toBeInTheDocument();
-    expect(mocks.getInquiry).toHaveBeenCalledTimes(3);
   });
 
   it("主动报价关单后复制，进入主动报价草稿编辑入口", async () => {
@@ -270,7 +276,7 @@ it("采纳已更新的沿用报价时，下拉明确告知当前价格税基及�
   await user.click(screen.getByRole("combobox", { name: "采纳报价" }));
   await user.click(await screen.findByText(/PN-8 · 报价 #7 · 采购7 · 当前¥75.00 · 不含税 · 第 2 版/));
   await user.click(screen.getByRole("button", { name: "确认关单" }));
-  await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 7 }));
+  await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 7, expected_offer_revision_no: 2 }));
 });
 
 it("同一报价ID在不同询价行钉住不同版本时，逐行使用各自快照比价", async () => {
@@ -300,7 +306,7 @@ it("点矩阵报价选择成交采纳，过期与旧版本不可选择，时间�
   expect(screen.queryByText("时间线 presales_inquiry 5")).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "关单" }));
   await user.click(screen.getByRole("button", { name: "确认关单" }));
-  await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 2 }));
+  await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 2, expected_offer_revision_no: 1 }));
 });
 
 it("详情草稿沿用不进入可采纳报价，草稿不报与沿用均标为未回复", async () => {

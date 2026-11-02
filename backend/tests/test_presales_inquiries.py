@@ -251,32 +251,39 @@ def test_binding_reuses_duplicates_and_only_once(db, presales_users, presales_pa
         binding.create_and_bind(db, line.id, users.peer.id, line.version, pn_std="PS-NEW")
 
 
-def test_binding_creation_is_transactional_and_requires_claim(db, presales_users):
+def test_binding_creation_without_assignment_remains_transactional(db, presales_users):
     users = presales_users
     inquiry = inquiries.create_draft(db, users.sales.id, lines=[{"pn_raw": "DISTINCT-NEW-ALPHA"}])
-    inquiries.submit(db, inquiry.id, users.sales.id, inquiry.version)
+    inquiries.submit(db, inquiry.id, users.sales.id, inquiry.version, open_tasks=False)
     line = inquiries.lines_for(db, inquiry.id)[0]
-    with pytest.raises(Forbidden):
-        binding.create_and_bind(db, line.id, users.buyer.id, line.version)
-    item = _items(db, inquiry, users)[0]
-    work_items.claim(db, item.id, users.buyer.id, item.version)
+    db.commit()
     binding.create_and_bind(db, line.id, users.buyer.id, line.version, description="新建说明")
     assert db.get(DimPart, line.part_id).description == "新建说明"
-    created_id = line.part_id
+    line_id, part_id = line.id, line.part_id
     db.rollback()
     with SessionLocal() as fresh:
-        assert fresh.get(DimPart, created_id) is None
+        assert fresh.get(DimPart, part_id) is None
+        assert fresh.get(PresalesInquiryLine, line_id).part_id is None
 
 
-def test_binding_requires_both_permissions(db, presales_users):
+@pytest.mark.parametrize("missing", ["action_presales_bind_part", "page_master_data"])
+def test_binding_requires_both_permissions(db, presales_users, presales_parts, missing):
     users = presales_users
-    inquiry = inquiries.create_draft(db, users.sales.id, assignee_ids=[users.buyer.id], lines=[{"pn_raw": "UNBOUND"}])
-    inquiries.submit(db, inquiry.id, users.sales.id, inquiry.version)
+    inquiry = inquiries.create_draft(db, users.sales.id, lines=[{"pn_raw": presales_parts[0].pn_std}])
+    inquiries.submit(db, inquiry.id, users.sales.id, inquiry.version, open_tasks=False)
     line = inquiries.lines_for(db, inquiry.id)[0]
-    users.buyer.perm_overrides = {"page_master_data": False}
+    versions = (inquiry.version, line.version)
+    users.buyer.perm_overrides = {missing: False}
     db.flush()
     with pytest.raises(Forbidden):
         binding.check(db, line.id, users.buyer.id)
+    with pytest.raises(Forbidden):
+        binding.bind(db, line.id, users.buyer.id, line.version, part_id=presales_parts[0].id)
+    assert line.part_id is None and (inquiry.version, line.version) == versions
+    # 同一行不指派、不领取，权限齐全的采购可查重并绑定。
+    assert binding.check(db, line.id, users.peer.id)["near_duplicates"]
+    binding.bind(db, line.id, users.peer.id, line.version, part_id=presales_parts[0].id)
+    assert line.part_id == presales_parts[0].id
 
 
 def test_public_pool_concurrent_claim_exactly_one_winner(db, presales_users, presales_parts):

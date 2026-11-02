@@ -1,5 +1,14 @@
 import { presales, type Inquiry, type InquiryLine } from "../../api/presales";
 import PartRegistrationForm from "../../components/parts/PartRegistrationForm";
+import { readPermissionMap } from "../../nav";
+
+export function canBindPresalesPart() {
+  const permissions = readPermissionMap();
+  return localStorage.getItem("role") === "admin" || (
+    permissions.page_presales === true && permissions.action_presales_bind_part === true
+    && permissions.page_master_data === true
+  );
+}
 
 export default function PartBinding({ line, onBound, refresh, disabled, compact = false }: {
   line: InquiryLine; onBound: (inquiry: Inquiry) => void; refresh: () => Promise<void>; disabled?: boolean; compact?: boolean;

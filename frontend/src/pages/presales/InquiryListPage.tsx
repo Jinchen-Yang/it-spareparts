@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Key } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Alert, Button, DatePicker, Input, Drawer, Select, Segmented, Space, Table, Tabs, Tag } from "antd";
 import type { Dayjs } from "dayjs";
 import { presales, type Inquiry, type InquiryLine, type Offer } from "../../api/presales";
@@ -7,14 +7,13 @@ import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
 import { presalesWorkbooks } from "../../api/presalesWorkbooks";
 import { WorkbookExportButton } from "../../components/workbook";
 import WorkbookDialog from "./WorkbookDialog";
-import { readPermissionMap } from "../../nav";
 import type { ColumnsType } from "antd/es/table";
 import PageHeader from "../../components/PageHeader";
 import PartThumb from "../../components/gallery/PartThumb";
 import { lineAnswer } from "./answers";
 import { CurrentAnswer } from "./InquiryOffers";
 type InquirySort = { key: string; dir: "asc" | "desc" };
-import { isOfferActive, useNow } from "./shared";
+import { isOfferActive, isPresalesSupervisor, useNow } from "./shared";
 import { moneyExact } from "../../utils/format";
 import { parseApiError, type ApiErrorInfo } from "../../utils/apiError";
 import { ApiErrorFeedback } from "../../components/ApiErrorFeedback";
@@ -40,11 +39,11 @@ function lineOffers(detail: Inquiry | undefined, line: InquiryLine): Offer[] {
 
 export default function InquiryListPage() {
   const navigate = useNavigate();
-  const permissions = readPermissionMap();
-  const supervisor = !!permissions.action_presales_supervise || ["admin", "boss"].includes(localStorage.getItem("role") || "");
+  const supervisor = isPresalesSupervisor();
   const [scope, setScope] = useState<"mine" | "shared" | "all">("mine");
   const [kind, setKind] = useState<Inquiry["kind"]>();
-  const [status, setStatus] = useState<Inquiry["status"]>();
+  const [params] = useSearchParams();
+  const [status, setStatus] = useState<Inquiry["status"] | undefined>(params.get("status") === "draft" ? "draft" : undefined);
   const [stage, setStage] = useState("");
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
@@ -60,7 +59,6 @@ export default function InquiryListPage() {
   const [sort, setSort] = useState<InquirySort | null>(defaultSort);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<ApiErrorInfo>();
-  const [detailError, setDetailError] = useState(false);
   const [reload, setReload] = useState(0);
   const conflictRetried = useRef(false);
   const now = useNow(Object.values(details).flatMap((detail) => (detail.lines || []).flatMap((line) => lineOffers(detail, line)
@@ -74,19 +72,17 @@ export default function InquiryListPage() {
   useEffect(() => { conflictRetried.current = false; setSelected([]); }, [scope, kind, status, page, sort, search, dateFrom, dateTo]);
   useEffect(() => {
     let disposed = false;
-    setLoading(true); setError(undefined); setItems([]); setDetails({}); setDetailError(false);
+    setLoading(true); setError(undefined); setItems([]); setDetails({});
     const selected = sort && serverKeys.has(sort.key) ? sort : defaultSort;
     void presales.listInquiries({ scope, kind, status, page, page_size: 20,
       q: search || undefined, date_from: dateFrom, date_to: dateTo,
-      sort: selected.key as "updated_at", dir: selected.dir }).then(async (data) => {
+      sort: selected.key as "updated_at", dir: selected.dir }).then((data) => {
       if (disposed) return;
       conflictRetried.current = false;
       setItems(data.items); setTotal(data.total);
-      const rows = await Promise.allSettled(data.items.map((item) => presales.getInquiry(item.id)));
-      if (disposed) return;
       const result: Record<number, Inquiry> = {};
-      rows.forEach((row) => { if (row.status === "fulfilled") result[row.value.id] = row.value; });
-      setDetails(result); setDetailError(rows.some((row) => row.status === "rejected"));
+      data.items.forEach((row) => { result[row.id] = row; });
+      setDetails(result);
     }).catch((cause) => {
       if (disposed) return;
       const info = parseApiError(cause, "询价单列表加载失败");
@@ -155,7 +151,6 @@ export default function InquiryListPage() {
         fetchSchema={() => presalesWorkbooks.getSalesSummarySchema()} onExport={(visible) => presalesWorkbooks.exportSalesSummary(exportIds, visible)} filename="销售询价汇总.xlsx" />
         <span className="presales-muted">选择本人销售询价后按 PN 汇总下载。处理进度筛选当前页。</span></div>
       {error && <Alert type="error" message="询价单列表加载失败" description={<ApiErrorFeedback info={error} />} action={<Button onClick={() => setReload((value) => value + 1)}>重试</Button>} />}
-      {detailError && <Alert type="warning" message="部分处理人状态加载失败，请刷新后查看。" />}
       <Table aria-label="询价单列表" rowKey="id" columns={columns} dataSource={filtered} loading={loading} tableLayout="fixed"
         rowSelection={scope === "mine" ? { selectedRowKeys: selected, onChange: setSelected, getCheckboxProps: (row) => ({ "aria-label": `选择 ${row.inquiry_no}`, disabled: !row.is_owner || row.kind !== "sales_inquiry" }) } : undefined}
         pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, showTotal: () => `本页显示 ${filtered.length} / ${items.length} 张 · 范围内共 ${total} 张` }}

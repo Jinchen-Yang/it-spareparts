@@ -1,5 +1,6 @@
 """询价单生命周期；待办、时间线和自定义字段仅走通用服务。"""
 
+import re
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
@@ -10,10 +11,10 @@ from sqlalchemy import delete, select, text
 from app.models.dimensions import DimCustomer, DimPart
 from app.models.fields_audience import FieldValue
 from app.models.presales import (
-    PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink,
+    PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink, PresalesOfferRevision,
 )
 from app.services import field_pool
-from app.services.presales import common
+from app.services.presales import answers, common
 from app.services.workflow import work_items
 from app.services.workflow.registry import Conflict, Forbidden, InvalidTransition, Subject
 
@@ -43,12 +44,13 @@ def lines_for(db, inquiry_id, *, active=True, lock=False):
 
 def _permission(ctx, kind):
     common.require(ctx, "page_presales")
-    common.require(ctx, "action_presales_inquire" if kind == "sales_inquiry" else "action_presales_offer")
+    # D-0052：不再区分询价、报价动作权限；kind 只保留调用方兼容。
 
 
 def _owner(db, inquiry, actor):
     user, ctx = common.resolve_actor(db, actor)
     _permission(ctx, inquiry.kind)
+    # 共享的是业务值与逐行报价。客户、行集和成交等整单操作仍归发起人或主管。
     if inquiry.created_by != user.id and not common.bypass(ctx):
         raise Forbidden("只有发起人或主管可以修改询价单")
     return user, ctx
@@ -56,8 +58,8 @@ def _owner(db, inquiry, actor):
 
 def _locked(db, inquiry_id, actor, expected_version):
     inquiry = common.lock_inquiry(db, inquiry_id)
-    common.check_version(inquiry, expected_version)
     user, ctx = _owner(db, inquiry, actor)
+    common.check_version(inquiry, expected_version)
     if inquiry.status == "closed":
         raise InvalidTransition("询价单已关单，请复制为新单")
     return inquiry, user, ctx
@@ -70,6 +72,7 @@ def _touch(inquiry):
 
 def _record(db, inquiry, actor, kind, payload=None):
     db.flush()
+    answers.refresh_inquiry(db, inquiry.id)
     common.event(db, inquiry, actor, kind, payload)
     common.audit(db, actor, kind, inquiry.id)
     return inquiry
@@ -95,7 +98,6 @@ def _assignees(db, ids):
     result = list(dict.fromkeys(ids))
     for value in result:
         _, ctx = common.resolve_actor(db, value)
-        common.require(ctx, "action_presales_quote")
     return result
 
 
@@ -136,9 +138,10 @@ def delivery_value(line, visible_fields):
 
 
 def _migrate_delivery(db, line, ctx, *, explicit=False):
+    from app.services.presales.visibility import _public
     subject = field_pool.Subject(SUBJECT_TYPE, f"line:{line.id}", "line")
     field_pool._lock(db, f"field-values:{SUBJECT_TYPE}:{subject.subject_id}:line")
-    values = field_pool.read_values(db, [subject], ctx, common.bypass)[subject.subject_id]
+    values = field_pool.read_values(db, [subject], ctx, _public)[subject.subject_id]
     legacy = [value for value in values if value["name"] == "期望交期"]
     if not explicit:
         line.expected_delivery = delivery_value(line, legacy)
@@ -150,6 +153,8 @@ def _migrate_delivery(db, line, ctx, *, explicit=False):
 
 
 def _reference(db, line, ctx, *, allow_new=False):
+    if line.answer_requires_review and not allow_new:
+        return  # 存量关联保留供核对，不作为有效答复使用。
     if line.ref_offer_id is None:
         line.ref_offer_revision_no = None
         return
@@ -163,7 +168,7 @@ def _reference(db, line, ctx, *, allow_new=False):
         return
     if not allow_new:
         raise InvalidTransition("原引用缺少历史版本，请先取消引用再重新选择")
-    offer = db.scalar(select(PresalesOffer).where(PresalesOffer.id == line.ref_offer_id)
+    offer = db.scalar(select(PresalesOffer).where(PresalesOffer.id == line.ref_offer_id, common.offer_source_eligible())
                       .with_for_update().execution_options(populate_existing=True))
     if offer is None or not common.offer_effective(offer):
         raise InvalidTransition("只能引用有效的报价")
@@ -178,10 +183,13 @@ def _reference(db, line, ctx, *, allow_new=False):
     line.ref_offer_revision_no = offer.revision_no
 
 
-def _signature(line):
+def quote_conditions(line):
     return {"part_id": line.part_id, "pn_raw": line.pn_raw, "qty": str(Decimal(line.qty).normalize()),
-            "require_exact_pn": line.require_exact_pn, "return_defective": line.return_defective,
-            "has_reference": line.ref_offer_id is not None}
+            "require_exact_pn": line.require_exact_pn, "return_defective": line.return_defective}
+
+
+def _signature(line):
+    return {**quote_conditions(line), "has_reference": line.ref_offer_id is not None}
 
 
 def _snapshot(db, inquiry):
@@ -195,7 +203,7 @@ def _save_fields(db, inquiry, values, ctx):
                                values, ctx)
 
 
-def _write_line(db, inquiry, data, seq, ctx, existing=None):
+def _write_line(db, inquiry, data, seq, ctx, existing=None, *, confirm_reset=True):
     if not isinstance(data, dict) or set(data) - _LINE_FIELDS:
         raise InvalidTransition("询价行包含未知字段")
     line = existing or PresalesInquiryLine(inquiry_id=inquiry.id, line_key=data.get("line_key") or uuid4().hex,
@@ -227,10 +235,23 @@ def _write_line(db, inquiry, data, seq, ctx, existing=None):
     return_defective = data.get("return_defective", line.return_defective if line.return_defective is not None else True)
     if type(return_defective) is not bool:
         raise InvalidTransition("坏件是否返回必须为布尔值")
-    line.return_defective = return_defective
     ref = data.get("ref_offer_id", line.ref_offer_id)
     if ref is not None and (type(ref) is not int or ref < 1):
         raise InvalidTransition("引用报价 ID 无效")
+    carry_response = False
+    if existing is not None and inquiry.status == "revising":
+        conditions_changed = (part_id, pn.strip(), qty, exact, return_defective) != (
+            line.part_id, line.pn_raw, line.qty, line.require_exact_pn, line.return_defective)
+        ref_changed = ref != line.ref_offer_id
+        if conditions_changed or ref_changed:
+            if not ref_changed:
+                # 旧表单总会回传原 pin，条件变更不能自动认领原条件的价格。
+                ref = None
+            _reset_editor_answer(db, line, ctx, "询价条件或引用已修改", confirm_reset,
+                                 keep_offer_id=None if conditions_changed else ref)
+        else:
+            carry_response = True
+    line.return_defective = return_defective
     line.seq, line.part_id, line.pn_raw, line.qty = seq, part_id, pn.strip(), qty
     new_reference = existing is None or ref != line.ref_offer_id
     if ref != line.ref_offer_id:
@@ -247,6 +268,8 @@ def _write_line(db, inquiry, data, seq, ctx, existing=None):
     db.add(line)
     _reference(db, line, ctx, allow_new=new_reference)
     db.flush()
+    if carry_response:
+        answers.carry_current_responses(db, [line.id])
     anchor = f"part:{part_id}" if part_id is not None else None
     if existing is None:
         field_pool.template_for(db, SUBJECT_TYPE, "line", ctx, anchor=anchor)
@@ -257,10 +280,26 @@ def _write_line(db, inquiry, data, seq, ctx, existing=None):
     return line
 
 
-def _replace_lines(db, inquiry, data, ctx):
+def _reset_editor_answer(db, line, ctx, reason, confirm_reset, *, keep_offer_id=None):
+    if not confirm_reset and (line.answer_state != "pending" or line.answer_requires_review):
+        raise Conflict("修改或删除已答复的询价行会使原答复失效，请确认", code="price_reset_required")
+    answers.clear_line_answers(db, line, ctx, reason, keep_offer_id=None if line.answer_requires_review else keep_offer_id)
+    line.answer_requires_review = False
+
+
+def _replace_lines(db, inquiry, data, ctx, expected_line_versions=None, *, confirm_reset=True):
     if not isinstance(data, list):
         raise InvalidTransition("lines 必须为列表")
     existing = {line.line_key: line for line in lines_for(db, inquiry.id, active=False, lock=True)}
+    if inquiry.status == "revising":
+        # 旧页面只有单头版本。仅在撤回或上次整单保存的行基线仍一致时接受全量替换。
+        baseline = expected_line_versions
+        if baseline is None:
+            baseline = _stored_snapshot(inquiry).get("editor_line_versions")
+        current = {key: row.version for key, row in existing.items() if row.status == "active"}
+        if baseline != current:
+            raise Conflict("询价行已更新，请重新加载单据核对后再保存", code="version_conflict", version=inquiry.version)
+    detached = _reconcile_legacy_answers(db, inquiry, ctx, existing.values()) if inquiry.status == "revising" else {}
     keys = set()
     for seq, entry in enumerate(data, 1):
         if not isinstance(entry, dict):
@@ -271,15 +310,22 @@ def _replace_lines(db, inquiry, data, ctx):
         old = existing.get(key)
         if old is not None and old.status == "deleted":
             raise InvalidTransition("已删除的行不能复用 line_key，请新增一行")
-        line = _write_line(db, inquiry, entry, seq, ctx, old)
+        if key in detached and entry.get("ref_offer_id") == detached[key]:
+            entry = {**entry, "ref_offer_id": None}  # 表单回显了刚结算的旧引用。
+        line = _write_line(db, inquiry, entry, seq, ctx, old, confirm_reset=confirm_reset)
         if line.line_key in keys:
             raise InvalidTransition("line_key 重复")
         keys.add(line.line_key)
     for key, line in existing.items():
         if key not in keys and line.status == "active":
+            if inquiry.status == "revising":
+                _reset_editor_answer(db, line, ctx, "询价行已删除", confirm_reset)
             line.status = "deleted"
             line.version += 1
     db.flush()
+    if inquiry.status == "revising":
+        inquiry.submitted_snapshot = {**_stored_snapshot(inquiry), "editor_line_versions": {
+            line.line_key: line.version for line in lines_for(db, inquiry.id)}}
 
 
 def _priority(value):
@@ -308,7 +354,8 @@ def create_draft(db, actor, *, kind="sales_inquiry", customer_id=None, notes=Non
     return _record(db, inquiry, user.id, "inquiry.created")
 
 
-def update_draft(db, inquiry_id, actor, expected_version, *, lines=None, field_values=None, **changes):
+def update_draft(db, inquiry_id, actor, expected_version, *, lines=None, expected_line_versions=None,
+                 field_values=None, confirm_reset=True, **changes):
     inquiry, user, ctx = _locked(db, inquiry_id, actor, expected_version)
     if inquiry.status not in {"draft", "revising"}:
         raise InvalidTransition("请先撤回再修改询价单")
@@ -327,7 +374,7 @@ def update_draft(db, inquiry_id, actor, expected_version, *, lines=None, field_v
         if input_key in changes:
             setattr(inquiry, column, common.rule_id(db, changes[input_key], ctx))
     if lines is not None:
-        _replace_lines(db, inquiry, lines, ctx)
+        _replace_lines(db, inquiry, lines, ctx, expected_line_versions, confirm_reset=confirm_reset)
     _save_fields(db, inquiry, field_values, ctx)
     _touch(inquiry)
     return _record(db, inquiry, user.id, "inquiry.updated")
@@ -355,14 +402,14 @@ def _versions(items):
     return {item.id: item.version for item in items if item.status in work_items.ACTIVE}
 
 
-def submit(db, inquiry_id, actor, expected_version):
+def submit(db, inquiry_id, actor, expected_version, *, open_tasks=True):
     inquiry, user, ctx = _locked(db, inquiry_id, actor, expected_version)
     if inquiry.kind != "sales_inquiry" or inquiry.status != "draft":
         raise InvalidTransition("只能提交销售询价草稿；主动报价请使用发布")
     rows = _validate_submit(db, inquiry, ctx)
     inquiry.status, inquiry.submitted_at = "submitted", common.now()
     inquiry.submitted_snapshot = _snapshot(db, inquiry)
-    if any(line.ref_offer_id is None for line in rows):
+    if open_tasks and any(line.ref_offer_id is None for line in rows):
         work_items.open_items(db, subject(inquiry), inquiry.assignee_ids, SUBJECT_TYPE, user.id)
     _touch(inquiry)
     return _record(db, inquiry, user.id, "inquiry.submitted")
@@ -375,6 +422,8 @@ def withdraw(db, inquiry_id, actor, expected_version):
     items = work_items.list_by_subject(db, subject(inquiry), user.id, lock=True)
     work_items.pause_subject(db, subject(inquiry), user.id, expected_versions=_versions(items))
     inquiry.status = "revising"
+    inquiry.submitted_snapshot = {**_stored_snapshot(inquiry), "answers_synced_on_edit": True, "editor_line_versions": {
+        line.line_key: line.version for line in lines_for(db, inquiry.id, lock=True)}}
     _touch(inquiry)
     return _record(db, inquiry, user.id, "inquiry.withdrawn")
 
@@ -398,54 +447,112 @@ def _reopen(db, inquiry, user, items):
         work_items.open_items(db, subject(inquiry), [], SUBJECT_TYPE, user.id)
 
 
-def resubmit(db, inquiry_id, actor, expected_version):
+def _matching_conditions(stored, line, *, submitted=False):
+    """提交基线只用已知字段判断变化；报价修订则需要完整条件才能作为当前价的证明。"""
+    sig = stored if isinstance(stored, dict) else {}
+    for key, current in quote_conditions(line).items():
+        value = sig.get(key)
+        if key == "qty":
+            # 与 e5 的 numeric 比较一致，不让 Decimal 的字符串标度或指数形式改变结论。
+            known = bool(re.fullmatch(r"[+]?[0-9]{1,32}(?:[.][0-9]{1,32})?(?:[Ee][+-]?[0-9]{1,3})?", str(value)))
+            if known:
+                value, current = Decimal(str(value)), Decimal(current)
+        elif key == "part_id":
+            known = key in sig and (value is None or type(value) in (int, float))
+        elif key == "pn_raw":
+            known = isinstance(value, str)
+        else:
+            if submitted and key == "return_defective" and key not in sig:
+                value = True  # D-0047 之前缺少该字段，业务默认坏件返回。
+            known = type(value) is bool
+        if (known and value != current) or (not known and not submitted):
+            return False
+    return True
+
+
+def _reference_changed(stored, line):
+    recorded = stored.get("has_reference") if isinstance(stored, dict) else None
+    return type(recorded) is bool and recorded != (line.ref_offer_id is not None)
+
+
+def _stored_snapshot(inquiry):
+    return inquiry.submitted_snapshot if isinstance(inquiry.submitted_snapshot, dict) else {}
+
+
+def _submitted_lines(inquiry):
+    lines = _stored_snapshot(inquiry).get("lines")
+    return lines if isinstance(lines, dict) else {}
+
+
+def _reconcile_legacy_answers(db, inquiry, actor, rows):
+    """升级前已撤回的单据尚有待结算的旧价格。在第一次整单改行或重提前结算一次。"""
+    if _stored_snapshot(inquiry).get("answers_synced_on_edit"):
+        return {}
+    previous = _submitted_lines(inquiry)
+    detached = {}
+    refreshed = []
+    for line in rows:
+        prior = previous.get(line.line_key)
+        if prior is None or line.answer_requires_review:
+            continue
+        conditions_changed = line.status != "active" or not _matching_conditions(prior, line, submitted=True)
+        if not conditions_changed and not _reference_changed(prior, line):
+            continue
+        ref, pin = line.ref_offer_id, line.ref_offer_revision_no
+        keep = None
+        if line.status == "active" and conditions_changed:
+            # 旧报价缺少条件证明。只认当前这行在新条件下实际确认过的最新修订。
+            proof = PresalesOfferRevision.snapshot["_inquiry"]["line_conditions"]
+            eligible = select(PresalesOffer.id, proof).join(PresalesOfferRevision,
+                (PresalesOfferRevision.offer_id == PresalesOffer.id) &
+                (PresalesOfferRevision.revision_no == PresalesOffer.revision_no)).where(
+                PresalesOffer.line_id == line.id, PresalesOffer.status == "published",
+                PresalesOffer.part_id.is_not_distinct_from(line.part_id),
+                PresalesOfferRevision.snapshot.contains({"line_id": line.id, "status": "published"})
+            ).order_by(PresalesOffer.no_stock, PresalesOffer.valid_from.desc().nulls_last(), PresalesOffer.id.desc())
+            keep = next((offer_id for offer_id, signature in db.execute(eligible)
+                         if _matching_conditions(signature, line)), None)
+        if conditions_changed and ref is not None:
+            detached[line.line_key] = ref
+        answers.clear_line_answers(db, line, actor, "结算升级前已变更的询价条件或引用",
+            keep_offer_id=keep if conditions_changed else ref,
+            keep_response_version=line.version if line.status == "active" else None)
+        if not conditions_changed:
+            line.ref_offer_id, line.ref_offer_revision_no = ref, pin
+        refreshed.append(line.id)
+    answers.refresh(db, refreshed, bump_versions=True)
+    inquiry.submitted_snapshot = {**_stored_snapshot(inquiry), "answers_synced_on_edit": True}
+    return detached
+
+
+def resubmit(db, inquiry_id, actor, expected_version, *, open_tasks=True):
     inquiry, user, ctx = _locked(db, inquiry_id, actor, expected_version)
     if inquiry.kind != "sales_inquiry" or inquiry.status != "revising":
         raise InvalidTransition("只能重新提交已撤回的销售询价")
+    if not _stored_snapshot(inquiry).get("answers_synced_on_edit"):
+        _reconcile_legacy_answers(db, inquiry, user.id, lines_for(db, inquiry.id, active=False, lock=True))
     rows = _validate_submit(db, inquiry, ctx)
-    # 旧快照没有引用标记；不能仅因升级了签名就重开已经回复的待办。
-    previous = {key: {"has_reference": False, "return_defective": True, **signature}
-                for key, signature in inquiry.submitted_snapshot.get("lines", {}).items()}
-    current = {line.line_key: _signature(line) for line in rows}
-    changed = {key for key in previous if key not in current or previous[key] != current[key]}
+    previous = _submitted_lines(inquiry)
+    current = {line.line_key: line for line in rows}
+    changed = {key for key, prior in previous.items() if key not in current
+               or not _matching_conditions(prior, current[key], submitted=True) or _reference_changed(prior, current[key])}
     added = set(current) - set(previous)
-    # 引用切换影响派单，不改变原来的 PN、数量或报价内容。
-    stale = {key for key in changed if key not in current or any(
-        previous[key].get(field) != current[key][field]
-        for field in current[key] if field != "has_reference")}
-    all_rows = lines_for(db, inquiry.id, active=False)
-    changed_ids = [line.id for line in all_rows if line.line_key in changed]
-    if changed_ids:
-        # 新版本要重新逐行处理，沿用与不报的旧结果不能冒充本次回复。
-        db.execute(delete(PresalesLineResponse).where(PresalesLineResponse.line_id.in_(changed_ids)))
-        db.execute(delete(PresalesOfferLineLink).where(PresalesOfferLineLink.line_id.in_(changed_ids)))
-    versions = {line.id: line.version for line in rows if line.line_key not in changed}
-    if versions:
-        for response in db.scalars(select(PresalesLineResponse).where(
-                PresalesLineResponse.line_id.in_(versions))):
-            response.line_version = versions[response.line_id]
-    from app.services.presales.offers import mark_stale
-    if stale:
-        ids = [line.id for line in all_rows if line.line_key in stale]
-        offers = list(db.scalars(select(PresalesOffer).where(PresalesOffer.line_id.in_(ids),
-            PresalesOffer.status.in_(("draft", "published"))).order_by(PresalesOffer.id).with_for_update()))
-        for offer in offers:
-            mark_stale(db, offer, user.id, "询价行删除或 PN、数量、要求 PN 一致、坏件返回条件发生变化")
-    items = work_items.list_by_subject(db, subject(inquiry), user.id, lock=True)
-    old_assignees = inquiry.submitted_snapshot.get("assignee_ids", [])
     inquiry.status = "submitted"
-    if old_assignees != inquiry.assignee_ids:
-        work_items.cancel_subject(db, subject(inquiry), user.id, "询价重新指派", expected_versions=_versions(items))
-        if any(line.ref_offer_id is None for line in rows):
-            work_items.open_items(db, subject(inquiry), inquiry.assignee_ids, SUBJECT_TYPE, user.id)
-    else:
-        work_items.resume_subject(db, subject(inquiry), user.id, expected_versions=_versions(items))
-        needs_reply = added | (changed & set(current))
-        if any(line.ref_offer_id is None and (line.line_key in needs_reply or not items)
-               for line in rows):
-            _reopen(db, inquiry, user, items)
-        elif not any(line.ref_offer_id is None for line in rows):
-            work_items.cancel_subject(db, subject(inquiry), user.id, "询价行已全部引用报价", expected_versions=_versions(items))
+    if open_tasks:
+        items = work_items.list_by_subject(db, subject(inquiry), user.id, lock=True)
+        old_assignees = _stored_snapshot(inquiry).get("assignee_ids", [])
+        if old_assignees != inquiry.assignee_ids:
+            work_items.cancel_subject(db, subject(inquiry), user.id, "询价重新指派", expected_versions=_versions(items))
+            if any(line.ref_offer_id is None for line in rows):
+                work_items.open_items(db, subject(inquiry), inquiry.assignee_ids, SUBJECT_TYPE, user.id)
+        else:
+            work_items.resume_subject(db, subject(inquiry), user.id, expected_versions=_versions(items))
+            needs_reply = added | (changed & set(current))
+            if any(line.ref_offer_id is None and (line.line_key in needs_reply or not items)
+                   for line in rows):
+                _reopen(db, inquiry, user, items)
+            elif not any(line.ref_offer_id is None for line in rows):
+                work_items.cancel_subject(db, subject(inquiry), user.id, "询价行已全部引用报价", expected_versions=_versions(items))
     inquiry.revision += 1
     inquiry.submitted_at, inquiry.submitted_snapshot = common.now(), _snapshot(db, inquiry)
     _touch(inquiry)
@@ -453,7 +560,7 @@ def resubmit(db, inquiry_id, actor, expected_version):
         "added_line_keys": sorted(added), "revision": inquiry.revision})
 
 
-def append_lines(db, inquiry_id, actor, expected_version, lines):
+def append_lines(db, inquiry_id, actor, expected_version, lines, *, open_tasks=True):
     inquiry, user, ctx = _locked(db, inquiry_id, actor, expected_version)
     if inquiry.kind != "sales_inquiry" or inquiry.status != "submitted":
         raise InvalidTransition("只能向已提交的销售询价追加行")
@@ -469,8 +576,8 @@ def append_lines(db, inquiry_id, actor, expected_version, lines):
         line = _write_line(db, inquiry, data, seq + offset, ctx)
         keys.add(line.line_key)
         added.append(line)
-    items = work_items.list_by_subject(db, subject(inquiry), user.id, lock=True)
-    if any(line.ref_offer_id is None for line in added):
+    if open_tasks and any(line.ref_offer_id is None for line in added):
+        items = work_items.list_by_subject(db, subject(inquiry), user.id, lock=True)
         _reopen(db, inquiry, user, items)
     inquiry.revision += 1
     inquiry.submitted_snapshot = _snapshot(db, inquiry)
@@ -478,19 +585,25 @@ def append_lines(db, inquiry_id, actor, expected_version, lines):
     return _record(db, inquiry, user.id, "inquiry.lines_appended", {"line_keys": [line.line_key for line in added]})
 
 
-def close(db, inquiry_id, actor, expected_version, *, outcome, won_offer_id=None):
+def close(db, inquiry_id, actor, expected_version, *, outcome, won_offer_id=None, expected_offer_revision_no=None):
     inquiry, user, ctx = _locked(db, inquiry_id, actor, expected_version)
     if inquiry.status not in {"submitted", "revising"} or outcome not in {"won", "lost", "cancelled"}:
         raise InvalidTransition("关单状态或结果无效")
+    if won_offer_id is None and expected_offer_revision_no is not None:
+        raise InvalidTransition("采纳报价版本须与所选报价一起提交")
     if won_offer_id is not None:
-        offer = db.get(PresalesOffer, won_offer_id)
+        # 外部来源不受本单的锁保护。锁定真实报价，直到成交快照一并提交。
+        offer = db.scalar(select(PresalesOffer).where(PresalesOffer.id == won_offer_id)
+                          .with_for_update().execution_options(populate_existing=True))
         line = db.get(PresalesInquiryLine, offer.line_id) if offer and offer.line_id is not None else None
+        if line is not None and line.answer_requires_review:
+            raise InvalidTransition("所选报价对应的询价条件已变化，请先在共享池重新填价")
         own = (offer is not None and offer.inquiry_id == inquiry.id and
                offer.status == "published" and not offer.no_stock and
                line is not None and line.status == "active")
         linked = False
         if offer is not None and not own:
-            rows = lines_for(db, inquiry.id)
+            rows = [row for row in lines_for(db, inquiry.id) if not row.answer_requires_review]
             by_id = {row.id: row for row in rows}
             linked = any(row.ref_offer_id == offer.id and row.part_id == offer.part_id for row in rows)
             if not linked and by_id:
@@ -512,6 +625,9 @@ def close(db, inquiry_id, actor, expected_version, *, outcome, won_offer_id=None
                           visibility.can_view_offer(db, offer, ctx))
         if outcome != "won" or not (own or linked):
             raise InvalidTransition("采纳报价必须是本单有效行内的已发布报价")
+        # 老客户端没有修订号；只有从未改版的首个报价能确认看到的是同一价格。
+        if offer.revision_no != (expected_offer_revision_no if expected_offer_revision_no is not None else 1):
+            raise Conflict("采纳报价已更新，请刷新并重新选择要成交的报价", code="offer_revision_conflict")
         from app.services.presales.visibility import pinned_offer_view
         if pinned_offer_view(db, offer.id, offer.revision_no, ctx) is None:
             raise InvalidTransition("报价历史版本不可用，请由原报价人更新后重新选择")
@@ -530,8 +646,8 @@ def close(db, inquiry_id, actor, expected_version, *, outcome, won_offer_id=None
 
 def copy_as_new(db, inquiry_id, actor, expected_version):
     inquiry = common.lock_inquiry(db, inquiry_id)
-    common.check_version(inquiry, expected_version)
     user, ctx = _owner(db, inquiry, actor)
+    common.check_version(inquiry, expected_version)
     source_lines = lines_for(db, inquiry.id)
     payload = [{"part_id": line.part_id, "pn_raw": line.pn_raw, "description": line.description,
         "qty": line.qty, "require_exact_pn": line.require_exact_pn, "notes": line.notes,

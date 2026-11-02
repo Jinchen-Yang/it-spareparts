@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from app.models.presales import PresalesInquiry
+from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer
 from app.models.system import SysAccessLog, SysUser
 from app.security import UserContext
 from app.services import audience
@@ -23,6 +23,13 @@ def offer_effective(offer, moment=None):
             and offer.valid_from is not None and offer.valid_from <= moment)
 
 
+def offer_source_eligible():
+    """历史报价可以读取；其来源行待核对时不进入当前有效价、沿用或成交候选。"""
+    return ~select(PresalesInquiryLine.id).where(
+        PresalesInquiryLine.id == PresalesOffer.line_id, PresalesInquiryLine.answer_requires_review.is_(True)
+    ).correlate(PresalesOffer).exists()
+
+
 def resolve_actor(db, actor):
     return work_items.actor_context(db, actor)
 
@@ -30,6 +37,11 @@ def resolve_actor(db, actor):
 def require(ctx, key):
     if not work_items.has_permission(ctx, key):
         raise Forbidden("无此操作权限")
+
+
+def was_submitted(inquiry):
+    """删除草稿也会关单，只有实际提交过的单据才进入共享范围。"""
+    return inquiry.status != "draft" and inquiry.submitted_at is not None
 
 
 def bypass(ctx):

@@ -5,8 +5,7 @@ from sqlalchemy import select
 from app.models.dimensions import DimPart
 from app.models.presales import PresalesInquiryLine
 from app.services import field_pool, manual_part_input, master_edit
-from app.services.presales import common, inquiries
-from app.services.workflow import work_items
+from app.services.presales import answers, common, inquiries
 from app.services.workflow.registry import Conflict, Forbidden, InvalidTransition, NotFound
 
 
@@ -25,19 +24,13 @@ def _access(db, line_id, actor, *, lock=False, expected_version=None):
         common.check_version(line, expected_version)
     if line.status != "active" or inquiry.status == "closed":
         raise InvalidTransition("询价行已删除或已关单")
-    allowed = common.bypass(ctx)
     if inquiry.kind == "proactive_offer":
-        allowed = allowed or inquiry.created_by == user.id
+        if inquiry.created_by != user.id and not common.bypass(ctx):
+            raise Forbidden("只有发起人或主管可以建档")
         if inquiry.status != "draft":
             raise InvalidTransition("主动报价只能在草稿阶段建档")
-    else:
-        if inquiry.status != "submitted":
-            raise InvalidTransition("请在询价提交后由处理人建档")
-        items = work_items.list_by_subject(db, inquiries.subject(inquiry), user.id)
-        allowed = allowed or any(item.assignee_id == user.id and item.status in work_items.ACTIVE
-                                 and not item.paused for item in items)
-    if not allowed:
-        raise Forbidden("只有本单处理人或主管可以建档，请先领单")
+    elif inquiry.status not in {"submitted", "revising"}:
+        raise InvalidTransition("请在询价提交后建档")
     return inquiry, line, user, ctx
 
 
@@ -68,7 +61,7 @@ def _apply(db, inquiry, line, part, user, ctx, kind):
     inquiry.version += 1
     inquiry.updated_at = common.now()
     field_pool.template_for(db, inquiries.SUBJECT_TYPE, "line", ctx, anchor=f"part:{part.id}")
-    db.flush()
+    answers.carry_current_responses(db, [line.id])
     common.event(db, inquiry, user.id, kind, {"line_id": line.id, "part_id": part.id})
     common.audit(db, user.id, kind, inquiry.id)
     return line

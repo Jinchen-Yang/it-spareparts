@@ -1,16 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Alert, App, Button, Checkbox, Descriptions, Drawer, Form, Input, InputNumber, Modal, Popover, Select, Space, Spin, Table, Tag } from "antd";
+import { Alert, App, Button, Checkbox, Descriptions, Drawer, Form, Input, InputNumber, Modal, Space, Spin, Table, Tag } from "antd";
 import { presales, type Inquiry, type InquiryLine, type Offer } from "../../api/presales";
 import type { AudienceRule, AudienceRuleRead } from "../../api/audience";
 import { type CustomFieldValue } from "../../api/fields";
-import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
 import type { PartSuggestion } from "../../api/search";
 import LivePartSearch from "../../components/parts/LivePartSearch";
 import CreatePartModal from "../../components/parts/CreatePartModal";
 import PartThumb from "../../components/gallery/PartThumb";
 import PriceRefBadge from "../../components/pricing/PriceRefBadge";
-import AudiencePicker, { PUBLIC_AUDIENCE } from "../../components/audience/AudiencePicker";
 import AudienceLock from "../../components/audience/AudienceLock";
 import PartQuoteBadges from "./PartQuoteBadges";
 import { isOfferActive as activeOffer, OfferBadge, useNow, flattenOffers, usePresalesError } from "./shared";
@@ -29,7 +27,7 @@ import { parseApiError } from "../../utils/apiError";
 function fromLine(line: InquiryLine): DraftLine {
   const fields = (line.field_values || []) as ReadField[];
   return { key: line.line_key, line_key: line.line_key, part_id: line.part_id ?? null, pn_raw: line.pn_raw,
-    description: line.description, qty: Number(line.qty), require_exact_pn: !!line.require_exact_pn,
+    description: line.description, qty: Number(line.qty), require_exact_pn: !!line.require_exact_pn, return_defective: line.return_defective !== false,
     ref_offer_id: line.ref_offer_id, ref_offer_revision_no: line.ref_offer_revision_no, ref_offer: line.ref_offer, notes: line.notes, notesVisible: "notes" in line, field_values: editableFields(fields, true), originalFields: fields,
     savedNotesAudience: line.notes_audience, expectedDelivery: line.expected_delivery ?? "" };
 }
@@ -55,6 +53,7 @@ function InquiryEditorContent() {
   const customerVisible = localStorage.getItem("role") === "admin" || readPermissionMap().data_customer !== false;
   const [inquiry, setInquiry] = useState<Inquiry>();
   const [lines, setLines] = useState<DraftLine[]>([]);
+  const loadedLines = useRef<DraftLine[]>([]);
   const [editing, setEditing] = useState<string>();
   const [headOpen, setHeadOpen] = useState(false);
   const [pasteOpen, setPasteOpen] = useState(false);
@@ -62,11 +61,7 @@ function InquiryEditorContent() {
   const [customerId, setCustomerId] = useState<number>();
   const [notes, setNotes] = useState("");
   const [notesAudience, setNotesAudience] = useState<AudienceRule>();
-  const [offerAudience, setOfferAudience] = useState<AudienceRule>();
   const [fields, setFields] = useState<CustomFieldValue[]>([]);
-  const [assigneeIds, setAssigneeIds] = useState<number[]>([]);
-  const [candidates, setCandidates] = useState<WorkCandidate[]>([]);
-  const [candidateError, setCandidateError] = useState(false);
   const [library, setLibrary] = useState<Record<number, Offer[]>>({});
   const now = useNow([...Object.values(library).flatMap(flattenOffers), ...lines.flatMap((line) => line.ref_offer ? [line.ref_offer] : [])]
     .map((offer) => offer.valid_from));
@@ -87,11 +82,12 @@ function InquiryEditorContent() {
     setVersionConflict(false);
     currentInquiry.current = data;
     const next = append ? [] : (data.lines || []).map(fromLine);
+    loadedLines.current = next;
     setInquiry(data); setLines(next);
     setCustomerId(data.customer_id ?? undefined); setNotes(data.notes || "");
-    setFields(editableFields((data.field_values || []) as ReadField[])); setAssigneeIds(data.assignee_ids || []);
+    setFields(editableFields((data.field_values || []) as ReadField[]));
     // 回读规则只用于显示；编辑草稿另存，未调整时不重复提交。
-    setOfferAudience(undefined); setNotesAudience(undefined);
+    setNotesAudience(undefined);
   }, [append]);
   const refresh = useCallback(async () => {
     if (!id) return;
@@ -105,13 +101,6 @@ function InquiryEditorContent() {
     } finally { if (mounted.current && generation === refreshGeneration.current) setLoading(false); }
   }, [id, apply]);
   useEffect(() => { void refresh(); }, [refresh]);
-  useEffect(() => {
-    const controller = new AbortController();
-    void listWorkCandidates("presales_inquiry", controller.signal).then((data) => {
-      if (!controller.signal.aborted) setCandidates(data.items);
-    }).catch(() => { if (!controller.signal.aborted) setCandidateError(true); });
-    return () => controller.abort();
-  }, []);
   const partIds = [...new Set(lines.flatMap((line) => line.part_id ? [line.part_id] : []))].sort((a, b) => a - b).join(",");
   useEffect(() => {
     let disposed = false;
@@ -126,7 +115,7 @@ function InquiryEditorContent() {
     if (!state?.referenceOffer || !state.part) return;
     const part = state.part;
     setLines([{ key: `new-${++nextKey.current}`, part_id: part.part_id, pn_raw: part.pn_std,
-      description: part.summary || part.description, brand: part.brand, qty: 1, require_exact_pn: false,
+      description: part.summary || part.description, brand: part.brand, qty: 1, require_exact_pn: false, return_defective: true,
       ref_offer_id: state.referenceOffer.id, notesVisible: true, field_values: [], originalFields: [], expectedDelivery: "" }]);
   }, [id, location.state]);
 
@@ -138,7 +127,7 @@ function InquiryEditorContent() {
       if (seen.has(part.part_id)) return false;
       seen.add(part.part_id); return true;
     }).map((part): DraftLine => ({ key: `new-${++nextKey.current}`, part_id: part.part_id, pn_raw: part.pn_std,
-      description: part.summary || part.description, brand: part.brand, qty: 1, require_exact_pn: false,
+      description: part.summary || part.description, brand: part.brand, qty: 1, require_exact_pn: false, return_defective: true,
       notesVisible: true, field_values: [], originalFields: [], expectedDelivery: "" }));
     if (!added.length) return;
     setLines((previous) => [...previous, ...added]);
@@ -150,7 +139,7 @@ function InquiryEditorContent() {
       if (!text || seen.has(text.toLocaleUpperCase())) return false;
       seen.add(text.toLocaleUpperCase()); return true;
     }).map((pn): DraftLine => ({ key: `new-${++nextKey.current}`, part_id: null, pn_raw: pn,
-      qty: 1, require_exact_pn: false, notesVisible: true, field_values: [], originalFields: [], expectedDelivery: "" }));
+      qty: 1, require_exact_pn: false, return_defective: true, notesVisible: true, field_values: [], originalFields: [], expectedDelivery: "" }));
     if (!added.length) return;
     setLines((previous) => [...previous, ...added]);
 
@@ -162,13 +151,13 @@ function InquiryEditorContent() {
   };
   const serializeLines = () => lines.map((line) => ({
     ...(line.line_key ? { line_key: line.line_key } : {}), part_id: line.part_id, pn_raw: line.pn_raw,
-    description: line.description ?? null, qty: line.qty, require_exact_pn: line.require_exact_pn,
+    description: line.description ?? null, qty: line.qty, require_exact_pn: line.require_exact_pn, return_defective: line.return_defective,
     ref_offer_id: line.ref_offer_id ?? null, ...(line.notesVisible ? { notes: line.notes ?? null } : {}),
     ...(changedAudience(line.notes_audience, line.savedNotesAudience) ? { notes_audience: line.notes_audience } : {}),
     expected_delivery: line.expectedDelivery || null,
     field_values: serializeFields(line.field_values, line.originalFields, true),
   }));
-  const save = async (submit: boolean) => {
+  const save = async (submit: boolean, confirmReset = false) => {
     if (busy || blocked) return;
     if (!lines.length && (submit || append)) { void message.warning("请至少加入一行询价"); return; }
     if (lines.some((line) => !Number.isFinite(line.qty) || line.qty <= 0)) { void message.warning("数量必须大于 0"); return; }
@@ -183,12 +172,20 @@ function InquiryEditorContent() {
       } else {
         const payload = { ...(customerVisible && (!inquiry || "customer_id" in inquiry) ? { customer_id: customerId ?? null } : {}),
           ...(!inquiry || "notes" in inquiry ? { notes } : {}),
-          ...(!inquiry || "assignee_ids" in inquiry ? { assignee_ids: assigneeIds } : {}),
-          lines: serializeLines(), field_values: serializeFields(fields, (inquiry?.field_values || []) as ReadField[]),
-          ...(changedAudience(offerAudience, inquiry?.offer_audience) ? { offer_audience: offerAudience } : !inquiry ? { offer_audience: PUBLIC_AUDIENCE } : {}),
+          field_values: serializeFields(fields, (inquiry?.field_values || []) as ReadField[]),
           ...(changedAudience(notesAudience, inquiry?.notes_audience) ? { notes_audience: notesAudience } : {}) };
-        saved = inquiry ? await presales.updateInquiry(inquiry.id, { ...payload, expected_version: inquiry.version })
-          : await presales.createInquiry({ ...payload, kind: "sales_inquiry" });
+        if (inquiry) {
+          const lineUpdate = inquiry.status === "revising" && lines === loadedLines.current ? {} : {
+            lines: serializeLines(),
+            ...(inquiry.status === "revising" ? {
+              expected_line_versions: Object.fromEntries((inquiry.lines ?? []).map((line) => [line.line_key, line.version])),
+            } : {}),
+          };
+          saved = await presales.updateInquiry(inquiry.id, { ...payload, ...lineUpdate, expected_version: inquiry.version,
+            ...(confirmReset ? { confirm_reset: true } : {}) });
+        } else {
+          saved = await presales.createInquiry({ ...payload, lines: serializeLines(), kind: "sales_inquiry" });
+        }
         if (!mounted.current) return;
         // 保存成功即同步版本与 line_key；提交失败重试时继续使用已保存的草稿身份。
         apply(saved);
@@ -203,7 +200,13 @@ function InquiryEditorContent() {
     } catch (error) {
       if (!mounted.current) return;
       // 冲突时保留草稿，不用服务端内容覆盖尚未保存的行与字段。
-      if (parseApiError(error).kind === "version_conflict") setVersionConflict(true);
+      const info = parseApiError(error);
+      if (info.code === "price_reset_required" && !confirmReset) {
+        modal.confirm({ title: "确认作废受影响行的原答复？", content: "改动条件、切换引用或删除已答复的行，会使这些行的原答复失效。旧报价仍可查历史。",
+          okText: "确认修改", cancelText: "继续编辑", onOk: () => save(submit, true) });
+        return;
+      }
+      if (info.kind === "version_conflict") setVersionConflict(true);
       await handleError(error);
     } finally { if (mounted.current) setBusy(false); }
   };
@@ -212,7 +215,7 @@ function InquiryEditorContent() {
   if (loadError) return <Alert type="error" message={loadError} action={<Button onClick={() => void refresh()}>重试</Button>} />;
   const line = lines.find((item) => item.key === editing);
   return <section className="presales-page">
-    <PageHeader title={append ? "追加询价行" : inquiry ? `编辑询价 ${inquiry.inquiry_no}` : "新建询价"} subtitle="选择型号并填写需求，提交后进入采购待办" extra={<Button onClick={() => navigate(inquiry ? `/presales/inquiries/${inquiry.id}` : "/presales/inquiries")}>返回</Button>} />
+    <PageHeader title={append ? "追加询价行" : inquiry ? `编辑询价 ${inquiry.inquiry_no}` : "新建询价"} subtitle="选择型号并填写需求，提交后进入共享池，所有人都能报价" extra={<Button onClick={() => navigate(inquiry ? `/presales/inquiries/${inquiry.id}` : "/presales/pool")}>返回</Button>} />
     <div className="presales-panel">
       {versionConflict && <Alert type="warning" showIcon message="记录版本已变化，当前填写内容仍保留。"
         description="请先复制需要保留的修改，再重新加载最新单据。"
@@ -224,21 +227,15 @@ function InquiryEditorContent() {
               catch (error) { await handleError(error); }
             }
           } })}>重新加载最新单据</Button>} />}
-      {blocked && <Alert type="warning" message="当前单据不可在此编辑；已提交的销售询价请先撤回修改，关单后请复制为新单。" />}
+      {blocked && <Alert type="warning" message="当前单据不可在此编辑；已提交的询价请在询价报价页按行修改，关单后请复制为新单。" />}
       {!append && (blocked ? <Descriptions column={1} items={[
         ...("customer_id" in (inquiry ?? {}) ? [{ key: "customer", label: "客户", children: inquiry?.customer_name ?? customerId ?? "—" }] : []),
         ...("notes" in (inquiry ?? {}) ? [{ key: "notes", label: "客户要求", children: notes }] : []),
       ]} /> : <Form layout="vertical" disabled={busy}>
         <div className="presales-form">
           {customerVisible && (!inquiry || "customer_id" in inquiry) && <Form.Item label="客户（可选）"><CandidateSelect label="客户" load={presales.customers} value={customerId} onChange={setCustomerId} disabled={busy} /></Form.Item>}
-          {(!inquiry || "assignee_ids" in inquiry) && <Form.Item label="处理人（留空进公共池）"><Select aria-label="处理人" mode="multiple" value={assigneeIds} onChange={setAssigneeIds}
-            options={candidates.map((candidate) => ({ value: candidate.id, label: candidate.display_name }))} /></Form.Item>}
-          {(!inquiry || inquiry.offer_audience) && <Form.Item label="本单报价可见范围"><Popover trigger="click" content={<AudiencePicker key={inquiry?.version ?? "new"} savedRule={inquiry?.offer_audience} value={offerAudience} onChange={setOfferAudience} disabled={busy} />}>
-            <Button aria-label="设置本单报价可见范围">{({ public: "公开（全体销售）", private: "私密", include: "部分可见", exclude: "不给谁看" })[offerAudience?.mode ?? inquiry?.offer_audience?.mode ?? "public"]}</Button>
-          </Popover></Form.Item>}
         </div>
         <Button type="link" aria-expanded={headOpen} onClick={() => setHeadOpen(!headOpen)}>{headOpen ? "收起客户要求 / 自定义字段" : "客户要求 / 自定义字段"}</Button>
-        {candidateError && <Alert type="warning" message="处理人候选加载失败，请刷新后再指定；留空仍表示公共池。" />}
         {headOpen && <>
           {(!inquiry || "notes" in inquiry) && <Form.Item label={<Space>客户要求{(!inquiry || inquiry.notes_audience) && <AudienceLock key={inquiry?.version ?? "new"} label="客户要求" savedRule={inquiry?.notes_audience} value={notesAudience} onChange={setNotesAudience} />}</Space>}>
             <Input.TextArea aria-label="客户要求" value={notes} onChange={(event) => setNotes(event.target.value)} /></Form.Item>}
@@ -261,6 +258,7 @@ function InquiryEditorContent() {
         { title: "数量", dataIndex: "qty", width: 90 },
         { title: "期望交期", key: "delivery", width: 130, render: (_, item) => item.expectedDelivery || "—" },
         { title: "PN 一致", key: "exact", width: 100, render: (_, item) => item.require_exact_pn ? "一致" : "—" },
+        { title: "坏件", key: "return", width: 90, render: (_, item) => item.return_defective ? "返回" : "不返回" },
         { title: "报价引用", key: "reference", width: 200, render: (_, item) => item.ref_offer_id ? <>{`已引用报价 #${item.ref_offer_id} · 本行不再派单`}{(!referencedOffer(item) || !activeOffer(referencedOffer(item)!, now)) && <Tag>引用已失效</Tag>}</> : item.part_id ? `${flattenOffers(library[item.part_id] ?? []).filter((offer) => activeOffer(offer, now)).length} 条有效报价` : "—" },
         { title: "操作", key: "actions", width: 150, render: (_, item) => <Space><Button type="link" aria-label={`编辑 ${item.pn_raw}`} onClick={() => setEditing(item.key)}>{blocked ? "查看" : "编辑"}</Button>
           {!blocked && <Button type="link" disabled={busy} aria-label={`移除${item.pn_raw}`} onClick={() => setLines((previous) => previous.filter((other) => other.key !== item.key))}>删除</Button>}</Space> },
@@ -279,6 +277,7 @@ function InquiryEditorContent() {
         <Form.Item label="完整描述">{line.part_id ? <p>{line.description || "—"}</p> : <Input.TextArea aria-label={`${line.pn_raw} 描述`} value={line.description ?? ""} onChange={(event) => updateLine(line.key, { description: event.target.value })} />}</Form.Item>
         <div className="presales-form"><Form.Item label="数量" required><InputNumber aria-label={`${line.pn_raw} 数量`} min={0.001} max={99999999999.999} precision={3} value={line.qty} onChange={(qty) => updateLine(line.key, { qty: qty ?? 0 })} /></Form.Item>
           <Form.Item label="期望交期"><Input type="date" aria-label={`${line.pn_raw} 期望交期`} value={line.expectedDelivery} onChange={(event) => updateLine(line.key, { expectedDelivery: event.target.value })} /></Form.Item>
+          <Form.Item><Checkbox aria-label="坏件返回" checked={line.return_defective} onChange={(event) => updateLine(line.key, { return_defective: event.target.checked })}>坏件返回</Checkbox></Form.Item>
           <Form.Item><Checkbox aria-label="要求 PN 一致" checked={line.require_exact_pn} onChange={(event) => updateLine(line.key, { require_exact_pn: event.target.checked })}>要求 PN 一致</Checkbox></Form.Item></div>
         {line.notesVisible && <Form.Item label={<Space>行备注{(!line.line_key || line.savedNotesAudience) && <AudienceLock label={`${line.pn_raw} 行备注`} savedRule={line.savedNotesAudience} value={line.notes_audience} onChange={(rule) => updateLine(line.key, { notes_audience: rule })} />}</Space>}>
           <Input.TextArea aria-label={`${line.pn_raw} 行备注`} value={line.notes ?? ""} onChange={(event) => updateLine(line.key, { notes: event.target.value })} /></Form.Item>}

@@ -12,7 +12,7 @@ import { ApiErrorFeedback } from "../../components/ApiErrorFeedback";
 export type ReadField = { field_def_id?: number; new_name?: string; name?: string; value: unknown; rule?: AudienceRuleRead };
 export type DraftLine = {
   key: string; line_key?: string; part_id: number | null; pn_raw: string; description?: string | null;
-  brand?: string | null; qty: number; require_exact_pn: boolean; ref_offer_id?: number | null;
+  brand?: string | null; qty: number; require_exact_pn: boolean; return_defective: boolean; ref_offer_id?: number | null;
   ref_offer_revision_no?: number | null; ref_offer?: Offer;
   notes?: string | null; notes_audience?: AudienceRule; notesVisible: boolean; field_values: CustomFieldValue[];
   savedNotesAudience?: AudienceRuleRead;

@@ -40,7 +40,6 @@ vi.mock("../../../components/parts/LivePartSearch", () => ({ default: ({ mode, v
   ...value.filter((part) => part.part_id !== id), part(id),
 ])}>加入 PN-{id}</button>) : <button onClick={() => onChange([part(42)])}>选定已有 PN</button>}</div> }));
 
-import TasksPage from "../TasksPage";
 import ProcessPage from "../ProcessPage";
 import OfferNewPage from "../OfferNewPage";
 import InquiryDetailPage from "../InquiryDetailPage";
@@ -67,7 +66,8 @@ beforeEach(() => {
   mocks.startFailed = false;
   localStorage.clear();
   localStorage.setItem("role", "purchaser");
-  localStorage.setItem("permissions", JSON.stringify({ action_presales_quote: true, action_presales_offer: true, data_supplier: true }));
+  localStorage.setItem("permissions", JSON.stringify({ page_presales: true, action_presales_quote: true,
+    action_presales_offer: true, action_presales_bind_part: true, page_master_data: true, data_supplier: true }));
   mocks.suppliers.mockResolvedValue([]);
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-25T04:00:00Z"));
   currentInquiry = baseInquiry();
@@ -132,27 +132,6 @@ describe("采购待办与询价处理", () => {
       existing_choices: { 81: { on_existing: "update", existing_offer_id: 99 } },
     })));
   });
-  it("报价通知进入只读询价详情并显示通知报价，不请求采购参考接口", async () => {
-    currentInquiry = { ...baseInquiry(), kind: "proactive_offer", created_by: undefined,
-      offers: [quote({ status: "published", unit_price: "567.89", valid_from: "2026-10-25T00:00:00Z" })] };
-    render(<MemoryRouter initialEntries={["/presales/tasks"]}><Routes>
-      <Route path="/presales/tasks" element={<TasksPage />} />
-      <Route path="/presales/inquiries/:id" element={<InquiryDetailPage />} />
-      <Route path="/presales/workbench/:id" element={<ProcessPage />} />
-    </Routes></MemoryRouter>);
-    fireEvent.click(screen.getByRole("tab", { name: "报价通知" }));
-    fireEvent.click(screen.getByRole("button", { name: "打开采购待办" }));
-    await screen.findByRole("heading", { name: "询价单 XJ-1" });
-    expect(screen.getAllByText(/567.89/).length).toBeGreaterThan(0);
-    expect(screen.queryByRole("button", { name: "退回公共池" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "保存草稿" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "回复给销售" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "更新 / 撤销报价" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "关单" })).not.toBeInTheDocument();
-    expect(mocks.reference).not.toHaveBeenCalled();
-    expect(mocks.saveOffer).not.toHaveBeenCalled();
-  });
-
   it("旧处理页带通知身份打开时也重定向至详情", async () => {
     render(<MemoryRouter initialEntries={[{ pathname: "/presales/workbench/1", state: { workItem: { ...task, subject_type: "presales_offer_notice" } } }]}><Routes>
       <Route path="/presales/workbench/:id" element={<ProcessPage />} />
@@ -190,16 +169,6 @@ describe("采购待办与询价处理", () => {
     expect(mocks.saveOffer).toHaveBeenCalledOnce();
     expect(mocks.createPart).not.toHaveBeenCalled();
   });
-  it("复用售前待办组件并带待办身份打开处理页", async () => {
-    function Opened() { const location = useLocation(); return <div>处理单 {(location.state as { workItem: WorkItem }).workItem.subject_id}</div>; }
-    render(<MemoryRouter initialEntries={["/presales/tasks"]}><Routes>
-      <Route path="/presales/tasks" element={<TasksPage />} /><Route path="/presales/workbench/:id" element={<Opened />} />
-    </Routes></MemoryRouter>);
-    expect(mocks.inbox.mock.calls[0][0].subjectType).toBe("presales_inquiry");
-    fireEvent.click(screen.getByRole("button", { name: "打开采购待办" }));
-    expect(await screen.findByText("处理单 1")).toBeInTheDocument();
-  });
-
   it("查重命中后选定已有主数据并使用行版本绑定", async () => {
     currentInquiry.lines![0].part_id = null;
     mocks.partCheck.mockResolvedValue({ near_duplicates: [{ pn_std: "PN-42", reason: "近似" }] });
@@ -215,17 +184,6 @@ describe("采购待办与询价处理", () => {
     fireEvent.click(screen.getByRole("button", { name: "绑定已有 PN" }));
     await waitFor(() => expect(mocks.bindPart).toHaveBeenCalledWith(11, { expected_version: 1, part_id: 42 }));
     await waitFor(() => expect(screen.queryByRole("button", { name: /查\s*重/ })).not.toBeInTheDocument());
-  });
-
-  it("报价通知复用待办组件并打开对应询价单", async () => {
-    render(<MemoryRouter initialEntries={["/presales/tasks"]}><Routes>
-      <Route path="/presales/tasks" element={<TasksPage />} />
-      <Route path="/presales/inquiries/:id" element={<div>报价通知单详情</div>} />
-    </Routes></MemoryRouter>);
-    fireEvent.click(screen.getByRole("tab", { name: "报价通知" }));
-    expect(mocks.inbox.mock.lastCall?.[0].subjectType).toBe("presales_offer_notice");
-    fireEvent.click(screen.getByRole("button", { name: "打开采购待办" }));
-    expect(await screen.findByText("报价通知单详情")).toBeInTheDocument();
   });
 
   it("查重无命中才能新建并绑定主数据", async () => {
@@ -746,17 +704,4 @@ it("采购报价页显示销售姓名，单号和只读禁用输入不出现", a
   await openLine("PN-1");
   expect(screen.queryByLabelText("PN-1单价")).not.toBeInTheDocument();
   expect(screen.queryByRole("spinbutton", { name: "统一有效期" })).not.toBeInTheDocument();
-});
-
-it.each(["采购询价", "报价通知"])("%s 主要标识为可见询价人，隐藏人员不回退到单号", async (tab) => {
-  render(<MemoryRouter><TasksPage /></MemoryRouter>);
-  if (tab === "报价通知") fireEvent.click(screen.getByRole("tab", { name: tab }));
-  const renderRow = mocks.inbox.mock.lastCall![0].renderRow;
-  const name = render(<>{renderRow({ ...task, summary: { inquiry_no: "XJ-SECRET", created_by_name: "销售李四" } })}</>);
-  expect(name.getByText("销售李四")).toBeInTheDocument();
-  expect(name.queryByText("XJ-SECRET")).not.toBeInTheDocument();
-  name.unmount();
-  const hidden = render(<>{renderRow({ ...task, summary: { inquiry_no: "XJ-SECRET" } })}</>);
-  expect(hidden.getByText("业务人员")).toBeInTheDocument();
-  expect(hidden.queryByText("XJ-SECRET")).not.toBeInTheDocument();
 });

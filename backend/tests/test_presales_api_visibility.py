@@ -5,13 +5,14 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select, text
+from sqlalchemy.orm import Session
 
 from app import permissions
 from app.auth import _make_token
 from app.main import app
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier
-from app.models.presales import PresalesOffer
+from app.models.presales import PresalesOffer, PresalesOfferRevision
 from app.models.system import SysAccessLog, SysUser
 from app.services import audience
 from app.services.presales import common, inquiries, library, offers, visibility
@@ -72,83 +73,6 @@ def _quoted(db, users, *, rule=None, whole=None):
     return inquiry, offer
 
 
-@pytest.mark.parametrize("mode", ["public", "private", "include", "exclude"])
-@pytest.mark.parametrize("viewer", ["buyer", "other", "peer", "supervisor"])
-def test_field_visibility_matrix_removes_values_and_identity_bypasses(db, users, mode, viewer):
-    rule = {"mode": mode}
-    if mode in {"include", "exclude"}:
-        rule["user_ids"] = [users.other.username]
-    inquiry, offer = _quoted(db, users, rule=rule)
-    ctx = _ctx(db, getattr(users, viewer))
-    result = library.batch(db, [users.part.id], ctx)[users.part.id][0]
-    expected = viewer in {"buyer", "supervisor"} or mode == "public" or (
-        mode == "include" and viewer == "other") or (mode == "exclude" and viewer != "other")
-    for field in ("supplier_id", "source_key", "reporter", "notes"):
-        assert (field in result) is expected, (mode, viewer, field, result)
-    assert "created_by" not in result and "work_item_id" not in result
-    assert "customer_id" not in result
-    if viewer == "other":
-        detail = visibility.inquiry_view(db, inquiry, ctx)
-        assert "customer_id" not in detail and "assignee_ids" not in detail
-
-
-def test_default_supplier_private_and_data_group_intersection_even_for_author(db, users):
-    inquiry, offer = _quoted(db, users)
-    seller = visibility.offer_view(db, offer, _ctx(db, users.seller))
-    assert "supplier_id" not in seller and "source_key" not in seller
-    assert seller["reporter"]["id"] == users.buyer.id and seller["notes"] == "采购机密"
-    graph = dict(users.buyer.template_perms)
-    graph["data_supplier"] = False
-    users.buyer.template_perms = graph
-    db.commit()
-    own = visibility.offer_view(db, offer, _ctx(db, users.buyer))
-    assert "supplier_id" not in own and "source_key" not in own
-    assert "customer_id" in visibility.inquiry_view(db, inquiry, _ctx(db, users.seller))
-    assert "customer_id" not in visibility.inquiry_view(db, inquiry, _ctx(db, users.peer))
-
-
-def test_whole_inquiry_private_blocks_detail_reference_library_and_search_badges(db, users):
-    inquiry, offer = _quoted(db, users, whole={"mode": "private"})
-    ctx = _ctx(db, users.other)
-    assert not visibility.can_view_inquiry(db, inquiry, ctx)
-    assert not visibility.can_view_offer(db, offer, ctx)
-    assert library.batch(db, [users.part.id], ctx) == {users.part.id: []}
-    assert library.boost_part_ids(db, users.part.pn_std, ctx) == []
-    with pytest.raises(Exception) as exc:
-        inquiries.create_draft(db, users.other.id, lines=[{
-            "part_id": users.part.id, "ref_offer_id": offer.id}])
-    assert getattr(exc.value, "status_code", None) == 403
-    db.rollback()
-    assert _client(users.other).get(f"/api/presales/inquiries/{inquiry.id}").status_code == 403
-
-
-def test_group_membership_changes_take_effect_on_existing_offer(db, users):
-    ctx = _ctx(db, users.buyer)
-    group = audience.create_group(db, "销售可见组", "personal", [users.other.username], ctx,
-                                  bypass=common.bypass)
-    inquiry, offer = _quoted(db, users, rule={"mode": "include", "group_ids": [group.id]})
-    other = _ctx(db, users.other)
-    assert "notes" in visibility.offer_view(db, offer, other)
-    audience.update_group(db, group.id, ctx, user_ids=[], bypass=common.bypass)
-    assert "notes" not in visibility.offer_view(db, offer, other)
-
-
-def test_history_and_timeline_do_not_reveal_now_private_notes_or_reporter(db, users):
-    inquiry, offer = _quoted(db, users)
-    offers.update_offer(db, offer.id, users.buyer.id,
-        {"notes": "新私密备注", "notes_audience": {"mode": "private"},
-         "reporter_audience": {"mode": "private"}}, expected_version=offer.version)
-    db.commit()
-    ctx = _ctx(db, users.seller)
-    revisions = visibility.revision_views(db, offer.id, ctx)
-    assert len(revisions) == 2
-    assert all("notes" not in row["snapshot"] and "reporter" not in row["snapshot"] for row in revisions)
-    timeline = events.list_events(db, Subject("presales_inquiry", inquiry.id), ctx)
-    offer_events = [row for row in timeline if row.kind.startswith("offer.")]
-    assert offer_events and all(row.actor is None for row in offer_events)
-    assert all("采购机密" not in str(row.payload) and "新私密备注" not in str(row.payload) for row in timeline)
-
-
 def test_generic_work_item_complete_cannot_bypass_per_line_reply_validation(db, users):
     inquiry = inquiries.create_draft(db, users.seller.id, lines=[{"part_id": users.part.id}],
                                      assignee_ids=[users.buyer.id])
@@ -159,7 +83,54 @@ def test_generic_work_item_complete_cannot_bypass_per_line_reply_validation(db, 
     assert item.status == "pending"
 
 
-def test_http_two_buyers_reply_compare_close_and_audit(db, users):
+def test_pool_deadlock_at_commit_preserves_price_and_version(db, users):
+    inquiry, offer = _quoted(db, users)
+    line = inquiries.lines_for(db, inquiry.id)[0]
+    url = f"/api/presales/pool/lines/{line.id}/price"
+    original_version, original_revision = line.version, offer.revision_no
+    client = _client(users.peer)
+    change = {"expected_version": original_version, "unit_price": "97.50"}
+
+    def deadlock(session):
+        session.execute(text("DO $$ BEGIN RAISE EXCEPTION 'concurrent update' "
+                             "USING ERRCODE = '40P01'; END $$"))
+
+    event.listen(Session, "before_commit", deadlock, once=True)
+    try:
+        response = client.put(url, json=change)
+    finally:
+        event.remove(Session, "before_commit", deadlock)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "concurrent_write"
+    db.refresh(line)
+    db.refresh(offer)
+    assert (line.version, offer.revision_no, offer.unit_price) == (original_version, original_revision, Decimal("50.25"))
+    saved = client.put(url, json=change)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["price"]["unit_price"] == "97.50"
+
+
+def test_revision_api_reads_pre_pool_snapshots_without_rewriting_them(db, users):
+    _, offer = _quoted(db, users)
+    previous = db.scalar(select(PresalesOfferRevision).where(PresalesOfferRevision.offer_id == offer.id))
+    offer.revision_no += 1
+    legacy = dict(previous.snapshot, revision_no=offer.revision_no)
+    legacy.pop("updated_by")
+    legacy.pop("price_basis")
+    revision = PresalesOfferRevision(offer_id=offer.id, revision_no=offer.revision_no,
+        snapshot=legacy, actor=users.buyer.id, changed_fields=["unit_price"])
+    db.add(revision)
+    db.commit()
+    response = _client(users.other).get(f"/api/presales/offers/{offer.id}/revisions")
+    assert response.status_code == 200
+    snapshot = response.json()[-1]["snapshot"]
+    assert snapshot["reporter"]["id"] == users.buyer.id
+    assert snapshot["unit_price"] == legacy["unit_price"] and snapshot["price_basis"] == "sale"
+    db.refresh(revision)
+    assert revision.snapshot == legacy
+
+
+def test_http_two_buyers_share_price_compare_close_and_audit(db, users):
     seller, buyer, peer = (_client(user) for user in (users.seller, users.buyer, users.peer))
     response = seller.post("/api/presales/inquiries", json={
         "customer_id": users.customer.id, "lines": [{"part_id": users.part.id, "qty": "2"}],
@@ -173,24 +144,158 @@ def test_http_two_buyers_reply_compare_close_and_audit(db, users):
     response = seller.post(path + "/submit", json={"expected_version": inquiry["version"]})
     assert response.status_code == 200, response.text
     inquiry = response.json()
-    first_offer = None
+    line = inquiry["lines"][0]
+    line_version = line["version"]
     for client, price in ((buyer, "25.50"), (peer, "24.50")):
-        quote = client.post(path + f"/lines/{inquiry['lines'][0]['id']}/offers", json={
-            "expected_version": inquiry["version"], "unit_price": price})
+        quote = client.put(f"/api/presales/pool/lines/{line['id']}/price", json={
+            "expected_version": line_version, "unit_price": price})
         assert quote.status_code == 200, quote.text
-        first_offer = first_offer or quote.json()["id"]
-        reply = client.post(path + "/reply", json={"expected_version": inquiry["version"]})
-        assert reply.status_code == 200, reply.text
+        row = quote.json()
+        first_offer, line_version = row["price"]["offer_id"], row["line_version"]
     detail = seller.get(path).json()
-    assert len(detail["offers"]) == 2 and all(item["status"] == "done" for item in detail["work_items"])
-    closed = seller.post(path + "/close", json={"expected_version": detail["version"],
-                                               "outcome": "won", "won_offer_id": first_offer})
+    assert len(detail["offers"]) == 1 and detail["work_items"] == []
+    history = seller.get(f"/api/presales/pool/lines/{line['id']}/history").json()
+    assert [Decimal(h["unit_price"]) for h in history if h["kind"] == "price"] == [Decimal("24.50"), Decimal("25.50")]
+    closed = seller.post(path + "/close", json={"expected_version": detail["version"], "outcome": "won",
+        "won_offer_id": first_offer, "expected_offer_revision_no": detail["offers"][0]["revision_no"]})
     assert closed.status_code == 200 and closed.json()["status"] == "closed", closed.text
     copied = seller.post(path + "/copy", json={"expected_version": closed.json()["version"]})
     assert copied.status_code == 201 and copied.json()["status"] == "draft", copied.text
     assert copied.json()["lines"][0]["line_key"] != inquiry["lines"][0]["line_key"]
     actions = set(db.scalars(select(SysAccessLog.action).where(SysAccessLog.resource == "presales")))
-    assert {"inquiry.created", "inquiry.submitted", "presales.offer.replied", "inquiry.closed"} <= actions
+    assert {"inquiry.created", "inquiry.submitted", "presales.pool.offer.updated", "inquiry.closed"} <= actions
+
+
+def test_shared_inquiry_header_edits_are_owner_or_supervisor_only_and_never_create_tasks(db, users):
+    owner, peer, supervisor = (_client(u) for u in (users.seller, users.other, users.supervisor))
+    draft = owner.post("/api/presales/inquiries", json={
+        "customer_id": users.customer.id, "assignee_ids": [users.buyer.id],
+        "lines": [{"part_id": users.part.id, "qty": 3}]}).json()
+    path = f"/api/presales/inquiries/{draft['id']}"
+    workbook = f"/api/presales/workbooks/inquiry/{draft['id']}"
+    submitted = owner.post(path + "/submit", json={"expected_version": draft["version"]}).json()
+    assert submitted["is_owner"] and not peer.get(path).json()["is_owner"]
+    version = {"expected_version": submitted["version"]}
+    for action, payload in (("/withdraw", version), ("/close", {**version, "outcome": "lost"}),
+                            ("/lines", {**version, "lines": [{"pn_raw": "越权附行"}]})):
+        assert peer.post(path + action, json=payload).status_code == 403
+    assert peer.post(path + "/withdraw", json={"expected_version": draft["version"]}).status_code == 403
+    revising = owner.post(path + "/withdraw", json=version).json()
+    version = {"expected_version": revising["version"]}
+    assert peer.patch(path, json={**version, "customer_id": None, "lines": []}).status_code == 403
+    assert peer.post(path + "/resubmit", json=version).status_code == 403
+    assert peer.get(workbook).status_code == 403
+    signed = supervisor.get(workbook)
+    assert signed.status_code == 200
+    forwarded = peer.post("/api/workbooks/presales_inquiry_lines/preview",
+        params={"subject_type": "presales_inquiry", "subject_id": draft["id"]},
+        files={"file": ("inquiry.xlsx", signed.content)})
+    assert forwarded.status_code == 403, forwarded.text
+    checked = owner.get(path).json()
+    assert (checked["status"], checked["version"], checked["customer_id"]) == (
+        "revising", revising["version"], users.customer.id)
+    assert len(checked["lines"]) == 1 and Decimal(checked["lines"][0]["qty"]) == 3
+    resumed = supervisor.post(path + "/resubmit", json=version)
+    assert resumed.status_code == 200, resumed.text
+    appended = owner.post(path + "/lines", json={
+        "expected_version": resumed.json()["version"], "lines": [{"pn_raw": "新增型号"}]})
+    assert appended.status_code == 200 and len(appended.json()["lines"]) == 2
+    assert owner.post(path + "/urge").status_code == 410
+    assert owner.get(path).json()["work_items"] == []
+
+
+def test_revising_editor_cannot_overwrite_delete_or_reorder_changed_pool_lines(db, users):
+    owner, peer = _client(users.seller), _client(users.peer)
+    draft = owner.post("/api/presales/inquiries", json={"lines": [
+        {"pn_raw": "A", "qty": 1}, {"pn_raw": "B", "qty": 4}]}).json()
+    path = f"/api/presales/inquiries/{draft['id']}"
+    submitted = owner.post(path + "/submit", json={"expected_version": draft["version"]}).json()
+    editing = owner.post(path + "/withdraw", json={"expected_version": submitted["version"]}).json()
+    first, second = editing["lines"]
+    versions = {row["line_key"]: row["version"] for row in editing["lines"]}
+    rows = [{"line_key": row["line_key"], "qty": row["qty"]} for row in editing["lines"]]
+    price_row = f"/api/presales/pool/lines/{first['id']}"
+    changed = peer.patch(price_row, json={"expected_version": first["version"], "qty": 2})
+    assert changed.status_code == 200, changed.text
+    header = {"expected_version": editing["version"], "notes": "A 的备注"}
+    # 旧整单客户端不传行版本；新客户端还可删除或换序，均不能覆盖 B 的写入。
+    for patch in ({"lines": rows}, {"lines": rows, "expected_line_versions": versions},
+                  {"lines": rows[1:], "expected_line_versions": versions},
+                  {"lines": rows[::-1], "expected_line_versions": versions}):
+        response = owner.patch(path, json={**header, **patch})
+        assert response.status_code == 409 and response.json()["detail"]["code"] == "version_conflict"
+    current = owner.get(path).json()
+    assert current["notes"] == editing["notes"] and current["version"] == editing["version"]
+    assert [(r["line_key"], Decimal(r["qty"])) for r in current["lines"]] == [
+        (first["line_key"], 2), (second["line_key"], 4)]
+    response = owner.patch(path, json=header)
+    assert response.status_code == 200 and response.json()["notes"] == header["notes"]
+    current = response.json()
+    new_versions = {r["line_key"]: r["version"] for r in current["lines"]}
+    reordered = owner.patch(path, json={"expected_version": current["version"], "expected_line_versions": new_versions,
+                                        "lines": [{"line_key": r["line_key"]} for r in reversed(current["lines"])]})
+    assert reordered.status_code == 200, reordered.text
+    assert [(r["line_key"], Decimal(r["qty"])) for r in reordered.json()["lines"]] == [
+        (second["line_key"], 4), (first["line_key"], 2)]
+    # 新老客户端都能接续已核对过的整单版本。
+    legacy = owner.patch(path, json={"expected_version": reordered.json()["version"], "lines": [{"line_key": first["line_key"]}]})
+    assert legacy.status_code == 200 and len(legacy.json()["lines"]) == 1
+
+
+@pytest.mark.parametrize("decision", ["price", "skip"])
+@pytest.mark.parametrize("edit_other_line", [False, True])
+def test_resubmit_keeps_answer_given_for_new_shared_conditions(db, users, decision, edit_other_line):
+    owner, buyer = _client(users.seller), _client(users.buyer)
+    draft = owner.post("/api/presales/inquiries", json={"lines": [
+        {"part_id": users.part.id}, {"pn_raw": "OTHER"}]}).json()
+    path = f"/api/presales/inquiries/{draft['id']}"
+    submitted = owner.post(path + "/submit", json={"expected_version": draft["version"]}).json()
+    editing = owner.post(path + "/withdraw", json={"expected_version": submitted["version"]}).json()
+    line = editing["lines"][0]
+    row_path = f"/api/presales/pool/lines/{line['id']}"
+    changed = buyer.patch(row_path, json={"expected_version": line["version"], "qty": 2})
+    assert changed.status_code == 200, changed.text
+    version = {"expected_version": changed.json()["line_version"]}
+    answer = (buyer.put(row_path + "/price", json={**version, "unit_price": "101.50"}) if decision == "price"
+              else buyer.post(row_path + "/skip", json={**version, "reason": "按新数量无货"}))
+    assert answer.status_code == 200, answer.text
+    # 对方的新答复之后，旧编辑器还可以用最新基线修改另一行，再重新提交。
+    current = owner.get(path).json()
+    first, second = current["lines"]
+    payload = {"expected_version": current["version"], "notes": "补充说明"}
+    if edit_other_line:
+        payload.update(expected_line_versions={r["line_key"]: r["version"] for r in current["lines"]},
+                       lines=[{"line_key": first["line_key"]}, {"line_key": second["line_key"], "notes": "补充说明"}])
+    saved = owner.patch(path, json=payload)
+    assert saved.status_code == 200, saved.text
+    result = owner.post(path + "/resubmit", json={"expected_version": saved.json()["version"]})
+    assert result.status_code == 200, result.text
+    refreshed = owner.get("/api/presales/pool/lines?tab=all").json()
+    row = next(r for r in refreshed["items"] if r["line_id"] == first["id"])
+    if decision == "price":
+        assert row["answer_state"] == "quoted" and Decimal(row["price"]["unit_price"]) == Decimal("101.50")
+    else:
+        assert row["answer_state"] == "skip" and row["answer_reason"] == "按新数量无货"
+
+
+def test_quote_metadata_edit_does_not_certify_price_for_new_inquiry_conditions(db, users):
+    inquiry, offer = _quoted(db, users)
+    owner, buyer = _client(users.seller), _client(users.buyer)
+    path = f"/api/presales/inquiries/{inquiry.id}"
+    editing = owner.post(path + "/withdraw", json={"expected_version": inquiry.version}).json()
+    # 旧版本撤回后只改条件，报价在重新提交之前仍是 published。模拟真实存量格式。
+    db.refresh(inquiry)
+    inquiry.submitted_snapshot = {k: v for k, v in inquiry.submitted_snapshot.items()
+                                  if k not in {"answers_synced_on_edit", "editor_line_versions"}}
+    old_line = inquiries.lines_for(db, inquiry.id)[0]
+    old_line.qty, old_line.version = 7, old_line.version + 1
+    db.commit()
+    changed = buyer.patch(f"/api/presales/offers/{offer.id}", json={"expected_version": offer.version, "notes": "仅修改货源说明"})
+    assert changed.status_code == 200, changed.text
+    result = owner.post(path + "/resubmit", json={"expected_version": editing["version"]})
+    assert result.status_code == 200, result.text
+    db.refresh(offer)
+    assert offer.status == "stale"
 
 
 def test_http_anonymous_denied_and_conflict_never_mutates(db, users):
@@ -230,7 +335,7 @@ def test_http_proactive_notice_reference_library_and_revisions(db, users):
     library_response = _client(users.other).get(f"/api/presales/library?part_ids={users.part.id}")
     assert library_response.status_code == 200 and len(library_response.json()[str(users.part.id)]) == 1
     notices = _client(users.other).get("/api/work-items?subject_type=presales_offer_notice")
-    assert notices.status_code == 200 and notices.json()["total"] == 1, notices.text
+    assert notices.status_code == 200 and notices.json()["total"] == 0, notices.text
     refs = buyer.post("/api/presales/reference", json={"inquiry_id": inquiry["id"]})
     assert refs.status_code == 200, refs.text
     assert refs.json()["gallery"] == [{"part_id": users.part.id}]
@@ -248,42 +353,6 @@ def test_supervisor_can_manage_team_fields_and_public_groups(db, users):
     group = client.post("/api/audience/groups", json={"scope": "public", "name": "售前采购组",
                                                     "user_ids": [users.buyer.username]})
     assert group.status_code == 201, group.text
-
-
-def test_public_pool_owner_sees_claimant_while_other_sales_cannot(db, users):
-    inquiry = inquiries.create_draft(db, users.seller.id, lines=[{"part_id": users.part.id}])
-    inquiries.submit(db, inquiry.id, users.seller.id, inquiry.version)
-    item = work_items.list_by_subject(db, Subject("presales_inquiry", inquiry.id), users.seller.id)[0]
-    work_items.claim(db, item.id, users.buyer.id, item.version)
-    offer = offers.save_draft(db, inquiry.id, inquiries.lines_for(db, inquiry.id)[0].id,
-        users.buyer.id, {"unit_price": "25", "reporter_audience": {"mode": "private"}},
-        expected_version=inquiry.version)
-    offers.reply(db, inquiry.id, users.buyer.id, expected_version=inquiry.version)
-    db.commit()
-    ctx = _ctx(db, users.seller)
-    detail = visibility.inquiry_view(db, inquiry, ctx)
-    assert "reporter" not in detail["offers"][0]
-    assert detail["assignee_ids"] == []
-    assert detail["work_items"][0]["assignee_id"] == users.buyer.id
-    assert detail["work_items"][0]["claimed_by"] == users.buyer.id
-    assert detail["work_items"][0]["status"] == "done"
-    other_detail = visibility.inquiry_view(db, inquiry, _ctx(db, users.other))
-    assert "reporter" not in other_detail["offers"][0]
-    assert "assignee_ids" not in other_detail
-    assert other_detail["work_items"] == []
-    for row in events.list_events(db, Subject("presales_inquiry", inquiry.id), ctx):
-        if row.actor is None:
-            assert row.work_item_id is None
-    assert "reporter" in visibility.offer_view(db, offer, _ctx(db, users.buyer))
-
-
-def test_deleted_unsubmitted_draft_does_not_become_visible_to_other_sales(db, users):
-    inquiry = inquiries.create_draft(db, users.seller.id, notes="未提交草稿", lines=[{"part_id": users.part.id}])
-    inquiries.delete_draft(db, inquiry.id, users.seller.id, inquiry.version)
-    db.commit()
-    assert not visibility.can_view_inquiry(db, inquiry, _ctx(db, users.other))
-    response = _client(users.other).get("/api/presales/inquiries?scope=all")
-    assert response.status_code == 200 and response.json()["total"] == 0
 
 
 def test_http_binding_check_then_existing_bind_and_create_new_are_versioned(db, users):

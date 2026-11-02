@@ -17,6 +17,9 @@ def test_original_notice_rechecks_reporter_via_moved_offer_response(db, r6_actor
     first = offers.publish_proactive(db, original.id, users.buyer.id,
         expected_version=original.version, notice_user_ids=[users.sales.id])[0]
     viewer = common.resolve_actor(db, users.sales.id)[1]
+    # D-0052 不再产生通知。单独构造上线前留下的工作项，验证历史回读。
+    work_items.open_items(db, Subject("presales_offer_notice", original.id), [users.sales.id],
+                          "presales_offer_notice", users.buyer.id)
     before = work_items.visible_items(db, viewer, "assigned", "presales_offer_notice")
     assert before["items"][0]["created_by"] == users.buyer.id
     _, _, _, updated = _publish(db, users, whole={"mode": whole}, price="1.00",

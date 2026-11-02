@@ -7,7 +7,6 @@ from app.models.presales import PresalesInquiry
 from app.models.sales import FSalesOrder
 from app.security import is_field_hidden, is_scoped_sales
 from app.services.presales import common
-from app.services.workflow import work_items
 from app.services.workflow.registry import Forbidden
 
 
@@ -23,7 +22,6 @@ def _query(model, q):
 
 def customers(db, ctx, q="", *, limit=20):
     common.require(ctx, "page_presales")
-    common.require(ctx, "action_presales_inquire")
     if is_field_hidden(ctx, "customer_id"):
         raise Forbidden("无客户信息权限")
     query = _query(DimCustomer, q)
@@ -46,9 +44,4 @@ def customers(db, ctx, q="", *, limit=20):
 
 def suppliers(db, ctx, q="", *, limit=20):
     common.require(ctx, "page_presales")
-    if not any(work_items.has_permission(ctx, key) for key in
-               ("action_presales_quote", "action_presales_offer")):
-        raise Forbidden("无此操作权限")
-    if is_field_hidden(ctx, "supplier_id"):
-        raise Forbidden("无供应商信息权限")
     return [dict(row._mapping) for row in db.execute(_query(DimSupplier, q).limit(limit))]

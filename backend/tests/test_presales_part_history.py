@@ -7,40 +7,43 @@ from app.services.presales import common, inquiries, offers, part_history, visib
 from tests.test_presales_api_visibility import _client, _quoted, users  # noqa: F401
 
 
-def test_part_history_uses_visibility_before_pagination_and_never_leaks_private_rows(db, users):
-    visible, offer = _quoted(db, users)
-    private, _ = _quoted(db, users, whole={"mode": "private"})
-    draft = inquiries.create_draft(db, users.seller.id, lines=[{"part_id": users.part.id}])
-    removed = inquiries.create_draft(db, users.other.id, lines=[{"part_id": users.part.id}])
-    inquiries.lines_for(db, removed.id)[0].status = "deleted"
-    offer.is_tax_inclusive = True
-    db.commit()
-    response = _client(users.other).get(f"/api/presales/parts/{users.part.id}/inquiries", params={"page_size": 1})
-    assert response.status_code == 200, response.text
-    result = response.json()
-    assert result["total"] == 1
-    row = result["items"][0]
-    assert row["inquiry_id"] == visible.id and row["inquiry_id"] not in {private.id, draft.id, removed.id}
-    assert row["created_by_name"] == "seller"
-    assert row["has_quote"] is True and Decimal(row["qty"]) == 2
-    assert row["lowest_valid_quotes"] == [{"unit_price": "50.25", "is_tax_inclusive": True}]
-    assert "customer_id" not in row and "supplier_id" not in row
-    assert _client(users.other).get(f"/api/presales/parts/{users.part.id}/inquiries", params={"page": 2, "page_size": 1}).json()["items"] == []
-
-
 def test_part_history_requires_presales_permission(users):
     response = _client(users.denied).get(f"/api/presales/parts/{users.part.id}/inquiries")
     assert response.status_code == 403
 
 
+def test_part_history_includes_legacy_private_records_but_excludes_drafts_and_deleted_lines(db, users):
+    public, _ = _quoted(db, users)
+    private, _ = _quoted(db, users, whole={"mode": "private"})
+    inquiries.create_draft(db, users.seller.id, lines=[{"part_id": users.part.id}])
+    removed = inquiries.create_draft(db, users.other.id, lines=[{"part_id": users.part.id}])
+    inquiries.lines_for(db, removed.id)[0].status = "deleted"
+    db.commit()
+
+    client = _client(users.other)
+    path = f"/api/presales/parts/{users.part.id}/inquiries"
+    for page, inquiry in enumerate((private, public), start=1):
+        response = client.get(path, params={"page": page, "page_size": 1})
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["total"] == 2
+        row, = result["items"]
+        assert row["inquiry_id"] == inquiry.id and row["created_by_name"] == "seller"
+        assert row["has_quote"] is True and Decimal(row["qty"]) == 2
+        assert row["lowest_valid_quotes"] == [{"unit_price": "50.25", "is_tax_inclusive": True}]
+        assert "customer_id" not in row and "supplier_id" not in row
+    assert client.get(path, params={"page": 3, "page_size": 1}).json()["items"] == []
+
+
 def test_part_history_pages_multiple_inquiries_before_building_details(db, users, monkeypatch):
-    visible = [_quoted(db, users)[0] for _ in range(4)]
-    _quoted(db, users, whole={"mode": "private"})
-    # 同一询价的多行也占独立分页位置。
+    public = [_quoted(db, users)[0] for _ in range(4)]
+    private, _ = _quoted(db, users, whole={"mode": "private"})
     inquiry = inquiries.create_draft(db, users.seller.id, lines=[
         {"part_id": users.part.id, "qty": 3}, {"part_id": users.part.id, "qty": 4}])
     inquiries.submit(db, inquiry.id, users.seller.id, inquiry.version)
     db.commit()
+    lines = inquiries.lines_for(db, inquiry.id)
+    next_page = [inquiries.lines_for(db, row.id)[0] for row in (private, public[-1])]
     detail_ids = []
     original = visibility.inquiry_view
 
@@ -50,27 +53,61 @@ def test_part_history_pages_multiple_inquiries_before_building_details(db, users
 
     monkeypatch.setattr(visibility, "inquiry_view", view)
     ctx = common.resolve_actor(db, users.other.id)[1]
-    first = part_history.list_lines(db, users.part.id, ctx, page=1, page_size=1)
-    assert first["total"] == 6
-    assert first["items"][0]["inquiry_id"] == inquiry.id
-    assert detail_ids == [inquiry.id]
-    detail_ids.clear()
-    second = part_history.list_lines(db, users.part.id, ctx, page=2, page_size=1)
-    assert second["total"] == 6
-    assert [row["inquiry_id"] for row in second["items"]] == [inquiry.id]
-    assert len({row["line_id"] for row in first["items"] + second["items"]}) == 2
-    assert detail_ids == [inquiry.id]
-    detail_ids.clear()
-    combined = part_history.list_lines(db, users.part.id, ctx, page=1, page_size=2)
-    assert [row["line_id"] for row in combined["items"]] == [row["line_id"] for row in first["items"] + second["items"]]
-    assert detail_ids == [inquiry.id]
-    detail_ids.clear()
-    following = part_history.list_lines(db, users.part.id, ctx, page=2, page_size=2)
-    assert [row["inquiry_id"] for row in following["items"]] == [visible[-1].id, visible[-2].id]
-    assert detail_ids == [visible[-1].id, visible[-2].id]
-    detail_ids.clear()
-    assert part_history.list_lines(db, users.part.id, ctx, page=10, page_size=2)["items"] == []
-    assert detail_ids == []
+    for page, size, expected_lines, expected_details in [
+        (1, 1, lines[:1], [inquiry.id]),
+        (2, 1, lines[1:], [inquiry.id]),
+        (1, 2, lines, [inquiry.id]),
+        (2, 2, next_page, [private.id, public[-1].id]),
+        (5, 2, [], []),
+    ]:
+        detail_ids.clear()
+        result = part_history.list_lines(db, users.part.id, ctx, page=page, page_size=size)
+        assert result["total"] == 7
+        assert [(row["inquiry_id"], row["line_id"]) for row in result["items"]] == [
+            (line.inquiry_id, line.id) for line in expected_lines]
+        assert detail_ids == expected_details
+
+
+def test_sales_creator_and_event_labels_are_visible_to_pool_reader(db, users):
+    row, _ = _quoted(db, users)
+    client = _client(users.other)
+    detail = client.get(f"/api/presales/inquiries/{row.id}").json()
+    assert detail["created_by_name"] == "seller"
+    # 旧入口生成的已完成待办仍可查到发起人。
+    completed = _client(users.buyer).get("/api/work-items", params={
+        "tab": "done", "subject_type": "presales_inquiry"}).json()["items"]
+    assert next(item for item in completed if item["subject_id"] == row.id)["summary"]["created_by_name"] == "seller"
+    timeline = client.get(f"/api/subjects/presales_inquiry/{row.id}/events").json()
+    assert any(event["kind_label"] == "提交询价" for event in timeline["items"])
+    assert all(event["kind_label"] and "." not in event["kind_label"] for event in timeline["items"])
+
+
+def test_legacy_proactive_quote_creator_is_visible_in_detail_and_history(db, users):
+    row = inquiries.create_draft(db, users.buyer.id, kind="proactive_offer", lines=[{"part_id": users.part.id}])
+    line = inquiries.lines_for(db, row.id)[0]
+    offers.save_draft(db, row.id, line.id, users.buyer.id,
+        {"unit_price": "88", "reporter_audience": {"mode": "private"}}, expected_version=row.version)
+    offers.publish_proactive(db, row.id, users.buyer.id, expected_version=row.version)
+    db.commit()
+    client = _client(users.other)
+    detail = client.get(f"/api/presales/inquiries/{row.id}").json()
+    assert detail["created_by_name"] == "buyer"
+    assert detail["offers"][0]["reporter"] == {"id": users.buyer.id, "name": "buyer"}
+    historical, = client.get(f"/api/presales/parts/{users.part.id}/inquiries").json()["items"]
+    assert (historical["line_id"], historical["created_by_name"]) == (line.id, "buyer")
+
+
+def test_review_required_inquiry_still_has_quote_history_but_no_current_minimum(db, users):
+    inquiry, offer = _quoted(db, users)
+    line, = inquiries.lines_for(db, inquiry.id)
+    line.answer_requires_review = True
+    inquiry.status = "revising"
+    db.commit()
+    response = _client(users.seller).get(f"/api/presales/parts/{users.part.id}/inquiries")
+    assert response.status_code == 200, response.text
+    row, = response.json()["items"]
+    assert row["line_id"] == line.id and row["has_quote"] and row["lowest_valid_quotes"] == []
+    assert offer.status == "published" and offer.unit_price == Decimal("50.25")
 
 
 def test_part_history_ignores_unusable_quotes_and_keeps_tax_bases_separate(db, users):
@@ -94,31 +131,3 @@ def test_part_history_ignores_unusable_quotes_and_keeps_tax_bases_separate(db, u
     db.commit()
     result = _client(users.seller).get(path).json()["items"][0]
     assert result["has_quote"] is True and result["lowest_valid_quotes"] == []
-
-
-def test_sales_creator_name_is_returned_for_assigned_buyer_and_work_summary(db, users):
-    row, _ = _quoted(db, users)
-    client = _client(users.buyer)
-    detail = client.get(f"/api/presales/inquiries/{row.id}").json()
-    assert detail["created_by_name"] == "seller"
-    assert "created_by" not in detail
-    queue = client.get("/api/work-items", params={"tab": "done", "subject_type": "presales_inquiry"}).json()
-    assert queue["items"][0]["summary"]["created_by_name"] == "seller"
-    timeline = _client(users.seller).get(f"/api/subjects/presales_inquiry/{row.id}/events").json()
-    assert any(event["kind_label"] == "提交询价" for event in timeline["items"])
-    assert all(event["kind_label"] and "." not in event["kind_label"] for event in timeline["items"])
-
-
-def test_proactive_creator_name_does_not_bypass_hidden_reporter(db, users):
-    row = inquiries.create_draft(db, users.buyer.id, kind="proactive_offer", lines=[{"part_id": users.part.id}])
-    line = inquiries.lines_for(db, row.id)[0]
-    offers.save_draft(db, row.id, line.id, users.buyer.id,
-        {"unit_price": "88", "reporter_audience": {"mode": "private"}}, expected_version=row.version)
-    offers.publish_proactive(db, row.id, users.buyer.id, expected_version=row.version, notice_user_ids=[users.other.id])
-    db.commit()
-    detail = _client(users.other).get(f"/api/presales/inquiries/{row.id}").json()
-    assert "created_by_name" not in detail and "created_by" not in detail
-    history = _client(users.other).get(f"/api/presales/parts/{users.part.id}/inquiries").json()["items"][0]
-    assert "created_by_name" not in history
-    queue = _client(users.other).get("/api/work-items", params={"tab": "assigned", "subject_type": "presales_offer_notice"}).json()
-    assert "created_by_name" not in queue["items"][0]["summary"]
