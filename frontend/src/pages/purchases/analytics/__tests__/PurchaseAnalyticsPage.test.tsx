@@ -891,16 +891,95 @@ describe("采购定位：供应商、单号与项目", () => {
     expect(screen.getAllByRole("row", { name: /CG-2026-101/ })).toHaveLength(1);
   });
 
-  it("提交定位筛选回到第一页并退出旧下钻", async () => {
-    renderPage("/purchases/analytics?preset=all&group_key=备件采购&page=2");
-    await screen.findByRole("row", { name: /CG-2026-101/ });
+  const lookupFields = [
+    { label: "供应商", urlKey: "supplier", apiKey: "supplier", value: "供应商甲" },
+    { label: "采购单号", urlKey: "purchase_order_no", apiKey: "order_no", value: "CG-101" },
+    { label: "销售单号", urlKey: "sales_order_no", apiKey: "linked_sales_order_no", value: "XSDD-201" },
+  ];
+
+  it.each([
+    ...lookupFields.map(field => ({ ...field, initialValue: "" })),
+    { ...lookupFields[0], initialValue: "   " },
+  ])("$label 未生效定位（初值 '$initialValue'）的草稿清空保留分组、订单与分页", async ({ label, urlKey, initialValue }) => {
+    const query = new URLSearchParams({ preset: "all", group_key: "备件采购", page: "2", order_id: "101" });
+    if (initialValue) query.set(urlKey, initialValue);
+    renderPage(`/purchases/analytics?${query}`);
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText("ST1000DM003");
+    const input = screen.getByRole("searchbox", { name: label });
+    const initialSearch = locationSearch;
+    const summaryCalls = fetchPurchaseAnalyticsSummary.mock.calls.length;
+    const ordersCalls = fetchPurchaseAnalyticsOrders.mock.calls.length;
+    const detailCalls = fetchPurchaseAnalyticsOrderDetail.mock.calls.length;
+
+    fireEvent.change(input, { target: { value: "未提交" } });
+    expect(locationSearch).toBe(initialSearch);
+    // change 到空模拟退格删除最后一个字符；不直接调用组件回调。
+    fireEvent.change(input, { target: { value: "" } });
+    expect(input).toHaveValue("");
+    expect(locationSearch).toBe(initialSearch);
+
+    fireEvent.change(input, { target: { value: "另一段未提交文本" } });
+    // 真实 AntD 清空按钮会先触发 onSearch(source=clear)，再触发 onChange。
+    fireEvent.click(input.closest(".ant-input-affix-wrapper")!.querySelector(".ant-input-clear-icon")!);
+    expect(input).toHaveValue("");
+    expect(locationSearch).toBe(initialSearch);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(fetchPurchaseAnalyticsSummary).toHaveBeenCalledTimes(summaryCalls);
+    expect(fetchPurchaseAnalyticsOrders).toHaveBeenCalledTimes(ordersCalls);
+    expect(fetchPurchaseAnalyticsOrderDetail).toHaveBeenCalledTimes(detailCalls);
+  });
+
+  it.each(lookupFields.flatMap(field => ["退格", "清空按钮"].map(method => ({ ...field, method }))))(
+    "$label 已生效过滤通过$method清除时更新范围并退出旧下钻", async ({ label, urlKey, apiKey, value, method }) => {
+      const query = new URLSearchParams({ preset: "all", group_key: "备件采购", page: "2", order_id: "101", [urlKey]: value });
+      renderPage(`/purchases/analytics?${query}`);
+      const dialog = await screen.findByRole("dialog");
+      await within(dialog).findByText("ST1000DM003");
+      const input = screen.getByRole("searchbox", { name: label });
+      expect(input).toHaveValue(value);
+      expect(viewSummaryCalls()[viewSummaryCalls().length - 1]).toHaveProperty(apiKey, value);
+      if (method === "退格") {
+        fireEvent.change(input, { target: { value: "" } });
+      } else {
+        fireEvent.click(input.closest(".ant-input-affix-wrapper")!.querySelector(".ant-input-clear-icon")!);
+      }
+      await waitFor(() => expect(viewSummaryCalls()[viewSummaryCalls().length - 1]).not.toHaveProperty(apiKey));
+      const next = new URLSearchParams(locationSearch);
+      for (const key of [urlKey, "group_key", "order_id", "page"]) expect(next.has(key)).toBe(false);
+      expect(next.get("preset")).toBe("all");
+      expect(input).toHaveValue("");
+    },
+  );
+
+  it.each(lookupFields)("$label 显式提交会trim、回到第一页并退出旧分组与订单", async ({ label, urlKey, apiKey, value }) => {
+    renderPage("/purchases/analytics?preset=all&group_key=备件采购&page=2&order_id=101");
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText("ST1000DM003");
+    const input = screen.getByRole("searchbox", { name: label });
+    const initialSearch = locationSearch;
+    fireEvent.change(input, { target: { value: `  ${value}  ` } });
+    expect(locationSearch).toBe(initialSearch);
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13, charCode: 13 });
+    await waitFor(() => expect(new URLSearchParams(locationSearch).get(urlKey)).toBe(value));
+    const next = new URLSearchParams(locationSearch);
+    for (const key of ["group_key", "order_id", "page"]) expect(next.has(key)).toBe(false);
+    expect(viewSummaryCalls()[viewSummaryCalls().length - 1]).toHaveProperty(apiKey, value);
+    expect(input).toHaveValue(value);
+  });
+
+  it("搜索按钮显式重新提交相同定位仍退出旧下钻", async () => {
+    renderPage("/purchases/analytics?preset=all&purchase_order_no=CG-101&group_key=备件采购&page=2&order_id=101");
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText("ST1000DM003");
     const input = screen.getByRole("searchbox", { name: "采购单号" });
     fireEvent.change(input, { target: { value: "  CG-101  " } });
-    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13, charCode: 13 });
-    await waitFor(() => expect(new URLSearchParams(locationSearch).get("purchase_order_no")).toBe("CG-101"));
-    expect(new URLSearchParams(locationSearch).has("group_key")).toBe(false);
-    expect(new URLSearchParams(locationSearch).has("page")).toBe(false);
-    expect(viewSummaryCalls()[viewSummaryCalls().length - 1]).toMatchObject({ order_no: "CG-101" });
+    fireEvent.click(input.closest(".ant-input-search")!.querySelector(".ant-input-search-button")!);
+    await waitFor(() => expect(new URLSearchParams(locationSearch).has("group_key")).toBe(false));
+    const next = new URLSearchParams(locationSearch);
+    expect(next.get("purchase_order_no")).toBe("CG-101");
+    expect(next.has("order_id")).toBe(false);
+    expect(next.has("page")).toBe(false);
   });
 
   it("受限供应商深链不会发出名称筛选，控件禁用", async () => {

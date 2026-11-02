@@ -156,6 +156,12 @@ function LookupInput({ label, value, disabled, onSearch }: { label: string; valu
   useEffect(() => setDraft(value), [value]);
   return <Input.Search aria-label={label} placeholder={`${label}（包含）`} style={{ width: 210 }} value={draft}
     disabled={disabled} allowClear maxLength={label === "供应商" ? 200 : 64}
-    onChange={event => { setDraft(event.target.value); if (!event.target.value) onSearch(""); }}
-    onSearch={text => onSearch(text.trim())} />;
+    onChange={event => {
+      setDraft(event.target.value);
+      if (!event.target.value && value.trim()) onSearch("");
+    }}
+    // AntD 清空图标还会触发 onSearch；清除统一交给 onChange，避免提交未生效的空草稿。
+    onSearch={(text, _event, info) => {
+      if (info?.source !== "clear") onSearch(text.trim());
+    }} />;
 }
