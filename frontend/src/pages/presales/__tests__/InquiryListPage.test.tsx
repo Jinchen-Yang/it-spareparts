@@ -15,10 +15,13 @@ import InquiryListPage from "../InquiryListPage";
 const row: Inquiry = { id: 1, inquiry_no: "XJ001", kind: "sales_inquiry", status: "submitted", version: 1, revision: 1,
   customer_id: 5, customer_name: "客户甲", line_count: 2, progress: { quoted_lines: 2, line_count: 2 },
   updated_at: "2026-01-01T10:00:00Z", created_at: "2026-01-01T00:00:00Z" };
+const listSummary = (inquiry: Inquiry) => mocks.listInquiries.mockResolvedValue({
+  items: [inquiry], total: 1, page: 1, page_size: 20,
+});
 beforeEach(() => {
   vi.clearAllMocks(); localStorage.clear();
   mocks.listInquiries.mockResolvedValue({ items: [row], total: 1, page: 1, page_size: 20 });
-  mocks.getInquiry.mockResolvedValue({ ...row, work_items: [
+  listSummary({ ...row, work_items: [
     { id: 11, assignee_id: 2, claimed_by: null, status: "done", paused: false, version: 1 },
     { id: 12, assignee_id: 3, claimed_by: null, status: "pending", paused: false, version: 1 },
   ] });
@@ -36,6 +39,7 @@ it("列表按处理人回复显示 1/2 进度与标签，主管可切换全部",
   // 客户名来自售前列表项 customer_name（T18），不再借用需采购分析权限的 options 接口。
   expect(await screen.findByText("客户甲")).toBeVisible();
   expect(mocks.fetchPurchaseAnalyticsOptions).not.toHaveBeenCalled();
+  expect(mocks.getInquiry).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("tab", { name: "全部" }));
   await waitFor(() => expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ scope: "all" })));
 });
@@ -43,7 +47,7 @@ it("列表按处理人回复显示 1/2 进度与标签，主管可切换全部",
 it("普通用户无全部入口；类型/状态使用服务端支持的筛选键，隐藏字段不补占位", async () => {
   const hidden = { ...row }; delete hidden.customer_id;
   mocks.listInquiries.mockResolvedValue({ items: [hidden], total: 1 });
-  mocks.getInquiry.mockResolvedValue({ ...hidden, work_items: [{ id: 11, status: "done", paused: false, version: 1 }] });
+  listSummary({ ...hidden, work_items: [{ id: 11, status: "done", paused: false, version: 1 }] });
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
   await screen.findAllByText("已回复", { selector: ".ant-tag" });
   expect(screen.queryByRole("tab", { name: "全部" })).not.toBeInTheDocument();
@@ -105,7 +109,7 @@ it("PN 状态按报价和版本去重，采购明确不报的行显示原因而�
   const quoted: Offer = { id: 71, inquiry_id: 1, line_id: 11, part_id: 1, version: 1, revision_no: 2,
     status: "published", unit_price: "100", is_tax_inclusive: true,
     valid_from: "2020-01-01T00:00:00Z" };
-  mocks.getInquiry.mockResolvedValue({ ...row, offers: [quoted], lines: [
+  listSummary({ ...row, offers: [quoted], lines: [
     { id: 11, inquiry_id: 1, line_key: "quoted", seq: 1, pn_raw: "PN-QUOTED", qty: 1, status: "active", version: 1,
       ref_offer_id: quoted.id, ref_offer: quoted, linked_offers: [quoted] },
     { id: 12, inquiry_id: 1, line_key: "skipped", seq: 2, pn_raw: "PN-SKIPPED", qty: 1, status: "active", version: 1 },
@@ -127,7 +131,7 @@ it("列表摘要使用本行钉住版本，被取代的引用不因当前报价�
   const current: Offer = { id: 71, inquiry_id: 1, line_id: 11, part_id: 1, version: 2, revision_no: 2,
     status: "published", unit_price: "50", is_tax_inclusive: true,
     valid_from: "2020-01-01T00:00:00Z" };
-  mocks.getInquiry.mockResolvedValue({ ...row, offers: [current], lines: [
+  listSummary({ ...row, offers: [current], lines: [
     { id: 11, inquiry_id: 1, line_key: "referenced", seq: 1, pn_raw: "PN-PINNED", qty: 1, status: "active", version: 1,
       ref_offer_id: current.id, ref_offer_revision_no: 1,
       ref_offer: { ...current, revision_no: 1, unit_price: "100", expired: true } },
@@ -145,7 +149,7 @@ it("引用快照不随时间失效（D-0046）", async () => {
   const pinned: Offer = { id: 71, inquiry_id: 1, line_id: 11, part_id: 1, version: 1, revision_no: 1,
     status: "published", unit_price: "100", is_tax_inclusive: true,
     valid_from: "2026-10-25T00:00:00Z" };
-  mocks.getInquiry.mockResolvedValue({ ...row, offers: [{ ...pinned, revision_no: 2 }], lines: [
+  listSummary({ ...row, offers: [{ ...pinned, revision_no: 2 }], lines: [
     { id: 11, inquiry_id: 1, line_key: "referenced", seq: 1, pn_raw: "PN-PINNED", qty: 1, status: "active", version: 1,
       ref_offer_id: pinned.id, ref_offer_revision_no: 1, ref_offer: pinned },
   ] });
@@ -176,7 +180,7 @@ it("共享分页直接请求 shared，服务端结果完整展示，不再拉取
 it("草稿沿用和不报标为未回复，不显示为有效报价或正式不报", async () => {
   const reused: Offer = { id: 90, inquiry_id: 9, line_id: 99, part_id: 1, status: "published", revision_no: 1, version: 1,
     unit_price: "123", valid_from: "2020-01-01T00:00:00Z" };
-  mocks.getInquiry.mockResolvedValue({ ...row, offers: [], work_items: [{ id: 11, assignee_id: 2, status: "in_progress", paused: false, version: 1 }],
+  listSummary({ ...row, offers: [], work_items: [{ id: 11, assignee_id: 2, status: "in_progress", paused: false, version: 1 }],
     lines: [11, 12].map((id) => ({ id, line_key: `line-${id}`, inquiry_id: 1, seq: id, pn_raw: `DRAFT-${id}`, qty: 1, status: "active", version: 1 })),
     line_responses: [{ line_id: 11, mode: "reuse", ref_offer_id: 90, offer: reused, is_draft: true, created_by: 2 },
       { line_id: 12, mode: "skip", reason: "草稿无货", is_draft: true, created_by: 2 }] });
@@ -193,7 +197,7 @@ it("草稿沿用和不报标为未回复，不显示为有效报价或正式不�
 it("当前答复失效时列表和概览一致，不把历史引用价计入有效价格合计", async () => {
   const historical: Offer = { id: 71, inquiry_id: 1, line_id: 11, part_id: 1, version: 1, revision_no: 1,
     status: "published", unit_price: "100", is_tax_inclusive: true, valid_from: "2020-01-01T00:00:00Z" };
-  mocks.getInquiry.mockResolvedValue({ ...row, lines: [
+  listSummary({ ...row, lines: [
     { id: 11, inquiry_id: 1, line_key: "historical", seq: 1, pn_raw: "PN-HISTORY", qty: 1, status: "active", version: 1,
       ref_offer_id: historical.id, ref_offer: historical },
   ], line_answers: [{ line_id: 11, state: "unavailable", responded: true, reason: "已回复，当前无有效报价" }] });
@@ -209,7 +213,7 @@ it("当前报价和概览均显示成本性质，不因成本数据权限隐藏"
   localStorage.setItem("permissions", JSON.stringify({ data_cost: false }));
   const current: Offer = { id: 71, inquiry_id: 1, line_id: 11, part_id: 1, version: 2, revision_no: 2,
     status: "published", unit_price: "100", is_tax_inclusive: true, price_basis: "cost", valid_from: "2020-01-01T00:00:00Z" };
-  mocks.getInquiry.mockResolvedValue({ ...row, lines: [
+  listSummary({ ...row, lines: [
     { id: 11, inquiry_id: 1, line_key: "cost", seq: 1, pn_raw: "PN-COST", qty: 1, status: "active", version: 1 },
   ], line_answers: [{ line_id: 11, state: "quoted", responded: true, offer: current }] });
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);

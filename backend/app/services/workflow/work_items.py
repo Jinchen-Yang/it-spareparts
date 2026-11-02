@@ -391,6 +391,13 @@ def visible_items(db, ctx, tab, subject_type=None, *, page=1, page_size=20):
     rows = db.scalars(select(WorkItem).where(predicate).order_by(WorkItem.id.desc())).all()
     # 受众分组可即时变化；旧指派关系不能代替当前业务准入。先过滤，再分页和计数。
     access_cache = {}
+    for name, spec in specs.items():
+        if spec.can_view_subjects is not None:
+            ids = list(dict.fromkeys(item.subject_id for item in rows if item.subject_type == name))
+            if ids:
+                allowed = spec.can_view_subjects(db, ids, ctx)
+                access_cache.update({(name, subject_id): bool(allowed.get(subject_id, False))
+                                     for subject_id in ids})
     items = []
     for item in rows:
         subject = (item.subject_type, item.subject_id)

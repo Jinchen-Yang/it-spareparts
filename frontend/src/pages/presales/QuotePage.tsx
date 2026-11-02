@@ -35,7 +35,7 @@ interface QuoteRow {
 }
 type RowValue = Pick<OfferInput, "unit_price" | "is_tax_inclusive" | "price_basis" | "lead_time" | "qty_available" | "stock_location" | "notes">;
 
-const TABS: WorkTab[] = ["assigned", "claimed", "pool", "done"];
+const ACTIVE_TABS: WorkTab[] = ["assigned", "claimed", "pool"];
 const STATE_LABEL: Record<RowState, string> = { pending: "待报价", draft: "已填，待回复", quoted: "已报价", skip: "不报", unavailable: "已回复，当前无有效报价" };
 const STATE_COLOR: Record<RowState, string | undefined> = { pending: "orange", draft: "blue", quoted: "green", skip: undefined, unavailable: "warning" };
 
@@ -168,6 +168,8 @@ export default function QuotePage() {
   const [sources, setSources] = useState<Source[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(false);
   const [refreshRequired, setRefreshRequired] = useState(false);
   const [library, setLibrary] = useState<Record<number, Offer[]>>({});
   const [libraryError, setLibraryError] = useState(false);
@@ -193,33 +195,52 @@ export default function QuotePage() {
 
   const load = useCallback(async () => {
     const current = ++generation.current;
-    setLoading(true); setLoadError(false);
-    try {
-      const pages = await Promise.all(TABS.map(async (tab) => {
+    setLoading(true); setLoadError(false); setHistoryLoading(false); setHistoryError(false);
+    const seen = new Set<number>();
+    const readTasks = async (tabs: WorkTab[]) => {
+      const pages = await Promise.all(tabs.map(async (tab) => {
         const items: WorkItem[] = [];
-        for (let page = 1; ; page += 1) {
+        for (let page = 1; current === generation.current; page += 1) {
           const result = await listWorkItems({ tab, subject_type: "presales_inquiry", page, page_size: 100 });
           items.push(...result.items);
           if (page * result.page_size >= result.total) break;
         }
         return items.map((task) => ({ task, pool: tab === "pool" }));
       }));
-      const seen = new Set<number>();
-      const tasks = pages.flat().filter(({ task }) => {
+      return pages.flat().filter(({ task }) => {
         if (seen.has(task.subject_id) || (task.status !== "done" && !["pending", "in_progress"].includes(task.status))) return false;
         seen.add(task.subject_id); return true;
       });
-      const loaded = await mapLimit(tasks, 6, async ({ task, pool }) => ({ task, pool, inquiry: await presales.getInquiry(task.subject_id) }));
+    };
+    const readDetails = (tasks: { task: WorkItem; pool: boolean }[]) => mapLimit(tasks, 6, async ({ task, pool }) => {
+      if (current !== generation.current) throw new Error("superseded");
+      return { task, pool, inquiry: await presales.getInquiry(task.subject_id) };
+    });
+    try {
+      const loaded = await readDetails(await readTasks(ACTIVE_TABS));
       if (current !== generation.current) return;
       const partial = loaded.some((result) => result.status === "rejected");
       setLoadError(partial);
       setRefreshRequired(partial);
       setSources(loaded.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
+      // 活动单可以立即处理；历史单的完整读取不再挡住首屏。
+      // done 仍可能带当前无有效价或未答复行，因此保留读取及全量状态语义。
+      setLoading(false); setHistoryLoading(true);
+      try {
+        const history = await readDetails(await readTasks(["done"]));
+        if (current !== generation.current) return;
+        setHistoryError(history.some((result) => result.status === "rejected"));
+        const rows = history.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+        // 保留用户在历史读取期间已保存/领取的活动单最新状态。
+        if (rows.length) setSources((previous) => [...previous, ...rows.filter((row) => !previous.some((item) => item.inquiry.id === row.inquiry.id))]);
+      } catch {
+        if (current === generation.current) setHistoryError(true);
+      } finally { if (current === generation.current) setHistoryLoading(false); }
     } catch (error) {
       if (current === generation.current) { setLoadError(true); await handleError(error); }
     } finally { if (current === generation.current) setLoading(false); }
   }, [handleError]);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); return () => { generation.current += 1; }; }, [load]);
 
   const partKey = [...new Set(sources.flatMap((source) => (source.inquiry.lines ?? []).flatMap((line) => line.part_id ? [line.part_id] : [])))].sort((a, b) => a - b).join(",");
   useEffect(() => {
@@ -259,6 +280,7 @@ export default function QuotePage() {
     .sort((a, b) => rank(b.source) - rank(a.source) || (b.source.inquiry.urge_count ?? 0) - (a.source.inquiry.urge_count ?? 0) || a.index - b.index)
     .flatMap(({ source }) => rowsOf(source, skips)), [sources, skips]);
   const counts = allRows.reduce((result, row) => ({ ...result, [row.state]: result[row.state] + 1 }), { pending: 0, draft: 0, quoted: 0, skip: 0, unavailable: 0 } as Record<RowState, number>);
+  const countSuffix = historyLoading || historyError ? "+" : "";
   const keyword = query.trim().toUpperCase();
   const rows = allRows.filter((row) => (filter === "all" || editing[row.key] || (filter === "pending" ? ["pending", "draft"].includes(row.state) : row.state === filter))
     && (!keyword || [row.source.inquiry.created_by_name, row.line.pn_raw, row.source.inquiry.customer_name, row.source.inquiry.inquiry_no, row.line.description]
@@ -451,14 +473,16 @@ export default function QuotePage() {
     </Space>} />
     <div className="presales-panel presales-stack">
       <div className="presales-toolbar">
-        {([["pending", `待报价 ${counts.pending + counts.draft}`], ["quoted", `已报价 ${counts.quoted}`], ["skip", `不报 ${counts.skip}`], ["unavailable", `暂无有效价 ${counts.unavailable}`], ["all", `全部 ${allRows.length}`]] as [Filter, string][])
+        {([["pending", `待报价 ${counts.pending + counts.draft}${countSuffix}`], ["quoted", `已报价 ${counts.quoted}${countSuffix}`], ["skip", `不报 ${counts.skip}${countSuffix}`], ["unavailable", `暂无有效价 ${counts.unavailable}${countSuffix}`], ["all", `全部 ${allRows.length}${countSuffix}`]] as [Filter, string][])
           .map(([key, label]) => <Button key={key} aria-pressed={filter === key} type={filter === key ? "primary" : "default"} ghost={filter === key} onClick={() => setFilter(key)}>{label}</Button>)}
         <Input.Search aria-label="筛选报价行" allowClear placeholder="按询价人、PN、客户筛选" style={{ width: 260, marginLeft: "auto" }} value={query} onChange={(event) => setQuery(event.target.value)} />
-        <Button onClick={() => void load()} disabled={loading || !!busy}>刷新</Button>
+        <Button onClick={() => void load()} disabled={loading || historyLoading || !!busy}>刷新</Button>
       </div>
       {direct && <DirectQuote onClose={() => setDirect(false)} onDone={(text) => { setDirect(false); setToast(text); void load(); }} />}
       {toast && <Alert type="success" showIcon closable message={toast} onClose={() => setToast("")} />}
       {loadError && <Alert type="error" message="报价行加载失败" action={<Button onClick={() => void load()}>重试</Button>} />}
+      {historyLoading && <Alert type="info" message="待办已显示，正在补充历史报价；带 + 的数量为当前已加载数量。" />}
+      {historyError && <Alert type="warning" message="历史报价未全部加载；带 + 的数量为当前已加载数量，已显示的待办仍可处理。" action={<Button disabled={loading || !!busy} onClick={() => void load()}>重试历史报价</Button>} />}
       {libraryError && <Alert type="warning" message="部分型号的已有报价未能加载，请刷新重试。" action={<Button disabled={loading} onClick={() => void load()}>刷新已有报价</Button>} />}
       {refreshRequired && !loadError && <Alert type="warning" message="保存已成功，状态刷新尚未完成。填写内容已保留，请先刷新后再操作。" action={<Button onClick={() => void load()}>刷新最新状态</Button>} />}
       {Object.keys(skips).length > 0 && <Typography.Text type="secondary">标为不报的行会在整单填完时一起回复给销售；离开本页前请填完该单其余行。</Typography.Text>}
