@@ -1,14 +1,16 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Alert, Button, Card, Input, Select, Space, Table, Typography } from "antd";
 import { Link } from "react-router-dom";
 import { formatBusinessDate } from "../../utils/date";
 import {
   searchMaintenanceMovements,
+  exportMaintenanceMovements,
   type MaintenanceMovement,
   type MaintenanceMovementQuery,
   type MaintenanceMovementResult,
 } from "../../api/maintenanceOperations";
 import { readError } from "../../pages/maintenance/panel/panelUtils";
+import { SESSION_EXPIRED_MESSAGE, sessionStale, useSessionOwner } from "../../utils/session";
 
 const ENTITIES = { issue: "领用", receipt: "返还实收", demand_order: "需求单", bad_return: "坏件返还" };
 const FIELDS: Record<string, string> = {
@@ -22,7 +24,18 @@ export default function MaintenanceMovementSearch() {
   const [result, setResult] = useState<MaintenanceMovementResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const ownerToken = useSessionOwner();
   const generation = useRef(0);
+  useEffect(() => () => { generation.current += 1; }, []);
+  const expired = () => {
+    if (!sessionStale(ownerToken)) return false;
+    setResult(null);
+    setLoading(false);
+    setExporting(false);
+    setError(SESSION_EXPIRED_MESSAGE);
+    return true;
+  };
 
   const change = (patch: Partial<MaintenanceMovementQuery>) => {
     generation.current += 1;
@@ -30,22 +43,49 @@ export default function MaintenanceMovementSearch() {
     setResult(null);
     setError(null);
     setLoading(false);
+    setExporting(false);
   };
   const search = async (page = 1) => {
+    if (expired()) return;
     if (!query.q.trim()) return;
     const seq = ++generation.current;
     setLoading(true);
     setError(null);
     try {
       const response = await searchMaintenanceMovements({ ...query, page, page_size: 20 });
-      if (seq === generation.current) setResult(response.data);
+      if (seq === generation.current && !expired()) setResult(response.data);
     } catch (err) {
-      if (seq === generation.current) {
+      if (seq === generation.current && !expired()) {
         setResult(null);
         setError(readError(err, "搜索失败，请稍后重试"));
       }
     } finally {
       if (seq === generation.current) setLoading(false);
+    }
+  };
+
+  const download = async () => {
+    if (expired() || !query.q.trim() || !result) return;
+    const seq = generation.current;
+    setExporting(true);
+    setError(null);
+    try {
+      const response = await exportMaintenanceMovements(query);
+      if (seq !== generation.current || expired()) return;
+      const url = URL.createObjectURL(response.data);
+      try {
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = "领用与返还跨项目搜索.csv";
+        anchor.click();
+      } finally { URL.revokeObjectURL(url); }
+    } catch (err) {
+      if (seq === generation.current && !expired()) {
+        const response = (err as { response?: { status?: number } }).response;
+        setError(response?.status === 413 ? "导出超过上限，请收窄搜索条件（最多5000行）" : readError(err, "导出失败，请稍后重试"));
+      }
+    } finally {
+      if (seq === generation.current) setExporting(false);
     }
   };
 
@@ -67,6 +107,7 @@ export default function MaintenanceMovementSearch() {
           onChange={(match_mode) => change({ match_mode })}
           options={[{ value: "literal", label: "包含" }, { value: "exact", label: "精确" }]} />
         <Button type="primary" loading={loading} disabled={!query.q.trim()} onClick={() => void search()}>搜索流转</Button>
+        <Button loading={exporting} disabled={loading || !result?.items.length} onClick={() => void download()}>下载全部筛选结果</Button>
       </Space>
       <Typography.Text type="secondary">仅搜索当前权限范围；PN、SN、凭证号 1–2 字符仅精确匹配，备注包含至少两个字符。</Typography.Text>
       {error && <Alert type="error" showIcon message="流转搜索失败" description={error} />}
@@ -77,6 +118,7 @@ export default function MaintenanceMovementSearch() {
           locale={{ emptyText: "当前权限范围内未找到" }} scroll={{ x: 1150 }} columns={[
             { title: "类型", width: 100, render: (_, row) => ENTITIES[row.entity_type] },
             { title: "项目", width: 150, render: (_, row) => <Link to={`/maintenance/projects/${encodeURIComponent(row.record_ref.project_id)}?tab=${row.record_ref.tab}`}>{row.project.name || row.project.code}</Link> },
+            { title: "关联销售单号XSDD", width: 190, render: (_, row) => row.project.sales_order_nos?.join(" / ") || "—" },
             { title: "单号", width: 150, render: (_, row) => row.document.display_number && row.document.number.startsWith("LY-AUTO-") ? row.document.display_number : row.document.number },
             { title: "日期", width: 110, render: (_, row) => formatBusinessDate(row.document.date) },
             { title: "PN", dataIndex: "pn", width: 130 },

@@ -40,6 +40,7 @@ def test_export_options_return_whitelist_and_exact_default_fields(db):
         "contract_nos",
         "contract_amount_inc_tax",
         "collection_received_inc_tax",
+        "no_return_note",
     ]
     keys = [field["key"] for field in payload["fields"]]
     assert len(keys) == len(set(keys))
@@ -86,7 +87,7 @@ def test_export_options_and_post_filter_profit_fields_by_server_permission(db):
     assert "contract_amount_inc_tax" not in keys
     assert "collection_received_inc_tax" not in keys
     assert options["default_fields"] == [
-        "project_name", "period_from", "period_to", "contract_nos"
+        "project_name", "period_from", "period_to", "contract_nos", "no_return_note"
     ]
 
     forbidden = client.post(
@@ -196,7 +197,7 @@ def test_export_xlsx_uses_current_contract_and_latest_confirmed_collection(db):
 
     workbook = load_workbook(BytesIO(response.content), read_only=True, data_only=False)
     worksheet = workbook["维保项目清单"]
-    table = list(worksheet.iter_rows(values_only=True))
+    table = list(worksheet.iter_rows(values_only=True, max_col=len(fields)))
     workbook.close()
     assert table[0] == (
         "项目名称",
@@ -205,8 +206,28 @@ def test_export_xlsx_uses_current_contract_and_latest_confirmed_collection(db):
         "销售单号（合同号）",
         "合同总额（含税）",
         "累计已回款（含税）",
+        "免返标注",
     )
     assert table[1][0] == "'=公式项目"  # 防 Excel 公式注入
     assert table[1][1].date() == date(2020, 1, 1)
     assert table[1][2].date() == date(2099, 12, 31)
-    assert table[1][3:] == ("XSDD-EXPORT-001", 1130, 450)
+    assert table[1][3:] == ("XSDD-EXPORT-001", 1130, 450, None)
+
+
+def test_no_return_note_default_export_is_independent_safe_text(db):
+    project = make_project(db, code="免返备注核对", lifecycle="ongoing")
+    project.no_return_default = False
+    project.no_return_note = "=免返原文\n仅作提醒"
+    project.project_note = "不同的项目备注"
+    db.commit()
+    response = boss_client(db, username="project-export-no-return").post(
+        "/api/maintenance/boss-board/projects/export", json={
+            "fields": ["no_return_note", "no_return_default", "project_note"],
+            "lifecycle": "ongoing",
+        })
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(BytesIO(response.content), data_only=False)
+    rows = list(workbook["维保项目清单"].values)
+    assert rows[0] == ("免返标注", "默认不返还", "项目备注")
+    assert rows[1] == ("'=免返原文\n仅作提醒", "否", "不同的项目备注")
+    workbook.close()

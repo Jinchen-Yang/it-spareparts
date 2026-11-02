@@ -3,9 +3,11 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const searchMovements = vi.fn();
+const exportMovements = vi.fn();
 vi.mock("../../../api/maintenanceOperations", async () => ({
   ...await vi.importActual<Record<string, unknown>>("../../../api/maintenanceOperations"),
   searchMaintenanceMovements: (...args: unknown[]) => searchMovements(...args),
+  exportMaintenanceMovements: (...args: unknown[]) => exportMovements(...args),
 }));
 import MaintenanceMovementSearch from "../MaintenanceMovementSearch";
 
@@ -27,10 +29,52 @@ function mount() {
   fireEvent.click(screen.getByRole("button", { name: "搜索流转" }));
 }
 
-beforeEach(() => { vi.clearAllMocks(); searchMovements.mockResolvedValue(result()); });
-afterEach(cleanup);
+beforeEach(() => {
+  vi.clearAllMocks(); searchMovements.mockResolvedValue(result());
+  exportMovements.mockResolvedValue({ data: new Blob(["csv"]) });
+  Object.defineProperty(URL, "createObjectURL", { value: vi.fn(() => "blob:movements"), configurable: true });
+  Object.defineProperty(URL, "revokeObjectURL", { value: vi.fn(), configurable: true });
+});
+afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); });
 
 describe("跨项目流转搜索", () => {
+  it("显示项目多个XSDD，下载完整筛选而不是当前页", async () => {
+    const item = { ...row(), project: { ...row().project, sales_order_nos: ["XSDD-20261101-0001", "XSDD-20261101-0002"] } };
+    searchMovements.mockResolvedValue(result([item], 2));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    mount();
+    expect(await screen.findByText("XSDD-20261101-0001 / XSDD-20261101-0002")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "下载全部筛选结果" }));
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1));
+    expect(exportMovements).toHaveBeenCalledWith({ q: "PN-123", field: "auto", entity: "all", match_mode: "literal" });
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:movements");
+  });
+
+  it("下载迟到时筛选改变或账号切换均不保存旧文件", async () => {
+    let resolve!: (value: unknown) => void;
+    exportMovements.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    mount();
+    await screen.findByRole("link", { name: "项目甲" });
+    fireEvent.click(screen.getByRole("button", { name: "下载全部筛选结果" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "流转搜索词" }), { target: { value: "NEW-PN" } });
+    resolve({ data: new Blob(["late"]) });
+    await waitFor(() => expect(screen.queryByRole("link", { name: "项目甲" })).toBeNull());
+    expect(click).not.toHaveBeenCalled();
+    localStorage.setItem("token", "different-session");
+    fireEvent.click(screen.getByRole("button", { name: "搜索流转" }));
+    expect(await screen.findByText("登录会话已变更（已切换账号或登出），请刷新页面后继续")).toBeInTheDocument();
+    expect(searchMovements).toHaveBeenCalledTimes(1);
+  });
+
+  it("导出超限明确提示，不生成截断文件", async () => {
+    exportMovements.mockRejectedValueOnce({ response: { status: 413 } });
+    mount();
+    await screen.findByRole("link", { name: "项目甲" });
+    fireEvent.click(screen.getByRole("button", { name: "下载全部筛选结果" }));
+    expect(await screen.findByText("导出超过上限，请收窄搜索条件（最多5000行）")).toBeInTheDocument();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+  });
   it("显示匹配证据及项目链接，需求单和领用分别进入对应页签", async () => {
     searchMovements.mockResolvedValue(result([row(), row("demand_order", "order1", "项目乙"), row("bad_return", "bad1", "项目丙")]));
     mount();

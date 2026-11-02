@@ -146,6 +146,7 @@ def _filters(
     date_to: date | None,
     project: str | None,
     business_type: str,
+    salesperson: str | None = None,
     q: str | None = None,
 ) -> dash._Filters:
     """范围先收敛后聚合：时间 × 授权项目 × 业务类型 ×（可选）关键词。"""
@@ -153,6 +154,7 @@ def _filters(
         start, end = dash.resolve_date_range(range_, date_from, date_to)
         requested = _parse_project_filter(project)
         scope = dash.resolve_project_scope(db, ctx, requested)
+        scope = dash.narrow_scope_by_salesperson(db, scope, salesperson)
         return dash._base_filters(
             db, scope=scope, start=start, end=end, q=q,
             business_type=None if business_type == "all" else business_type,
@@ -192,6 +194,7 @@ def options(
     visible = _amounts_visible(ctx)
     scope = dash.resolve_project_scope(db, ctx, None)
     projects = dash._project_rows(db, scope)
+    salespersons = dash.project_salespersons(db, projects)
     sorts = {
         "projects": [s for s in dash.PROJECT_SORTS
                      if visible or s not in _AMOUNT_SORTS],
@@ -202,6 +205,7 @@ def options(
     payload: dict = {
         "range_presets": list(dash.RANGE_PRESETS),
         "default_range": "7d",
+        "salespersons": sorted({name for name in salespersons.values() if name}),
         "default_date_rule": "近 7 天含今天（上海日历日）",
         "sorts": sorts,
         "projects": [
@@ -235,6 +239,7 @@ def summary(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     project: str | None = Query(None, max_length=4000),
+    salesperson: str | None = Query(None, max_length=64),
     business_type: str = Query(
         "all", pattern=BUSINESS_TYPE_FILTER_PATTERN, max_length=128
     ),
@@ -256,7 +261,7 @@ def summary(
     ratio = _retention_ratio(value_retention_ratio)
     filters = _filters(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
-        project=project, business_type=business_type, q=q,
+        project=project, business_type=business_type, salesperson=salesperson, q=q,
     )
     record_access_log(
         ctx, "maintenance_dashboard_summary", "maintenance_dashboard",
@@ -277,6 +282,7 @@ def projects(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     project: str | None = Query(None, max_length=4000),
+    salesperson: str | None = Query(None, max_length=64),
     business_type: str = Query(
         "all", pattern=BUSINESS_TYPE_FILTER_PATTERN, max_length=128
     ),
@@ -300,7 +306,7 @@ def projects(
     ratio = _retention_ratio(value_retention_ratio)
     filters = _filters(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
-        project=project, business_type=business_type, q=q,
+        project=project, business_type=business_type, salesperson=salesperson, q=q,
     )
     record_access_log(
         ctx, "maintenance_dashboard_projects", "maintenance_dashboard",
@@ -325,6 +331,7 @@ def parts(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     project: str | None = Query(None, max_length=4000),
+    salesperson: str | None = Query(None, max_length=64),
     business_type: str = Query(
         "all", pattern=BUSINESS_TYPE_FILTER_PATTERN, max_length=128
     ),
@@ -345,7 +352,7 @@ def parts(
     ratio = _retention_ratio(value_retention_ratio)
     filters = _filters(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
-        project=project, business_type=business_type, q=q,
+        project=project, business_type=business_type, salesperson=salesperson, q=q,
     )
     record_access_log(ctx, "maintenance_dashboard_parts",
                       "maintenance_dashboard",
@@ -372,6 +379,7 @@ def valuation(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     project: str | None = Query(None, max_length=4000),
+    salesperson: str | None = Query(None, max_length=64),
     business_type: str = Query(
         "all", pattern=BUSINESS_TYPE_FILTER_PATTERN, max_length=128
     ),
@@ -396,7 +404,7 @@ def valuation(
     ratio = _retention_ratio(value_retention_ratio)
     filters = _filters(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
-        project=project, business_type=business_type, q=q,
+        project=project, business_type=business_type, salesperson=salesperson, q=q,
     )
     record_access_log(ctx, "maintenance_dashboard_valuation",
                       "maintenance_dashboard",
@@ -487,6 +495,7 @@ def receipts(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     project: str | None = Query(None, max_length=4000),
+    salesperson: str | None = Query(None, max_length=64),
     business_type: str = Query(
         "all", pattern=BUSINESS_TYPE_FILTER_PATTERN, max_length=128
     ),
@@ -509,7 +518,7 @@ def receipts(
     ratio = _retention_ratio(value_retention_ratio)
     filters = _filters(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
-        project=project, business_type=business_type, q=q,
+        project=project, business_type=business_type, salesperson=salesperson, q=q,
     )
     record_access_log(
         ctx, "maintenance_dashboard_receipts", "maintenance_dashboard",
@@ -542,6 +551,7 @@ def quantity_checks(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     project: str | None = Query(None, max_length=4000),
+    salesperson: str | None = Query(None, max_length=64),
     business_type: str = Query(
         "all", pattern=BUSINESS_TYPE_FILTER_PATTERN, max_length=128
     ),
@@ -564,6 +574,7 @@ def quantity_checks(
     try:
         requested = _parse_project_filter(project)
         scope = dash.resolve_project_scope(db, ctx, requested)
+        scope = dash.narrow_scope_by_salesperson(db, scope, salesperson)
         start, end = dash.resolve_date_range(range_, date_from, date_to)
     except dash.DashboardInputError as exc:
         raise HTTPException(
@@ -602,6 +613,7 @@ def orders(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     project: str | None = Query(None, max_length=4000),
+    salesperson: str | None = Query(None, max_length=64),
     business_type: str = Query(
         "all", pattern=BUSINESS_TYPE_FILTER_PATTERN, max_length=128
     ),
@@ -618,7 +630,7 @@ def orders(
     response.headers["Cache-Control"] = "no-store"
     filters = _filters(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
-        project=project, business_type=business_type,
+        project=project, business_type=business_type, salesperson=salesperson,
     )
     record_access_log(ctx, "maintenance_dashboard_orders",
                       "maintenance_dashboard",
@@ -636,6 +648,7 @@ def consumption_daily(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     project: str | None = Query(None, max_length=4000),
+    salesperson: str | None = Query(None, max_length=64),
     business_type: str = Query(
         "all", pattern=BUSINESS_TYPE_FILTER_PATTERN, max_length=128
     ),
@@ -654,7 +667,7 @@ def consumption_daily(
     visible = _amounts_visible(ctx)
     filters = _filters(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
-        project=project, business_type=business_type,
+        project=project, business_type=business_type, salesperson=salesperson,
     )
     record_access_log(ctx, "maintenance_dashboard_consumption",
                       "maintenance_dashboard",
@@ -678,6 +691,7 @@ def consumption_issues(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     project: str | None = Query(None, max_length=4000),
+    salesperson: str | None = Query(None, max_length=64),
     business_type: str = Query(
         "all", pattern=BUSINESS_TYPE_FILTER_PATTERN, max_length=128
     ),
@@ -699,7 +713,7 @@ def consumption_issues(
     visible = _amounts_visible(ctx)
     filters = _filters(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
-        project=project, business_type=business_type,
+        project=project, business_type=business_type, salesperson=salesperson,
     )
     record_access_log(ctx, "maintenance_dashboard_consumption_issues",
                       "maintenance_dashboard",
@@ -750,6 +764,7 @@ def export(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     project: str | None = Query(None, max_length=4000),
+    salesperson: str | None = Query(None, max_length=64),
     business_type: str = Query(
         "all", pattern=BUSINESS_TYPE_FILTER_PATTERN, max_length=128
     ),
@@ -774,7 +789,7 @@ def export(
     ratio = _retention_ratio(value_retention_ratio)
     filters = _filters(
         db, ctx, range_=range_, date_from=date_from, date_to=date_to,
-        project=project, business_type=business_type, q=q,
+        project=project, business_type=business_type, salesperson=salesperson, q=q,
     )
     record_access_log(
         ctx, "maintenance_dashboard_export", "maintenance_dashboard",
@@ -1226,6 +1241,7 @@ def _part_export_columns(visible: bool) -> tuple[list[str], list[ExportColumn]]:
 def _receipt_export_columns(visible: bool) -> tuple[list[str], list[ExportColumn]]:
     columns: list[ExportColumn] = [
         ("业务日", "occurred_at", False),
+        ("项目名称", "project_name", False),
         ("项目编码", "project_code", False),
         ("来源需求单号", "source_order_no", False),
         ("PN", "pn", False),

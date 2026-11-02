@@ -37,6 +37,7 @@ DEFAULT_FIELDS = (
     "contract_nos",
     "contract_amount_inc_tax",
     "collection_received_inc_tax",
+    "no_return_note",
 )
 
 PermissionGroup = Literal["profit", "cost", "cost_profit"]
@@ -210,6 +211,7 @@ EXPORT_FIELDS: tuple[ExportField, ...] = (
     ExportField("project_manager_id", "维保负责人账号", "项目基础", lambda r: _value(r, "_master_project_manager_id"), width=20),
     ExportField("salesperson", "销售人员", "项目基础", lambda r: _value(r, "salesperson"), width=16),
     ExportField("no_return_default", "默认不返还", "项目基础", lambda r: _yes_no(r, "_master_no_return_default"), width=14),
+    ExportField("no_return_note", "免返标注", "项目基础", lambda r: _value(r, "_master_no_return_note"), width=54),
     ExportField("project_note", "项目备注", "项目基础", lambda r: _value(r, "_master_project_note"), width=54),
     ExportField("is_active", "主档有效", "项目基础", lambda r: _yes_no(r, "_master_is_active"), width=12),
     ExportField("is_archived", "已归档", "项目基础", lambda r: _yes_no(r, "is_archived"), width=12),
@@ -310,6 +312,7 @@ def _merge_master_facts(db: Session, rows: list[dict]) -> None:
             "_master_cmo_name": project.cmo_name,
             "_master_project_manager_id": project.project_manager_id,
             "_master_no_return_default": project.no_return_default,
+            "_master_no_return_note": project.no_return_note,
             "_master_project_note": project.project_note,
             "_master_is_active": project.is_active,
             "_master_version": project.version,

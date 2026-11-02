@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.models.maintenance import FMaintenanceOrder, MaintenanceDemandTombstone
 from app.models.maintenance_bad_return import MaintenanceBadReturn, MaintenanceBadReturnLine
 from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
-from app.models.maintenance_project import MaintenanceProject
+from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract, MaintenanceProjectXsdd
 from app.models.maintenance_project_operations import MaintenanceSiteIssue, MaintenanceSiteIssueLine
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.system import SysUser
@@ -31,6 +31,7 @@ _STATUS_SETS = {
     "bad_return": {"draft", "submitted", "in_transit", "warehouse_confirmed", "void"},
 }
 _SLOTS = BoundedSemaphore(4)
+MAX_EXPORT_ROWS = 5000
 _FIELD_LABELS = {
     "pn": "PN", "serial_number": "SN", "serial_numbers": "逐件 SN",
     "source_serial_number": "导入源 SN", "remark": "现场备注", "note": "备注",
@@ -227,17 +228,47 @@ def movement_statements(query, project_ids, *, include_issue=True):
     return result
 
 
-def _search(db, query, ctx):
+def _sales_order_nos(db, project_ids):
+    """仅展示稳定项目关联的XSDD；不从项目名称、编码或单号片段猜测。"""
+    from app.services.maintenance_project_identity import normalize_xsdd
+
+    if not project_ids:
+        return {}
+    contracts = select(MaintenanceProjectContract.project_id, MaintenanceProjectContract.contract_no).where(
+        MaintenanceProjectContract.project_id.in_(project_ids))
+    identities = select(MaintenanceProjectXsdd.project_id, MaintenanceProjectXsdd.xsdd_norm).where(
+        MaintenanceProjectXsdd.project_id.in_(project_ids))
+    demands = select(MaintenanceSourceOrderAssignment.project_id, FMaintenanceOrder.linked_sales_order_no).join(
+        FMaintenanceOrder, FMaintenanceOrder.raw_order_id == MaintenanceSourceOrderAssignment.source_order_id,
+    ).where(MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+            MaintenanceSourceOrderAssignment.is_active.is_(True), _valid_demand())
+    result = {pid: set() for pid in project_ids}
+    for pid, raw_no in db.execute(union_all(identities, contracts, demands)):
+        normalized = normalize_xsdd(raw_no)
+        if normalized:
+            result[pid].add(f"XSDD-{normalized}")
+    return {pid: sorted(values) for pid, values in result.items()}
+
+
+def _search(db, query, ctx, *, export=False):
     unavailable = ["issue"] if is_field_hidden(ctx, "unit_cost") else []
     project_ids = _visible_projects(db, query, ctx)
     statements = movement_statements(query, project_ids, include_issue=not unavailable)
     items = []
+    limit = MAX_EXPORT_ROWS if export else query.page_size
     if project_ids and statements:
         combined = union_all(*statements).subquery()
         rows = db.execute(select(combined.c.payload, combined.c.rank).order_by(
             combined.c.rank, combined.c.business_date.desc().nulls_last(), combined.c.entity, combined.c.record_id,
-        ).offset((query.page - 1) * query.page_size).limit(query.page_size + 1)).all()
+        ).offset(0 if export else (query.page - 1) * query.page_size).limit(limit + 1)).all()
+        if export and len(rows) > MAX_EXPORT_ROWS:
+            raise HTTPException(413, f"超过导出上限 {MAX_EXPORT_ROWS} 行，请收窄搜索条件")
+        sales_hidden = is_field_hidden(ctx, "customer_name")
+        sales_nos = {} if sales_hidden else _sales_order_nos(
+            db, {row.payload["project"]["id"] for row in rows})
         for payload, rank in rows:
+            payload["project"]["sales_order_nos"] = (
+                None if sales_hidden else sales_nos.get(payload["project"]["id"], []))
             fields = payload.pop("fields")
             payload["matched_fields"] = [f for f in payload["matched_fields"] if f]
             payload["serials"] = [s for s in payload["serials"] if s]
@@ -245,8 +276,8 @@ def _search(db, query, ctx):
                 payload["pn"] = " / ".join(dict.fromkeys(payload["pn"]))
             payload["match_kind"] = ("exact", "compact", "literal")[rank]
             excerpt = "；".join(f"{_FIELD_LABELS[name]}: {fields[name]}" for name in payload["matched_fields"])
-            payload["excerpt"] = excerpt[:240]
-            payload["truncated"] = len(excerpt) > 240
+            payload["excerpt"] = excerpt if export else excerpt[:240]
+            payload["truncated"] = not export and len(excerpt) > 240
             payload["evidence"] = {key: fields[key] for key in ("express_no", "express_no2", "logistics_reference") if key in fields}
             entity = payload["entity_type"]
             payload["record_ref"] = {
@@ -256,14 +287,14 @@ def _search(db, query, ctx):
             }
             items.append(payload)
     return {
-        "items": items[:query.page_size], "has_more": len(items) > query.page_size,
-        "page": query.page, "page_size": query.page_size,
+        "items": items[:limit], "has_more": len(items) > limit,
+        "page": 1 if export else query.page, "page_size": limit,
         "scope": "当前账号有权访问的有效维保项目", "unavailable_entities": unavailable,
         "as_of": datetime.now(UTC).isoformat(),
     }
 
 
-def search_movements(db: Session, query: MovementSearchQuery, user_ctx: UserContext):
+def search_movements(db: Session, query: MovementSearchQuery, user_ctx: UserContext, *, export=False):
     if not page_allowed(user_ctx, "page_maintenance"):
         raise HTTPException(403, "无权访问维保页面")
     if not _SLOTS.acquire(blocking=False):
@@ -273,7 +304,7 @@ def search_movements(db: Session, query: MovementSearchQuery, user_ctx: UserCont
         with db.begin_nested():
             previous = db.scalar(select(func.current_setting("statement_timeout")))
             db.execute(select(func.set_config("statement_timeout", "5000", True)))
-            result = _search(db, query, user_ctx)
+            result = _search(db, query, user_ctx, export=True) if export else _search(db, query, user_ctx)
             db.execute(select(func.set_config("statement_timeout", previous, True)))
             return result
     except DBAPIError as exc:

@@ -189,6 +189,7 @@ export function MaintenanceDashboardPage() {
     to: { defaultValue: "", isValid: isDate },
     project: { defaultValue: "" },
     business_type: { defaultValue: "" },
+    salesperson: { defaultValue: "" },
     q: { defaultValue: "" },
     ratio: { defaultValue: "", isValid: isRatio },
     sort: { defaultValue: "" },
@@ -266,9 +267,10 @@ export function MaintenanceDashboardPage() {
     ...(state.range === "custom" && state.to ? { date_to: state.to } : {}),
     ...(state.project ? { project: state.project } : {}),
     ...(state.business_type ? { business_type: state.business_type } : {}),
+    ...(state.salesperson ? { salesperson: state.salesperson } : {}),
     ...(state.q.trim() ? { q: state.q.trim() } : {}),
     ...(amountsVisible ? { value_retention_ratio: ratio } : {}),
-  }), [state.range, state.from, state.to, state.project, state.business_type,
+  }), [state.range, state.from, state.to, state.project, state.business_type, state.salesperson,
       state.q, amountsVisible, ratio]);
 
   // 排序：候选来自 options（随权限收敛）；URL 里的非法/越权键回退页签默认。
@@ -377,7 +379,7 @@ export function MaintenanceDashboardPage() {
               setSearchDraft("");
               patch({
                 range: null, from: null, to: null, project: null,
-                business_type: null, q: null, ratio: null, sort: null, page: null, ps: null,
+                business_type: null, salesperson: null, q: null, ratio: null, sort: null, page: null, ps: null,
               });
             }}>
               重置筛选
@@ -428,6 +430,14 @@ export function MaintenanceDashboardPage() {
               }))}
               onChange={(value) => patch({ business_type: value ?? null, page: null })}
             />
+          </span>
+          <span className="mdb-filter-field">
+            <span className="mdb-filter-label">销售人员</span>
+            <Select<string> aria-label="销售人员筛选" placeholder="全部销售" allowClear showSearch
+              optionFilterProp="label" value={state.salesperson || undefined}
+              style={{ width: 160, maxWidth: "calc(100vw - 96px)" }}
+              options={(options.salespersons ?? []).map(value => ({ value, label: value }))}
+              onChange={value => patch({ salesperson: value ?? null, page: null })} />
           </span>
           <span className="mdb-filter-field">
             <span className="mdb-filter-label">项目</span>
