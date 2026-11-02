@@ -1,6 +1,7 @@
 """D-0051: signed receipt edits retain facts, capacity, scope and first receipts."""
 import io
 import json
+from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -64,6 +65,123 @@ def test_preview_rolls_back_facts_and_audit_then_apply_replays_first_result(db):
     assert db.scalar(select(func.count()).select_from(MaintenanceProjectOperationAudit)) == count + 2
     repreview = workbook.preview(db, data=data, project_id=project.project_id, operator="synthetic", authorize=lambda: None)
     assert repreview["replayed"] is True
+
+
+@pytest.mark.parametrize("typed_fields", [(), (7,), (9,), (7, 9)])
+def test_same_value_numeric_and_datetime_cells_are_noop_without_reason(db, typed_fields):
+    original_time = datetime(2026, 10, 31, 4, 5, 6, 123456, tzinfo=timezone.utc)
+    project, receipt = seed(db, occurred_at=original_time)
+    data = workbook.build(db, project_id=project.project_id)
+    def reenter_same_values(wb):
+        ws = wb[workbook.SHEET]
+        # Export uses literal text. A normal save alone does not convert it;
+        # retyping/pasting an equivalent numeric/date value may do so.
+        assert isinstance(ws.cell(2, 7).value, str)
+        assert ws.cell(2, 9).value == "2026-10-31 12:05:06"
+        if 7 in typed_fields: ws.cell(2, 7, 2)
+        if 9 in typed_fields: ws.cell(2, 9, datetime(2026, 10, 31, 12, 5, 6))
+    data = edit(data, reenter_same_values)
+    if not typed_fields:
+        saved = load_workbook(io.BytesIO(data))
+        try:
+            assert isinstance(saved[workbook.SHEET].cell(2, 7).value, str)
+            assert isinstance(saved[workbook.SHEET].cell(2, 9).value, str)
+        finally:
+            saved.close()
+    preview, result = apply_service(db, project, data)
+    assert preview["updates"] == preview["voids"] == result["updates"] == result["voids"] == 0
+    assert preview["rows"] == result["rows"] == []
+    row = db.get(MaintenanceRkdReturnLine, receipt["receipt_id"], populate_existing=True)
+    assert row.qty == 2 and row.version == 1
+    # Equivalent displayed seconds must not overwrite stored sub-second facts.
+    assert row.occurred_at == original_time
+
+
+def test_void_accepts_equivalent_numeric_and_datetime_cells(db):
+    original_time = datetime(2026, 10, 31, 4, 5, 6, 123456, tzinfo=timezone.utc)
+    project, receipt = seed(db, occurred_at=original_time)
+    def void(wb):
+        ws = wb[workbook.SHEET]
+        ws.cell(2, 7, 2)
+        ws.cell(2, 9, datetime(2026, 10, 31, 12, 5, 6))
+        ws.cell(2, 6, "作废")
+        ws.cell(2, 12, "重复登记")
+    preview, result = apply_service(db, project, edit(workbook.build(db, project_id=project.project_id), void))
+    assert preview["updates"] == result["updates"] == 0
+    assert preview["voids"] == result["voids"] == 1
+    assert preview["rows"][0]["fields"] == []
+    row = db.get(MaintenanceRkdReturnLine, receipt["receipt_id"], populate_existing=True)
+    assert row.line_status == "voided" and row.version == 2
+    assert row.qty == 2 and row.occurred_at == original_time
+
+
+@pytest.mark.parametrize("new_time, expected_time", [
+    (datetime(2026, 10, 31, 12, 5, 7), datetime(2026, 10, 31, 4, 5, 7, tzinfo=timezone.utc)),
+    ("2026-10-31 12:05:06.000001", datetime(2026, 10, 31, 4, 5, 6, 1, tzinfo=timezone.utc)),
+])
+def test_real_quantity_and_time_edits_preserve_precision(db, new_time, expected_time):
+    project, receipt = seed(db, occurred_at=datetime(2026, 10, 31, 4, 5, 6, tzinfo=timezone.utc))
+    def update(wb):
+        change(wb, value=3)
+        wb[workbook.SHEET].cell(2, 9, new_time)
+    preview, result = apply_service(db, project, edit(workbook.build(db, project_id=project.project_id), update))
+    assert preview["updates"] == result["updates"] == 1
+    assert preview["rows"][0]["fields"] == ["qty", "occurred_at"]
+    row = db.get(MaintenanceRkdReturnLine, receipt["receipt_id"], populate_existing=True)
+    assert row.qty == 3 and row.version == 2 and row.occurred_at == expected_time
+
+
+def test_fractional_quantity_is_not_rounded_into_equivalent_integer(db):
+    project, _ = seed(db)
+    data = edit(workbook.build(db, project_id=project.project_id),
+                lambda wb: change(wb, value="2.00000000000000000001"))
+    with pytest.raises(workbook.ReceiptWorkbookError, match="实收数量必须为正整数"):
+        workbook.parse(data, project_id=project.project_id)
+
+
+@pytest.mark.parametrize("column", [3, 11])
+def test_numeric_coercion_does_not_apply_to_readonly_or_editable_text(db, column):
+    project, receipt = seed(db, note="00123")
+    row = db.get(MaintenanceRkdReturnLine, receipt["receipt_id"])
+    row.pn = "00123"
+    db.commit()
+    data = edit(workbook.build(db, project_id=project.project_id),
+                lambda wb: change(wb, col=column, value=123))
+    with pytest.raises(workbook.ReceiptWorkbookError):
+        workbook.parse(data, project_id=project.project_id)
+    assert row.pn == row.note == "00123" and row.version == 1
+
+
+def test_metadata_allows_formatted_empty_rows_with_signed_keys_unchanged(db):
+    project, _ = seed(db)
+    def add_empty_rows(wb):
+        ms = wb[workbook.META_SHEET]
+        ms.insert_rows(2)
+        ms.cell(2, 1).number_format = "@"
+        ms.cell(workbook.MAX_META_ROWS, 2).number_format = "@"
+    data = edit(workbook.build(db, project_id=project.project_id), add_empty_rows)
+    assert workbook.parse(data, project_id=project.project_id)["operations"] == []
+
+
+@pytest.mark.parametrize("kind", [
+    "duplicate", "unknown", "value_without_key", "whitespace", "missing", "numeric_value",
+    "extra_column", "too_many_rows", "extreme_dimension",
+])
+def test_metadata_padding_does_not_allow_extra_content_or_unbounded_dimensions(db, kind):
+    project, _ = seed(db)
+    def tamper(wb):
+        ms = wb[workbook.META_SHEET]
+        if kind == "duplicate": ms.append([ms.cell(1, 1).value, ms.cell(1, 2).value])
+        elif kind == "unknown": ms.append(["unknown", "value"])
+        elif kind == "value_without_key": ms.cell(6, 2, "value")
+        elif kind == "whitespace": ms.cell(6, 1, " ")
+        elif kind == "missing": ms.delete_rows(1)
+        elif kind == "numeric_value": ms.cell(1, 2, 1)
+        elif kind == "extra_column": ms.cell(1, 3).number_format = "@"
+        elif kind == "too_many_rows": ms.cell(workbook.MAX_META_ROWS + 1, 2).number_format = "@"
+        elif kind == "extreme_dimension": ms.cell(1048576, 2).number_format = "@"
+    with pytest.raises(workbook.ReceiptWorkbookError):
+        workbook.parse(edit(workbook.build(db, project_id=project.project_id), tamper), project_id=project.project_id)
 
 
 @pytest.mark.parametrize("kind", ["pn", "version", "identity", "baseline", "signature", "delete", "duplicate", "formula", "new"])

@@ -33,6 +33,8 @@ BASE_SHEET = "_receipt_baseline"
 META_SHEET = "_receipt_meta"
 MAX_ROWS = 5000
 MAX_BYTES = 20 * 1024 * 1024
+MAX_META_ROWS = 64
+META_KEYS = frozenset({"protocol", "project_id", "baseline_hash", "key_id", "metadata_hmac"})
 ENTITY = "return_receipt_workbook"
 HEADERS = ["记录身份（只读）", "版本（只读）", "PN（只读）", "来源（只读）",
            "需求单（只读）", "操作", "实收数量", "件况", "收到时间（北京时间）",
@@ -203,10 +205,23 @@ def parse(data: bytes, *, project_id: str) -> dict:
         if not {SHEET, BASE_SHEET, META_SHEET}.issubset(wb.sheetnames):
             raise ReceiptWorkbookError("不是收货编辑模板，请在返还收货Excel编辑入口重新下载")
         ms, bs, ws = wb[META_SHEET], wb[BASE_SHEET], wb[SHEET]
-        if (ms.max_row != 5 or ms.max_column != 2 or bs.max_row > MAX_ROWS
+        if (not 1 <= ms.max_row <= MAX_META_ROWS or ms.max_column != 2 or bs.max_row > MAX_ROWS
                 or bs.max_column != 1 or ws.max_row > MAX_ROWS + 1 or ws.max_column != len(HEADERS)):
             raise ReceiptWorkbookError("模板结构或行数无效")
-        meta = {str(r[0]): str(r[1]) for r in ms.iter_rows(values_only=True)}
+        # Excel may retain a formatted empty row. Accept only that physical
+        # padding; logical metadata remains exactly the signed five keys.
+        meta = {}
+        for cells in ms.iter_rows():
+            if all(cell.value is None for cell in cells):
+                continue
+            name, value = (cell.value for cell in cells)
+            if (any(cell.data_type in {"f", "e"} for cell in cells)
+                    or not isinstance(name, str) or name not in META_KEYS or name in meta
+                    or not isinstance(value, str)):
+                raise ReceiptWorkbookError("模板元信息结构无效，请重新下载")
+            meta[name] = value
+        if set(meta) != META_KEYS:
+            raise ReceiptWorkbookError("模板元信息结构无效，请重新下载")
         key = get_settings().maintenance_manifest_verification_keys().get(meta.get("key_id", ""))
         if (meta.get("protocol") != PROTOCOL or meta.get("project_id") != project_id
                 or key is None or not hmac.compare_digest(meta.get("metadata_hmac", ""), _metadata_signature(meta, key))):
@@ -236,7 +251,12 @@ def parse(data: bytes, *, project_id: str) -> dict:
             updates = {}
             for index, name in EDITABLE.items():
                 if values[index] != base[index]:
-                    updates[name] = _parsed_value(index, values[index], row_no)
+                    parsed = _parsed_value(index, values[index], row_no)
+                    # A same-value numeric/date cell is not a fact change.
+                    # Do not normalize text, identities or signed baseline data.
+                    if index in {6, 8} and parsed == _parsed_value(index, base[index], row_no):
+                        continue
+                    updates[name] = parsed
             if action == "作废" and updates:
                 raise ReceiptWorkbookError(f"第{row_no}行：作废行请保持其它字段不变")
             if updates or action == "作废":
