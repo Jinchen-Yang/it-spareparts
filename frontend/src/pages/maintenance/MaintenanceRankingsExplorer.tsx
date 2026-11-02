@@ -50,6 +50,17 @@ export default function MaintenanceRankingsExplorer({ refreshKey = 0 }: { refres
     if (dimension === "project") goProject(data.focus.row, data.focus.row, row.key);
     else goProject(row, data.focus.row, dimension === "pn" ? data.focus.row.key : undefined);
   };
+  const reconcile = (row: ExplorerRow) => {
+    if (!data?.focus.row) return;
+    const project = data.focus.dimension === "project" ? row : data.focus.row;
+    if (projectAccessReason(project)) return;
+    // 整单累计核对不继承领用日期窗口；PN 文本仅选择包含该产品的整单，
+    // 不把整单差额分摊成某 PN 的待返义务。
+    const target = new URLSearchParams({ tab: "checks", range: "all", project: project.project_id! });
+    const pn = data.focus.dimension === "pn" ? row.pn : dimension === "pn" ? data.focus.row.pn : null;
+    if (pn) target.set("q", pn);
+    navigate(`/maintenance/dashboard?${target}`);
+  };
   const selected = data?.focus.row;
   const cumulativeEnabled = !!data?.meta.additive && !data.meta.has_negative && data.summary.value != null && Number(data.summary.value) > 0;
   const chartShare = data?.summary.top_share_pct ?? null;
@@ -78,24 +89,25 @@ export default function MaintenanceRankingsExplorer({ refreshKey = 0 }: { refres
       {!data.total ? <Card><Empty description="当前期间和筛选条件下没有记录，请调整筛选。" /></Card> : <>
         {layout === "A" && <div className="me-split">
           <Card title={EXPLORER_DIMENSIONS[dimension]} extra={<Tag>{EXPLORER_METRICS[metric].label}</Tag>}><Typography.Paragraph type="secondary">点击一项，查看{dimension === "project" ? "PN" : "项目"}分布</Typography.Paragraph><RankingList rows={data.chart_rows} metric={metric} selected={selected?.key} onSelect={focus} /><div className="me-caption">全范围排序 · 图表固定显示 Top {data.chart_rows.length}，不随明细翻页改变。</div></Card>
-          <Distribution data={data} metric={metric} onRow={detailClick} onPage={page => patch({ focus_page: String(page) })} />
+          <Distribution data={data} metric={metric} onRow={detailClick} onReconcile={reconcile} onPage={page => patch({ focus_page: String(page) })} />
         </div>}
         {layout === "B" && <>
           <Card title={`${EXPLORER_DIMENSIONS[dimension]} · 贡献与集中度`}><ParetoChart data={data} metric={metric} onSelect={focus} /><div className="me-caption">{!data.meta.additive ? "各组需求单可能重叠，仅比较规模，不计算累计占比。" : data.meta.has_negative ? "保留正负值的真实方向；包含负值时不计算累计占比。" : `仅绘制前 ${data.chart_rows.length} 项，累计占比分母为全部 ${data.total} 项。未展示部分不拼成一根大柱。`}</div></Card>
-          <Distribution data={data} metric={metric} onRow={detailClick} onPage={page => patch({ focus_page: String(page) })} />
+          <Distribution data={data} metric={metric} onRow={detailClick} onReconcile={reconcile} onPage={page => patch({ focus_page: String(page) })} />
         </>}
         {layout === "C" && <>
           <Card title="项目热力矩阵" extra={<Tag>颜色按当前可见单元格</Tag>}><HeatMatrix data={data} metric={metric} onFocus={focus} onCell={(row, column) => {
             if (data.matrix.column_dimension === "pn") goProject(row, row, column.key);
             else goProject(column, row, dimension === "pn" ? row.key : undefined);
           }} /><div className="me-caption">只展示前 {data.matrix.rows.length} 项与前 {data.matrix.columns.length} 个{data.matrix.column_dimension === "pn" ? " PN" : "项目"}。空白表示没有对应记录，未知成本单独标记；点击有记录且有详情权限的单元格进入项目。</div></Card>
-          <Distribution data={data} metric={metric} onRow={detailClick} onPage={page => patch({ focus_page: String(page) })} />
+          <Distribution data={data} metric={metric} onRow={detailClick} onReconcile={reconcile} onPage={page => patch({ focus_page: String(page) })} />
         </>}
         <Card title={`排名明细 · ${fmt(data.total)} 项`} extra={<Typography.Text type="secondary">全范围排序</Typography.Text>}>
           <Table<ExplorerRow> rowKey="key" size="small" dataSource={data.rows} scroll={{ x: 960 }} rowClassName={row => row.key === selected?.key ? "me-selected-row" : ""} columns={[
             { title: "排名", width: 64, key: "rank", render: (_: unknown, __: ExplorerRow, index: number) => (data.page - 1) * data.page_size + index + 1 },
             { title: EXPLORER_DIMENSIONS[dimension], key: "entity", width: 260, render: (_: unknown, row: ExplorerRow) => <button className="me-name-button" onClick={() => focus(row)}><strong>{row.label}</strong>{row.subtitle && <small>{row.subtitle}</small>}</button> },
             { title: "实际领用 / 件", dataIndex: "issued_qty", align: "right", render: (value: string) => fmt(value) },
+            { title: "同期实收 / 件", dataIndex: "receipt_qty", align: "right", render: (value: string | undefined) => fmt(value) },
             { title: "需求净量 / 件", dataIndex: "effective_qty", align: "right", render: (value: string) => fmt(value) },
             { title: "需求单数", dataIndex: "order_count", align: "right", render: (value: number) => fmt(value) },
             ...(canCost ? [{ title: "已知需求成本 / 元", key: "cost", align: "right" as const, render: (_: unknown, row: ExplorerRow) => selectedCost(row) }] : []),
@@ -129,13 +141,23 @@ function RankingList({ rows, metric, selected, onSelect, disabledReason, offset 
   })}</div>;
 }
 
-function Distribution({ data, metric, onRow, onPage }: { data: ExplorerData; metric: ExplorerMetric; onRow: (row: ExplorerRow) => void; onPage: (page: number) => void }) {
+function Distribution({ data, metric, onRow, onReconcile, onPage }: { data: ExplorerData; metric: ExplorerMetric; onRow: (row: ExplorerRow) => void; onReconcile: (row: ExplorerRow) => void; onPage: (page: number) => void }) {
   const { focus } = data;
   return <Card className="me-distribution" title={focus.dimension === "pn" ? "项目内 PN 分布" : "项目使用分布"}>
     {!focus.row ? <Empty description="选中项在当前筛选中没有记录，请从排名中重新选择。" /> : <>
       <div className="me-focus-heading"><div><strong>{focus.row.label}</strong><p>{focus.row.subtitle}</p></div><Tag>{fmt(focus.row.value, metric)} {EXPLORER_METRICS[metric].unit}</Tag></div>
       <Typography.Paragraph type="secondary">{focus.dimension === "pn" ? "有项目详情权限时，点击 PN 进入当前项目的分析定位。" : "有项目详情权限时，点击项目条形进入该项目并保留当前筛选。"} 共 {focus.total} 项。{metric === "cost" ? "占比只覆盖已知成本。" : ""}</Typography.Paragraph>
       {!focus.rows.length ? <Empty description="当前选中项暂无可展示分布" /> : <RankingList rows={focus.rows} metric={metric} offset={(focus.page - 1) * focus.page_size} onSelect={onRow} disabledReason={row => projectAccessReason(focus.dimension === "project" ? row : focus.row)} />}
+      {metric === "issued" && focus.rows.length > 0 && <div className="me-return-checks">
+        <Typography.Paragraph type="secondary">实收按返还日期统计，与上方领用使用同一期间。跟进返件请打开整单核对，查看原始下单量、累计实收与差额；差额不代表该 PN 的待返义务。</Typography.Paragraph>
+        {focus.rows.map(row => {
+          const reason = projectAccessReason(focus.dimension === "project" ? row : focus.row);
+          return <div key={row.key} style={{ display: "flex", gap: 12, justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+            <span>{row.label} · 同期实收 {fmt(row.receipt_qty)} 件</span>
+            <Button size="small" disabled={reason != null} title={reason ?? undefined} aria-label={`核对${row.label}关联需求单`} onClick={() => onReconcile(row)}>查看整单核对</Button>
+          </div>;
+        })}
+      </div>}
       {focus.total > focus.page_size && <Pagination size="small" current={focus.page} pageSize={focus.page_size} total={focus.total} onChange={onPage} showSizeChanger={false} />}
       {focus.rows.some(row => focus.dimension === "project" && !row.project_id) && <div className="me-caption">未归属项目保留统计，不提供无效跳转。</div>}
     </>}

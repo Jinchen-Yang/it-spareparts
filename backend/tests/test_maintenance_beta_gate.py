@@ -65,8 +65,6 @@ def test_maintenance_beta_permission_is_additive_and_fail_closed():
 
     for action in (
         "action_maintenance_manager_workbook_apply",
-        "action_maintenance_project_manage",
-        "action_maintenance_demand_delete",
         "action_maintenance_warehouse_manage",
         "action_maintenance_migration_review",
         "action_maintenance_collection_follow_up",
@@ -79,12 +77,61 @@ def test_maintenance_beta_permission_is_additive_and_fail_closed():
     # 2026-08-24 客户拍板：验收开放给销售/项目经理/维保负责人，两键移出
     # Beta 附加依赖（保留稳定版 page_maintenance 依赖）。
     for action in (
+        "action_maintenance_project_manage",
+        "action_maintenance_demand_delete",
+        "action_maintenance_demand_manage",
         "action_maintenance_acceptance_submit",
         "action_maintenance_acceptance_review",
         "action_maintenance_site_issue_manage",
         "action_maintenance_bad_return_manage",
     ):
         assert action not in permissions.ACTION_ADDITIONAL_PAGE_DEPENDENCIES
+
+
+def test_stable_actions_keep_page_action_and_profit_requirements_without_beta(db, monkeypatch):
+    from uuid import uuid4
+    from app.services import maintenance_demands, maintenance_demand_manual
+    from tests.test_return_receipt_hardening import _grant
+    from tests.test_site_issue_v2_api import _project
+    settings = get_settings()
+    monkeypatch.setattr(settings, "maintenance_beta_enabled", False)
+    monkeypatch.setattr(settings, "maintenance_boss_dashboard_enabled", True)
+    project = _project(db, project_id=str(uuid4()))
+    db.commit()
+    granted = {"page_maintenance": True, "page_maintenance_beta": False,
+        "action_maintenance_project_manage": True, "action_maintenance_demand_delete": True,
+        "action_maintenance_demand_manage": True, "data_profit": True, "data_purchase_cost": True}
+    assert not permissions.combo_errors(permissions.effective("readonly", granted))
+    manager = _client(db, username="stable-manager", overrides=granted)
+    _grant(db, project.project_id, "stable-manager")
+    base = f"/api/maintenance/projects/stable/{project.project_id}"
+    archived = manager.post(base + "/archive", json={"version": project.version, "reason": "归档原因"})
+    assert archived.status_code == 200, archived.text
+    directory = manager.get("/api/maintenance/projects/stable", params={"include_inactive": True})
+    assert directory.status_code == 200, directory.text
+    assert project.project_id in directory.text
+    restored = manager.post(base + "/restore", json={"version": archived.json()["version"], "reason": "恢复原因"})
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["is_active"] is True
+    monkeypatch.setattr(maintenance_demands, "void_fast", lambda *_args, **_kwargs: {"reached": True})
+    monkeypatch.setattr(maintenance_demand_manual, "patch_demand_line", lambda *_args, **_kwargs: {"reached": True})
+    void_body = {"source_order_ids": ["synthetic"], "reason": "合成测试"}
+    patch_body = {"updates": {"qty": 2}, "reason": "合成测试", "expected_digest": "a" * 64}
+    assert manager.post("/api/maintenance/demands/void-fast", json=void_body).status_code == 200
+    assert manager.patch("/api/maintenance/demands/lines/synthetic", json=patch_body).status_code == 200
+    assert manager.post("/api/maintenance/demands/delete-intents", json={}).status_code == 404
+    for denied_key in ("action_maintenance_project_manage", "data_profit", "data_purchase_cost", "page_maintenance"):
+        username = f"missing-{denied_key}"
+        denied = _client(db, username=username, overrides={**granted, denied_key: False})
+        _grant(db, project.project_id, username)
+        response = denied.post(base + "/archive", json={"version": restored.json()["version"], "reason": "不能执行"})
+        assert response.status_code == 403, (denied_key, response.text)
+    for action, path, body, method in (
+        ("action_maintenance_demand_delete", "/api/maintenance/demands/void-fast", void_body, "post"),
+        ("action_maintenance_demand_manage", "/api/maintenance/demands/lines/synthetic", patch_body, "patch"),
+    ):
+        denied = _client(db, username=f"missing-{action}", overrides={**granted, action: False})
+        assert getattr(denied, method)(path, json=body).status_code == 403
 
 
 def test_server_gate_keeps_stable_page_live_and_beta_closed(db):
@@ -100,7 +147,7 @@ def test_server_gate_keeps_stable_page_live_and_beta_closed(db):
         # ——见本文件 test_boss_gate_keeps_panel_routers_live 与 main.py 挂载注释。
         for method, path, body in (
             ("get", "/api/maintenance/projects/stable/operations", None),
-            ("post", "/api/maintenance/demands/search", {}),
+            ("post", "/api/maintenance/demands/delete-intents", {}),
         ):
             beta = (
                 getattr(client, method)(path, json=body)
@@ -112,14 +159,14 @@ def test_server_gate_keeps_stable_page_live_and_beta_closed(db):
         settings.maintenance_beta_enabled = True
         for method, path, body in (
             ("get", "/api/maintenance/projects/stable/operations", None),
-            ("post", "/api/maintenance/demands/search", {}),
+            ("post", "/api/maintenance/demands/delete-intents", {}),
         ):
             opened = (
                 getattr(client, method)(path, json=body)
                 if body is not None
                 else getattr(client, method)(path)
             )
-            assert opened.status_code == 200, (method, path, opened.text)
+            assert opened.status_code == (422 if path.endswith("delete-intents") else 200), (method, path, opened.text)
     finally:
         settings.maintenance_beta_enabled = original
 
@@ -136,6 +183,7 @@ def test_beta_requires_explicit_user_whitelist_even_when_global_gate_is_open(db)
         overrides={
             "page_maintenance": True,
             "page_maintenance_beta": True,
+            "action_maintenance_demand_delete": True,
         },
     )
 
@@ -143,13 +191,13 @@ def test_beta_requires_explicit_user_whitelist_even_when_global_gate_is_open(db)
     original = settings.maintenance_beta_enabled
     try:
         settings.maintenance_beta_enabled = True
-        beta_path = "/api/maintenance/demands/search"
+        beta_path = "/api/maintenance/demands/delete-intents"
         assert TestClient(app).post(beta_path, json={}).status_code == 401
         assert stable_only.get("/api/maintenance/projects").status_code == 200
         denied = stable_only.post(beta_path, json={})
         assert denied.status_code == 403
         assert "未获得维保管理页面权限" in denied.text
-        assert whitelisted.post(beta_path, json={}).status_code == 200
+        assert whitelisted.post(beta_path, json={}).status_code == 422
     finally:
         settings.maintenance_beta_enabled = original
 
@@ -220,7 +268,7 @@ def test_login_capability_requires_server_gate_and_real_whitelisted_account(db):
             "replenishment": False,
             "maintenance_boss": False,
         }
-        denied = shared_client.post("/api/maintenance/demands/search", json={})
+        denied = shared_client.post("/api/maintenance/demands/delete-intents", json={})
         assert denied.status_code == 403, denied.text
     finally:
         settings.maintenance_beta_enabled = original_maintenance
@@ -241,7 +289,7 @@ def test_every_beta_router_fails_closed_before_business_lookup(db):
             ("get", "/api/maintenance/project-manager/workbooks/v3/status", None),
             ("get", "/api/maintenance/return-categories", None),
             ("get", "/api/maintenance/projects/stable/not-real/workbook", None),
-            ("post", "/api/maintenance/demands/search", {}),
+            ("post", "/api/maintenance/demands/delete-intents", {}),
             ("post", "/api/maintenance/warehouse-documents/search", {}),
             ("post", "/api/maintenance/collection-reminders/search", {}),
             ("get", "/api/maintenance/projects/stable/not-real/collection-milestones", None),
@@ -289,6 +337,7 @@ def test_every_registered_beta_route_has_the_server_gate_dependency():
         "app.api.maintenance_source_assignments",
         "app.api.maintenance_return_receipts",
         "app.api.maintenance_return_receipt_import",
+        "app.api.maintenance_receipt_workbook",
     }
     from app.api import maintenance_project_operations
     stable_operations = {
@@ -305,6 +354,9 @@ def test_every_registered_beta_route_has_the_server_gate_dependency():
         # 闸不随 beta 闸——beta 总闸生产恒 false，挂 beta 会建议功能整组 404。
         maintenance_project_operations.site_issue_demand_candidates,
     }
+
+    from app.api import maintenance_demands
+    stable_operations.update(route.endpoint for route in maintenance_demands.router.routes)
 
     def _routes(modules: set[str]) -> list[APIRoute]:
         return [
@@ -329,7 +381,7 @@ def test_every_registered_beta_route_has_the_server_gate_dependency():
     assert _missing(beta_routes, require_maintenance_beta) == []
 
     boss_routes = _routes(boss_endpoint_modules) + [
-        route for route in _routes({"app.api.maintenance_project_operations"})
+        route for route in _routes({"app.api.maintenance_project_operations", "app.api.maintenance_demands"})
         if route.endpoint in stable_operations
     ]
     assert boss_routes
@@ -376,7 +428,7 @@ def test_boss_gate_keeps_panel_routers_live(db):
                 if body is not None
                 else getattr(client, method)(path)
             )
-            assert opened.status_code == 200, (method, path, opened.text)
+            assert opened.status_code == (422 if path.endswith("delete-intents") else 200), (method, path, opened.text)
     finally:
         settings.maintenance_boss_dashboard_enabled = original_boss
         settings.maintenance_beta_enabled = original_beta

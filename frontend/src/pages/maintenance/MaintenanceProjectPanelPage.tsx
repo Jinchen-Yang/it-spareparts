@@ -24,6 +24,7 @@ import type { MaintenanceProjectOperationsSummary } from "../../api/maintenanceO
 import { searchMaintenanceManagerAccounts } from "../../api/maintenanceOperations";
 import type { MaintenanceManagerAccount } from "../../api/maintenanceOperations";
 import ProjectManagerAssignmentControl from "../../components/maintenance/ProjectManagerAssignmentControl";
+import ProjectArchiveControl from "../../components/maintenance/ProjectArchiveControl";
 import WorkbookRoundTrip from "../../components/maintenance/WorkbookRoundTrip";
 import { readPermissionMap } from "../../nav";
 import { maintenanceAnalyticsReturnPath, readProjectPanelTab } from "./analysisNavigation";
@@ -444,6 +445,8 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
             disabled={!canEditBasics}
             onSaved={refreshProject}
           />
+          {project && canManageProject && (localStorage.getItem("role") === "admin" || !!perms.data_profit)
+            ? <ProjectArchiveControl key={projectId} project={project} onChanged={refreshProject} /> : null}
           {operationsProject ? (
             <ProjectManagerAssignmentControl
               project={operationsProject}
@@ -457,7 +460,7 @@ function MaintenanceProjectPanelContent({ projectId }: { projectId: string }) {
           title="本项目总表"
           filename={`${exportBase}-总表.xlsx`}
           canUpload={canUpload}
-          hint="六 sheet 一次下载，回填后整份上传覆盖"
+          hint="项目总表回填；收货编辑请进入领用与返还中的返还收货Excel编辑"
           onDownload={() => downloadProjectMaster(projectId)}
           onValidate={(file) => validateProjectMaster(projectId, file)}
           onApply={(file, opts) => applyProjectMaster(projectId, file, opts)}

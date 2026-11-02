@@ -508,9 +508,7 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
 ACTION_ADDITIONAL_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_presales_bind_part": "page_master_data",
     "action_maintenance_manager_workbook_apply": "page_maintenance_beta",
-    "action_maintenance_project_manage": "page_maintenance_beta",
-    "action_maintenance_demand_delete": "page_maintenance_beta",
-    "action_maintenance_demand_manage": "page_maintenance_beta",
+    # D-0051：项目主档、需求单维护随稳定页面；动作仍需显式授予。
     # 已发布的领用作废/返还收货操作仅依赖 page_maintenance；旧草稿工作流
     # 仍由独立 Beta 路由总闸与白名单保护，不因此授予任何账号新的动作。
     # 验收两键 2026-08-24 起移出 Beta 附加依赖：客户拍板验收开放给销售/项目经理/
@@ -1041,11 +1039,11 @@ PERMISSION_META: dict[str, dict] = {
     "action_maintenance_demand_delete": {
         "label": "维保需求单安全删除",
         "summary": "允许把误导入的 WBDD 整单逻辑删除，并从全部有效业务视图中排除。",
-        "can": "跨页选择需求单、查看完整复核清单、填写理由并经两次确认后执行可恢复的逻辑删除。",
+        "can": "在稳定需求单页面查看影响、填写理由并确认作废；旧两阶段批量流程仍需维保管理白名单。",
         "cannot": "不能删除单行备件、不能物理删除原始订单或项目归属；恢复必须走独立实名管理员入口。",
         "typical": ["管理员", "管理员指定的数据维护人员"],
         "sensitivity": "critical",
-        "risk": "会改变成本、库存推导、项目看板和导出的有效数据范围；系统强制服务端等待与整批原子校验。",
+        "risk": "会改变有效需求、成本推导、项目看板和导出的范围并保留审计；稳定页面按单确认作废，服务端校验后返回结果。",
     },
     "action_maintenance_demand_manage": {
         "label": "维保需求单页面直改",

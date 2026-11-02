@@ -43,6 +43,7 @@ from app.api import (
     maintenance_migration,
     maintenance_project_operations,
     maintenance_return_receipts,
+    maintenance_receipt_workbook,
     maintenance_return_receipt_import,
     maintenance_source_assignments,
     maintenance_project_workbooks,
@@ -173,6 +174,7 @@ app.include_router(
 )
 app.include_router(maintenance_row_workbench.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipts.router, prefix=settings.api_prefix)
+app.include_router(maintenance_receipt_workbook.router, prefix=settings.api_prefix)
 app.include_router(resale_export.router, prefix=settings.api_prefix)
 app.include_router(resale_catalog_export.router, prefix=settings.api_prefix)
 app.include_router(pn_master_integration.router, prefix=settings.api_prefix)
@@ -208,6 +210,11 @@ app.include_router(
 )
 app.include_router(
     maintenance_demands.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_boss_dependencies,
+)
+app.include_router(
+    maintenance_demands.beta_router,
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )

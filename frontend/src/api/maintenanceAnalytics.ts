@@ -228,6 +228,8 @@ export type ExplorerCostState = "known" | "partial" | "unknown" | "restricted";
 export interface ExplorerStats {
   value: string | null;
   issued_qty: string;
+  /** 同期有效实收，按返还业务日统计；不是返还义务或需求单累计差额。 */
+  receipt_qty?: string;
   effective_qty: string;
   cost_inc: string | null;
   cost_state: ExplorerCostState;

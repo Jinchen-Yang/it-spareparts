@@ -31,6 +31,7 @@ import {
   validateSparePartLines,
 } from "../../api/maintenanceWorkbooks";
 import MaintenanceMovementSearch from "../../components/maintenance/MaintenanceMovementSearch";
+import MaintenanceProjectDirectoryButton from "../../components/maintenance/MaintenanceProjectDirectoryButton";
 import ProjectCard from "../../components/maintenance/ProjectCard";
 import MaintenanceBatchTransferButton from "../../components/maintenance/MaintenanceBatchTransferButton";
 import MaintenanceProjectExportButton from "../../components/maintenance/MaintenanceProjectExportButton";
@@ -305,6 +306,7 @@ export function MaintenanceHomePage() {
           </Space>
         } />
       <MaintenanceMovementSearch />
+      <MaintenanceProjectDirectoryButton />
       {rowWorkbenchOpen ? <div id="maintenance-global-row-workbench">
         {rangePreset === "custom" && !customRange
           ? <Alert type="info" showIcon message="请选择自定义日期区间后查询备件行。" />

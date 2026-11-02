@@ -17,6 +17,7 @@ import { raw, readError, type RegisterPanelRefresh } from "./panelUtils";
 import ReturnReceiptImport from "./ReturnReceiptImport";
 import ReturnReceiptBatchEntry from "./ReturnReceiptBatchEntry";
 import ReturnReceiptBatchMaintenance from "./ReturnReceiptBatchMaintenance";
+import ReceiptWorkbookEditor from "./ReceiptWorkbookEditor";
 import PanelActionBar from "./PanelActionBar";
 import { availableReceiptDemand, capacityQty, receiptCapacityError, receiptDemandOption } from "./returnReceiptCapacity";
 
@@ -663,6 +664,7 @@ export function ReturnReceiptsSection({ projectId, canImport = true, onChanged, 
           <>
             <Button type="primary" size="small" onClick={openCreate}>登记返还</Button>
             <ReturnReceiptBatchEntry projectId={projectId} onDone={async () => { await refreshAfterChange(); }} />
+            <ReceiptWorkbookEditor key={projectId} projectId={projectId} onChanged={refreshAfterChange} />
             {selectedReceipts.length ? (
               <>
                 {/* key 含 projectId：项目一换组件立即换实例，旧实例的卸载 effect 使在途批次失效 */}
