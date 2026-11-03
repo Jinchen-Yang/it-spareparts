@@ -46,6 +46,9 @@ from sqlalchemy.orm import Session
 from app import config, security, tax_policy
 from app.business_time import business_today
 from app.models import DimCustomer, DimPart, FPurchaseLine, FPurchaseOrder, FSalesOrder
+from app.models.dimensions import DimSupplier
+from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
+from app.services.maintenance_project_assignments import maintenance_scope_project_ids
 
 DEFAULT_TAX_RATE = Decimal("0.13")
 NO_LINKED_LABEL = "（无关联销售单）"
@@ -327,7 +330,8 @@ def _validate_common(date_from, date_to):
 
 
 def _base_where(po, link, *, date_from, date_to, source_type, purchaser,
-                salesperson, customer_id):
+                salesperson, customer_id, supplier=None, order_no=None,
+                linked_sales_order_no=None):
     """已生效 + 全部筛选条件（多选一律精确匹配；日期闭区间，不传 = 全部）。"""
     w = [po.data_status == config.ACTIVE_STATUS]
     if date_from:
@@ -342,6 +346,13 @@ def _base_where(po, link, *, date_from, date_to, source_type, purchaser,
         w.append(link.c.salesperson.in_(salesperson))
     if customer_id:
         w.append(link.c.customer_id.in_(customer_id))
+    for column, value in ((po.order_no, order_no),
+                          (po.linked_sales_order_no, linked_sales_order_no)):
+        if value and value.strip():
+            w.append(column.contains(value.strip(), autoescape=True))
+    if supplier and supplier.strip():
+        w.append(po.supplier_id.in_(select(DimSupplier.id).where(
+            DimSupplier.name_normalized.contains(supplier.strip(), autoescape=True))))
     return w
 
 
@@ -361,7 +372,8 @@ def _share(nominal, total) -> float | None:
 
 
 def _filters_echo(*, date_from, date_to, source_type, purchaser, salesperson,
-                  customer_id, category, group_by=None, group_key=None) -> dict:
+                  customer_id, category, group_by=None, group_key=None,
+                  supplier=None, order_no=None, linked_sales_order_no=None) -> dict:
     return {
         "date_from": date_from.isoformat() if date_from else None,
         "date_to": date_to.isoformat() if date_to else None,
@@ -372,6 +384,9 @@ def _filters_echo(*, date_from, date_to, source_type, purchaser, salesperson,
         "category": category or [],
         "group_by": group_by,
         "group_key": group_key,
+        "supplier": supplier or None,
+        "order_no": order_no or None,
+        "linked_sales_order_no": linked_sales_order_no or None,
     }
 
 
@@ -496,7 +511,8 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
             date_to: date | None = None, source_type: list[str] | None = None,
             purchaser: list[str] | None = None, salesperson: list[str] | None = None,
             customer_id: list[int] | None = None, category: list[str] | None = None,
-            group_by: str = "source_type") -> dict:
+            group_by: str = "source_type", supplier: str | None = None,
+            order_no: str | None = None, linked_sales_order_no: str | None = None) -> dict:
     """KPI + 分组汇总。分类筛选（或按分类分组）→ 行级口径（拆行只计匹配行）；
     其余 → 单头口径（实付取单头「采购金额」原值）。三套金额一次全部返回。
 
@@ -514,7 +530,8 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
     # 去重子查询的 IN 输入只用 po 侧条件（销售/客户条件挂在 link 上，构造时不可用）
     po_where = _base_where(po, None, date_from=date_from, date_to=date_to,
                            source_type=source_type, purchaser=purchaser,
-                           salesperson=None, customer_id=None)
+                           salesperson=None, customer_id=None, supplier=supplier,
+                           order_no=order_no, linked_sales_order_no=linked_sales_order_no)
     link = _sales_link_bounded(po_where) if (salesperson or customer_id) else None
     group_link = link if link is not None else (
         _sales_link_bounded(po_where) if group_by in ("salesperson", "customer") else None)
@@ -523,7 +540,8 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
     cat = _category_match(category)
     where = _base_where(po, link, date_from=date_from, date_to=date_to,
                         source_type=source_type, purchaser=purchaser,
-                        salesperson=salesperson, customer_id=customer_id)
+                        salesperson=salesperson, customer_id=customer_id, supplier=supplier,
+                        order_no=order_no, linked_sales_order_no=linked_sales_order_no)
     if line_mode and cat is not None:
         where.append(cat)
 
@@ -627,7 +645,8 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
         "filters_echo": _filters_echo(
             date_from=date_from, date_to=date_to, source_type=source_type,
             purchaser=purchaser, salesperson=salesperson, customer_id=customer_id,
-            category=category, group_by=group_by),
+            category=category, group_by=group_by, supplier=supplier,
+            order_no=order_no, linked_sales_order_no=linked_sales_order_no),
         "as_of": business_today().isoformat(),
         "kpi": {
             "orders": kpi_row.orders,
@@ -645,10 +664,57 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
 
 # ---------------------------------------------------------------- orders 下钻
 
+def _page_context(db: Session, orders, user_ctx=None, *, category=None,
+                  group_category=None) -> dict[int, dict]:
+    """页内批量读取产品/关联；一对多信息不参与单头金额查询。"""
+    if not orders:
+        return {}
+    ids = [row.id for row in orders]
+    suppliers = dict(db.execute(select(DimSupplier.id, DimSupplier.name_normalized)
+        .where(DimSupplier.id.in_([row.supplier_id for row in orders
+                                  if row.supplier_id is not None]))).all())
+    nos = {row.linked_sales_order_no for row in orders if row.linked_sales_order_no}
+    names: dict[str, dict[str, str]] = {}
+    if nos and not security.is_field_hidden(user_ctx, "customer"):
+        pc, project = MaintenanceProjectContract, MaintenanceProject
+        today = business_today()
+        stmt = select(pc.contract_no, project.project_id, project.display_name).join(
+            project, pc.project_id == project.project_id).where(
+                pc.contract_no.in_(nos), pc.effective_from <= today,
+                or_(pc.effective_to.is_(None), pc.effective_to > today))
+        scope = maintenance_scope_project_ids(db, user_ctx) if user_ctx is not None else None
+        if scope is not None:
+            stmt = stmt.where(project.project_id.in_(scope))
+        for row in db.execute(stmt.order_by(pc.contract_no, project.project_id)):
+            names.setdefault(row.contract_no, {})[row.project_id] = row.display_name
+    result = {row.id: {
+        "supplier": None if security.is_field_hidden(user_ctx, "supplier") else suppliers.get(row.supplier_id),
+        "linked_sales_order_no": row.linked_sales_order_no,
+        "project_names": list(names.get(row.linked_sales_order_no, {}).values()),
+        "products": [],
+    } for row in orders}
+    po, pl, dp = FPurchaseOrder, FPurchaseLine, DimPart
+    stmt = (select(pl.order_id, pl.id, dp.pn_std, pl.description)
+        .join(po, _batch_line_join(po, pl)).join(dp, pl.part_id == dp.id)
+        .where(po.id.in_(ids)))
+    cat = _category_match(category)
+    if cat is not None:
+        stmt = stmt.where(cat)
+    if group_category:
+        stmt = stmt.where(_category_dim(dp) == group_category)
+    for row in db.execute(stmt.order_by(pl.order_id, pl.line_no.asc().nulls_last(), pl.id)):
+        result[row.order_id]["products"].append({
+            "line_id": row.id, "pn_std": row.pn_std, "description": row.description,
+        })
+    return result
+
+
 def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
            date_to: date | None = None, source_type: list[str] | None = None,
            purchaser: list[str] | None = None, salesperson: list[str] | None = None,
            customer_id: list[int] | None = None, category: list[str] | None = None,
+           supplier: str | None = None, order_no: str | None = None,
+           linked_sales_order_no: str | None = None,
            group_by: str | None = None, group_key: str | None = None,
            sort: str = "order_date", order: str = "desc",
            page: int = 1, page_size: int = 50) -> dict:
@@ -693,7 +759,8 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     # 分类是行级条件也不在此——IN 集合是超集即可，不影响正确性）
     po_where = _base_where(po, None, date_from=date_from, date_to=date_to,
                            source_type=source_type, purchaser=purchaser,
-                           salesperson=None, customer_id=None)
+                           salesperson=None, customer_id=None, supplier=supplier,
+                           order_no=order_no, linked_sales_order_no=linked_sales_order_no)
     link = _sales_link_bounded(po_where) if needs_link else None
     # 分类分组（带或不带 group_key）一律行级口径，与 summary 同真值（对抗复审
     # 2026-10-17 确认项：无 group_key 时单头口径会与同参数 KPI 对不上账）
@@ -701,7 +768,8 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     cat = _category_match(category)
     where = _base_where(po, link, date_from=date_from, date_to=date_to,
                         source_type=source_type, purchaser=purchaser,
-                        salesperson=salesperson, customer_id=customer_id)
+                        salesperson=salesperson, customer_id=customer_id, supplier=supplier,
+                        order_no=order_no, linked_sales_order_no=linked_sales_order_no)
     if cat is not None:
         where.append(cat)
     # 下钻键与其余维度同一路径精确匹配（AND 交集）——不折进分类多选 OR 集合，
@@ -709,12 +777,12 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     if group_key and group_by:
         where.append(_group_dim(group_by, po, link, dp) == group_key)
 
-    po_cols = [po.id, po.order_no, po.order_date, po.source_type_raw, po.purchaser]
+    po_cols = [po.id, po.order_no, po.order_date, po.source_type_raw, po.purchaser,
+               po.supplier_id, po.linked_sales_order_no]
     group_cols = list(po_cols)
     if link is None:
         # 页内补值需要关联键（补值映射按 linked_sales_order_no 查）
-        po_cols.append(po.linked_sales_order_no)
-        group_cols.append(po.linked_sales_order_no)
+        pass  # 关联键始终用于列表追溯
     else:
         po_cols += [link.c.salesperson, link.c.customer_id,
                     DimCustomer.name_normalized.label("customer_name")]
@@ -772,6 +840,8 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
         cust_names = (dict(db.execute(
             select(DimCustomer.id, DimCustomer.name_normalized)
             .where(DimCustomer.id.in_(cust_ids))).all()) if cust_ids else {})
+    context = _page_context(db, rows, user_ctx, category=category,
+                            group_category=group_key if group_by == "category" else None)
     items = []
     for r in rows:
         if link is not None:
@@ -781,6 +851,7 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
             cname = cust_names.get(cid)
         items.append({
             "order_id": r.id, "order_no": r.order_no,
+            **context[r.id],
             "order_date": r.order_date.isoformat() if r.order_date else None,
             "source_type": r.source_type_raw, "purchaser": r.purchaser,
             "salesperson": sp, "customer_id": cid,
@@ -801,7 +872,8 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
         "filters_echo": _filters_echo(
             date_from=date_from, date_to=date_to, source_type=source_type,
             purchaser=purchaser, salesperson=salesperson, customer_id=customer_id,
-            category=category, group_by=group_by, group_key=group_key),
+            category=category, group_by=group_by, group_key=group_key, supplier=supplier,
+            order_no=order_no, linked_sales_order_no=linked_sales_order_no),
         "as_of": business_today().isoformat(),
         "items": items,
     }
@@ -883,7 +955,7 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
             po.tax_rate, po.is_tax_inclusive, po.amount_ex_tax, po.amount_inc_tax),
         "amount_ex": _f(ex), "amount_inc": _f(inc),
         "amount_paid": _f(po.amount_inc_tax),
-        "linked_sales_order_no": po.linked_sales_order_no,
+        **_page_context(db, [po], user_ctx, category=category)[po.id],
         "salesperson": link_row.salesperson if link_row else None,
         "customer_id": link_row.customer_id if link_row else None,
         "customer": link_row.name_normalized if link_row else None,

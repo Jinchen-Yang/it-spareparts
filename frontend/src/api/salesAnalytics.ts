@@ -97,6 +97,7 @@ export interface SalesAnalyticsSummary {
   };
   as_of: string;
   kpi: SalesKpi;
+  recorded_expenses?: RecordedExpenses;
   /** 行级口径（选了大类 / 品牌）：不含税为按 13% 推算的名义值。 */
   line_mode?: boolean;
   /** 上月同期 KPI（compare=true 且区间不长于一个月时）。 */
@@ -133,6 +134,7 @@ export interface SalesAnalyticsOrderRow {
   gross_profit?: number | null;
   gross_margin?: number | null;
   reconciliation: SalesReconciliationBlock;
+  products?: { line_id: number; pn: string | null; unit_price: number | null }[];
 }
 
 export const SALES_ANALYTICS_SORT_KEYS = [
@@ -210,6 +212,7 @@ export interface SalesAnalyticsOrderDetail {
   lines?: SalesOrderLine[];
   as_of: string;
   reconciliation: SalesReconciliationBlock;
+  products?: { line_id: number; pn: string | null; unit_price: number | null }[];
   reconciliation_history: SalesReconciliationHistoryEntry[];
 }
 
@@ -448,3 +451,17 @@ export const downloadSalesOrdersCsv = (
     params: toSalesAnalyticsParams(filters, { sort, ...(order !== "desc" ? { order } : {}) }),
     responseType: "blob",
   });
+
+export interface RecordedExpenses {
+  status: "recorded" | "no_evidence" | "restricted";
+  amount_inc_tax: number | null;
+  total: number | null;
+  missing_amounts: number | null;
+  as_of?: string;
+  page?: number;
+  page_size?: number;
+  items: { source: string; id: string; order_no: string; reference: string | null; expense_date: string; category: string | null; amount_inc_tax: number | null }[];
+}
+
+export const fetchRecordedSalesExpenses = (filters: SalesAnalyticsFilters, page = 1) =>
+  api.get<RecordedExpenses>("/sales/analytics/expenses", { params: toSalesAnalyticsParams(filters, { page, page_size: 50 }) });

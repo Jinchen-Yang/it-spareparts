@@ -378,14 +378,14 @@ describe("订单明细：导出与金额区间", () => {
 });
 
 describe("多维紧凑图页签", () => {
-  it("九维并列各发一次 /groups（sort=指标、top=N），切指标写 URL，点击可下钻条目收窄筛选", async () => {
+  it("七维并列各发一次 /groups（sort=指标、top=N），切指标写 URL，点击可下钻条目收窄筛选", async () => {
     renderPage("/sales/analytics?tab=compact");
     expect(await screen.findByTestId("sales-compact")).toBeInTheDocument();
-    await waitFor(() => expect(fetchSalesAnalyticsGroups).toHaveBeenCalledTimes(9));
+    await waitFor(() => expect(fetchSalesAnalyticsGroups).toHaveBeenCalledTimes(7));
     const dims = fetchSalesAnalyticsGroups.mock.calls.map(([q]) => (q as { group_by: string }).group_by);
     expect(new Set(dims)).toEqual(new Set([
-      "customer", "salesperson", "category", "brand", "pn",
-      "business_type", "warehouse", "customer_type", "customer_city",
+      "customer", "salesperson", "brand", "pn",
+      "business_type", "warehouse", "customer_type",
     ]));
     for (const [q] of fetchSalesAnalyticsGroups.mock.calls) {
       expect(q).toMatchObject({ sort: "amount_ex_tax", order: "desc", top: 10 });
@@ -415,7 +415,7 @@ describe("多维紧凑图页签", () => {
     }));
     renderPage("/sales/analytics?tab=compact&cmetric=amount_ex_tax");
     expect(await screen.findByTestId("sales-compact")).toBeInTheDocument();
-    await waitFor(() => expect(fetchSalesAnalyticsGroups).toHaveBeenCalledTimes(6));
+    await waitFor(() => expect(fetchSalesAnalyticsGroups).toHaveBeenCalledTimes(5));
     const dims = fetchSalesAnalyticsGroups.mock.calls.map(([q]) => (q as { group_by: string }).group_by);
     expect(dims).not.toContain("customer");
     expect(dims).not.toContain("customer_type");

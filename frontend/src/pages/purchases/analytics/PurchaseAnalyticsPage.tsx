@@ -118,6 +118,7 @@ export default function PurchaseAnalyticsPage() {
   // admin 恒全开；其余角色按登录快照（boss 模板默认双开，显式关掉的按受限处理）
   const costRestricted = !isAdmin && perms.data_purchase_cost === false;
   const customerRestricted = !isAdmin && perms.data_customer === false;
+  const supplierRestricted = !isAdmin && perms.data_supplier === false;
 
   // 客户权限受限时：客户筛选/分组对后端是 403，其下钻层（group_key 是客户 id，
   // 换维度后必是空集）一并收敛——控件显示、渲染层、请求参数全部同源，
@@ -125,6 +126,7 @@ export default function PurchaseAnalyticsPage() {
   const customerDimBlocked = customerRestricted && state.groupBy === "customer";
   const effectiveState = {
     ...state,
+    supplier: supplierRestricted ? "" : state.supplier,
     groupBy: customerDimBlocked ? DEFAULT_GROUP_BY : state.groupBy,
     customerIds: customerRestricted ? [] : state.customerIds,
     groupKey: customerDimBlocked ? null : state.groupKey,
@@ -209,7 +211,7 @@ export default function PurchaseAnalyticsPage() {
   const apiFilters = useMemo(
     () => toAnalyticsApiFilters(effectiveState, today),
     // sp 变化时重算；实际重拉由 filterKey（筛选序列化键）控制，口径/抽屉参数变化不触发
-    [sp.toString(), customerRestricted, todayKey],
+    [sp.toString(), customerRestricted, supplierRestricted, todayKey],
   );
   const filterKey = JSON.stringify(apiFilters);
 
@@ -354,6 +356,7 @@ export default function PurchaseAnalyticsPage() {
           customersHasMore={options?.customers_has_more ?? false}
           costRestricted={costRestricted}
           customerRestricted={customerRestricted}
+          supplierRestricted={supplierRestricted}
           onReset={() => setSp(new URLSearchParams(), { replace: true })}
         />
 

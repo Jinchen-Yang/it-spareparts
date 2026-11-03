@@ -5,7 +5,7 @@
 // 毛利卡默认「上月对比 + 成本覆盖率」同时见（A-AC11）；单内有单但无已配成本行 →
 // 显示「待配成本」而非 0（Q-A-05）。
 import type { ReactNode } from "react";
-import { Tooltip } from "antd";
+import { Button, Tooltip } from "antd";
 import { fmtMoney, KpiCard } from "../shared";
 import type { SalesAnalyticsSummary, SalesKpi } from "../../../api/salesAnalytics";
 import { pct, pctSigned } from "../../../utils/format";
@@ -17,6 +17,7 @@ export interface SummaryViewProps {
   amounts: AmountKey[];
   /** data_profit=false：毛利卡不渲染（后端已置空）。 */
   profitRestricted?: boolean;
+  onOpenExpenses?: () => void;
 }
 
 /**
@@ -68,7 +69,7 @@ function ProfitSub({ kpi, prev }: { kpi: SalesKpi; prev: SalesKpi | undefined })
   );
 }
 
-export default function SummaryView({ summary, amounts, profitRestricted = false }: SummaryViewProps) {
+export default function SummaryView({ summary, amounts, profitRestricted = false, onOpenExpenses }: SummaryViewProps) {
   const kpi = summary?.kpi;
   const prev: SalesKpi | undefined = summary?.compare?.kpi;
   const noOrders = kpi != null && kpi.orders === 0;
@@ -155,6 +156,13 @@ export default function SummaryView({ summary, amounts, profitRestricted = false
               )
             }
           />
+        )}
+        {summary?.recorded_expenses && summary.recorded_expenses.status !== "restricted" && (
+          <KpiCard label="已记录费用（含税）"
+            value={summary.recorded_expenses.status === "no_evidence" ? "无费用记录" : fmtMoney(summary.recorded_expenses.amount_inc_tax)}
+            sub={<span>入选销售单累计至 {summary.recorded_expenses.as_of}，非完整报备总额。
+              {summary.recorded_expenses.missing_amounts ? ` ${summary.recorded_expenses.missing_amounts} 条缺金额。` : ""}
+              <Button type="link" size="small" onClick={onOpenExpenses}>查看费用记录</Button></span>} />
         )}
         {kpi?.salespeople !== undefined && (
           <KpiCard

@@ -12,8 +12,9 @@ orders 全年区间拖到 ≈2.7s（金臣验收线：一整年区间 >2s 即缺
 - options 销售人员：DISTINCT ON 的输入用「已生效采购单引用的 order_no」半连接限定。
 - order_detail：按 order_no 直取 id 最小一条。
 
-**接口响应结构（字段名、类型、嵌套、分页/排序语义、回显字段）一字不改**是本修复的
-硬约束（下游 PR-4a 前端已按现有结构开发）。证明方式：把旧实现（a636dbf）的五个查询
+**既有字段、分页/排序语义及回显不变**是该性能修复的硬约束。D-0051 后续合法增加
+供应商、关联销售/项目与产品投影，这些新增字段在独立 Python 参考中按夹具原始事实计算，
+不调用生产页内投影 helper，也不从完整 JSON 对拍中删除。证明方式：把旧实现（a636dbf）的五个查询
 函数原样保留为下方 ``_ref_*`` 参考函数（只存在于测试），在同一批夹具上与新版逐场景
 对拍完整 JSON 输出相等；另用 EXPLAIN（不 ANALYZE，先例 test_maintenance_project_
 foundation）守护计划形态防回退。
@@ -37,8 +38,11 @@ from app.business_time import business_today
 from app.db import engine
 from app.models import (DimCustomer, DimPart, FPurchaseLine, FPurchaseOrder,
                         FSalesOrder)
+from app.models.dimensions import DimSupplier
+from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
 from app.security import UserContext
 from app.services import purchase_analytics
+from app.services.maintenance_project_assignments import maintenance_scope_project_ids
 from app.services.purchase_analytics import (NO_LINKED_LABEL, UNCATEGORIZED_LABEL,
                                              EMPTY_LABEL, _base_where,
                                              _batch_line_join, _category_dim,
@@ -57,7 +61,7 @@ D = Decimal
 # =======================================================================
 # 参考实现：a636dbf 的旧查询装配（逐字拷贝，仅函数名加 _ref_ 前缀、内部
 # _sales_link 改调 _ref_sales_link）。不要按新思路"改进"这里的任何一行——
-# 它是等价性对拍的基准；仅 options 客户候选按后续规格独立补齐。
+# 它是等价性对拍的基准；后续客户候选和 D-0051 新投影按规格独立补齐，旧查询装配不改。
 # =======================================================================
 
 
@@ -288,6 +292,59 @@ def _ref_summary(db: Session, user_ctx=None, *, date_from: date | None = None,
     }
 
 
+def _ref_display_context(db, order_ids, user_ctx=None, *, category=None, group_category=None):
+    """只读夹具原始事实，以 Python 过滤/排序，独立于生产的页内 SQL 投影。"""
+    if not order_ids:
+        return {}
+    orders = list(db.scalars(select(FPurchaseOrder).where(FPurchaseOrder.id.in_(order_ids))))
+    suppliers = {row.id: row.name_normalized for row in db.scalars(select(DimSupplier))}
+    parts = {row.id: row for row in db.scalars(select(DimPart))}
+    projects = {row.project_id: row.display_name for row in db.scalars(select(MaintenanceProject))}
+    contracts = list(db.scalars(select(MaintenanceProjectContract)))
+    raw_lines = list(db.scalars(select(FPurchaseLine).where(FPurchaseLine.order_id.in_(order_ids))))
+    scope = maintenance_scope_project_ids(db, user_ctx) if user_ctx is not None else None
+    requested_categories = {value.strip() for value in category or [] if value and value.strip()}
+    today = business_today()
+    result = {}
+    for po in orders:
+        project_ids = {
+            link.project_id for link in contracts
+            if po.linked_sales_order_no and link.contract_no == po.linked_sales_order_no
+            and link.effective_from <= today
+            and (link.effective_to is None or link.effective_to > today)
+            and (scope is None or link.project_id in scope)
+        }
+        products = []
+        lines = sorted(
+            (line for line in raw_lines if line.order_id == po.id
+             and line.import_batch_id == po.import_batch_id),
+            key=lambda line: (line.line_no is None, line.line_no or 0, line.id),
+        )
+        for line in lines:
+            part = parts.get(line.part_id)
+            if part is None:
+                continue
+            # PostgreSQL btrim 的默认空白为普通空格；未分类哨兵保持既有过滤契约。
+            part_category = (part.category_major or "").strip(" ")
+            if requested_categories and not (
+                part_category in requested_categories
+                or (not part_category and UNCATEGORIZED_LABEL in (category or []))
+            ):
+                continue
+            if group_category and (part_category or UNCATEGORIZED_LABEL) != group_category:
+                continue
+            products.append({"line_id": line.id, "pn_std": part.pn_std,
+                             "description": line.description})
+        result[po.id] = {
+            "supplier": None if security.is_field_hidden(user_ctx, "supplier") else suppliers.get(po.supplier_id),
+            "linked_sales_order_no": po.linked_sales_order_no,
+            "project_names": [] if security.is_field_hidden(user_ctx, "customer") else [
+                projects[pid] for pid in sorted(project_ids)],
+            "products": products,
+        }
+    return result
+
+
 def _ref_orders(db: Session, user_ctx=None, *, date_from: date | None = None,
                 date_to: date | None = None, source_type: list[str] | None = None,
                 purchaser: list[str] | None = None, salesperson: list[str] | None = None,
@@ -393,6 +450,11 @@ def _ref_orders(db: Session, user_ctx=None, *, date_from: date | None = None,
         "amount_ex": _f(_round2(r.amount_ex)),
         "amount_paid": _f(_round2(r.amount_paid)),
     } for r in db.execute(stmt)]
+    context = _ref_display_context(
+        db, [item["order_id"] for item in items], user_ctx, category=category,
+        group_category=group_key if group_by == "category" else None)
+    for item in items:
+        item.update(context[item["order_id"]])
     return {
         "total": total, "page": page, "page_size": page_size,
         "sort": requested_sort, "order": order,
@@ -482,6 +544,7 @@ def _ref_order_detail(db: Session, order_id: int, user_ctx=None, *,
         "lines_count": len(lines),
         "lines": lines,
     }
+    data.update(_ref_display_context(db, [po.id], user_ctx, category=category)[po.id])
     if cat is not None:
         data["category_matched"] = {
             "lines": len(lines),
@@ -552,7 +615,8 @@ def eq(db):
     poa = _po(db, "PA", nb, on=date(2026, 3, 5), source_type="销售订单", purchaser="采购员甲",
               linked="XS-001", is_inc=True, rate=D("0.13"), amount_ex=D("1000"),
               amount_inc=D("1130"))
-    _line(db, "PA-L1", poa, p1, nb, line_no=1, amount=D("500"))
+    first_line = _line(db, "PA-L1", poa, p1, nb, line_no=1, amount=D("500"))
+    first_line.description = "当前批次产品原文"
     _line(db, "PA-L2", poa, p2, nb, line_no=2, amount=D("630"))
     _line(db, "PA-OLD1-L1", poa, p1, ob1, line_no=1, amount=D("999"))   # 残留：同行号
     _line(db, "PA-OLD1-L3", poa, pres, ob1, line_no=3, amount=D("500"))  # 残留：多行号
@@ -616,6 +680,21 @@ def eq(db):
     pom = _po(db, "PM", nb, on=date(2026, 5, 28), source_type="批量采购", purchaser="采购员乙",
               is_inc=False, rate=None, amount_ex=None, amount_inc=D("452"))
     _line(db, "PM-L1", pom, p3, nb, line_no=1, amount=D("452"))
+
+    # 新投影在完整对拍中必须有非空事实，不能仅比较默认 None/[]。
+    supplier = DimSupplier(name_raw="等价供应商原文", name_normalized="等价供应商")
+    db.add(supplier)
+    db.flush()
+    poa.supplier_id = supplier.id
+    for pid, label, end in (("eq-project-active", "真实关联项目", None),
+                            ("eq-project-expired", "失效关联不应显示", date(2025, 1, 1))):
+        db.add(MaintenanceProject(project_id=pid, project_code=pid,
+                                  display_name=label, lifecycle_status="active"))
+        db.flush()
+        db.add(MaintenanceProjectContract(
+            project_contract_id=pid, project_id=pid, contract_id=pid,
+            contract_no="XS-001", status_mapping_state="mapped", status_mapping_version="test-v1",
+            included_in_total=True, effective_from=date(2020, 1, 1), effective_to=end, source="test"))
 
     db.commit()
 
@@ -795,6 +874,17 @@ def test_orders_equivalence_masked_ranking(eq):
     # 无遮蔽账号对照组（同参数仍按金额排）
     _assert_orders_eq(eq.db, None, "unmasked", date_from=Y, date_to=Y_END,
                       sort="amount_paid")
+
+
+def test_order_display_context_field_visibility_equivalence(eq):
+    perms = permissions.effective("boss", None)
+    perms.update(data_supplier=False, data_customer=False)
+    ctx = UserContext(user_id="eq-hidden-display-context", role="boss", permissions=perms)
+    _assert_orders_eq(eq.db, ctx, "display-context-hidden", date_from=Y, date_to=Y_END)
+    ref = _ref_order_detail(eq.db, eq.poa.id, ctx)
+    detail = purchase_analytics.order_detail(eq.db, eq.poa.id, ctx)
+    assert detail == ref
+    assert detail["supplier"] is None and detail["project_names"] == []
 
 
 # =======================================================================

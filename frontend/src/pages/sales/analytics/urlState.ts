@@ -40,7 +40,7 @@ export const AMOUNT_OPTIONS: { value: AmountKey; label: string }[] = [
 ];
 export const ALL_AMOUNTS: AmountKey[] = ["ex", "inc", "revenue"];
 /** D-41 §2「三项并存」：默认三项并排显示。 */
-export const DEFAULT_AMOUNTS: AmountKey[] = [...ALL_AMOUNTS];
+export const DEFAULT_AMOUNTS: AmountKey[] = ["inc"];
 
 /** 口径键 → 后端排序键（列头点击按此排序，D-41：可按任一已显示金额倒序）。 */
 export const AMOUNT_SORT_KEY: Record<AmountKey, SalesAnalyticsSortKey> = {
@@ -50,7 +50,7 @@ export const AMOUNT_SORT_KEY: Record<AmountKey, SalesAnalyticsSortKey> = {
 };
 
 /** 默认按不含税金额倒序（与后端 sort 缺省一致；amount_ex_tax 100% 有值）。 */
-export const DEFAULT_SORT: SalesAnalyticsSortKey = "amount_ex_tax";
+export const DEFAULT_SORT: SalesAnalyticsSortKey = "amount_inc_tax";
 
 /** 页签（D-44）：默认订单明细——沿用 D-41「打开即大单列表」与旧分享链。 */
 export const SALES_TABS = ["overview", "compact", "groups", "trend", "orders"] as const;
@@ -123,7 +123,8 @@ export { ANALYTICS_PAGE_MAX as SALES_ANALYTICS_PAGE_MAX } from "../../../utils/a
 
 export function parseSalesAnalyticsUrl(sp: URLSearchParams): SalesAnalyticsUrlState {
   const sortRaw = sp.get("sort");
-  const selected = parseUrlSelection(sp, "basis", ALL_AMOUNTS);
+  const selected = parseUrlList(sp, "basis").some(value => ALL_AMOUNTS.includes(value as AmountKey))
+    ? parseUrlSelection(sp, "basis", ALL_AMOUNTS) : [...DEFAULT_AMOUNTS];
   return {
     ...parseAnalyticsDates(sp),
     businessType: parseUrlList(sp, "business_type"),
@@ -179,7 +180,7 @@ export function parseAmount(raw: string | null): number | null {
 function amountsIsDefault(amounts: AmountKey[]): boolean {
   return (
     amounts.length === DEFAULT_AMOUNTS.length &&
-    ALL_AMOUNTS.every((a) => amounts.includes(a))
+    DEFAULT_AMOUNTS.every((a) => amounts.includes(a))
   );
 }
 

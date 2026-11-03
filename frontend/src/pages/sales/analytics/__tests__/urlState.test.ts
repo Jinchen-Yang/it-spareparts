@@ -6,6 +6,7 @@ import dayjs from "dayjs";
 
 import {
   ALL_AMOUNTS,
+  DEFAULT_AMOUNTS,
   DEFAULT_SORT,
   parseSalesAnalyticsUrl,
   serializeSalesAnalyticsState,
@@ -17,7 +18,7 @@ const sp = (qs: string) => new URLSearchParams(qs);
 const TODAY = dayjs("2026-10-17");
 
 describe("parseSalesAnalyticsUrl：默认与容错", () => {
-  it("零参数 = 今天 + 三金额并排 + 不含税金额倒序 + 第 1 页 + 不含退货", () => {
+  it("零参数 = 今天 + 含税金额 + 含税金额倒序 + 第 1 页 + 不含退货", () => {
     const s = parseSalesAnalyticsUrl(sp(""));
     expect(s).toEqual({
       preset: "today",
@@ -26,7 +27,7 @@ describe("parseSalesAnalyticsUrl：默认与容错", () => {
       businessType: [],
       customer: null,
       salesperson: null,
-      amounts: [...ALL_AMOUNTS],
+      amounts: [...DEFAULT_AMOUNTS],
       sort: DEFAULT_SORT,
       page: 1,
       pageSize: 50,
@@ -50,7 +51,7 @@ describe("parseSalesAnalyticsUrl：默认与容错", () => {
     expect(s.sort).toBe(DEFAULT_SORT);
     expect(s.page).toBe(1);
     expect(s.orderId).toBeNull();
-    expect(s.amounts).toEqual([...ALL_AMOUNTS]);
+    expect(s.amounts).toEqual([...DEFAULT_AMOUNTS]);
     expect(s.includeReturns).toBe(false); // 只有字面 "1" 才算开
   });
 
@@ -78,22 +79,22 @@ describe("parseSalesAnalyticsUrl：默认与容错", () => {
     expect(parseSalesAnalyticsUrl(sp("order_id=201")).orderId).toBe(201);
   });
 
-  it("basis 只保留合法值；全非法 → 默认三金额（受限账号也不会得到空口径）", () => {
+  it("basis 只保留合法值；全非法 → 默认含税金额（受限账号也不会得到空口径）", () => {
     expect(parseSalesAnalyticsUrl(sp("basis=inc,revenue")).amounts).toEqual(["inc", "revenue"]);
     expect(parseSalesAnalyticsUrl(sp("basis=inc,x")).amounts).toEqual(["inc"]);
-    expect(parseSalesAnalyticsUrl(sp("basis=,")).amounts).toEqual([...ALL_AMOUNTS]);
+    expect(parseSalesAnalyticsUrl(sp("basis=,")).amounts).toEqual([...DEFAULT_AMOUNTS]);
   });
 });
 
 describe("serializeSalesAnalyticsState：默认值不落 URL", () => {
-  it("preset=today / sort=默认键 / page=1 / 含退货关 / 三金额全选 都转 undefined", () => {
+  it("preset=today / sort=默认键 / page=1 / 含退货关 / 默认含税 都转 undefined", () => {
     expect(serializeSalesAnalyticsState({
       preset: "today",
       sort: DEFAULT_SORT,
       page: 1,
       pageSize: 50,
       includeReturns: false,
-      amounts: [...ALL_AMOUNTS],
+      amounts: [...DEFAULT_AMOUNTS],
     })).toEqual({
       preset: undefined, from: undefined, to: undefined,
       sort: undefined, page: undefined, include_returns: undefined, basis: undefined,
@@ -136,7 +137,7 @@ describe("URL 双向往返（parse ∘ serialize = 恒等）", () => {
     "preset=custom&from=2026-09-01&to=2026-10-15"
     + "&business_type=%E5%A4%87%E4%BB%B6%E9%94%80%E5%94%AE,%E6%9C%8D%E5%8A%A1"
     + "&customer=%E5%AE%A2%E6%88%B7%E7%94%B2&salesperson=%E7%8E%8B%E4%BA%94"
-    + "&basis=ex,revenue&sort=amount_inc_tax&page=4&include_returns=1&order_id=201",
+    + "&basis=ex,revenue&sort=amount_ex_tax&page=4&include_returns=1&order_id=201",
     "preset=all",
     "preset=7d&business_type=%E6%9C%8D%E5%8A%A1",
     "preset=yesterday&basis=revenue&sort=revenue",
@@ -177,7 +178,7 @@ describe("URL 双向往返（parse ∘ serialize = 恒等）", () => {
   }
   it("URL 里显式写默认值 → 归一化为零参数（分享链接不携带冗余）", () => {
     const state = parseSalesAnalyticsUrl(sp(
-      "preset=today&sort=amount_ex_tax&page=1&include_returns=0&basis=ex,inc,revenue",
+      "preset=today&sort=amount_inc_tax&page=1&include_returns=0&basis=inc",
     ));
     const full = serializeSalesAnalyticsState(state);
     expect(Object.values(full).every((v) => v === undefined)).toBe(true);

@@ -16,6 +16,7 @@ const fetchSalesAmountHistogram = vi.fn();
 const downloadSalesOrdersCsv = vi.fn();
 const fetchSalesAnalyticsGroups = vi.fn();
 const fetchSalesAnalyticsTrend = vi.fn();
+const fetchRecordedSalesExpenses = vi.fn();
 
 vi.mock("../../../../api/salesAnalytics", async () => {
   const actual = await vi.importActual<Record<string, unknown>>(
@@ -31,6 +32,7 @@ vi.mock("../../../../api/salesAnalytics", async () => {
     downloadSalesOrdersCsv: (...a: unknown[]) => downloadSalesOrdersCsv(...a),
     fetchSalesAnalyticsGroups: (...a: unknown[]) => fetchSalesAnalyticsGroups(...a),
     fetchSalesAnalyticsTrend: (...a: unknown[]) => fetchSalesAnalyticsTrend(...a),
+    fetchRecordedSalesExpenses: (...a: unknown[]) => fetchRecordedSalesExpenses(...a),
   };
 });
 // jsdom 无 canvas：mock 图表壳（金额分布条 / 看板图表），只保留空态文案
@@ -169,7 +171,7 @@ beforeEach(() => {
   fetchSalesAnalyticsOrders.mockImplementation((q: Record<string, unknown>) => {
     const page = (q.page as number) ?? 1;
     return Promise.resolve({ data: ordersResp({
-      sort: q.sort ?? "amount_ex_tax",
+      sort: q.sort ?? "amount_inc_tax",
       page,
       include_returns: q.include_returns === true,
       ...(page > 1 ? { items: [] } : {}),
@@ -189,25 +191,25 @@ afterEach(() => {
 // ---------------------------------------------------------------- 用例
 
 describe("销售分析页：URL 单一真值", () => {
-  it("默认渲染：零参数 URL，默认今天（date_from = date_to = 今天），三金额并排 + 不含税金额倒序", async () => {
+  it("默认渲染：零参数 URL，默认今天（date_from = date_to = 今天），含税金额与产品单价", async () => {
     renderPage();
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
     expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({ date_from: TODAY, date_to: TODAY });
     expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).toEqual({
       date_from: TODAY, date_to: TODAY,
-      sort: "amount_ex_tax", order: "desc", page: 1, page_size: 50, include_returns: false,
+      sort: "amount_inc_tax", order: "desc", page: 1, page_size: 50, include_returns: false,
     });
     expect(locationSearch).toBe("");
     // KPI：销售单数 + 三金额合计并排（默认全选）
     expect(screen.getByText("销售单数")).toBeInTheDocument();
     expect(screen.getByText("5")).toBeInTheDocument();
-    expect(screen.getByText(/1,?000\.00/)).toBeInTheDocument();
+    expect(screen.queryByText(/1,?000\.00/)).toBeNull();
     expect(screen.getByText(/1,?130\.00/)).toBeInTheDocument();
-    expect(screen.getByText(/800\.00/)).toBeInTheDocument();
+    expect(screen.queryByText(/800\.00/)).toBeNull();
     // 含税缺失单数的如实披露（不以推算值冒充）
     expect(screen.getByText(/1 单缺失/)).toBeInTheDocument();
     // 列表三金额列 + 对账块列都在
-    for (const t of ["不含税金额", "含税订单金额", "营收", "已对账金额", "待对账金额", "退货已对账金额", "数据截至时间"]) {
+    for (const t of ["PN", "含税单价", "含税订单金额", "已对账金额", "待对账金额", "退货已对账金额", "数据截至时间"]) {
       expect(screen.getByRole("columnheader", { name: t }), t).toBeInTheDocument();
     }
   });
@@ -217,7 +219,7 @@ describe("销售分析页：URL 单一真值", () => {
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
     expect(fetchSalesAnalyticsSummary).toHaveBeenCalledWith({});
     expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).toMatchObject({
-      sort: "amount_ex_tax", page: 1,
+      sort: "amount_inc_tax", page: 1,
     });
     expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).not.toHaveProperty("date_from");
     expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).not.toHaveProperty("date_to");
@@ -243,26 +245,19 @@ describe("销售分析页：URL 单一真值", () => {
     expect(locationSearch).toContain("include_returns=1");
   });
 
-  it("切换金额口径是纯展示切换：不触发汇总/订单重新请求，只写 URL", async () => {
+  it("切换汇总金额口径不改订单精简列或重新取数", async () => {
     renderPage();
-    expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
-    await waitFor(() => expect(fetchSalesAnalyticsSummary).toHaveBeenCalledTimes(1));
+    await screen.findByRole("row", { name: /XS-2026-201/ });
     await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(1));
-
-    // 多选去掉「含税订单金额」：下拉里点已选项 = 取消选择（jsdom 下比点标签 × 稳）
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "金额口径" }));
-    fireEvent.click(
-      await screen.findByText("含税订单金额", { selector: ".ant-select-item-option-content" }),
-    );
-    await waitFor(() => expect(new URLSearchParams(locationSearch).getAll("basis")).toEqual(["ex", "revenue"]));
-    expect(navigationType).toBe("REPLACE");
+    fireEvent.click(await screen.findByText("不含税金额", { selector: ".ant-select-item-option-content" }));
+    await waitFor(() => expect(new Set(new URLSearchParams(locationSearch).getAll("basis"))).toEqual(new Set(["ex", "inc"])));
     expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(1);
     expect(fetchSalesAnalyticsSummary).toHaveBeenCalledTimes(1);
-    // KPI 卡与列一并消失（含税 KPI 卡的缺失披露文案随之消失，不许恒显三卡）
-    expect(screen.queryByRole("columnheader", { name: "含税订单金额" })).toBeNull();
-    expect(screen.queryByText(/1 单缺失/)).toBeNull();
-    expect(screen.getByRole("columnheader", { name: "不含税金额" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "营收" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "含税订单金额" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "不含税金额" })).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "营收" })).toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "客户类型" })).toBeNull();
   });
 
   it("含退货开关只影响列表/详情（reconciled_display）：重拉订单不重拉 KPI，状态落 URL", async () => {
@@ -305,17 +300,16 @@ describe("销售分析页：URL 单一真值", () => {
     const row = screen.getByRole("row", { name: /XS-2026-201/ });
     expect(row.textContent).toContain("—");
     expect(row.textContent).not.toContain("200.00");
-    // 金额列排序入口预先禁用（不发注定被回退的请求）；营收（恒公开）仍可排
-    expect(screen.getByRole("columnheader", { name: "不含税金额" }).closest("th")?.className)
+    // 可见金额列没有排序入口，移除列也不再暴露。
+    expect(screen.getByRole("columnheader", { name: "含税订单金额" }).closest("th")?.className)
       .not.toContain("ant-table-column-has-sorters");
-    expect(screen.getByRole("columnheader", { name: "营收" }).closest("th")?.className)
-      .toContain("ant-table-column-has-sorters");
-    fireEvent.click(screen.getByRole("columnheader", { name: "不含税金额" }));
+    expect(screen.queryByRole("columnheader", { name: "营收" })).toBeNull();
+    fireEvent.click(screen.getByRole("columnheader", { name: "含税订单金额" }));
     await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(1));
     // KPI 合计不随行级遮蔽（PR-3b 有意公开），口径控件保留
     expect(screen.getByRole("combobox", { name: "金额口径" })).toBeInTheDocument();
     expect(screen.getByText(/1,?130\.00/)).toBeInTheDocument();
-    expect(screen.getByText(/800\.00/)).toBeInTheDocument();
+    expect(screen.queryByText(/800\.00/)).toBeNull();
     // 金额分布（直方图）整体不挂载（A-AC03）：分布本身就是金额信息，三口径一视
     // 同仁、营收口径也无例外；不发注定 403 的直方图请求
     expect(screen.queryByLabelText("订单金额分布")).toBeNull();
@@ -396,7 +390,7 @@ describe("销售分析页：URL 单一真值", () => {
     // 页码 2 合法（120 单/50 每页）：本例验排序切换回第 1 页，越界收敛另有专测
     fetchSalesAnalyticsOrders.mockImplementation((q: Record<string, unknown>) =>
       Promise.resolve({ data: ordersResp({ total: 120, sort: q.sort, order: q.order ?? "desc" }) }));
-    renderPage("/sales/analytics?page=2");
+    renderPage("/sales/analytics?sort=order_date&page=2");
     expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
     await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(1));
 
@@ -404,9 +398,10 @@ describe("销售分析页：URL 单一真值", () => {
     fireEvent.click(screen.getByRole("columnheader", { name: "含税订单金额" }));
     await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(2));
     expect(fetchSalesAnalyticsOrders.mock.calls[1][0]).toMatchObject({
-      sort: "amount_inc_tax", page: 1,
+      sort: "amount_inc_tax", order: "desc", page: 1,
     });
-    expect(locationSearch).toContain("sort=amount_inc_tax");
+    // 含税为默认排序，URL 省略默认键但请求仍明确发送该排序。
+    expect(new URLSearchParams(locationSearch).has("sort")).toBe(false);
     expect(navigationType).toBe("REPLACE");
     expect(locationSearch).not.toContain("page=");
     // 再点同一列：升序
@@ -537,20 +532,14 @@ describe("销售分析页：URL 单一真值", () => {
     });
   });
 
-  it("排序键口径未显示时收敛（D-41 只按已显示金额倒序）：basis 缺 inc 则 sort=amount_inc_tax 收敛为 amount_ex_tax", async () => {
-    renderPage("/sales/analytics?sort=amount_inc_tax&basis=ex,revenue");
-    expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
-    // 请求按首个已显示口径发出；URL 排序键原值保留（分享态不被改写）
-    expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).toMatchObject({ sort: "amount_ex_tax" });
-    expect(locationSearch).toContain("sort=amount_inc_tax");
-    // 回显与请求一致 → 不是权限回退，无回退提示
-    expect(screen.queryByText(/已按营收/)).toBeNull();
-
-    // 把该口径加回显示集：收敛解除，按 URL 排序键换键重拉
+  it("旧深链移除列排序收敛为含税金额，汇总口径不改变列表排序", async () => {
+    renderPage("/sales/analytics?sort=amount_ex_tax&basis=ex,revenue");
+    await screen.findByRole("row", { name: /XS-2026-201/ });
+    expect(fetchSalesAnalyticsOrders.mock.calls[0][0]).toMatchObject({ sort: "amount_inc_tax" });
+    expect(locationSearch).toContain("sort=amount_ex_tax");
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "金额口径" }));
     fireEvent.click(await screen.findByText("含税订单金额", { selector: ".ant-select-item-option-content" }));
-    await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(2));
-    expect(fetchSalesAnalyticsOrders.mock.calls[1][0]).toMatchObject({ sort: "amount_inc_tax" });
+    await waitFor(() => expect(fetchSalesAnalyticsOrders).toHaveBeenCalledTimes(1));
   });
 
   it("销售人员多选（D-44）：候选来自 options，选中后精确匹配进请求与 URL；重置清空", async () => {
@@ -618,7 +607,10 @@ describe("销售分析页：健壮性", () => {
     renderPage();
     expect(await screen.findByText("当前筛选下没有销售单")).toBeInTheDocument();
     expect(screen.getByText("0")).toBeInTheDocument();
-    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(3);
+    const amountCard = screen.getByText("区间内无订单").parentElement!;
+    expect(within(amountCard).getByText("含税订单金额")).toBeInTheDocument();
+    expect(within(amountCard).getByText("—")).toBeInTheDocument();
+    expect(within(amountCard).queryByText("0.00")).toBeNull();
   });
 
   it("订单详情 404：提示「订单不存在（或非已生效单）」并自动关抽屉、URL 摘键", async () => {
@@ -694,7 +686,7 @@ describe("销售分析页：健壮性", () => {
       return Promise.resolve({ data: ordersResp({
         total: 120,
         page,
-        sort: q.sort ?? "amount_ex_tax",
+        sort: q.sort ?? "amount_inc_tax",
         include_returns: q.include_returns === true,
         ...(page > 3 ? { items: [] } : {}),
       }) });
@@ -769,9 +761,9 @@ describe("DL-010 所属会话守卫（返工：静默换 token 后请求前拒�
     await waitFor(() => expect(fetchSalesAnalyticsOrders.mock.calls.length).toBe(baseline + 1));
     expect(fetchSalesAnalyticsOrders.mock.lastCall?.[0]).toMatchObject({ sort: "amount_inc_tax" });
 
-    // 静默换 token：再点「营收」列头 → 拒发（无新请求），旧列表清空并提示
+    // 静默换 token：再点「订单日期」列头 → 拒发（无新请求），旧列表清空并提示
     localStorage.setItem("token", "account-b");
-    fireEvent.click(screen.getByRole("columnheader", { name: "营收" }));
+    fireEvent.click(screen.getByRole("columnheader", { name: "订单日期" }));
     expect(fetchSalesAnalyticsOrders.mock.calls.length).toBe(baseline + 1);
     expect(screen.getByText(SESSION_DEAD_TEXT)).toBeInTheDocument();
     expect(screen.queryByRole("row", { name: /XS-2026-201/ })).toBeNull();
@@ -931,5 +923,48 @@ describe("URL 导航与每页条数", () => {
     await waitFor(() => expect(new URLSearchParams(locationSearch).has("order_id")).toBe(false));
     expect(new URLSearchParams(locationSearch).get("page_size")).toBe("100");
     expect(navigationType).toBe("POP");
+  });
+});
+
+describe("销售费用证据：已记录金额与明细", () => {
+  const evidence = {
+    status: "recorded", amount_inc_tax: 101.7, total: 51, missing_amounts: 0,
+    as_of: AS_OF, page: 1, page_size: 50,
+    items: [{ source: "source", id: "RAW-1", order_no: "XS-2026-201", reference: "BXD-1", expense_date: "2026-10-16", category: "差旅", amount_inc_tax: 101.7 }],
+  };
+
+  it("卡片说明证据范围，费用明细和分页保留销售筛选", async () => {
+    fetchSalesAnalyticsSummary.mockResolvedValue({ data: { ...SUMMARY, recorded_expenses: evidence } });
+    fetchRecordedSalesExpenses.mockResolvedValue({ data: evidence });
+    renderPage("/sales/analytics?preset=all&business_type=备件销售");
+    expect(await screen.findByText("已记录费用（含税）")).toBeInTheDocument();
+    expect(screen.getByText(/非完整报备总额/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看费用记录" }));
+    expect(await screen.findByText("BXD-1")).toBeInTheDocument();
+    expect(fetchRecordedSalesExpenses.mock.calls[0]).toEqual([{ business_type: ["备件销售"] }, 1]);
+    fireEvent.click(within(screen.getByRole("dialog", { name: "已记录费用" })).getByTitle("2"));
+    await waitFor(() => expect(fetchRecordedSalesExpenses.mock.lastCall).toEqual([{ business_type: ["备件销售"] }, 2]));
+  });
+
+  it("无费用证据不是零；权限受限不展示费用卡或明细入口", async () => {
+    fetchSalesAnalyticsSummary.mockResolvedValue({ data: { ...SUMMARY, recorded_expenses: { ...evidence, status: "no_evidence", amount_inc_tax: null, total: 0, items: [] } } });
+    const view = renderPage();
+    expect(await screen.findByText("无费用记录")).toBeInTheDocument();
+    view.unmount();
+    fetchSalesAnalyticsSummary.mockResolvedValue({ data: { ...SUMMARY, recorded_expenses: { ...evidence, status: "restricted", amount_inc_tax: null, total: null, items: [] } } });
+    renderPage();
+    await screen.findByRole("row", { name: /XS-2026-201/ });
+    expect(screen.queryByText("已记录费用（含税）")).toBeNull();
+    expect(screen.queryByRole("button", { name: "查看费用记录" })).toBeNull();
+    expect(fetchRecordedSalesExpenses).not.toHaveBeenCalled();
+  });
+
+  it("费用查询失败明确报错，不渲染零值或无记录结论", async () => {
+    fetchSalesAnalyticsSummary.mockResolvedValue({ data: { ...SUMMARY, recorded_expenses: evidence } });
+    fetchRecordedSalesExpenses.mockRejectedValue(new Error("offline"));
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "查看费用记录" }));
+    expect(await screen.findByText("费用记录加载失败，请重试。")).toBeInTheDocument();
+    expect(screen.queryByText("未找到费用记录，不能据此认定费用为零")).toBeNull();
   });
 });

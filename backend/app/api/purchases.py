@@ -111,6 +111,9 @@ def _analytics_common(
     salesperson: list[str] = Query([], description="关联销售单销售人员多选"),
     customer_id: list[DbId] = Query([], description="关联销售单客户 id 多选（1..2^31-1）"),
     category: list[str] = Query([], description="分类多选（dim_part.category_major；「未分类」为哨兵值）"),
+    supplier: str | None = Query(None, max_length=200, description="供应商名称包含（字面值）"),
+    order_no: str | None = Query(None, max_length=64, description="采购单号包含（字面值）"),
+    linked_sales_order_no: str | None = Query(None, max_length=64, description="销售单号包含（字面值）"),
 ) -> dict:
     """采购分析共用筛选（日期预设由前端折算，后端只收 date_from/date_to）。"""
     return {
@@ -118,6 +121,8 @@ def _analytics_common(
         "source_type": source_type, "purchaser": purchaser,
         "salesperson": salesperson, "customer_id": customer_id,
         "category": category,
+        "supplier": supplier, "order_no": order_no,
+        "linked_sales_order_no": linked_sales_order_no,
     }
 
 
@@ -126,6 +131,8 @@ def _guard_customer_filter(filters: dict, ctx: UserContext,
     """data_customer 不可见时不允许按客户筛选/分组/下钻（dashboard 同款 fail-closed；
     本页面向老板/管理员的全程口径，不像 dashboard 给 scoped sales 留口）。"""
     hidden = is_field_hidden(ctx, "customer_id")
+    if is_field_hidden(ctx, "supplier") and (filters.get("supplier") or "").strip():
+        raise HTTPException(status_code=403, detail="当前账号无供应商权限，不能按供应商筛选")
     if hidden and filters["customer_id"]:
         raise HTTPException(status_code=403, detail="当前账号无客户信息权限，不能按客户筛选")
     if hidden and group_by == "customer":

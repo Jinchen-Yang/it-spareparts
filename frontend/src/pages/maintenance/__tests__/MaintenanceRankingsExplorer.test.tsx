@@ -42,6 +42,43 @@ describe("分析数据展示合同", () => {
 });
 
 describe("三视图与跳转", () => {
+  it("实际领用旁展示同期实收，整单核对携带项目和PN且不截断累计实收", async () => {
+    const data = fixture();
+    data.focus.rows = [{ ...project, receipt_qty: "1.25" }];
+    fetchExplorer.mockResolvedValue(data);
+    mount("/maintenance/analytics?range=custom&from=2026-01-01&to=2026-01-31&dim=pn&focus=part%3A1");
+    expect(await screen.findByText("项目甲 · 同期实收 1.25 件")).toBeInTheDocument();
+    expect(screen.getByText(/差额不代表该 PN 的待返义务/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "核对项目甲关联需求单" }));
+    expect(screen.getByTestId("location")).toHaveTextContent("/maintenance/dashboard?");
+    expect(query().get("project")).toBe("project-1");
+    expect(query().get("q")).toBe("PN-A");
+    expect(query().get("tab")).toBe("checks");
+    expect(query().get("range")).toBe("all");
+    expect(query().has("from")).toBe(false);
+  });
+  it("没有项目详情权限不能借核对入口跳转，缺实收字段不填零", async () => {
+    const data = fixture();
+    data.focus.rows = [{ ...project, can_open_project: false }];
+    fetchExplorer.mockResolvedValue(data);
+    mount();
+    expect(await screen.findByText("项目甲 · 同期实收 未知 件")).toBeInTheDocument();
+    const button = screen.getByRole("button", { name: "核对项目甲关联需求单" });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(screen.getByTestId("location")).toHaveTextContent("/maintenance/analytics?");
+  });
+  it("项目维度核对使用项目焦点身份和所选PN，零实收仍展示零", async () => {
+    const data = fixture();
+    data.dimension = "project";
+    data.focus = { row: project, dimension: "pn", rows: [{ ...first, receipt_qty: "0" }], total: 1, page: 1, page_size: 8 };
+    fetchExplorer.mockResolvedValue(data);
+    mount("/maintenance/analytics?dim=project&range=all");
+    expect(await screen.findByText("PN-A · 同期实收 0 件")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "核对PN-A关联需求单" }));
+    expect(query().get("project")).toBe("project-1");
+    expect(query().get("q")).toBe("PN-A");
+  });
   it("三种图始终可切换，共用一次响应，点击分布跳项目并保留完整返回地址", async () => {
     const path = "/maintenance/analytics?range=all&focus=part%3A1&customer=客户&page=2&layout=A";
     mount(path); await screen.findByRole("button", { name: /项目甲，实际领用/ });

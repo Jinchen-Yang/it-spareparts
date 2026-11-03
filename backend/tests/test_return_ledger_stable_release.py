@@ -69,13 +69,17 @@ def test_main_stable_receipts_issue_void_and_candidates_with_beta_closed(db, mon
     })
     assert voided.status_code == 200, voided.text
 
+    assert client.post("/api/maintenance/demands/search", json={}).status_code == 200
+    assert client.get(f"/api/maintenance/demands/orders/{first.raw_order_id}/lines").status_code == 200
+    assert client.post("/api/maintenance/demands/void-fast", json={}).status_code == 403
+
     # Draft/preview/confirm/correct and old return workflow remain independently gated.
     for method, url in (
         ("post", f"/api/maintenance/site-issues/projects/{pid}"),
         ("post", f"/api/maintenance/site-issues/{issue_id}/preview"),
         ("post", f"/api/maintenance/site-issues/{issue_id}/confirm"),
         ("patch", f"/api/maintenance/site-issues/{issue_id}"),
-        ("post", "/api/maintenance/demands/search"),
+        ("post", "/api/maintenance/demands/delete-intents"),
         ("post", "/api/maintenance/bad-returns/search"),
     ):
         assert getattr(client, method)(url, json={}).status_code == 404, url
@@ -89,6 +93,7 @@ def test_main_stable_receipts_issue_void_and_candidates_with_beta_closed(db, mon
 
     monkeypatch.setattr(settings, "maintenance_boss_dashboard_enabled", False)
     for method, url, body in (
+        ("post", "/api/maintenance/demands/search", {}),
         ("get", candidates_url, None),
         ("get", "/api/maintenance/projects/stable", None),
         ("get", receipt_base, None),
