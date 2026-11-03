@@ -97,6 +97,19 @@ def test_legacy_proactive_quote_creator_is_visible_in_detail_and_history(db, use
     assert (historical["line_id"], historical["created_by_name"]) == (line.id, "buyer")
 
 
+def test_review_required_inquiry_still_has_quote_history_but_no_current_minimum(db, users):
+    inquiry, offer = _quoted(db, users)
+    line, = inquiries.lines_for(db, inquiry.id)
+    line.answer_requires_review = True
+    inquiry.status = "revising"
+    db.commit()
+    response = _client(users.seller).get(f"/api/presales/parts/{users.part.id}/inquiries")
+    assert response.status_code == 200, response.text
+    row, = response.json()["items"]
+    assert row["line_id"] == line.id and row["has_quote"] and row["lowest_valid_quotes"] == []
+    assert offer.status == "published" and offer.unit_price == Decimal("50.25")
+
+
 def test_part_history_ignores_unusable_quotes_and_keeps_tax_bases_separate(db, users):
     row, offer = _quoted(db, users)
     offer.is_tax_inclusive = True

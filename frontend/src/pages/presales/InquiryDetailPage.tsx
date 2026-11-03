@@ -118,11 +118,11 @@ function InquiryDetailContent({ id }: { id: number }) {
   const canManage = inquiry.is_owner === true || isPresalesSupervisor();
   const canAmend = canManage && inquiry.kind === "sales_inquiry";
   const adopted = inquiry.won_offer;
-  const lineForOffer = (offer: Offer) => lines.find((line) => line.id === offer.line_id || line.ref_offer_id === offer.id
-    || line.linked_offer_ids?.includes(offer.id) || line.linked_offers?.some((linked) => linked.id === offer.id) || inquiry.line_responses?.some((row) => !row.is_draft && row.line_id === line.id && row.mode === "reuse" && row.ref_offer_id === offer.id));
+  const lineForOffer = (offer: Offer) => lines.find((line) => !line.answer_requires_review && (line.id === offer.line_id || line.ref_offer_id === offer.id
+    || line.linked_offer_ids?.includes(offer.id) || line.linked_offers?.some((linked) => linked.id === offer.id) || inquiry.line_responses?.some((row) => !row.is_draft && row.line_id === line.id && row.mode === "reuse" && row.ref_offer_id === offer.id)));
   const closeOptions = [...new Map([...offers, ...lines.flatMap((line) => [...(line.linked_offers ?? []), ...(line.ref_offer ? [line.ref_offer] : [])]),
     ...(inquiry.line_responses ?? []).flatMap((row) => !row.is_draft && row.mode === "reuse" && row.offer ? [row.offer] : [])]
-    .map((offer) => [offer.id, offer])).values()].filter((offer) => isOfferActive(offer, now) && !!lineForOffer(offer));
+    .filter((offer) => isOfferActive(offer, now) && !!lineForOffer(offer)).map((offer) => [offer.id, offer])).values()];
   const galleryItems = lines.filter((line) => line.part_id).map((line) => ({ partId: line.part_id!, pn: line.pn_raw }));
 
   const lineOffers = new Map(lines.map((line) => [line.id, offersForLine(line, inquiry)]));
@@ -131,8 +131,8 @@ function InquiryDetailContent({ id }: { id: number }) {
       .flatMap((response) => response.ref_offer_id ? [response.ref_offer_id] : [])]);
   const canClose = !readOnly && canManage && ["submitted", "revising"].includes(inquiry.status);
   const renderOffer = (line: InquiryLine, offer: Offer) => {
-    const active = isOfferActive(offer, now);
-    const candidates = (lineOffers.get(line.id) ?? []).filter((candidate) => isOfferActive(candidate, now) && !candidate.no_stock
+    const active = !line.answer_requires_review && isOfferActive(offer, now);
+    const candidates = (lineOffers.get(line.id) ?? []).filter((candidate) => !line.answer_requires_review && isOfferActive(candidate, now) && !candidate.no_stock
       && hasValue(candidate.unit_price) && candidate.is_tax_inclusive === offer.is_tax_inclusive);
     const lowest = active && !offer.no_stock && typeof offer.is_tax_inclusive === "boolean" && hasValue(offer.unit_price)
       && Number(offer.unit_price) === Math.min(...candidates.map((candidate) => Number(candidate.unit_price)));

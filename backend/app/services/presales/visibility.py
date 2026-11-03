@@ -125,6 +125,10 @@ def _offer_batch(db, offers, ctx, *, fields):
         for index, offer, _ in candidates if (index, "record") in filtered
         for key in ("supplier_audience", "reporter_audience", "notes_audience")
     }, ctx, bypass=bypass) if fields else {}
+    source_ids = {offer.line_id for _, offer, _ in candidates if offer.line_id is not None}
+    held_sources = set(db.scalars(select(PresalesInquiryLine.id).where(
+        PresalesInquiryLine.id.in_(source_ids), PresalesInquiryLine.answer_requires_review.is_(True)
+    ))) if fields and source_ids else set()
     result = []
     for index, offer, values in candidates:
         if (index, "record") not in filtered:
@@ -133,6 +137,8 @@ def _offer_batch(db, offers, ctx, *, fields):
         for key in ("supplier_audience", "reporter_audience", "notes_audience"):
             if (index, key) in rule_views:
                 view[key] = rule_views[(index, key)]
+        if offer.line_id in held_sources:
+            view.update(answer_requires_review=True, expired=True)
         result.append((offer, view))
     return result
 
@@ -201,9 +207,13 @@ def pinned_offer_view(db, offer_id, revision_no, ctx):
             or item.unit_price != snapshot.unit_price
             or item.is_tax_inclusive != snapshot.is_tax_inclusive
             for item in (_snapshot_offer(row) for row in later))
-    view["expired"] = not offer_effective(snapshot) or superseded
+    current_held = view.get("answer_requires_review", False) if current.line_id == snapshot.line_id else db.scalar(
+        select(PresalesInquiryLine.answer_requires_review).where(PresalesInquiryLine.id == current.line_id))
+    if current_held:
+        view["answer_requires_review"] = True
+    view["expired"] = view.get("answer_requires_review", False) or not offer_effective(snapshot) or superseded
     view["original_withdrawn"] = current.status == "withdrawn"
-    if current.revision_no > revision_no:
+    if current.revision_no > revision_no and not current_held:
         latest = offer_view(db, current, ctx)
         if latest is not None:
             view["latest"] = {key: latest[key] for key in ("unit_price", "is_tax_inclusive", "revision_no", "price_basis")}
@@ -247,11 +257,17 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
         if key not in pinned:
             pinned[key] = pinned_offer_view(db, offer_id, revision_no, ctx)
         return pinned[key]
-    line_references = {line.id: read_pin(line.ref_offer_id, line.ref_offer_revision_no)
+    held_lines = {line.id for line in lines if line.answer_requires_review}
+    def line_pin(line_id, offer_id, revision_no):
+        view = read_pin(offer_id, revision_no)
+        if view is None or line_id not in held_lines:
+            return view
+        return {**{k: v for k, v in view.items() if k != "latest"}, "answer_requires_review": True, "expired": True}
+    line_references = {line.id: line_pin(line.id, line.ref_offer_id, line.ref_offer_revision_no)
                        for line in lines if line.ref_offer_id is not None}
-    response_references = {row.id: read_pin(row.ref_offer_id, row.ref_offer_revision_no)
+    response_references = {row.id: line_pin(row.line_id, row.ref_offer_id, row.ref_offer_revision_no)
                            for row in responses if row.ref_offer_id is not None}
-    link_references = {(link.line_id, link.offer_id): read_pin(link.offer_id, link.offer_revision_no)
+    link_references = {(link.line_id, link.offer_id): line_pin(link.line_id, link.offer_id, link.offer_revision_no)
                        for link in links}
     views_by_id = {view["id"]: view for view in offers}
     for view in [*line_references.values(),
@@ -291,12 +307,16 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
                    if not row.is_draft and row.line_version == line_versions[row.line_id]
                    )
     handled.update(line_id for (line_id, _), view in link_references.items() if view is not None)
+    handled.difference_update(held_lines)
     result["progress"] = {"quoted_lines": len(handled), "line_count": len(lines)}
     # D-0048：历史引用仍是不可变快照；“当前答复”独立读取同一报价的当前权限和状态。
     current_views = {view["id"]: view for view in offer_views(db, offer_models, ctx)}
     current_models = {offer.id: offer for offer in offer_models}
     line_answers = []
     for line in lines:
+        if line.id in held_lines:
+            line_answers.append({"line_id": line.id, "state": "pending", "responded": False, "answer_requires_review": True})
+            continue
         visible_responses = [row for row in responses if row.line_id == line.id
             and not row.is_draft and row.line_version == line.version]
         line_offers = [offer for offer in offer_models if offer.line_id == line.id]
@@ -308,7 +328,7 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
         ids.update(link.offer_id for link in links if link.line_id == line.id
                    and link_references.get((line.id, link.offer_id)) is not None)
         candidates = [current_views[key] for key in ids if key in current_views
-                      and offer_effective(current_models[key])]
+                      and not current_views[key].get("answer_requires_review") and offer_effective(current_models[key])]
         answered = line.id in handled
         answer = {"line_id": line.id, "responded": answered}
         if candidates:
@@ -319,7 +339,8 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
             skipped = max((row for row in visible_responses if row.mode == "skip"),
                           key=lambda row: row.id, default=None)
             no_stock = max((current_views[offer.id] for offer in line_offers
-                            if offer.id in current_views and offer.status == "published" and offer.no_stock),
+                            if offer.id in current_views and not current_views[offer.id].get("answer_requires_review")
+                            and offer.status == "published" and offer.no_stock),
                            key=lambda view: view["id"], default=None)
             if skipped is not None:
                 reporter = db.get(SysUser, skipped.created_by)
@@ -390,11 +411,12 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
             if response.is_draft:
                 row["is_draft"] = True
             offer = response_references.get(response.id)
-            row["expired"] = response.mode == "reuse" and (offer is None or offer["expired"])
+            row["expired"] = response.line_id in held_lines or (response.mode == "reuse" and (offer is None or offer["expired"]))
             row["original_withdrawn"] = bool(offer and offer["original_withdrawn"])
             if offer is not None:
                 row["offer"] = offer
-                if response.ref_offer_id in current_views:
+                if (response.line_id not in held_lines and response.ref_offer_id in current_views
+                        and not current_views[response.ref_offer_id].get("answer_requires_review")):
                     row["current_offer"] = current_views[response.ref_offer_id]
                 owner_view = pinned_offer_view(db, response.ref_offer_id, response.ref_offer_revision_no,
                                               resolve_actor(db, inquiry.created_by)[1])

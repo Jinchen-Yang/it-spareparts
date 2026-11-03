@@ -80,6 +80,40 @@ def _published(db, data, *, private=False):
         expected_version=inquiry.version, on_existing="new")[0]
 
 
+def test_review_required_row_exports_blank_and_can_explicitly_reuse_an_independent_offer(db, quote_data):
+    data = quote_data
+    original = _published(db, data)
+    inquiry = _submitted(db, data)
+    line, = inquiries.lines_for(db, inquiry.id)
+    priced = pool.set_price(db, line.id, data.peer.id, {"unit_price": "3.00"}, expected_version=line.version)
+    uncertain_id = priced["price"]["offer_id"]
+    inquiry.status = "revising"
+    ctx = common.resolve_actor(db, data.buyer.id)[1]
+    previous = _edit(quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id), {2: {"单价": 4}})
+    old_preview = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, previous, ctx=ctx)
+    line.answer_requires_review = True
+    line.answer_state, line.current_offer_id = "pending", None
+    db.add(PresalesLineResponse(line_id=line.id, line_version=line.version, mode="skip",
+                                reason="旧数量不供应", created_by=data.buyer.id))
+    db.commit()
+    with pytest.raises(Conflict):
+        operations.apply(db, old_preview["operation_id"], data.buyer.id, old_preview["plan_digest"])
+
+    content = quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id)
+    sheet = load_workbook(BytesIO(content))["采购报价表"]
+    cells = {cell.value: sheet.cell(2, cell.column).value for cell in sheet[1]}
+    assert all(cells[label] is None for label in ("处理方式", "不报原因", "单价"))
+    assert f"#{original.id}：" in cells["已有有效报价"] and f"#{uncertain_id}：" not in cells["已有有效报价"]
+    invalid = _edit(content, {2: {"处理方式": "沿用", "沿用报价编号": uncertain_id}})
+    preview = operations.preview(db, quote_workbook.QUOTE_SCHEMA.name, invalid, ctx=ctx)
+    assert preview["plan"]["errors"]
+    changed = _edit(content, {2: {"处理方式": "沿用", "沿用报价编号": original.id}})
+    _apply(db, data, changed)
+    db.refresh(line)
+    assert not line.answer_requires_review and line.current_offer_id not in (uncertain_id, original.id)
+    assert db.get(PresalesOffer, line.current_offer_id).unit_price == Decimal("19.00")
+
+
 def test_same_pn_merges_and_distributes_without_reply(db, quote_data):
     data = quote_data
     original = _published(db, data)

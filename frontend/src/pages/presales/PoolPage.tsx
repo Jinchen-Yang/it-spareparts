@@ -162,9 +162,12 @@ export default function PoolPage() {
 
   const edit = (row: PoolLine, patch: Omit<PoolLineEdit, "expected_version" | "confirm_reset">) => {
     const send = (confirmReset: boolean) => void write(row, "inquiry", () => presalesPool.edit(row.line_id, { expected_version: row.line_version, ...patch, ...(confirmReset ? { confirm_reset: true } : {}) }));
-    // 备注不影响价格；待报价行没有可作废的答复。
-    if (row.answer_state === "pending" || !["qty", "return_defective", "require_exact_pn"].some((key) => key in patch)) { send(false); return; }
-    modal.confirm({ title: "修改后原答复作废", content: `${row.pn} 改条件后，原来的${row.answer_state === "quoted" ? "报价" : "不报记录"}会作废并留在历史中，这一行回到待报价。确定修改吗？`,
+    const changesConditions = ["qty", "return_defective", "require_exact_pn"].some((key) => key in patch);
+    if (!changesConditions || (row.answer_state === "pending" && !row.answer_requires_review)) { send(false); return; }
+    const content = row.answer_requires_review
+      ? `${row.pn} 的旧答复仍待核对。修改条件将解除与旧答复的关联，历史仍可查看，本行需要重新报价。确定修改吗？`
+      : `${row.pn} 改条件后，原来的${row.answer_state === "quoted" ? "报价" : "不报记录"}会作废并留在历史中，这一行回到待报价。确定修改吗？`;
+    modal.confirm({ title: "修改后原答复作废", content,
       okText: "确定修改", cancelText: "取消", onOk: () => send(true), onCancel: resetQty });
   };
 
@@ -245,6 +248,7 @@ export default function PoolPage() {
       onSelect={(value) => change(row, { price_basis: value })} options={[{ value: "sale", label: "售价" }, { value: "cost", label: "成本价" }]} /> },
     { title: "状态 / 更新人", key: "state", width: 130, render: (_, row) => <div className="presales-cell">
       <Tag color={STATE_COLOR[row.answer_state]}>{STATE_LABEL[row.answer_state]}</Tag>
+      {row.answer_requires_review && <span className="presales-muted">旧答复对应的询价条件待核对，请按当前条件重新报价或填写不报原因。</span>}
       {row.answered_by && <span className="presales-muted">{row.answered_by} {formatBusinessDateTime(row.answered_at)}</span>}
       {row.answer_state === "skip" && row.answer_reason && <span className="presales-muted">{row.answer_reason}</span>}
     </div> },

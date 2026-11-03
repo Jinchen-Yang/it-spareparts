@@ -94,6 +94,7 @@ class PresalesInquiryLine(Base):
     return_defective: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     # D-0052：当前答复只由 services.presales.answers 计算写入，共享池列表直接读取。
     answer_state: Mapped[str] = mapped_column(String(8), default="pending", server_default="pending")
+    answer_requires_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     current_offer_id: Mapped[int | None] = mapped_column(ForeignKey(
         "presales_offer.id", use_alter=True, name="fk_presales_line_current_offer",
     ))

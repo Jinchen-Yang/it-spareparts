@@ -28,6 +28,7 @@ export function OfferPrice({ offer }: { offer: Offer }) {
 }
 
 export function CurrentAnswer({ inquiry, line }: { inquiry: Inquiry; line: InquiryLine }) {
+  if (line.answer_requires_review) return <Tag color="orange">待核对，请按当前条件重新报价</Tag>;
   const answer = lineAnswer(inquiry, line);
   return <>{answerSentence(line, answer)} {answer.state === "quoted" && <PriceBasisTag offer={answer.offer} />}</>;
 }

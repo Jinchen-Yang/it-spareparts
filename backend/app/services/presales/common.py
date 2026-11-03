@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from app.models.presales import PresalesInquiry
+from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer
 from app.models.system import SysAccessLog, SysUser
 from app.security import UserContext
 from app.services import audience
@@ -21,6 +21,13 @@ def offer_effective(offer, moment=None):
     moment = moment or now()
     return (offer.status == "published" and not offer.no_stock and offer.unit_price is not None
             and offer.valid_from is not None and offer.valid_from <= moment)
+
+
+def offer_source_eligible():
+    """历史报价可以读取；其来源行待核对时不进入当前有效价、沿用或成交候选。"""
+    return ~select(PresalesInquiryLine.id).where(
+        PresalesInquiryLine.id == PresalesOffer.line_id, PresalesInquiryLine.answer_requires_review.is_(True)
+    ).correlate(PresalesOffer).exists()
 
 
 def resolve_actor(db, actor):

@@ -12,7 +12,7 @@ from app.services.presales import inquiries, offers, sales_workbook
 from app.services.workbook.schema import WorkbookError
 from app.services.workflow.registry import Forbidden
 from tests.test_presales_api_visibility import _client
-from tests.test_presales_r6_existing import r6_actors
+from tests.test_presales_r6_existing import _publish, r6_actors
 
 
 def _summary(content):
@@ -77,6 +77,19 @@ def test_summary_prices_keep_pinned_adoption_when_the_shared_price_changes(db, r
     _, rows = _summary(sales_workbook.export_sales_summary(db, [inquiry.id], users.sales.id))
     assert "buyer" in rows[0]["各处理人最低价"]
     assert "12.34" in rows[0]["采纳价"] and "23.45" not in rows[0]["采纳价"]
+
+
+def test_summary_excludes_uncertain_line_prices_but_keeps_another_inquirys_price_for_same_part(db, r6_actors):
+    users = r6_actors
+    revising, line, _, _ = _publish(db, users, kind="sales_inquiry", price="3.00", on_existing="new")
+    normal, _, _, _ = _publish(db, users, kind="sales_inquiry", price="70.00", source="B", on_existing="new")
+    revising.status = "revising"
+    line.answer_requires_review = True
+    db.flush()
+    flagged, = sales_workbook.summary_rows(db, [revising.id], users.sales.id)
+    assert flagged["qty"] > 0 and flagged["handler_min_prices"] == "" and flagged["adopted_prices"] == ""
+    _, rows = _summary(sales_workbook.export_sales_summary(db, [revising.id, normal.id], users.sales.id))
+    assert "70.00" in rows[0]["各处理人最低价"] and "3.00" not in rows[0]["各处理人最低价"]
 
 
 def test_export_endpoints_download_and_write_literal_access_actions(db, r6_actors):

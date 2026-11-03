@@ -53,6 +53,7 @@ export interface PoolLine {
   notes: string | null;
   expected_delivery: string | null;
   answer_state: AnswerState;
+  answer_requires_review?: boolean;
   answer_reason: string | null;
   answered_by: string | null;
   answered_at: string | null;

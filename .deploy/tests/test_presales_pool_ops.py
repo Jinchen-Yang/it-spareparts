@@ -24,6 +24,29 @@ def base():
 
 
 class PoolReleaseTests(TestCase):
+    def test_freeze_scope_uses_only_the_literal_old_schema_query(self):
+        query = ops.review_query((DEPLOY.parent / ops.REVIEW_MIGRATION).read_bytes())
+        self.assertNotIn("answer_requires_review", query)
+        for source in ('REVIEW_LINE_IDS = "SELECT 1; DELETE FROM work_item"', 'OTHER = "SELECT 1"'):
+            with self.assertRaises(RuntimeError):
+                ops.review_query(source)
+
+    def test_migration_rejects_wrong_row_set_or_current_answer_on_quarantined_source(self):
+        r = MagicMock()
+        expected = {"count": 2, "ids_md5": "expected-set"}
+        r.review_scope.return_value = {"count": 2, "ids_md5": "different-set"}
+        with self.assertRaisesRegex(RuntimeError, "scope differs"):
+            ops.Release.verify_review_projection(r, expected)
+        r.require_valid_review_answers.assert_not_called()
+        r.review_scope.return_value = expected
+        self.assertEqual(ops.Release.verify_review_projection(r, expected), expected)
+        r.require_valid_review_answers.assert_called_once()
+        r.sql.return_value = "1"
+        with self.assertRaisesRegex(RuntimeError, "still current"):
+            ops.Release.require_valid_review_answers(r)
+        r.sql.return_value = "0"
+        ops.Release.require_valid_review_answers(r)
+
     def test_release_scope(self):
         m = base()
         ops.validate(m)
