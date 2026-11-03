@@ -1,10 +1,22 @@
-"""受众规则只回读给各字段作者和主管，不能沿记录准入泄漏给其他人。"""
+"""记录准入后保留字段监督能力，字段规则不能旁路询价授权。"""
 
 import pytest
 
+from app import permissions
+from app.models.system import SysUser
 from app.services import audience, field_pool
 from app.services.presales import common, inquiries, offers, visibility
+from app.services.workflow.registry import Forbidden
 from tests.test_presales_api_visibility import _client, _ctx, _quoted, users
+
+
+@pytest.fixture()
+def admin_user(db):
+    user = SysUser(username="audience-admin", role="admin", display_name="管理员",
+        password_hash="测试不登录", template_perms=permissions.effective("admin", None), perm_overrides={})
+    db.add(user)
+    db.flush()
+    return user
 
 
 def _rule(mode, users, group):
@@ -14,17 +26,18 @@ def _rule(mode, users, group):
     return result
 
 
-def test_shared_values_do_not_disclose_personal_audience_lists(db, users):
+def test_shared_values_do_not_disclose_personal_audience_lists(db, users, admin_user):
     buyer, seller = _ctx(db, users.buyer), _ctx(db, users.seller)
     group = audience.create_group(db, "采购的个人组", "personal", [users.other.username],
                                   buyer, bypass=common.bypass)
-    inquiry, offer = _quoted(db, users, rule=_rule("include", users, group))
+    inquiry, offer = _quoted(db, users, rule=_rule("include", users, group),
+        whole={"mode": "include", "user_ids": [users.other.username, users.supervisor.username]})
     line = inquiries.lines_for(db, inquiry.id)[0]
     for target, level in ((f"inquiry:{inquiry.id}", "header"), (f"line:{line.id}", "line")):
         field_pool.save_values(db, field_pool.Subject("presales_inquiry", target, level), [
             {"new_name": "历史备注", "value": "全员可见", "rule": {"mode": "private"}}], seller)
     db.commit()
-    for viewer in (users.other, users.seller, users.buyer, users.supervisor):
+    for viewer in (users.other, users.seller, users.buyer, users.supervisor, admin_user):
         client = _client(viewer)
         detail = client.get(f"/api/presales/inquiries/{inquiry.id}")
         history = client.get(f"/api/presales/offers/{offer.id}/revisions")
@@ -33,16 +46,23 @@ def test_shared_values_do_not_disclose_personal_audience_lists(db, users):
         for row in (header, header["lines"][0]):
             field = next(f for f in row["field_values"] if f["name"] == "历史备注")
             assert field["value"] == "全员可见"
-            assert ("rule" in field) == (viewer in (users.seller, users.supervisor))
-            assert ("notes_audience" in row) == (viewer in (users.seller, users.supervisor))
+            assert ("rule" in field) == (viewer in (users.seller, users.supervisor, admin_user))
+            assert ("notes_audience" in row) == (viewer in (users.seller, users.supervisor, admin_user))
         for quote in (header["offers"][0], history.json()[-1]["snapshot"]):
             assert quote["notes"] == "采购机密" and quote["reporter"]["name"] == "buyer"
-            assert ("notes_audience" in quote) == (viewer in (users.buyer, users.supervisor))
+            assert ("notes_audience" in quote) == (viewer in (users.buyer, users.supervisor, admin_user))
             if "notes_audience" in quote:
                 assert quote["notes_audience"]["groups"] == [{"id": group.id, "name": "采购的个人组"}]
+    supervisor = _client(users.supervisor)
+    assert supervisor.get(f"/api/presales/inquiries/{inquiry.id}/visibility").status_code == 403
+    inquiry.offer_audience_rule_id = common.rule_id(db,
+        {"mode": "include", "user_ids": [users.other.username]}, seller)
+    db.commit()
+    assert supervisor.get(f"/api/presales/inquiries/{inquiry.id}").status_code == 403
+    assert supervisor.get(f"/api/presales/offers/{offer.id}/revisions").status_code == 403
 
 
-def test_inquiry_and_line_rules_read_back_selected_names_for_author_and_bypass(db, users):
+def test_inquiry_and_line_rules_read_back_selected_names_for_author_and_bypass(db, users, admin_user):
     ctx = _ctx(db, users.seller)
     group = audience.create_group(db, "采购协作", "personal", [users.buyer.username],
                                   ctx, bypass=common.bypass)
@@ -51,14 +71,16 @@ def test_inquiry_and_line_rules_read_back_selected_names_for_author_and_bypass(d
         notes_audience=rule, lines=[{"part_id": users.part.id, "notes_audience": rule}])
     expected = {"mode": "exclude", "users": [{"id": users.other.username, "name": "other"}],
                 "groups": [{"id": group.id, "name": group.name}]}
-    for viewer in (users.seller, users.supervisor):
+    for viewer in (users.seller, admin_user):
         view = visibility.inquiry_view(db, inquiry, _ctx(db, viewer))
         assert view["offer_audience"] == view["notes_audience"] == expected
         assert view["lines"][0]["notes_audience"] == expected
+    with pytest.raises(Forbidden):
+        visibility.inquiry_view(db, inquiry, _ctx(db, users.supervisor))
     assert "offer_audience" not in visibility.inquiry_view(db, inquiry, ctx, detail=False)
 
 
-def test_field_pool_read_rules_use_effective_default_and_value_author(db, users):
+def test_field_pool_read_rules_use_effective_default_and_value_author(db, users, admin_user):
     author, other = _ctx(db, users.seller), _ctx(db, users.other)
     rule = audience.create_rule(db, "exclude", [users.peer.username], [], author)
     field = field_pool.define_field(db, subject_type="presales_inquiry", level="line",
@@ -70,7 +92,9 @@ def test_field_pool_read_rules_use_effective_default_and_value_author(db, users)
     expected = {"mode": "exclude", "users": [{"id": users.peer.username, "name": "peer"}], "groups": []}
     assert read(author)[0]["rule"] == expected
     assert "rule" not in read(other)[0]
-    assert read(_ctx(db, users.supervisor))[0]["rule"] == expected
+    assert read(_ctx(db, admin_user))[0]["rule"] == expected
+    assert "rule" not in read(_ctx(db, users.supervisor))[0]
+    assert read(_ctx(db, users.supervisor), bypass=common.field_rule_bypass)[0]["rule"] == expected
     assert read(_ctx(db, users.peer)) == []
     field_pool.save_values(db, subject, [{"field_def_id": field.id, "value": "新值"}], other)
     assert "rule" not in read(author)[0]

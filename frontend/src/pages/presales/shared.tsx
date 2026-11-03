@@ -11,6 +11,10 @@ export function isPresalesSupervisor() {
     || ["admin", "boss"].includes(localStorage.getItem("role") || "");
 }
 
+export function isPresalesAdmin() {
+  return ["admin", "boss"].includes(localStorage.getItem("role") || "");
+}
+
 /** 服务端截止可带微秒；浏览器以毫秒为单位，向上对齐才不会提前失效。 */
 export function offerDeadline(value: string | null | undefined): number {
   if (!value) return NaN;

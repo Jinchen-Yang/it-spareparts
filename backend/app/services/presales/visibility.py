@@ -4,8 +4,9 @@ from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, false, or_, select, true
 
+from app.models.fields_audience import AudienceGroupMember, AudienceRule, AudienceRuleMember
 from app.models.presales import (
     PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink,
     PresalesOfferRevision,
@@ -13,13 +14,15 @@ from app.models.presales import (
 from app.models.system import SysUser
 from app.models.workflow import SubjectEvent
 from app.services import audience, field_pool
-from app.services.presales.common import author_name, bypass, offer_effective, resolve_actor, was_submitted
+from app.services.presales.common import (
+    author_name, bypass, field_rule_bypass, offer_effective, resolve_actor, was_submitted,
+)
 from app.services.workflow import work_items
 from app.services.workflow.registry import Forbidden, Subject
 
 
 def _public(_ctx):
-    """D-0052：售前不再按受众规则过滤；规则数据保留，仅为回滚。"""
+    """整单准入后沿用 D-0052 的业务字段展示规则。"""
     return True
 
 
@@ -27,16 +30,51 @@ def _allowed(_db, _rule, _ctx, _author):
     return True
 
 
-def can_view_inquiry(db, inquiry, ctx):
-    if isinstance(inquiry, int):
-        inquiry = db.get(PresalesInquiry, inquiry)
-    if inquiry is None or not work_items.has_permission(ctx, "page_presales"):
-        return False
+def _inquiry_filter(user, ctx, model):
+    if not work_items.has_permission(ctx, "page_presales"):
+        return false()
+    if bypass(ctx):
+        return true()
+    submitted = and_(model.status != "draft", model.submitted_at.is_not(None))
+    if work_items.has_permission(ctx, "action_presales_quote"):
+        return or_(model.created_by == user.id, submitted)
+    # D-0053：只有明确 include 授权能扩大默认范围，旧 public/null/exclude 均不扩大。
+    included = select(AudienceRule.id).join(
+        AudienceRuleMember, AudienceRuleMember.rule_id == AudienceRule.id,
+    ).outerjoin(AudienceGroupMember,
+        AudienceGroupMember.group_id == AudienceRuleMember.group_id,
+    ).where(AudienceRule.id == model.offer_audience_rule_id, AudienceRule.mode == "include",
+        or_(AudienceRuleMember.user_id == user.username, AudienceGroupMember.user_id == user.username),
+    ).correlate(model).exists()
+    return or_(model.created_by == user.id, and_(submitted, or_(model.kind == "proactive_offer", included)))
+
+
+def inquiry_access_filter(db, ctx, model=PresalesInquiry):
+    """可组合的 SQL 整单准入条件，在计数、搜索和分页前应用。"""
     user, ctx = resolve_actor(db, ctx)
-    if bypass(ctx) or inquiry.created_by == user.id:
-        return True
-    # D-0052：只有草稿仍属于本人。
-    return was_submitted(inquiry)
+    return _inquiry_filter(user, ctx, model)
+
+
+def offer_access_filter(db, ctx, model=PresalesOffer):
+    """独立报价沿用既有范围；关联报价始终服从当前源询价。"""
+    user, ctx = resolve_actor(db, ctx)
+    if not work_items.has_permission(ctx, "page_presales"):
+        return false()
+    parent = select(PresalesInquiry.id).where(
+        PresalesInquiry.id == model.inquiry_id, _inquiry_filter(user, ctx, PresalesInquiry),
+    ).correlate(model).exists()
+    published = and_(model.status != "draft", or_(
+        model.status.not_in(("stale", "withdrawn")), model.valid_from.is_not(None)))
+    draft_access = true() if bypass(ctx) else or_(model.created_by == user.id, published)
+    return and_(or_(model.inquiry_id.is_(None), parent), draft_access)
+
+
+def can_view_inquiry(db, inquiry, ctx):
+    inquiry_id = inquiry if isinstance(inquiry, int) else getattr(inquiry, "id", None)
+    if inquiry_id is None:
+        return False
+    return db.scalar(select(PresalesInquiry.id).where(
+        PresalesInquiry.id == inquiry_id, inquiry_access_filter(db, ctx))) is not None
 
 
 def inquiry_access_batch(db, inquiries, ctx):
@@ -51,10 +89,11 @@ def inquiry_access_batch(db, inquiries, ctx):
     participation = work_items.participation_batch(
         db, "presales_inquiry", [row.id for row in inquiries if row.created_by != user.id], ctx,
     )
-    bypassed = bypass(ctx)
+    visible_ids = set(db.scalars(select(PresalesInquiry.id).where(
+        PresalesInquiry.id.in_([row.id for row in inquiries]), _inquiry_filter(user, ctx, PresalesInquiry))))
     for row in inquiries:
         result[row.id]["assigned"] = participation.get(row.id, {}).get("assigned", False)
-        result[row.id]["visible"] = bypassed or row.created_by == user.id or was_submitted(row)
+        result[row.id]["visible"] = row.id in visible_ids
     return result
 
 
@@ -67,11 +106,10 @@ def _offer_batch(db, offers, ctx, *, fields):
     if not work_items.has_permission(ctx, "page_presales"):
         return []
     inquiries = {row.id: row for row in db.scalars(select(PresalesInquiry).where(
-        PresalesInquiry.id.in_({offer.inquiry_id for offer in offers})))}
+        PresalesInquiry.id.in_({offer.inquiry_id for offer in offers}),
+        _inquiry_filter(user, ctx, PresalesInquiry)))}
     def inquiry_for(offer):
-        snapshot = getattr(offer, "_inquiry_snapshot", None)
-        if snapshot is not None:
-            return snapshot
+        # 历史快照保存成交事实，但不能恢复已经撤销的源询价可见授权。
         if offer.inquiry_id is None:
             # 仅用于复用既有记录/字段权限判断，不创建任何来源业务单据。
             return SimpleNamespace(id=None, kind="proactive_offer", created_by=offer.created_by,
@@ -93,12 +131,9 @@ def _offer_batch(db, offers, ctx, *, fields):
         if inquiry is None:
             continue
         direct = bypassed or offer.created_by == user.id
-        if not direct:
-            if offer.status == "draft" or (offer.status in {"stale", "withdrawn"} and offer.valid_from is None):
-                continue
-            direct = inquiry.created_by == user.id
-            if not direct and not was_submitted(inquiry):
-                continue
+        if not direct and (offer.status == "draft" or (
+                offer.status in {"stale", "withdrawn"} and offer.valid_from is None)):
+            continue
         record_key = (index, "record")
         flat[record_key] = True
         rules[record_key] = (None, None) if direct else (
@@ -124,7 +159,7 @@ def _offer_batch(db, offers, ctx, *, fields):
         (index, key): (getattr(offer, key + "_rule_id"), authors[offer.created_by].username)
         for index, offer, _ in candidates if (index, "record") in filtered
         for key in ("supplier_audience", "reporter_audience", "notes_audience")
-    }, ctx, bypass=bypass) if fields else {}
+    }, ctx, bypass=field_rule_bypass) if fields else {}
     source_ids = {offer.line_id for _, offer, _ in candidates if offer.line_id is not None}
     held_sources = set(db.scalars(select(PresalesInquiryLine.id).where(
         PresalesInquiryLine.id.in_(source_ids), PresalesInquiryLine.answer_requires_review.is_(True)
@@ -186,6 +221,8 @@ def pinned_offer_view(db, offer_id, revision_no, ctx):
     current = db.get(PresalesOffer, offer_id)
     if revision is None or current is None or "_inquiry" not in revision.snapshot:
         return None
+    if not can_view_offer(db, current, ctx):
+        return None
     snapshot = _snapshot_offer(revision)
     view = offer_view(db, snapshot, ctx)
     if view is None:
@@ -231,7 +268,7 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
     result["is_owner"] = owner
     result = audience.filter_fields(db, [result], ctx,
                 field_rules={"notes": (inquiry.notes_audience_rule_id, author)}, bypass=_public)[0]
-    # D-0052：询价全员可见，客户名只看系统数据权限。
+    # 通过当前询价准入后，客户名仍受独立数据权限控制。
     if not work_items.has_permission(ctx, "data_customer"):
         result.pop("customer_id", None)
     lines = list(db.scalars(select(PresalesInquiryLine).where(
@@ -257,6 +294,9 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
         if key not in pinned:
             pinned[key] = pinned_offer_view(db, offer_id, revision_no, ctx)
         return pinned[key]
+    if inquiry.won_offer_id is not None and read_pin(inquiry.won_offer_id, inquiry.won_offer_revision_no) is None:
+        result["won_offer_id"] = None
+        result["won_offer_revision_no"] = None
     held_lines = {line.id for line in lines if line.answer_requires_review}
     def line_pin(line_id, offer_id, revision_no):
         view = read_pin(offer_id, revision_no)
@@ -360,21 +400,26 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
         result.update(audience.read_rules(db, {
             "offer_audience": (inquiry.offer_audience_rule_id, author),
             "notes_audience": (inquiry.notes_audience_rule_id, author),
-        }, ctx, bypass=bypass))
+        }, ctx, bypass=field_rule_bypass))
         header_subject = field_pool.Subject("presales_inquiry", f"inquiry:{inquiry.id}", "header")
-        result["field_values"] = field_pool.read_values(db, [header_subject], ctx, _public, include_rules=True, rule_bypass=bypass).get(
-            header_subject.subject_id, [])
+        result["field_values"] = field_pool.read_values(db, [header_subject], ctx, _public,
+            include_rules=True, rule_bypass=field_rule_bypass).get(header_subject.subject_id, [])
     if detail or summary:
         line_rules = audience.read_rules(db, {
             line.id: (line.notes_audience_rule_id, author) for line in lines
-        }, ctx, bypass=bypass) if detail else {}
+        }, ctx, bypass=field_rule_bypass) if detail else {}
         line_subjects = [field_pool.Subject("presales_inquiry", f"line:{line.id}", "line") for line in lines]
         # 历史交期可能仍存于自定义字段，摘要也必须读取经过权限过滤的值。
-        values = field_pool.read_values(db, line_subjects, ctx, _public, include_rules=detail, rule_bypass=bypass) if lines else {}
+        values = field_pool.read_values(db, line_subjects, ctx, _public,
+            include_rules=detail, rule_bypass=field_rule_bypass) if lines else {}
         result["lines"] = []
         for line in lines:
             row = {col.name: getattr(line, col.name) for col in line.__table__.columns
                    if col.name != "notes_audience_rule_id"}
+            if line.current_offer_id is not None and line.current_offer_id not in current_views:
+                row.update(current_offer_id=None, answered_by=None, answered_at=None)
+            if line.ref_offer_id is not None and line_references.get(line.id) is None:
+                row.update(ref_offer_id=None, ref_offer_revision_no=None, reference_restricted=True)
             row = audience.filter_fields(db, [row], ctx,
                 field_rules={"notes": (line.notes_audience_rule_id, author)}, bypass=_public)[0]
             if line.id in line_rules:
@@ -411,6 +456,8 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
             if response.is_draft:
                 row["is_draft"] = True
             offer = response_references.get(response.id)
+            if response.ref_offer_id is not None and offer is None:
+                row.update(ref_offer_id=None, ref_offer_revision_no=None)
             row["expired"] = response.line_id in held_lines or (response.mode == "reuse" and (offer is None or offer["expired"]))
             row["original_withdrawn"] = bool(offer and offer["original_withdrawn"])
             if offer is not None:

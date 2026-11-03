@@ -447,7 +447,7 @@ describe("项目备注", () => {
     expect(input).toHaveValue("项目曾经更换联系人");
     fireEvent.change(input, { target: { value: "中".repeat(501) } });
     fireEvent.click(within(dialog).getByRole("button", { name: /确 定|OK/i }));
-    expect(await within(dialog).findByText("项目备注最多 500 个字符")).toBeVisible();
+    await waitFor(() => expect(within(dialog).getByText("项目备注最多 500 个字符")).toBeVisible());
     expect(input).toHaveValue("中".repeat(501));
     expect(updateMaintenanceProject).not.toHaveBeenCalled();
     fireEvent.change(input, { target: { value: "😀".repeat(500) } });

@@ -6,10 +6,11 @@ from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, or_, select, text
 
 from app.models.dimensions import DimCustomer, DimPart
-from app.models.fields_audience import FieldValue
+from app.models.fields_audience import AudienceGroupMember, AudienceRule, AudienceRuleMember, FieldValue
+from app.models.system import SysUser
 from app.models.presales import (
     PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink, PresalesOfferRevision,
 )
@@ -47,13 +48,16 @@ def _permission(ctx, kind):
     # D-0052：不再区分询价、报价动作权限；kind 只保留调用方兼容。
 
 
-def _owner(db, inquiry, actor):
+def _owner(db, inquiry, actor, *, allow_supervisor=True):
     user, ctx = common.resolve_actor(db, actor)
     _permission(ctx, inquiry.kind)
-    # 共享的是业务值与逐行报价。客户、行集和成交等整单操作仍归发起人或主管。
-    if inquiry.created_by != user.id and not common.bypass(ctx):
-        raise Forbidden("只有发起人或主管可以修改询价单")
-    return user, ctx
+    if inquiry.created_by == user.id or common.bypass(ctx):
+        return user, ctx
+    if allow_supervisor and work_items.has_permission(ctx, "action_presales_supervise"):
+        from app.services.presales.visibility import can_view_inquiry
+        if can_view_inquiry(db, inquiry, ctx):
+            return user, ctx
+    raise Forbidden("只有发起人、管理员或有权查看的主管可以修改询价单")
 
 
 def _locked(db, inquiry_id, actor, expected_version):
@@ -238,6 +242,9 @@ def _write_line(db, inquiry, data, seq, ctx, existing=None, *, confirm_reset=Tru
     ref = data.get("ref_offer_id", line.ref_offer_id)
     if ref is not None and (type(ref) is not int or ref < 1):
         raise InvalidTransition("引用报价 ID 无效")
+    unchanged_reference = existing is not None and ref == line.ref_offer_id and (
+        part_id, pn.strip(), qty, exact, return_defective) == (
+        line.part_id, line.pn_raw, line.qty, line.require_exact_pn, line.return_defective)
     carry_response = False
     if existing is not None and inquiry.status == "revising":
         conditions_changed = (part_id, pn.strip(), qty, exact, return_defective) != (
@@ -266,7 +273,11 @@ def _write_line(db, inquiry, data, seq, ctx, existing=None, *, confirm_reset=Tru
         line.version += 1
         line.updated_at = common.now()
     db.add(line)
-    _reference(db, line, ctx, allow_new=new_reference)
+    from app.services.presales.visibility import offer_access_filter
+    preserve_hidden_reference = unchanged_reference and ref is not None and db.scalar(
+        select(PresalesOffer.id).where(PresalesOffer.id == ref, offer_access_filter(db, ctx))) is None
+    if not preserve_hidden_reference:
+        _reference(db, line, ctx, allow_new=new_reference)
     db.flush()
     if carry_response:
         answers.carry_current_responses(db, [line.id])
@@ -343,7 +354,7 @@ def create_draft(db, actor, *, kind="sales_inquiry", customer_id=None, notes=Non
     _permission(ctx, kind)
     inquiry = PresalesInquiry(kind=kind, inquiry_no=_number(db, kind), customer_id=_customer(db, customer_id),
         status="draft", revision=1, version=1, created_by=user.id, assignee_ids=_assignees(db, assignee_ids or []),
-        notes=_text(notes, "备注"), offer_audience_rule_id=common.rule_id(db, offer_audience, ctx, default="public"),
+        notes=_text(notes, "备注"), offer_audience_rule_id=common.rule_id(db, offer_audience, ctx, default="private"),
         notes_audience_rule_id=common.rule_id(db, notes_audience, ctx), submitted_snapshot={},
         priority=_priority(priority))
     db.add(inquiry)
@@ -361,6 +372,8 @@ def update_draft(db, inquiry_id, actor, expected_version, *, lines=None, expecte
         raise InvalidTransition("请先撤回再修改询价单")
     if set(changes) - {"customer_id", "notes", "assignee_ids", "offer_audience", "notes_audience", "priority"}:
         raise InvalidTransition("询价单包含未知字段")
+    if "offer_audience" in changes:
+        _owner(db, inquiry, ctx, allow_supervisor=False)
     if "priority" in changes:
         inquiry.priority = _priority(changes["priority"])
     if "customer_id" in changes:
@@ -387,6 +400,35 @@ def delete_draft(db, inquiry_id, actor, expected_version):
     inquiry.status, inquiry.closed_outcome, inquiry.closed_at = "closed", "cancelled", common.now()
     _touch(inquiry)
     return _record(db, inquiry, user.id, "inquiry.deleted")
+
+
+def visibility_settings(db, inquiry_id, actor):
+    inquiry = common.get_inquiry(db, inquiry_id)
+    _owner(db, inquiry, actor, allow_supervisor=False)
+    people = db.scalars(select(SysUser).where(
+        SysUser.is_active.is_(True), SysUser.deleted_at.is_(None),
+        select(AudienceRule.id).join(
+            AudienceRuleMember, AudienceRuleMember.rule_id == AudienceRule.id,
+        ).outerjoin(AudienceGroupMember, AudienceGroupMember.group_id == AudienceRuleMember.group_id).where(
+            AudienceRule.id == inquiry.offer_audience_rule_id, AudienceRule.mode == "include",
+            or_(AudienceRuleMember.user_id == SysUser.username, AudienceGroupMember.user_id == SysUser.username),
+        ).correlate(SysUser).exists(),
+    ).order_by(SysUser.username))
+    return {"version": inquiry.version, "visible_to": [
+        {"id": person.username, "name": person.display_name or person.username} for person in people]}
+
+
+def update_visibility(db, inquiry_id, actor, expected_version, visible_to):
+    # 与逐行写入的父单 SHARE 锁互斥，撤权不会穿过正在执行的写入。
+    inquiry = common.lock_inquiry(db, inquiry_id)
+    user, ctx = _owner(db, inquiry, actor, allow_supervisor=False)
+    common.check_version(inquiry, expected_version)
+    inquiry.offer_audience_rule_id = common.visibility_rule_id(db, visible_to, ctx)
+    _touch(inquiry)
+    db.flush()
+    common.event(db, inquiry, user.id, "inquiry.visibility_updated")
+    common.audit(db, user.id, "presales.inquiry.visibility_updated", inquiry.id)
+    return visibility_settings(db, inquiry.id, ctx)
 
 
 def _validate_submit(db, inquiry, ctx):
@@ -655,7 +697,6 @@ def copy_as_new(db, inquiry_id, actor, expected_version):
         for line in source_lines]
     copied = create_draft(db, user.id, kind=inquiry.kind, customer_id=inquiry.customer_id,
         notes=inquiry.notes, lines=payload, assignee_ids=list(inquiry.assignee_ids), priority=inquiry.priority)
-    copied.offer_audience_rule_id = inquiry.offer_audience_rule_id
     copied.notes_audience_rule_id = inquiry.notes_audience_rule_id
     for source_line, copied_line in zip(source_lines, lines_for(db, copied.id), strict=True):
         copied_line.notes_audience_rule_id = source_line.notes_audience_rule_id

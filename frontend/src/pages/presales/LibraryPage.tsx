@@ -8,6 +8,7 @@ import PriceRefBadge from "../../components/pricing/PriceRefBadge";
 import { usePresalesError, isOfferActive, OfferBadge, useNow, flattenOffers, activeOfferGroups } from "./shared";
 import PageHeader from "../../components/PageHeader";
 import { formatBusinessDateTime } from "../../utils/date";
+import { parseApiError } from "../../utils/apiError";
 import "./presales.css";
 
 interface LibraryRow { part: LibraryPart; offer: Offer }
@@ -42,6 +43,7 @@ export default function LibraryPage() {
         setSources({ ...sourceCache.current });
         const ids = [...new Set(data.flatMap((part) => flattenOffers(part.offers).map((offer) => offer.inquiry_id)))].filter((id): id is number => id != null && !sourceCache.current[id]);
         let index = 0;
+        let sourceDenied = false;
         // 报价库没有来源类型：缓存真实单据类型，并限制补取并发，搜索变化即取消。
         await Promise.allSettled(Array.from({ length: Math.min(4, ids.length) }, async () => {
           while (index < ids.length && !controller.signal.aborted) {
@@ -52,9 +54,25 @@ export default function LibraryPage() {
                 sourceCache.current[inquiry.id] = inquiry.kind;
                 setSources({ ...sourceCache.current });
               }
-            } catch { /* 无权读取来源单时不推测来源类型，报价仍按库响应显示。 */ }
+            } catch (error) {
+              const info = parseApiError(error);
+              if (!controller.signal.aborted && (info.kind === "permission" || info.status === 404)) {
+                sourceDenied = true;
+                setItems([]); setSelected(undefined); setLoading(true);
+                delete sourceCache.current[id];
+                setSources({ ...sourceCache.current });
+              }
+            }
           }
         }));
+        if (sourceDenied && !controller.signal.aborted) {
+          // 以一次新的服务端权限查询恢复仍可见的报价，失权期间清除旧详情。
+          const current = await presales.searchLibrary(query, controller.signal);
+          if (!controller.signal.aborted) {
+            setItems(current);
+            setLoading(false);
+          }
+        }
       }).catch((error: unknown) => {
         if (!controller.signal.aborted) {
           setLoading(false);

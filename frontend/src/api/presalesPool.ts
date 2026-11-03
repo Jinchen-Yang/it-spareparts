@@ -116,7 +116,7 @@ export const presalesPool = {
   async counts(signal?: AbortSignal) {
     return (await api.get<PoolCounts>(`${root}/counts`, { signal })).data;
   },
-  async create(body: { customer_id?: number | null; priority: "normal" | "urgent"; notes?: string | null; lines: PoolNewLine[] }) {
+  async create(body: { customer_id?: number | null; priority: "normal" | "urgent"; notes?: string | null; visible_to?: string[]; lines: PoolNewLine[] }) {
     return (await api.post<{ inquiry_id: number; inquiry_no: string; line_count: number }>(`${root}/inquiries`, body)).data;
   },
   async setPrice(lineId: number, body: PoolPriceInput) {

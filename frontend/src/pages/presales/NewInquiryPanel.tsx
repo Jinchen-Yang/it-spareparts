@@ -7,6 +7,7 @@ import { suggestParts, type PartSuggestion } from "../../api/search";
 import CreatePartModal from "../../components/parts/CreatePartModal";
 import { readPermissionMap } from "../../nav";
 import CandidateSelect from "./CandidateSelect";
+import { InquiryPeopleSelect, INQUIRY_VISIBILITY_HELP } from "./InquiryVisibility";
 import { LatestPriceTag, latestActiveOffer, usePresalesError } from "./shared";
 import "./presales.css";
 
@@ -73,6 +74,7 @@ export default function NewInquiryPanel({ onCreated }: { onCreated: () => void }
   const [customerId, setCustomerId] = useState<number>();
   const [priority, setPriority] = useState<"normal" | "urgent">("normal");
   const [notes, setNotes] = useState("");
+  const [visibleTo, setVisibleTo] = useState<string[]>([]);
   const [delivery, setDelivery] = useState("");
   const [busy, setBusy] = useState(false);
   const update = (key: number, patch: Partial<Row>) => {
@@ -91,12 +93,12 @@ export default function NewInquiryPanel({ onCreated }: { onCreated: () => void }
     if (filled.some((row) => !(row.qty > 0))) { void message.warning("数量必须大于 0"); return; }
     setBusy(true);
     try {
-      const created = await presalesPool.create({ ...(customerVisible && customerId != null ? { customer_id: customerId } : {}), priority, notes: notes.trim() || null,
+      const created = await presalesPool.create({ ...(customerVisible && customerId != null ? { customer_id: customerId } : {}), priority, notes: notes.trim() || null, visible_to: visibleTo,
         lines: filled.map((row) => ({ part_id: row.part?.part_id ?? null, pn_raw: row.part?.pn_std ?? row.pn.trim(),
           description: row.part ? row.part.summary || row.part.description || null : null, qty: row.qty, require_exact_pn: row.exact,
           return_defective: row.returnDefective, notes: row.note.trim() || null, expected_delivery: delivery || null })) });
       void message.success(`询价 ${created.inquiry_no} 已提交，共 ${created.line_count} 行`);
-      setRows([blank(nextKey.current++)]); setCustomerId(undefined); setNotes(""); setDelivery(""); setPriority("normal");
+      setRows([blank(nextKey.current++)]); setCustomerId(undefined); setNotes(""); setDelivery(""); setPriority("normal"); setVisibleTo([]);
       notifyPoolChanged();
       onCreated();
     } catch (error) { await handleError(error); }
@@ -107,6 +109,11 @@ export default function NewInquiryPanel({ onCreated }: { onCreated: () => void }
       {customerVisible && <span className="presales-inline-field">客户<CandidateSelect label="客户" load={presales.customers} value={customerId} onChange={setCustomerId} disabled={busy} /></span>}
       <span className="presales-inline-field presales-inline-auto">优先级<Radio.Group aria-label="优先级" optionType="button" size="small" value={priority}
         onChange={(event) => setPriority(event.target.value)} options={[{ value: "normal", label: "普通" }, { value: "urgent", label: "紧急" }]} /></span>
+    </div>
+    <div className="presales-stack">
+      <span>额外可见人员（可选）</span>
+      <InquiryPeopleSelect value={visibleTo} onChange={setVisibleTo} disabled={busy} />
+      <span className="presales-muted">{INQUIRY_VISIBILITY_HELP}</span>
     </div>
     <Table aria-label="新建询价行" rowKey="key" size="small" pagination={false} dataSource={rows} tableLayout="fixed" scroll={{ x: 900 }} columns={[
       { title: "#", key: "no", width: 44, render: (_, __, index) => <span className="presales-muted">{index + 1}</span> },

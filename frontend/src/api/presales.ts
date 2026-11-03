@@ -34,6 +34,7 @@ export interface LineInput {
 
 export interface InquiryLine extends Omit<LineInput, "notes_audience" | "field_values"> {
   answer_requires_review?: boolean;
+  reference_restricted?: boolean;
   id: number;
   inquiry_id: number;
   line_key: string;
@@ -201,6 +202,7 @@ export interface PartInquiryRecord {
 
 export interface InquiryPage { items: Inquiry[]; total: number; page: number; page_size: number }
 export interface VersionInput { expected_version: number }
+export interface InquiryVisibility { version: number; visible_to: { id: string; name: string }[] }
 export interface OfferRevision {
   revision_no: number;
   snapshot: Offer;
@@ -246,6 +248,12 @@ export const presales = {
   },
   async getInquiry(id: number, signal?: AbortSignal) {
     return (await api.get<Inquiry>(`${root}/inquiries/${id}`, { signal })).data;
+  },
+  async getInquiryVisibility(id: number, signal?: AbortSignal) {
+    return (await api.get<InquiryVisibility>(`${root}/inquiries/${id}/visibility`, { signal })).data;
+  },
+  async updateInquiryVisibility(id: number, body: VersionInput & { visible_to: string[] }) {
+    return (await api.put<InquiryVisibility>(`${root}/inquiries/${id}/visibility`, body)).data;
   },
   async createInquiry(body: InquiryInput) { return (await api.post<Inquiry>(`${root}/inquiries`, body)).data; },
   async updateInquiry(id: number, body: Omit<InquiryInput, "kind"> & VersionInput & { expected_line_versions?: Record<string, number>; confirm_reset?: boolean }) {

@@ -32,7 +32,7 @@ def _selects():
 
 def test_shared_offer_fields_match_across_readers_and_omit_internal_fields(db, users):
     private = {"mode": "private"}
-    inquiry, first = _quoted(db, users, whole=private, rule=private)
+    inquiry, first = _quoted(db, users, whole={"mode": "include", "user_ids": [users.other.username]}, rule=private)
     line = inquiries.lines_for(db, inquiry.id)[0]
     second = offers.save_draft(db, inquiry.id, line.id, users.peer.id,
         {"unit_price": "51.00", "supplier_id": users.supplier.id, "source_key": "peer",
@@ -83,7 +83,7 @@ def test_workflow_batch_participation_matches_single_and_refreshes_after_claim(d
 def test_1500_effective_quotes_have_bounded_library_and_boost_queries(db, users):
     moment = common.now()
     owner, writer = _ctx(db, users.seller), _ctx(db, users.buyer)
-    public_rule = common.rule_id(db, {"mode": "public"}, owner)
+    public_rule = common.rule_id(db, {"mode": "include", "user_ids": [users.other.username]}, owner)
     private_rule = common.rule_id(db, {"mode": "private"}, writer)
     # 每位报价人一条主报价，保留大结果集的查询数与字段矩阵契约。
     reporters = [SysUser(username=f"batch_buyer_{index}", role="purchaser",

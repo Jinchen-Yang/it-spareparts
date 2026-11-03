@@ -16,6 +16,7 @@ from app.api.audience import audience_user
 from app.db import get_db
 from app.models.dimensions import DimCustomer, DimPart
 from app.models.presales import PresalesInquiry, PresalesInquiryLine
+from app.models.workflow import WorkItem
 from app.security import UserContext
 from app.services import price_reference
 from app.services.presales import binding, candidates, common, inquiries, library, offers, visibility, part_history
@@ -51,6 +52,10 @@ class AudienceInput(Input):
 
 class VersionInput(Input):
     expected_version: int = Field(ge=1, le=2**31 - 1)
+
+
+class VisibilityInput(VersionInput):
+    visible_to: list[str]
 
 
 class CustomValue(Input):
@@ -264,7 +269,7 @@ def search_suppliers(db: Db, ctx: Ctx, q: str = Query(default="", max_length=256
 @router.get("/inquiries")
 def list_inquiries(db: Db, ctx: Ctx,
     kind: Literal["sales_inquiry", "proactive_offer"] | None = None,
-    scope: Literal["mine", "shared", "all"] = "mine",
+    scope: Literal["mine", "shared", "all"] = "all",
     status: Literal["draft", "submitted", "revising", "closed"] | None = None,
     q: str = Query(default="", max_length=256),
     date_from: date | None = None, date_to: date | None = None,
@@ -275,7 +280,7 @@ def list_inquiries(db: Db, ctx: Ctx,
         user, _ = common.resolve_actor(db, ctx)
         if date_from and date_to and date_from > date_to:
             raise ValueError("date_from 不能晚于 date_to")
-        # 仅允许不依赖受众私密字段的排序键；先 SQL 排序，再沿用可见性过滤和分页。
+        # 整单权限、参与者范围与搜索均在 SQL 中完成，再计数和分页。
         line_count = select(func.count(PresalesInquiryLine.id)).where(
             PresalesInquiryLine.inquiry_id == PresalesInquiry.id,
             PresalesInquiryLine.status == "active",
@@ -297,9 +302,15 @@ def list_inquiries(db: Db, ctx: Ctx,
         customer_name = func.coalesce(func.nullif(DimCustomer.name_normalized, ""), DimCustomer.name_raw)
         query = select(PresalesInquiry, customer_name).outerjoin(
             DimCustomer, DimCustomer.id == PresalesInquiry.customer_id,
-        ).order_by(order.nulls_last(), PresalesInquiry.id.desc())
+        ).where(visibility.inquiry_access_filter(db, ctx)).order_by(order.nulls_last(), PresalesInquiry.id.desc())
         if scope == "shared":
             query = query.where(PresalesInquiry.created_by != user.id)
+        if scope == "mine":
+            assigned = select(WorkItem.id).where(
+                WorkItem.subject_type == "presales_inquiry", WorkItem.subject_id == PresalesInquiry.id,
+                WorkItem.assignee_id == user.id,
+            ).correlate(PresalesInquiry).exists()
+            query = query.where(or_(PresalesInquiry.created_by == user.id, assigned))
         if kind:
             query = query.where(PresalesInquiry.kind == kind)
         if status:
@@ -331,25 +342,15 @@ def list_inquiries(db: Db, ctx: Ctx,
                 query = query.where(PresalesInquiry.updated_at < datetime.combine(date_to + timedelta(days=1), time.min, zone))
             else:
                 query = query.where(PresalesInquiry.updated_at <= datetime.combine(date_to, time.max, zone))
-        candidates = list(db.execute(query))
-        access = visibility.inquiry_access_batch(db, [row for row, _ in candidates], ctx)
-        visible = []
-        for inquiry, name in candidates:
-            if not access[inquiry.id]["visible"]:
-                continue
-            if scope == "mine" and inquiry.created_by != user.id:
-                if not access[inquiry.id]["assigned"]:
-                    continue
-            visible.append((inquiry, name))
-        # 准入与参与者筛选仍在分页之前，保证 total 和每一页的权限范围准确。
-        # 昂贵的行答复/报价/待办序列化只服务当前页，页外记录不展开。
+        total = db.scalar(select(func.count()).select_from(query.order_by(None).subquery()))
+        visible = db.execute(query.offset((page - 1) * page_size).limit(page_size))
         items = []
-        for inquiry, name in visible[(page - 1) * page_size:page * page_size]:
+        for inquiry, name in visible:
             view = visibility.inquiry_view(db, inquiry, ctx, detail=False, summary=True)
             view["customer_name"] = name if "customer_id" in view else None
             view["is_owner"] = inquiry.created_by == user.id
             items.append(view)
-        return {"items": items, "total": len(visible),
+        return {"items": items, "total": total,
                 "page": page, "page_size": page_size}
     return _call(db, read)
 
@@ -370,6 +371,17 @@ def update_inquiry(inquiry_id: int, body: UpdateInquiry, db: Db, ctx: Ctx):
     data = body.model_dump(exclude_unset=True, exclude={"expected_version", "confirm_reset"})
     return _inquiry_action(db, ctx, lambda: inquiries.update_draft(
         db, inquiry_id, ctx, body.expected_version, confirm_reset=body.confirm_reset, **data))
+
+
+@router.get("/inquiries/{inquiry_id}/visibility")
+def get_inquiry_visibility(inquiry_id: int, db: Db, ctx: Ctx):
+    return _call(db, lambda: inquiries.visibility_settings(db, inquiry_id, ctx))
+
+
+@router.put("/inquiries/{inquiry_id}/visibility")
+def update_inquiry_visibility(inquiry_id: int, body: VisibilityInput, db: Db, ctx: Ctx):
+    return _call(db, lambda: inquiries.update_visibility(
+        db, inquiry_id, ctx, body.expected_version, body.visible_to), write=True)
 
 
 @router.delete("/inquiries/{inquiry_id}", status_code=204)

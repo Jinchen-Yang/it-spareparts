@@ -12,7 +12,7 @@ def test_part_history_requires_presales_permission(users):
     assert response.status_code == 403
 
 
-def test_part_history_includes_legacy_private_records_but_excludes_drafts_and_deleted_lines(db, users):
+def test_buyer_part_history_includes_legacy_private_records_but_excludes_drafts_and_deleted_lines(db, users):
     public, _ = _quoted(db, users)
     private, _ = _quoted(db, users, whole={"mode": "private"})
     inquiries.create_draft(db, users.seller.id, lines=[{"part_id": users.part.id}])
@@ -20,7 +20,7 @@ def test_part_history_includes_legacy_private_records_but_excludes_drafts_and_de
     inquiries.lines_for(db, removed.id)[0].status = "deleted"
     db.commit()
 
-    client = _client(users.other)
+    client = _client(users.buyer)
     path = f"/api/presales/parts/{users.part.id}/inquiries"
     for page, inquiry in enumerate((private, public), start=1):
         response = client.get(path, params={"page": page, "page_size": 1})
@@ -52,7 +52,7 @@ def test_part_history_pages_multiple_inquiries_before_building_details(db, users
         return original(db, inquiry, ctx)
 
     monkeypatch.setattr(visibility, "inquiry_view", view)
-    ctx = common.resolve_actor(db, users.other.id)[1]
+    ctx = common.resolve_actor(db, users.buyer.id)[1]
     for page, size, expected_lines, expected_details in [
         (1, 1, lines[:1], [inquiry.id]),
         (2, 1, lines[1:], [inquiry.id]),
@@ -70,7 +70,7 @@ def test_part_history_pages_multiple_inquiries_before_building_details(db, users
 
 def test_sales_creator_and_event_labels_are_visible_to_pool_reader(db, users):
     row, _ = _quoted(db, users)
-    client = _client(users.other)
+    client = _client(users.buyer)
     detail = client.get(f"/api/presales/inquiries/{row.id}").json()
     assert detail["created_by_name"] == "seller"
     # 旧入口生成的已完成待办仍可查到发起人。
@@ -89,7 +89,7 @@ def test_legacy_proactive_quote_creator_is_visible_in_detail_and_history(db, use
         {"unit_price": "88", "reporter_audience": {"mode": "private"}}, expected_version=row.version)
     offers.publish_proactive(db, row.id, users.buyer.id, expected_version=row.version)
     db.commit()
-    client = _client(users.other)
+    client = _client(users.peer)
     detail = client.get(f"/api/presales/inquiries/{row.id}").json()
     assert detail["created_by_name"] == "buyer"
     assert detail["offers"][0]["reporter"] == {"id": users.buyer.id, "name": "buyer"}

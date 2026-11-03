@@ -93,7 +93,8 @@ def test_shared_scope_excludes_own_before_pagination(db, users):
     for index in range(6):
         own = inquiries.create_draft(db, users.seller.id, lines=[{'pn_raw': f'OWN-{index}'}])
         inquiries.submit(db, own.id, users.seller.id, own.version)
-        row = inquiries.create_draft(db, users.other.id, lines=[{'pn_raw': f'SHARED-{index}'}])
+        row = inquiries.create_draft(db, users.other.id, lines=[{'pn_raw': f'SHARED-{index}'}],
+            offer_audience={"mode": "include", "user_ids": [users.seller.username]})
         inquiries.submit(db, row.id, users.other.id, row.version)
         shared.append(row.id)
     db.commit()

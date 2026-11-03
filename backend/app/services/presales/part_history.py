@@ -2,41 +2,35 @@
 
 from decimal import Decimal
 
-from sqlalchemy import select
-from sqlalchemy.orm import load_only
+from sqlalchemy import func, select
 
 from app.models.presales import PresalesInquiry, PresalesInquiryLine
 from app.services.presales import common, visibility
 
 
 def list_lines(db, part_id, ctx, *, page=1, page_size=20):
+    _, ctx = common.resolve_actor(db, ctx)
     common.require(ctx, "page_presales")
     if part_id <= 0:
         raise ValueError("part_id 必须为正整数")
-    # 受众与工作流准入继续走唯一 visibility 出口；候选只读准入字段和行 ID。
-    candidates = db.execute(select(PresalesInquiry, PresalesInquiryLine.id).join(
+    # 数量和分页使用同一权限关系，隐藏单据不能占用页位或进入总数。
+    query = select(PresalesInquiry.id, PresalesInquiryLine.id).join(
         PresalesInquiryLine, PresalesInquiryLine.inquiry_id == PresalesInquiry.id,
-    ).where(PresalesInquiryLine.part_id == part_id, PresalesInquiryLine.status == "active").options(
-        load_only(PresalesInquiry.id, PresalesInquiry.created_by, PresalesInquiry.status,
-                  PresalesInquiry.submitted_at, PresalesInquiry.kind, PresalesInquiry.offer_audience_rule_id),
-    ).order_by(PresalesInquiry.created_at.desc(), PresalesInquiry.id.desc(),
-               PresalesInquiryLine.seq, PresalesInquiryLine.id))
-    allowed = {}
-    visible = []
-    for inquiry, line_id in candidates:
-        if inquiry.id not in allowed:
-            allowed[inquiry.id] = visibility.can_view_inquiry(db, inquiry, ctx)
-        if allowed[inquiry.id]:
-            visible.append((inquiry, line_id))
-    current_page = visible[(page - 1) * page_size:page * page_size]
-    # 当前页一次补齐单头字段，避免 load_only 的逐字段延迟加载。
-    page_ids = {inquiry.id for inquiry, _ in current_page}
+    ).where(PresalesInquiryLine.part_id == part_id, PresalesInquiryLine.status == "active",
+            visibility.inquiry_access_filter(db, ctx))
+    total = db.scalar(select(func.count()).select_from(query.subquery()))
+    current_page = db.execute(query.order_by(
+        PresalesInquiry.created_at.desc(), PresalesInquiry.id.desc(),
+        PresalesInquiryLine.seq, PresalesInquiryLine.id,
+    ).offset((page - 1) * page_size).limit(page_size)).all()
+    page_ids = {inquiry_id for inquiry_id, _ in current_page}
     page_inquiries = {inquiry.id: inquiry for inquiry in db.scalars(select(PresalesInquiry).where(
         PresalesInquiry.id.in_(page_ids)))} if current_page else {}
     views = {}
     result = []
     moment = common.now()
-    for inquiry, line_id in current_page:
+    for inquiry_id, line_id in current_page:
+        inquiry = page_inquiries[inquiry_id]
         if inquiry.id not in views:
             views[inquiry.id] = visibility.inquiry_view(db, page_inquiries[inquiry.id], ctx)
         view = views[inquiry.id]
@@ -71,5 +65,5 @@ def list_lines(db, part_id, ctx, *, page=1, page_size=20):
             if "created_by_name" in view:
                 row["created_by_name"] = view["created_by_name"]
             result.append(row)
-    return {"items": result, "total": len(visible),
+    return {"items": result, "total": total,
             "page": page, "page_size": page_size}

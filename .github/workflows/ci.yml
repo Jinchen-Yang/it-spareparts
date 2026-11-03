@@ -39,7 +39,9 @@ jobs:
       - name: 售前发布控制器与 Caddy 切流契约
         env:
           ITSP_CADDY_CONTRACT_IMAGE: caddy:2.11.4
-        run: python3 -m unittest discover -s .deploy/tests -p test_presales_pool_ops.py
+        run: |
+          python3 -m unittest discover -s .deploy/tests -p test_presales_pool_ops.py
+          python3 -m unittest discover -s .deploy/tests -p test_requirements_visibility_ops.py
       - name: 安装 uv（钉 0.11.31）
         run: |
           curl -LsSf https://astral.sh/uv/0.11.31/install.sh | sh

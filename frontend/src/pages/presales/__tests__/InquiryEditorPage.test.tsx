@@ -86,6 +86,22 @@ beforeEach(() => {
 afterEach(cleanupAntd);
 
 describe("销售询价编辑", () => {
+  it.each([false, true])("不可见历史引用在修改备注时保留，仅显式移除时清空（移除=%s）", async (remove) => {
+    const data = inquiry({ status: "revising", version: 5 });
+    data.lines![0].reference_restricted = true;
+    mocks.presales.getInquiry.mockResolvedValue(data);
+    mount("/presales/inquiries/1/edit");
+    await openLine("PN-A");
+    fireEvent.change(screen.getByRole("textbox", { name: "PN-A 行备注" }), { target: { value: "只更新备注" } });
+    if (remove) fireEvent.click(screen.getByRole("button", { name: "移除不可见引用" }));
+    fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
+    await waitFor(() => expect(mocks.presales.updateInquiry).toHaveBeenCalled());
+    const line = mocks.presales.updateInquiry.mock.calls[0][1].lines[0];
+    expect(line.notes).toBe("只更新备注");
+    if (remove) expect(line).toHaveProperty("ref_offer_id", null);
+    else expect(line).not.toHaveProperty("ref_offer_id");
+  });
+
   it("只读编辑页优先显示客户名称", async () => {
     mocks.presales.getInquiry.mockResolvedValue(inquiry({ status: "submitted", customer_name: "客户名称而非编号" }));
     mount("/presales/inquiries/1/edit");

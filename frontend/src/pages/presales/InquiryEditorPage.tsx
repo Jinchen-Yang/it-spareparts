@@ -14,6 +14,7 @@ import PartQuoteBadges from "./PartQuoteBadges";
 import { isOfferActive as activeOffer, OfferBadge, useNow, flattenOffers, usePresalesError } from "./shared";
 import { formatMoney } from "../../utils/format";
 import CandidateSelect from "./CandidateSelect";
+import { InquiryPeopleSelect, INQUIRY_VISIBILITY_HELP } from "./InquiryVisibility";
 import { changedAudience } from "../../components/audience/rules";
 import { readPermissionMap } from "../../nav";
 import PageHeader from "../../components/PageHeader";
@@ -29,6 +30,7 @@ function fromLine(line: InquiryLine): DraftLine {
   return { key: line.line_key, line_key: line.line_key, part_id: line.part_id ?? null, pn_raw: line.pn_raw,
     description: line.description, qty: Number(line.qty), require_exact_pn: !!line.require_exact_pn, return_defective: line.return_defective !== false,
     ref_offer_id: line.ref_offer_id, ref_offer_revision_no: line.ref_offer_revision_no, ref_offer: line.ref_offer, notes: line.notes, notesVisible: "notes" in line, field_values: editableFields(fields, true), originalFields: fields,
+    reference_restricted: line.reference_restricted,
     savedNotesAudience: line.notes_audience, expectedDelivery: line.expected_delivery ?? "" };
 }
 
@@ -60,6 +62,7 @@ function InquiryEditorContent() {
   const [pasteText, setPasteText] = useState("");
   const [customerId, setCustomerId] = useState<number>();
   const [notes, setNotes] = useState("");
+  const [visibleTo, setVisibleTo] = useState<string[]>([]);
   const [notesAudience, setNotesAudience] = useState<AudienceRule>();
   const [fields, setFields] = useState<CustomFieldValue[]>([]);
   const [library, setLibrary] = useState<Record<number, Offer[]>>({});
@@ -152,7 +155,8 @@ function InquiryEditorContent() {
   const serializeLines = () => lines.map((line) => ({
     ...(line.line_key ? { line_key: line.line_key } : {}), part_id: line.part_id, pn_raw: line.pn_raw,
     description: line.description ?? null, qty: line.qty, require_exact_pn: line.require_exact_pn, return_defective: line.return_defective,
-    ref_offer_id: line.ref_offer_id ?? null, ...(line.notesVisible ? { notes: line.notes ?? null } : {}),
+    ...(!line.reference_restricted || line.ref_offer_id != null ? { ref_offer_id: line.ref_offer_id ?? null } : {}),
+    ...(line.notesVisible ? { notes: line.notes ?? null } : {}),
     ...(changedAudience(line.notes_audience, line.savedNotesAudience) ? { notes_audience: line.notes_audience } : {}),
     expected_delivery: line.expectedDelivery || null,
     field_values: serializeFields(line.field_values, line.originalFields, true),
@@ -184,7 +188,8 @@ function InquiryEditorContent() {
           saved = await presales.updateInquiry(inquiry.id, { ...payload, ...lineUpdate, expected_version: inquiry.version,
             ...(confirmReset ? { confirm_reset: true } : {}) });
         } else {
-          saved = await presales.createInquiry({ ...payload, lines: serializeLines(), kind: "sales_inquiry" });
+          saved = await presales.createInquiry({ ...payload, lines: serializeLines(), kind: "sales_inquiry",
+            offer_audience: { mode: visibleTo.length ? "include" : "private", user_ids: visibleTo, group_ids: [] } });
         }
         if (!mounted.current) return;
         // 保存成功即同步版本与 line_key；提交失败重试时继续使用已保存的草稿身份。
@@ -215,7 +220,7 @@ function InquiryEditorContent() {
   if (loadError) return <Alert type="error" message={loadError} action={<Button onClick={() => void refresh()}>重试</Button>} />;
   const line = lines.find((item) => item.key === editing);
   return <section className="presales-page">
-    <PageHeader title={append ? "追加询价行" : inquiry ? `编辑询价 ${inquiry.inquiry_no}` : "新建询价"} subtitle="选择型号并填写需求，提交后进入共享池，所有人都能报价" extra={<Button onClick={() => navigate(inquiry ? `/presales/inquiries/${inquiry.id}` : "/presales/pool")}>返回</Button>} />
+    <PageHeader title={append ? "追加询价行" : inquiry ? `编辑询价 ${inquiry.inquiry_no}` : "新建询价"} subtitle="提交后本人、采购／报价人、管理员及指定人员可见，草稿仅本人和管理员可见" extra={<Button onClick={() => navigate(inquiry ? `/presales/inquiries/${inquiry.id}` : "/presales/pool")}>返回</Button>} />
     <div className="presales-panel">
       {versionConflict && <Alert type="warning" showIcon message="记录版本已变化，当前填写内容仍保留。"
         description="请先复制需要保留的修改，再重新加载最新单据。"
@@ -235,6 +240,9 @@ function InquiryEditorContent() {
         <div className="presales-form">
           {customerVisible && (!inquiry || "customer_id" in inquiry) && <Form.Item label="客户（可选）"><CandidateSelect label="客户" load={presales.customers} value={customerId} onChange={setCustomerId} disabled={busy} /></Form.Item>}
         </div>
+        {!inquiry && <Form.Item label="额外可见人员（可选）" extra={INQUIRY_VISIBILITY_HELP}>
+          <InquiryPeopleSelect value={visibleTo} onChange={setVisibleTo} disabled={busy} />
+        </Form.Item>}
         <Button type="link" aria-expanded={headOpen} onClick={() => setHeadOpen(!headOpen)}>{headOpen ? "收起客户要求 / 自定义字段" : "客户要求 / 自定义字段"}</Button>
         {headOpen && <>
           {(!inquiry || "notes" in inquiry) && <Form.Item label={<Space>客户要求{(!inquiry || inquiry.notes_audience) && <AudienceLock key={inquiry?.version ?? "new"} label="客户要求" savedRule={inquiry?.notes_audience} value={notesAudience} onChange={setNotesAudience} />}</Space>}>
@@ -259,7 +267,7 @@ function InquiryEditorContent() {
         { title: "期望交期", key: "delivery", width: 130, render: (_, item) => item.expectedDelivery || "—" },
         { title: "PN 一致", key: "exact", width: 100, render: (_, item) => item.require_exact_pn ? "一致" : "—" },
         { title: "坏件", key: "return", width: 90, render: (_, item) => item.return_defective ? "返回" : "不返回" },
-        { title: "报价引用", key: "reference", width: 200, render: (_, item) => item.ref_offer_id ? <>{`已引用报价 #${item.ref_offer_id} · 本行不再派单`}{(!referencedOffer(item) || !activeOffer(referencedOffer(item)!, now)) && <Tag>引用已失效</Tag>}</> : item.part_id ? `${flattenOffers(library[item.part_id] ?? []).filter((offer) => activeOffer(offer, now)).length} 条有效报价` : "—" },
+        { title: "报价引用", key: "reference", width: 200, render: (_, item) => item.reference_restricted && !item.ref_offer_id ? <Tag>原引用当前不可见</Tag> : item.ref_offer_id ? <>{`已引用报价 #${item.ref_offer_id} · 本行不再派单`}{(!referencedOffer(item) || !activeOffer(referencedOffer(item)!, now)) && <Tag>引用已失效</Tag>}</> : item.part_id ? `${flattenOffers(library[item.part_id] ?? []).filter((offer) => activeOffer(offer, now)).length} 条有效报价` : "—" },
         { title: "操作", key: "actions", width: 150, render: (_, item) => <Space><Button type="link" aria-label={`编辑 ${item.pn_raw}`} onClick={() => setEditing(item.key)}>{blocked ? "查看" : "编辑"}</Button>
           {!blocked && <Button type="link" disabled={busy} aria-label={`移除${item.pn_raw}`} onClick={() => setLines((previous) => previous.filter((other) => other.key !== item.key))}>删除</Button>}</Space> },
       ]} locale={{ emptyText: "搜索加入多个 PN，或按原文添加待建档行" }} />
@@ -282,7 +290,10 @@ function InquiryEditorContent() {
         {line.notesVisible && <Form.Item label={<Space>行备注{(!line.line_key || line.savedNotesAudience) && <AudienceLock label={`${line.pn_raw} 行备注`} savedRule={line.savedNotesAudience} value={line.notes_audience} onChange={(rule) => updateLine(line.key, { notes_audience: rule })} />}</Space>}>
           <Input.TextArea aria-label={`${line.pn_raw} 行备注`} value={line.notes ?? ""} onChange={(event) => updateLine(line.key, { notes: event.target.value })} /></Form.Item>}
         <Form.Item label="行自定义字段"><Fields key={`${line.key}:${inquiry?.version ?? "new"}`} level="line" partId={line.part_id} savedValues={line.originalFields} value={line.field_values} onChange={(values) => updateLine(line.key, { field_values: values })} disabled={busy} /></Form.Item>
-        {line.part_id && <><h3>参考价（30 天）</h3><PriceRefBadge partId={line.part_id} /><h3>有效报价</h3>{line.ref_offer_id ? <><p>已引用报价 #{line.ref_offer_id}</p>{referencedOffer(line) && <OfferBadge offer={referencedOffer(line)!} />}<Button onClick={() => updateLine(line.key, { ref_offer_id: null, ref_offer_revision_no: null, ref_offer: undefined })}>取消引用</Button></>
+        {line.reference_restricted && !line.ref_offer_id && <Alert type="info" message="原引用当前不可见"
+          description="只修改备注会保留原引用。提交前可移除该引用，或选择当前可见的报价。"
+          action={<Button onClick={() => updateLine(line.key, { reference_restricted: false, ref_offer_id: null, ref_offer_revision_no: null, ref_offer: undefined })}>移除不可见引用</Button>} />}
+        {line.part_id && <><h3>参考价（30 天）</h3><PriceRefBadge partId={line.part_id} /><h3>有效报价</h3>{line.ref_offer_id ? <><p>已引用报价 #{line.ref_offer_id}</p>{referencedOffer(line) && <OfferBadge offer={referencedOffer(line)!} />}<Button onClick={() => updateLine(line.key, { ref_offer_id: null, ref_offer_revision_no: null, ref_offer: undefined, reference_restricted: false })}>取消引用</Button></>
           : <EffectiveOffers offers={library[line.part_id] ?? []} now={now} onReference={(offer) => updateLine(line.key, { ref_offer_id: offer.id })} />}</>}
       </Form>)}
     </Drawer>

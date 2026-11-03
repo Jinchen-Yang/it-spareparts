@@ -69,6 +69,22 @@ it("独立主动报价没有来源单，不请求或导航到null来源，仍可
   expect(screen.getByRole("button", { name: "用这条报价建询价单" })).toBeEnabled();
 });
 
+it("单个来源失权后重新查询报价库，恢复其他仍可见的报价", async () => {
+  const available = offer({ id: 9, inquiry_id: 3, stock_location: "仍可见仓库" });
+  api.searchLibrary.mockResolvedValueOnce([{ part_id: 1, pn_std: "PN-A", offers: [offer(), available], offer_count: 2 }])
+    .mockResolvedValueOnce([{ part_id: 1, pn_std: "PN-A", offers: [available], offer_count: 1 }]);
+  api.getInquiry.mockImplementation(async (id: number) => {
+    if (id === 2) throw { response: { status: 403, data: { detail: "无权查看该询价单" } } };
+    return { id, kind: "sales_inquiry" };
+  });
+  await search();
+  expect(api.searchLibrary).toHaveBeenCalledTimes(2);
+  expect(screen.queryByLabelText("报价 7")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("报价 9")).toBeInTheDocument();
+  expect(screen.getByText("所在地：仍可见仓库")).toBeInTheDocument();
+  expect(screen.queryByText("报价库加载失败")).not.toBeInTheDocument();
+});
+
 it("旧搜索的迟到结果不会覆盖新的查询", async () => {
   let resolve!: (value: LibraryPart[]) => void;
   api.searchLibrary.mockReturnValueOnce(new Promise<LibraryPart[]>((done) => { resolve = done; }));

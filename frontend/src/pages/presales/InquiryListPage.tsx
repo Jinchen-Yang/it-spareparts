@@ -13,7 +13,8 @@ import PartThumb from "../../components/gallery/PartThumb";
 import { lineAnswer } from "./answers";
 import { CurrentAnswer } from "./InquiryOffers";
 type InquirySort = { key: string; dir: "asc" | "desc" };
-import { isOfferActive, isPresalesSupervisor, useNow } from "./shared";
+import { isOfferActive, isPresalesAdmin, useNow } from "./shared";
+import { readPermissionMap } from "../../nav";
 import { moneyExact } from "../../utils/format";
 import { parseApiError, type ApiErrorInfo } from "../../utils/apiError";
 import { ApiErrorFeedback } from "../../components/ApiErrorFeedback";
@@ -39,10 +40,10 @@ function lineOffers(detail: Inquiry | undefined, line: InquiryLine): Offer[] {
 
 export default function InquiryListPage() {
   const navigate = useNavigate();
-  const supervisor = isPresalesSupervisor();
-  const [scope, setScope] = useState<"mine" | "shared" | "all">("mine");
-  const [kind, setKind] = useState<Inquiry["kind"]>();
   const [params] = useSearchParams();
+  const canSeeAll = isPresalesAdmin() || readPermissionMap().action_presales_quote === true;
+  const [scope, setScope] = useState<"mine" | "shared" | "all">(params.get("scope") === "mine" ? "mine" : canSeeAll ? "all" : "mine");
+  const [kind, setKind] = useState<Inquiry["kind"]>();
   const [status, setStatus] = useState<Inquiry["status"] | undefined>(params.get("status") === "draft" ? "draft" : undefined);
   const [stage, setStage] = useState("");
   const [query, setQuery] = useState("");
@@ -135,7 +136,7 @@ export default function InquiryListPage() {
       <Button onClick={() => setImportOpen(true)}>从 Excel 新建</Button><Button type="primary" onClick={() => navigate("/presales/inquiries/new")}>新建询价</Button></Space>} />
     <div className="presales-panel">
       <Tabs activeKey={scope} onChange={(value) => { setScope(value as typeof scope); setPage(1); }} items={[
-        { key: "mine", label: "我的询价" }, { key: "shared", label: "共享给我" }, ...(supervisor ? [{ key: "all", label: "全部" }] : []),
+        { key: "mine", label: "我的询价" }, { key: "shared", label: "共享给我" }, ...(canSeeAll ? [{ key: "all", label: "全部" }] : []),
       ]} />
       <div className="presales-toolbar">
         <Segmented value={stage} options={[{ value: "", label: "全部状态" }, ...["草稿", "待处理", "处理中", "已回复", "已结束"].map((value) => ({ value, label: value }))]}
@@ -151,7 +152,7 @@ export default function InquiryListPage() {
         fetchSchema={() => presalesWorkbooks.getSalesSummarySchema()} onExport={(visible) => presalesWorkbooks.exportSalesSummary(exportIds, visible)} filename="销售询价汇总.xlsx" />
         <span className="presales-muted">选择本人销售询价后按 PN 汇总下载。处理进度筛选当前页。</span></div>
       {error && <Alert type="error" message="询价单列表加载失败" description={<ApiErrorFeedback info={error} />} action={<Button onClick={() => setReload((value) => value + 1)}>重试</Button>} />}
-      <Table aria-label="询价单列表" rowKey="id" columns={columns} dataSource={filtered} loading={loading} tableLayout="fixed"
+      <Table aria-label="询价单列表" rowKey="id" columns={columns} dataSource={filtered} loading={loading} tableLayout="fixed" scroll={{ x: 1300 }}
         rowSelection={scope === "mine" ? { selectedRowKeys: selected, onChange: setSelected, getCheckboxProps: (row) => ({ "aria-label": `选择 ${row.inquiry_no}`, disabled: !row.is_owner || row.kind !== "sales_inquiry" }) } : undefined}
         pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, showTotal: () => `本页显示 ${filtered.length} / ${items.length} 张 · 范围内共 ${total} 张` }}
         onChange={(pagination, _filters, sorter) => {

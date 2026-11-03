@@ -55,10 +55,32 @@ function openPage(data = inquiry()) {
   return screen.findByText("询价单 XJ0005");
 }
 
-beforeEach(() => { vi.clearAllMocks(); mocks.library.mockResolvedValue({}); });
+beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); mocks.library.mockResolvedValue({}); });
 afterEach(() => { cleanup(); });
 
 describe("询价详情", () => {
+  it.each(["admin", "boss"])("管理员 %s 可管理已关闭的他人询价可见人员", async (role) => {
+    localStorage.setItem("role", role);
+    await openPage(inquiry({ is_owner: false, status: "closed" }));
+    expect(screen.getByRole("button", { name: "可见人员" })).toBeVisible();
+  });
+
+  it("仅主管动作权限无法管理他人可见人员", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ action_presales_supervise: true }));
+    await openPage(inquiry({ is_owner: false }));
+    expect(screen.queryByRole("button", { name: "可见人员" })).toBeNull();
+  });
+
+  it("历史请求发现撤权后清除详情与旧报价", async () => {
+    await openPage(inquiry());
+    mocks.revisions.mockRejectedValue({ response: { status: 403 } });
+    mocks.getInquiry.mockRejectedValue({ response: { status: 403 } });
+    fireEvent.click(screen.getByRole("button", { name: "查看报价 1 历史" }));
+    await screen.findByText("询价单加载失败，请确认当前权限后重试");
+    expect(screen.queryByText("询价单 XJ0005")).toBeNull();
+    expect(screen.queryByText("需要质保")).toBeNull();
+    expect(screen.queryByRole("table", { name: "询价比价矩阵" })).toBeNull();
+  });
   it("待核对的旧报价保留历史展示且不可采纳", async () => {
     const data = inquiry();
     const lines = data.lines!.map((line) => ({ ...line, answer_requires_review: true }));

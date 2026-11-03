@@ -45,7 +45,12 @@ def was_submitted(inquiry):
 
 
 def bypass(ctx):
-    return ctx.role in ("admin", "boss") or work_items.has_permission(ctx, "action_presales_supervise")
+    return ctx.role in ("admin", "boss")
+
+
+def field_rule_bypass(ctx):
+    """记录准入通过后，保留主管回读历史字段规则的权限。"""
+    return bypass(ctx) or work_items.has_permission(ctx, "action_presales_supervise")
 
 
 def get_inquiry(db, inquiry_id):
@@ -87,6 +92,12 @@ def rule_id(db, value, ctx, *, default=None):
         raise InvalidTransition("可见性规则格式无效")
     return audience.create_rule(db, value.get("mode", "public"), value.get("user_ids", []),
                                 value.get("group_ids", []), ctx)
+
+
+def visibility_rule_id(db, visible_to, ctx):
+    if not isinstance(visible_to, list):
+        raise InvalidTransition("可见人员必须是账号列表")
+    return audience.create_rule(db, "include" if visible_to else "private", visible_to, [], ctx)
 
 
 def event(db, inquiry, actor, kind, payload=None):

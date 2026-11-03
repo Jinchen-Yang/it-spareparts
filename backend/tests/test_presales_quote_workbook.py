@@ -69,9 +69,9 @@ def _apply(db, data, content):
     return operations.apply(db, preview["operation_id"], data.buyer.id, preview["plan_digest"])
 
 
-def _published(db, data, *, private=False):
+def _published(db, data):
     inquiry = inquiries.create_draft(db, data.buyer.id, kind="proactive_offer",
-        offer_audience={"mode": "private"} if private else None,
+        offer_audience={"mode": "include", "user_ids": [data.sales.username, data.other.username]},
         lines=[{"part_id": data.parts[0].id, "qty": 1}])
     line = inquiries.lines_for(db, inquiry.id)[0]
     offers.save_draft(db, inquiry.id, line.id, data.buyer.id,
@@ -281,7 +281,7 @@ def test_another_assignees_line_can_export_but_stale_version_conflicts(db, quote
 
 def test_reuse_copies_shared_price_and_historical_tax_to_each_source(db, quote_data):
     data = quote_data
-    original = _published(db, data, private=True)
+    original = _published(db, data)
     offers.update_offer(db, original.id, data.buyer.id,
         {"price_basis": "cost", "is_tax_inclusive": None}, expected_version=original.version)
     sources = [_submitted(db, data), _submitted(db, data, owner=data.other)]
@@ -499,12 +499,12 @@ def test_forwarded_draft_response_stays_private_after_delete_and_permission_revo
     with pytest.raises(Forbidden):
         operations.preview(db, schema, removed, ctx=peer)
 
-    data.peer.perm_overrides = {"action_presales_supervise": True}
+    data.peer.role = "admin"
     db.flush()
     allowed = operations.preview(db, schema, removed, ctx=peer)
     assert allowed["plan"]["rows"][0]["values"][field] == value
     db.delete(draft)
-    data.peer.perm_overrides = {}
+    data.peer.role = "purchaser"
     db.flush()
     with pytest.raises(Forbidden):
         operations.preview(db, schema, removed, ctx=peer)
@@ -536,7 +536,7 @@ def test_only_exported_private_fields_restrict_the_file_for_a_shared_line(db, qu
         operations.preview(db, schema, _remove_quote_row(private), ctx=peer)
 
 
-def test_legacy_export_scope_requires_owner_or_supervisor_on_applied_replay(db, quote_data):
+def test_legacy_export_scope_requires_owner_or_admin_on_applied_replay(db, quote_data):
     data = quote_data
     inquiry = _submitted(db, data)
     schema = quote_workbook.QUOTE_SCHEMA.name
@@ -550,7 +550,7 @@ def test_legacy_export_scope_requires_owner_or_supervisor_on_applied_replay(db, 
     changed = _edit(content, {2: {"处理方式": "报价", "单价": 14}})
     with pytest.raises(Forbidden):
         operations.preview(db, schema, changed, ctx=peer)
-    data.peer.perm_overrides = {"action_presales_supervise": True}
+    data.peer.role = "admin"
     db.flush()
     invalid = _edit(content, {2: {"处理方式": "不报"}})
     rejected = operations.preview(db, schema, invalid, ctx=peer)
@@ -560,7 +560,7 @@ def test_legacy_export_scope_requires_owner_or_supervisor_on_applied_replay(db, 
     preview = operations.preview(db, schema, changed, ctx=peer)
     first = operations.apply(db, preview["operation_id"], data.peer.id, preview["plan_digest"])
     assert operations.preview(db, schema, changed, ctx=peer)["response"] == first["response"]
-    data.peer.perm_overrides = {}
+    data.peer.role = "purchaser"
     db.flush()
     with pytest.raises(Forbidden):
         operations.preview(db, schema, changed, ctx=peer)

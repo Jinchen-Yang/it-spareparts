@@ -13,7 +13,7 @@ from app.models.workflow import SubjectEvent
 from app.services import field_pool
 from app.services.presales import answers, common, inquiries, offers, visibility
 from app.services.workflow import work_items
-from app.services.workflow.registry import Conflict, InvalidTransition, NotFound
+from app.services.workflow.registry import Conflict, Forbidden, InvalidTransition, NotFound
 
 TABS = {"pending", "quoted", "skip", "mine", "all"}
 OPEN_STATUSES = ("submitted", "revising")
@@ -39,7 +39,7 @@ def _base_filter():
             PresalesInquiry.status != "draft", PresalesInquiry.submitted_at.is_not(None))
 
 
-def _rows_query():
+def _rows_query(db, ctx):
     customer = func.coalesce(func.nullif(DimCustomer.name_normalized, ""), DimCustomer.name_raw)
     return select(PresalesInquiryLine, PresalesInquiry, PresalesOffer, _Requester, _Answerer, customer,
                   DimSupplier.name_raw).join(
@@ -48,7 +48,8 @@ def _rows_query():
         PresalesOffer, PresalesOffer.id == PresalesInquiryLine.current_offer_id,
     ).outerjoin(_Answerer, _Answerer.id == PresalesInquiryLine.answered_by).outerjoin(
         DimCustomer, DimCustomer.id == PresalesInquiry.customer_id,
-    ).outerjoin(DimSupplier, DimSupplier.id == PresalesOffer.supplier_id).where(*_base_filter())
+    ).outerjoin(DimSupplier, DimSupplier.id == PresalesOffer.supplier_id).where(
+        *_base_filter(), visibility.inquiry_access_filter(db, ctx))
 
 
 def _tab_filter(tab, user_id):
@@ -82,7 +83,7 @@ def _quantity(value):
     return None if value is None else format(value, ".3f")
 
 
-def _latest_by_part(db, part_ids):
+def _latest_by_part(db, part_ids, ctx):
     """同 PN 的最新有效价，一次读完当前页，只用于提示和沿用。"""
     if not part_ids:
         return {}
@@ -91,14 +92,18 @@ def _latest_by_part(db, part_ids):
     ).where(PresalesOffer.part_id.in_(part_ids), PresalesOffer.status == "published",
             PresalesOffer.no_stock.is_(False), PresalesOffer.unit_price.is_not(None),
             PresalesOffer.valid_from <= common.now(), common.offer_source_eligible(),
+            visibility.offer_access_filter(db, ctx),
     ).order_by(PresalesOffer.part_id, PresalesOffer.valid_from.desc(), PresalesOffer.id.desc()))
     return {offer.part_id: {"offer_id": offer.id, "unit_price": _money(offer.unit_price),
                             "is_tax_inclusive": offer.is_tax_inclusive, "price_basis": offer.price_basis,
                             "reporter": _name(user), "at": offer.valid_from} for offer, user in rows}
 
 
-def _view(row, user_id, ctx, latest, fields):
+def _view(row, user_id, ctx, latest, fields, visible_offer_ids):
     line, inquiry, offer, requester, answerer, customer, supplier = row
+    hidden_price = offer is not None and offer.id not in visible_offer_ids
+    if hidden_price:
+        offer, answerer, supplier = None, None, None
     result = {
         "line_id": line.id, "line_version": line.version, "inquiry_id": inquiry.id,
         "inquiry_no": inquiry.inquiry_no, "inquiry_version": inquiry.version, "inquiry_status": inquiry.status,
@@ -108,7 +113,8 @@ def _view(row, user_id, ctx, latest, fields):
         "require_exact_pn": line.require_exact_pn, "return_defective": line.return_defective, "notes": line.notes,
         "expected_delivery": inquiries.delivery_value(line, fields), "answer_state": line.answer_state,
         "answer_requires_review": line.answer_requires_review,
-        "answer_reason": line.answer_reason, "answered_by": _name(answerer), "answered_at": line.answered_at,
+        "answer_reason": None if hidden_price else line.answer_reason,
+        "answered_by": _name(answerer), "answered_at": None if hidden_price else line.answered_at,
         "price": None if offer is None else {
             "offer_id": offer.id, "revision_no": offer.revision_no,
             "unit_price": _money(offer.unit_price), "is_tax_inclusive": offer.is_tax_inclusive,
@@ -128,15 +134,18 @@ def _view(row, user_id, ctx, latest, fields):
 
 def _views(db, rows, user_id, ctx):
     lines = [row[0] for row in rows]
-    latest = _latest_by_part(db, {line.part_id for line in lines if line.part_id and line.answer_state != "quoted" and not line.answer_requires_review})
+    latest = _latest_by_part(db, {line.part_id for line in lines if line.part_id and line.answer_state != "quoted" and not line.answer_requires_review}, ctx)
+    offer_ids = {row[2].id for row in rows if row[2] is not None}
+    visible_offer_ids = set(db.scalars(select(PresalesOffer.id).where(
+        PresalesOffer.id.in_(offer_ids), visibility.offer_access_filter(db, ctx)))) if offer_ids else set()
     subjects = [field_pool.Subject("presales_inquiry", f"line:{line.id}", "line")
                 for line in lines if line.expected_delivery is None]
     legacy = field_pool.read_values(db, subjects, ctx, visibility._public)
-    return [_view(row, user_id, ctx, latest, legacy.get(f"line:{row[0].id}", [])) for row in rows]
+    return [_view(row, user_id, ctx, latest, legacy.get(f"line:{row[0].id}", []), visible_offer_ids) for row in rows]
 
 
 def counts(db, actor):
-    user, _ = _actor(db, actor)
+    user, ctx = _actor(db, actor)
     is_open = PresalesInquiry.status.in_(OPEN_STATUSES)
 
     def state(value):
@@ -145,7 +154,7 @@ def counts(db, actor):
         func.count().filter(PresalesInquiry.created_by == user.id), func.count(),
     ).select_from(PresalesInquiryLine).join(
         PresalesInquiry, PresalesInquiry.id == PresalesInquiryLine.inquiry_id,
-    ).where(*_base_filter())).one()
+    ).where(*_base_filter(), visibility.inquiry_access_filter(db, ctx))).one()
     # 草稿不进池子，只给本人一个入口数。
     drafts = db.scalar(select(func.count()).select_from(PresalesInquiry).where(
         PresalesInquiry.kind == "sales_inquiry", PresalesInquiry.status == "draft",
@@ -157,7 +166,7 @@ def list_lines(db, actor, *, tab="pending", q="", page=1, page_size=50):
     user, ctx = _actor(db, actor)
     if tab not in TABS:
         raise InvalidTransition("筛选条件无效")
-    query = _rows_query().where(*_tab_filter(tab, user.id))
+    query = _rows_query(db, ctx).where(*_tab_filter(tab, user.id))
     if q.strip():
         query = query.where(_search_filter(q, ctx))
     total = db.scalar(select(func.count()).select_from(query.with_only_columns(PresalesInquiryLine.id).subquery()))
@@ -172,7 +181,7 @@ def list_lines(db, actor, *, tab="pending", q="", page=1, page_size=50):
 
 def line_view(db, line_id, actor):
     user, ctx = _actor(db, actor)
-    row = db.execute(_rows_query().where(PresalesInquiryLine.id == line_id)
+    row = db.execute(_rows_query(db, ctx).where(PresalesInquiryLine.id == line_id)
                      .execution_options(populate_existing=True)).one_or_none()
     if row is None:
         raise NotFound("询价行不存在")
@@ -188,6 +197,8 @@ def _lock(db, line_id, actor, expected_version):
                         .execution_options(populate_existing=True))
     if inquiry is None or inquiry.kind != "sales_inquiry" or not common.was_submitted(inquiry):
         raise NotFound("询价行不存在或已删除")
+    if not visibility.can_view_inquiry(db, inquiry, ctx):
+        raise Forbidden("无权查看该询价单")
     line = db.scalar(select(PresalesInquiryLine).where(
         PresalesInquiryLine.id == line_id, PresalesInquiryLine.inquiry_id == inquiry.id)
                      .with_for_update().execution_options(populate_existing=True))
@@ -287,7 +298,7 @@ def edit_line(db, line_id, actor, data, *, expected_version, confirm_reset=False
     return line_view(db, line_id, actor)
 
 
-def create_inquiry(db, actor, *, lines, customer_id=None, priority="normal", notes=None):
+def create_inquiry(db, actor, *, lines, customer_id=None, priority="normal", notes=None, visible_to=None):
     """询价一步提交：不产生草稿和待办。"""
     user, ctx = _actor(db, actor)
     if not lines:
@@ -295,6 +306,7 @@ def create_inquiry(db, actor, *, lines, customer_id=None, priority="normal", not
     inquiry = PresalesInquiry(kind="sales_inquiry", inquiry_no=inquiries._number(db, "sales_inquiry"),
         customer_id=inquiries._customer(db, customer_id), status="submitted", revision=1, version=1,
         created_by=user.id, assignee_ids=[], notes=inquiries._text(notes, "备注"),
+        offer_audience_rule_id=common.visibility_rule_id(db, [] if visible_to is None else visible_to, ctx),
         priority=inquiries._priority(priority), submitted_at=common.now())
     db.add(inquiry)
     db.flush()
@@ -308,12 +320,14 @@ def create_inquiry(db, actor, *, lines, customer_id=None, priority="normal", not
 
 
 def history(db, line_id, actor):
-    """这一行的价格修订和条件变更，最新在前；任何人可查。"""
-    _actor(db, actor)
+    """当前有权查看该行及报价来源的用户读取历史。"""
+    _, ctx = _actor(db, actor)
     line = db.get(PresalesInquiryLine, line_id)
     inquiry = db.get(PresalesInquiry, line.inquiry_id) if line is not None else None
-    if line is None or line.status != "active" or inquiry.kind != "sales_inquiry" or not common.was_submitted(inquiry):
+    if line is None or inquiry is None or line.status != "active" or inquiry.kind != "sales_inquiry" or not common.was_submitted(inquiry):
         raise NotFound("询价行不存在")
+    if not visibility.can_view_inquiry(db, inquiry, ctx):
+        raise Forbidden("无权查看该询价单")
     payload = SubjectEvent.payload
     line_events = (SubjectEvent.subject_type == "presales_inquiry", SubjectEvent.subject_id == inquiry.id,
                    payload["line_id"].as_integer() == line.id)
@@ -332,7 +346,9 @@ def history(db, line_id, actor):
                 PresalesOfferRevision.revision_no.between(sources.c.first_revision, sources.c.last_revision)))
     revisions = db.execute(select(PresalesOfferRevision, SysUser).join(
         SysUser, SysUser.id == PresalesOfferRevision.actor,
+    ).join(PresalesOffer, PresalesOffer.id == PresalesOfferRevision.offer_id,
     ).where(
+        visibility.offer_access_filter(db, ctx),
         PresalesOfferRevision.id.in_(revision_ids),
         PresalesOfferRevision.snapshot["valid_from"].astext.is_not(None),
         PresalesOfferRevision.snapshot["status"].astext != "draft",

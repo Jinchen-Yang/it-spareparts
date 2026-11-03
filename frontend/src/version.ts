@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.44.0";
+export const APP_VERSION = "1.45.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,17 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.45.0",
+    date: "2026-11-02",
+    items: [
+      "询价默认仅发起人、采购或报价人、管理员可见，发起人和管理员可另外指定可见人员，也可不选。草稿仅本人和管理员可见。",
+      "可在询价页面调整可见人员，撤销后历史报价和原先下载的报价 Excel 也会重新核验权限。客户名称仍按客户信息权限显示。",
+      "本次更新前下载的旧报价 Excel 若缺少完整的价格来源范围，请重新下载后填写上传。",
+      "本次同时上线原需求表的销售采购定位、订单 PN 与费用查看、维保销售人员筛选、项目归档恢复、返还收货 Excel 编辑及完整筛选结果导出。",
+      "项目清单增加免返原文，备件订单导出增加收货地址参考，需求与实收核对入口已接通。Excel 导入加强原文、日期、公式缓存及问题单据校验。",
+    ],
+  },
   {
     version: "1.44.0",
     date: "2026-11-02",
