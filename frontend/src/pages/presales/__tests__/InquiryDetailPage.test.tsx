@@ -182,14 +182,10 @@ describe("询价详情", () => {
     await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome }));
   });
 
-  it("撤回成功后进入编辑；复制已关单后进入新单编辑", async () => {
+  it("已提交询价不再提供撤回；复制已关单后进入新单编辑", async () => {
     const user = userEvent.setup();
-    mocks.withdrawInquiry.mockResolvedValue(inquiry({ status: "revising" }));
     await openPage();
-    await user.click(screen.getByRole("button", { name: "撤回修改" }));
-    expect(await screen.findByText("编辑路由")).toBeInTheDocument();
-    expect(screen.getByLabelText("编辑地址")).toHaveTextContent("/presales/inquiries/5/edit");
-    expect(mocks.withdrawInquiry).toHaveBeenCalledWith(5, { expected_version: 4 });
+    expect(screen.queryByRole("button", { name: "撤回修改" })).not.toBeInTheDocument();
     cleanup();
     mocks.copyInquiry.mockResolvedValue(inquiry({ id: 6, status: "draft" }));
     await openPage(inquiry({ status: "closed" }));
@@ -199,19 +195,12 @@ describe("询价详情", () => {
     expect(mocks.copyInquiry).toHaveBeenCalledWith(5, { expected_version: 4 });
   });
 
-  it("追加行进入追加模式，409 刷新最新版本", async () => {
+  it("追加行进入追加模式", async () => {
     const user = userEvent.setup();
     await openPage();
     await user.click(screen.getByRole("button", { name: "追加行" }));
     expect(await screen.findByText("编辑路由")).toBeInTheDocument();
     expect(screen.getByLabelText("编辑地址")).toHaveTextContent("/presales/inquiries/5/edit?append=1");
-    cleanup();
-    mocks.withdrawInquiry.mockRejectedValue({ response: { status: 409, data: { detail: "版本冲突" } } });
-    await openPage();
-    mocks.getInquiry.mockResolvedValue(inquiry({ version: 7, status: "revising" }));
-    await user.click(screen.getByRole("button", { name: "撤回修改" }));
-    expect(await screen.findByText("撤回修改中")).toBeInTheDocument();
-    expect(mocks.getInquiry).toHaveBeenCalledTimes(3);
   });
 
   it("主动报价关单后复制，进入主动报价草稿编辑入口", async () => {

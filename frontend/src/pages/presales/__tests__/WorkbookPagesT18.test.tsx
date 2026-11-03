@@ -54,7 +54,6 @@ vi.mock("../../../components/workflow/WorkInbox", () => ({ default: (props: {
 } }));
 
 import InquiryEditorPage from "../InquiryEditorPage";
-import QuoteWorkbenchPage from "../QuoteWorkbenchPage";
 import { ProcessContent } from "../ProcessPage";
 import WorkbookDialog from "../WorkbookDialog";
 
@@ -141,41 +140,16 @@ describe("T18 采购 Excel 页面接线", () => {
     expect(mocks.exportQuoteSheet).toHaveBeenCalledWith([1], { lines: ["mode", "unit_price"] });
     fireEvent.click(screen.getByRole("button", { name: "上传报价表" }));
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("已保存为草稿，请在页面确认后回复")).toBeInTheDocument();
+    expect(within(dialog).getByText("报价已生效")).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "预览测试文件" }));
     expect(mocks.previewQuoteSheet).toHaveBeenCalledWith(expect.any(File));
     expect(mocks.previewInquiry).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole("button", { name: "确认工作簿草稿" }));
     await waitFor(() => expect(mocks.getInquiry).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText("已保存为草稿，请在页面确认后回复")).toBeInTheDocument();
+    expect(await screen.findByText("报价已生效")).toBeInTheDocument();
     expect(mocks.replyInquiry).not.toHaveBeenCalled();
     expect(mocks.publishInquiry).not.toHaveBeenCalled();
     expect(mocks.saveOffer).not.toHaveBeenCalled();
-  });
-
-  it("合并下载只接受可操作本人待办，合并导入应用刷新队列并保留草稿提示", async () => {
-    mocks.getInquiry.mockResolvedValue(inquiry("submitted"));
-    render(<MemoryRouter initialEntries={[{ pathname: "/presales/workbench", state: { workItem: ownTask } }]}>
-      <QuoteWorkbenchPage />
-    </MemoryRouter>);
-    await screen.findByRole("button", { name: "合并下载" });
-    expect(screen.getByRole("button", { name: "合并下载" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "选择其他人待办" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "选择未领公共池" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "选择暂停待办" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "选择我的单1" }));
-    fireEvent.click(screen.getByRole("button", { name: "合并下载" }));
-    expect(mocks.exportQuoteSheet).toHaveBeenCalledWith([1, 2], { lines: ["mode", "unit_price"] });
-    fireEvent.click(screen.getByRole("button", { name: "上传合并表" }));
-    const dialog = await screen.findByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("button", { name: "预览测试文件" }));
-    expect(mocks.previewQuoteSheet).toHaveBeenCalledWith(expect.any(File));
-    fireEvent.click(within(dialog).getByRole("button", { name: "确认工作簿草稿" }));
-    expect(await screen.findByText("已保存为草稿，请在页面确认后回复")).toBeInTheDocument();
-    expect(screen.getByText("队列刷新 1")).toBeInTheDocument();
-    expect(mocks.getInquiry).not.toHaveBeenCalled();
-    expect(mocks.replyInquiry).not.toHaveBeenCalled();
-    expect(mocks.publishInquiry).not.toHaveBeenCalled();
   });
 
   it("独立导入弹窗的采购模式不按页面单号改写文件来源", async () => {
@@ -185,6 +159,6 @@ describe("T18 采购 Excel 页面接线", () => {
     expect(mocks.previewInquiry).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "下载空模板" })).not.toBeInTheDocument();
     expect(mocks.importer).toHaveBeenLastCalledWith(expect.objectContaining({ schemaName: "presales_quote_sheet",
-      successMessage: "已保存为草稿，请在页面确认后回复" }));
+      successMessage: "报价已生效" }));
   });
 });

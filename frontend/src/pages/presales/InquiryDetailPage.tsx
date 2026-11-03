@@ -77,16 +77,6 @@ function InquiryDetailContent({ id }: { id: number }) {
     } finally { if (current === historyGeneration.current) setHistoryLoading(false); }
   };
 
-  const withdraw = async () => {
-    if (!inquiry || busy) return;
-    setBusy(true);
-    try {
-      await presales.withdrawInquiry(id, { expected_version: inquiry.version });
-      navigate(`/presales/inquiries/${id}/edit`);
-    } catch (error) { await handlePresalesError(error, load); }
-    finally { setBusy(false); }
-  };
-
   const copy = async () => {
     if (!inquiry || busy) return;
     setBusy(true);
@@ -164,7 +154,7 @@ function InquiryDetailContent({ id }: { id: number }) {
         {inquiry.kind === "proactive_offer" && inquiry.status === "draft" && <Button disabled={busy} onClick={() => navigate(`/presales/offers/new?draft=${id}`)}>继续填写主动报价</Button>}
         {inquiry.kind === "proactive_offer" && inquiry.status === "submitted" && <Button disabled={busy} onClick={() => navigate(`/presales/workbench/${id}`)}>更新 / 撤销报价</Button>}
         {canAmend && ["draft", "revising"].includes(inquiry.status) && <Button disabled={busy} onClick={() => navigate(`/presales/inquiries/${id}/edit`)}>编辑询价</Button>}
-        {canAmend && inquiry.status === "submitted" && <><Button loading={busy} onClick={() => void withdraw()}>撤回修改</Button><Button disabled={busy} onClick={() => navigate(`/presales/inquiries/${id}/edit?append=1`)}>追加行</Button></>}
+        {canAmend && inquiry.status === "submitted" && <Button disabled={busy} onClick={() => navigate(`/presales/inquiries/${id}/edit?append=1`)}>追加行</Button>}
       </>)}
       <Button onClick={() => setTimelineOpen(true)}>查看动态</Button>
     </Space>} />
@@ -178,7 +168,6 @@ function InquiryDetailContent({ id }: { id: number }) {
       ]} />
       <FieldValues values={inquiry.field_values} />
       {adopted && <Space wrap><Button type="link" onClick={() => void showHistory(adopted)}>报价 #{adopted.id} · 第 {adopted.revision_no} 版</Button><OfferBadge offer={adopted} /></Space>}
-      <div className="presales-toolbar">{inquiry.work_items?.map((work) => <Tag key={work.id}>{hasValue(work.claimed_by) || hasValue(work.assignee_id) ? `处理人 ${work.claimed_by ?? work.assignee_id} · ` : "公共池 · "}{workLabels[work.status]}{work.paused ? " · 已暂停" : ""}</Tag>)}</div>
       <p className="presales-muted">最低价按同一含税口径比较，仅计入有效报价。</p>
       <Table aria-label="询价比价矩阵" rowKey="id" dataSource={lines} loading={loading} tableLayout="fixed" pagination={{ defaultPageSize: 20 }} columns={[
         { title: "PN / 描述", key: "pn", render: (_, line) => <><Space>{line.part_id && <PartThumb partId={line.part_id} pn={line.pn_raw} size={24} />}{line.pn_raw}{line.require_exact_pn && <Tag>一致</Tag>}</Space><div className="presales-muted">{line.description}</div></> },

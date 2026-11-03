@@ -13,7 +13,7 @@ import { existingOfferConflict, useExistingOfferChoice } from "./ExistingOfferDi
 import { WorkbookExportButton } from "../../components/workbook";
 import { presalesWorkbooks } from "../../api/presalesWorkbooks";
 import WorkbookDialog from "./WorkbookDialog";
-import PartBinding from "./PartBinding";
+import PartBinding, { canBindPresalesPart } from "./PartBinding";
 import PageHeader from "../../components/PageHeader";
 import { findOwnTask, loadInquiry } from "./quoteData";
 import "./presales.css";
@@ -133,6 +133,8 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
       && quoteComplete(offer) && !offer.no_stock && !!line.part_id);
   });
   const canProcess = inquiry.status === "submitted" && (proactive || (!!task && actorId != null)) && !paused;
+  const canBind = canBindPresalesPart() && (proactive ? inquiry.status === "draft"
+    : inquiry.status === "submitted" || inquiry.status === "revising");
   const editable = canProcess && !refreshRequired;
   const refreshAfterSuccess = (error: unknown, action: string) => {
     setRefreshRequired(true);
@@ -253,7 +255,7 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
       existing: library[line.part_id!] ?? [],
       disabled: !canEdit || busy, responseDisabled: !editable || !active || busy,
       referenced: !!line.ref_offer_id && !proactive,
-      binding: !line.part_id && canProcess && active ? <PartBinding line={line} onBound={setInquiry} refresh={refresh} disabled={busy || refreshRequired} /> : undefined,
+      binding: !line.part_id && canBind ? <PartBinding line={line} onBound={setInquiry} refresh={refresh} disabled={busy || refreshRequired} /> : undefined,
       details: <>
         {inquiry.line_answers && <p>当前答复：<CurrentAnswer inquiry={inquiry} line={line} /></p>}
         {!proactive && canEditPublished && response.mode !== "quote" && <>
@@ -329,7 +331,7 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
     </Drawer>
     {gallery && <GalleryPicker mode="modal" items={lines.filter((line) => line.part_id).map((line) => ({ partId: line.part_id!, pn: line.pn_raw }))} onClose={() => setGallery(false)} />}
     {importOpen && <WorkbookDialog mode="quote" inquiryId={inquiry.id} onClose={() => setImportOpen(false)} onApplied={() => {
-      message.success("已保存为草稿，请在页面确认后回复"); setImportOpen(false); setLoadVersion((version) => version + 1); onTaskChange?.();
+      message.success("报价已生效"); setImportOpen(false); setLoadVersion((version) => version + 1); onTaskChange?.();
     }} />}
   </section>;
 }

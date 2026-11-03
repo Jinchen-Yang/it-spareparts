@@ -49,22 +49,14 @@ def _filter_events(rows, ctx):
         inquiry = db.get(PresalesInquiry, row.subject_id)
         user, ctx = resolve_actor(db, ctx)
         own = inquiry.created_by == user.id
-        if not own and not bypass(ctx):
-            # 非发起人只看本人参与事件；共享销售通过报价读取受控内容。
-            if row.actor != user.id:
-                continue
         payload = row.payload or {}
-        actor = row.actor if own or bypass(ctx) else None
+        # D-0052：时间线全员可见，谁改的如实显示。
+        actor = row.actor
         offer_id = payload.get("offer_id")
         if offer_id is not None:
             offer = db.get(PresalesOffer, offer_id)
             if not offer or not can_view_offer(db, offer, ctx):
                 continue
-            if "reporter" not in offer_view(db, offer, ctx):
-                actor = None
-        elif actor is not None and actor != inquiry.created_by and not bypass(ctx):
-            # 领单/完成事件也可能透露被隐藏的报价人。
-            actor = None
         clean = {key: value for key, value in payload.items() if key in {
             "offer_id", "line_id", "revision", "version", "outcome", "added", "changed", "deleted",
         }}
@@ -196,7 +188,7 @@ def register_subjects():
     specs = registered()
     if "presales_inquiry" not in specs:
         register("presales_inquiry", SubjectSpec(
-            pool_permission="action_presales_quote", supervisor_permission="action_presales_supervise",
+            pool_permission="page_presales", supervisor_permission="action_presales_supervise",
             can_view_subject=_can_view, summarize=_summarize, filter_events=_filter_events,
             validate_complete=_validate_complete,
             can_manage_subject=_can_manage,

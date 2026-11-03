@@ -12,13 +12,13 @@ export default function WorkbookDialog({ mode, inquiryId, onClose, onApplied }: 
     <Space direction="vertical" style={{ width: "100%" }}>
       <Alert type="info" message={inquiry
         ? "预览核对后再应用；应用后刷新为 Excel 保存的草稿，页面上尚未保存的修改会被替换。"
-        : "支持单张或合并报价表，按文件中的来源分发；应用后只保存草稿，请回页面确认后回复。页面尚未保存的修改会被替换。"} />
+        : "支持单张或合并报价表，按文件中的来源分发；应用后价格立即生效，所有人可见。"} />
       {inquiry && !inquiryId && <WorkbookExportButton schemaName="presales_inquiry_lines" label="下载空模板"
         fetchSchema={() => presalesWorkbooks.getInquirySchema()} onExport={presalesWorkbooks.exportInquiryTemplate} filename="询价空模板.xlsx" />}
       <WorkbookImport schemaName={inquiry ? "presales_inquiry_lines" : "presales_quote_sheet"}
         buttonLabel={inquiry ? "上传 Excel" : "上传报价表"}
         previewFile={(file) => inquiry ? presalesWorkbooks.previewInquiry(file, inquiryId) : presalesWorkbooks.previewQuoteSheet(file)}
-        successMessage={inquiry ? "询价草稿已保存" : "已保存为草稿，请在页面确认后回复"} onApplied={onApplied} />
+        successMessage={inquiry ? "询价草稿已保存" : "报价已生效"} onApplied={onApplied} />
     </Space>
   </Modal>;
 }

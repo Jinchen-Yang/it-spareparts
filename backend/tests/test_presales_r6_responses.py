@@ -180,22 +180,6 @@ def test_reuse_rejects_wrong_pn_or_invalid_offer(db, r6_actors, invalid):
     assert db.scalar(select(func.count()).select_from(PresalesLineResponse)) == 0
 
 
-def test_reuse_rejects_invisible_offer_and_reference_list_uses_m8(db, r6_actors):
-    users = r6_actors
-    _, _, _, private = _publish(db, users, buyer=users.peer, whole={"mode": "private"}, price="1.00")
-    _, _, _, public = _publish(db, users, price="100.00")
-    inquiry, lines = _pending(db, users)
-    assert [row["id"] for row in library.batch(db, [users.part.id], users.buyer.id)[users.part.id]] == [public.id]
-    with pytest.raises(InvalidTransition):
-        _reply(db, inquiry, users.buyer,
-               [{"line_id": lines[0].id, "mode": "reuse", "ref_offer_id": private.id}])
-    assert _item(db, inquiry, users, users.buyer).status == "pending"
-    db.commit()
-    response = _client(users.buyer).post("/api/presales/reference", json={"inquiry_id": inquiry.id})
-    assert response.status_code == 200, response.text
-    assert [row["id"] for row in response.json()["offers"][str(users.part.id)]] == [public.id]
-
-
 def test_reuse_response_keeps_pinned_record_audience_when_current_becomes_private(db, r6_actors):
     users = r6_actors
     source, _, _, original = _publish(db, users)

@@ -4,7 +4,6 @@ import hashlib
 import json
 import re
 from decimal import Decimal
-from types import SimpleNamespace
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -16,12 +15,10 @@ from app.models.presales import (
     PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesWorkbookExport,
 )
 from app.models.workbook import WorkbookOperation
-from app.models.workflow import WorkItem
 from app.services import field_pool, price_reference
-from app.services.presales import common, library, offers, visibility
+from app.services.presales import common, library, pool, visibility
 from app.services.workbook.export import export_workbook
 from app.services.workbook.registry import Conflict as WorkbookConflict
-from app.services.workbook.registry import Forbidden as WorkbookForbidden
 from app.services.workbook.schema import ColumnSpec, SheetSpec, WorkbookError, WorkbookSchema, column_allowed
 from app.services.workbook.validation import validate_by_applying
 from app.services.workflow import work_items
@@ -39,25 +36,23 @@ QUOTE_SCHEMA = WorkbookSchema("presales_quote_sheet", 1, [
         ColumnSpec("purchase_reference", "参考采购均价", "text", "reference", "近 30 天；参考价不等于定价", field_group="data_purchase_cost"),
         ColumnSpec("sale_reference", "参考销售价", "text", "reference", "近 30 天；参考价不等于定价"),
         ColumnSpec("active_offers", "已有有效报价", "text", "reference", "仅列当前采购与所有来源单所有人均可见的有效报价", width=45),
-        ColumnSpec("mode", "处理方式", "enum", "optional", "选择报价、沿用或不报；应用只保存草稿", choices={"quote": "报价", "reuse": "沿用", "skip": "不报"}),
+        ColumnSpec("mode", "处理方式", "enum", "optional", "选择报价、沿用或不报；应用后立即生效", choices={"quote": "报价", "reuse": "沿用", "skip": "不报"}),
         ColumnSpec("unit_price", "单价", "decimal", "optional", "报价时填写，最多两位小数", decimals=2),
         ColumnSpec("price_basis", "价格性质", "enum", "optional", "成本价或售价；未修改时保留原草稿/更新目标的口径", choices={"cost": "成本价", "sale": "售价"}),
         ColumnSpec("is_tax_inclusive", "含税", "bool", "optional", "税口径；空白表示未填写"),
         ColumnSpec("qty_available", "可供数量", "decimal", "optional", "最多三位小数", decimals=3),
-        ColumnSpec("source_key", "货源", "text", "optional", "货源标识，最多 128 字", max_len=128, field_group="data_supplier"),
+        ColumnSpec("source_key", "货源", "text", "optional", "货源标识，最多 128 字", max_len=128),
         ColumnSpec("stock_location", "所在地", "text", "optional", "所在地，最多 256 字", max_len=256),
         ColumnSpec("lead_time", "交期", "text", "optional", "交期说明，最多 256 字", max_len=256),
-        ColumnSpec("supplier", "供应商", "text", "optional", "按供应商档案名称精确匹配；不唯一或找不到时报错", field_group="data_supplier"),
+        ColumnSpec("supplier", "供应商", "text", "optional", "按供应商档案名称精确匹配；不唯一或找不到时报错"),
         ColumnSpec("notes", "采购备注", "text", "optional", "沿用草稿中已有的可见性规则"),
         ColumnSpec("ref_offer_id", "沿用报价编号", "int", "optional", "沿用时必填，必须是所有来源单所有人可见的有效报价"),
         ColumnSpec("reason", "不报原因", "text", "optional", "不报时必填"),
-        ColumnSpec("on_existing", "已有报价时的选择", "enum", "optional", "本人同 PN 已有有效报价时必须显式选择", choices={"update": "更新", "new": "另报"}),
-        ColumnSpec("existing_offer_id", "目标报价编号", "int", "optional", "选择更新且有多条有效报价时必须填写"),
     ]),
 ], instructions=[
     "同一 PN 按要求 PN 一致、坏件是否返回分别合并；任一条件不同会拆行，避免放宽要求。",
     "一行会分发至全部来源单对应行；任何来源校验失败，整份回滚；不新建询价单。",
-    "不允许新增或删除行。应用只保存草稿报价及处理选择；须回到页面点击回复给销售。",
+    "不允许新增或删除行。应用后价格立即生效，所有人可见。",
     "合并来源已有草稿的值不一致时显示空白；未改动的字段按每个来源保留，修改后统一分发。",
 ])
 
@@ -88,118 +83,83 @@ def _ids(values):
 
 
 def _task(db, inquiry, ctx, user, *, history=False):
-    candidates = list(db.scalars(select(WorkItem).where(
-        WorkItem.subject_type == "presales_inquiry", WorkItem.subject_id == inquiry.id,
-        WorkItem.assignee_id == user.id,
-    ).order_by(WorkItem.id).with_for_update().execution_options(populate_existing=True)))
-    eligible = [row for row in candidates if not row.paused and row.status in work_items.ACTIVE]
-    if len(eligible) == 1:
-        return eligible[0]
-    if history and candidates and any(row.status in {"done", "declined"} for row in candidates):
-        return candidates[-1]
-    raise Forbidden("请先领取或接受自己的未暂停待办")
+    """D-0052 不再领取：共享池里能看到询价就能报价，不要求待办。"""
+    if not visibility.can_view_inquiry(db, inquiry, ctx):
+        raise Forbidden("无权处理该询价")
+    return None
 
 
 def can_access(db, ctx, subject_type, subject_id):
+    return subject_type is None and subject_id is None and work_items.has_permission(ctx, "page_presales")
+
+
+def can_access_export(db, ctx, export_id):
+    exported = db.scalar(select(PresalesWorkbookExport).where(
+        PresalesWorkbookExport.schema_name == QUOTE_SCHEMA.name,
+        PresalesWorkbookExport.export_id == export_id))
+    if exported is None or not isinstance(exported.scope.get("rows"), list):
+        return False
+    # 旧文件没有未发布答复的来源证明；已删除或后来已发布，也不能公开当时的私有基线。
+    if (exported.actor != ctx.user_id and not common.bypass(ctx)
+            and exported.scope.get("contains_private_draft") is not False):
+        return False
+    operations = db.scalars(select(WorkbookOperation).where(
+        WorkbookOperation.schema_name == QUOTE_SCHEMA.name,
+        WorkbookOperation.export_id == export_id, WorkbookOperation.actor == ctx.user_id)).all()
+    line_ids = {value for row in exported.scope["rows"] for value in row["line_ids"]}
+    if any(type(value) is not int or value < 1 for value in line_ids):
+        return False
+    lines = db.scalars(select(PresalesInquiryLine).where(PresalesInquiryLine.id.in_(line_ids))).all()
+    if len(lines) != len(line_ids):
+        return False
     try:
-        user, ctx = common.resolve_actor(db, ctx)
-        common.require(ctx, "page_presales")
-        common.require(ctx, "action_presales_quote")
-        if subject_type is not None or subject_id is not None:
-            return False
-        # M4 无法把当前计划传给授权回调。保守重查本人的全部历史来源，
-        # 任一来源失权就拒绝无范围预览/回放，避免旧回执成为权限旁路。
-        operations = list(db.scalars(select(WorkbookOperation).where(
-            WorkbookOperation.schema_name == QUOTE_SCHEMA.name,
-            WorkbookOperation.actor == ctx.user_id)))
-        exports = list(db.scalars(select(PresalesWorkbookExport).where(
-            PresalesWorkbookExport.schema_name == QUOTE_SCHEMA.name,
-            PresalesWorkbookExport.actor == ctx.user_id)))
-        line_ids = set()
-        for operation in operations:
-            for row in operation.plan.get("rows", []):
-                # 非法新增行没有来源身份和历史值，不能永久封禁后续修正上传。
-                if row.get("entity_id") is not None:
-                    line_ids.update(_source_ids(row["entity_id"]))
-        for exported in exports:
-            for row in exported.scope.get("rows", []):
-                ids = row.get("line_ids", [])
-                if any(type(value) is not int or value < 1 for value in ids):
-                    return False
-                line_ids.update(ids)
-        lines = list(db.scalars(select(PresalesInquiryLine).where(PresalesInquiryLine.id.in_(line_ids))))
-        if len(lines) != len(line_ids):
-            return False
         for inquiry_id in sorted({line.inquiry_id for line in lines}):
             inquiry = common.lock_inquiry(db, inquiry_id)
             if not visibility.can_view_inquiry(db, inquiry, ctx):
                 return False
-            _task(db, inquiry, ctx, user, history=True)
-        return (_related_exports_accessible(db, line_ids, ctx)
-                and _exports_accessible(db, exports, lines, ctx)
+        return (_export_accessible(db, exported, lines, ctx)
                 and _history_accessible(db, operations, lines, ctx))
     except (WorkflowError, WorkbookError):
         return False
 
 
-def _related_exports_accessible(db, source_ids, ctx):
-    related = []
-    all_ids = set()
-    for exported in db.scalars(select(PresalesWorkbookExport).where(
-            PresalesWorkbookExport.schema_name == QUOTE_SCHEMA.name)):
-        rows = [row for row in exported.scope.get("rows", [])
-                if source_ids.intersection(row.get("line_ids", []))]
-        if rows:
-            related.append(SimpleNamespace(actor=exported.actor, scope={"rows": rows}))
-            all_ids.update(value for row in rows for value in row["line_ids"])
-    lines = list(db.scalars(select(PresalesInquiryLine).where(PresalesInquiryLine.id.in_(all_ids))))
-    return len(lines) == len(all_ids) and _exports_accessible(db, related, lines, ctx)
-
-
-def _exports_accessible(db, exports, lines, ctx):
+def _export_accessible(db, exported, lines, ctx):
     by_id = {line.id: line for line in lines}
-    for exported in exports:
-        for row in exported.scope.get("rows", []):
-            members = [by_id[value] for value in row["line_ids"]]
-            inquiries = {line.inquiry_id: db.get(PresalesInquiry, line.inquiry_id) for line in members}
-            if any(not visibility.can_view_inquiry(db, inquiry, ctx) for inquiry in inquiries.values()):
+    for row in exported.scope.get("rows", []):
+        members = [by_id[value] for value in row["line_ids"]]
+        inquiries = {line.inquiry_id: db.get(PresalesInquiry, line.inquiry_id) for line in members}
+        if any(not visibility.can_view_inquiry(db, inquiry, ctx) for inquiry in inquiries.values()):
+            return False
+        if any(not work_items.has_permission(ctx, key) for key in row.get("field_groups", [])):
+            return False
+        for note in row.get("notes", []):
+            if note["level"] == "header":
+                record = inquiries.get(note["id"])
+                author = record.created_by if record is not None else None
+            elif note["level"] == "line":
+                record = by_id.get(note["id"])
+                author = inquiries[record.inquiry_id].created_by if record is not None else None
+            else:
                 return False
-            if any(not work_items.has_permission(ctx, key) for key in row.get("field_groups", [])):
+            if record is None or not visibility._allowed(db, record.notes_audience_rule_id, ctx, author):
                 return False
-            for note in row.get("notes", []):
-                if note["level"] == "header":
-                    record = inquiries.get(note["id"])
-                    author = record.created_by if record is not None else None
-                elif note["level"] == "line":
-                    record = by_id.get(note["id"])
-                    author = inquiries[record.inquiry_id].created_by if record is not None else None
-                else:
-                    return False
-                if record is None or not visibility._allowed(db, record.notes_audience_rule_id, ctx, author):
-                    return False
-            for line_id, field_id in row.get("delivery_fields", []):
-                stored = db.scalar(select(FieldValue.id).where(
-                    FieldValue.subject_type == "presales_inquiry",
-                    FieldValue.subject_id == f"line:{line_id}", FieldValue.field_def_id == field_id))
-                # 旧交期迁移到行列后会删除 M7 值，不能据此撤销历史工作簿授权。
-                if stored is None:
-                    continue
-                subject = field_pool.Subject("presales_inquiry", f"line:{line_id}", "line")
-                visible = field_pool.read_values(db, [subject], ctx, common.bypass)[subject.subject_id]
-                if field_id not in {field["field_def_id"] for field in visible}:
-                    return False
-            for offer_id in row.get("active_offer_ids", []):
-                offer = db.get(PresalesOffer, offer_id)
-                viewers = [ctx, *(common.resolve_actor(db, inquiry.created_by)[1]
-                                 for inquiry in inquiries.values())]
-                if offer is None or any(visibility.offer_view(db, offer, viewer) is None for viewer in viewers):
-                    return False
-            if exported.actor != ctx.user_id and not common.bypass(ctx):
-                for draft in row.get("draft_fields", []):
-                    offer = db.get(PresalesOffer, draft["id"])
-                    view = visibility.offer_view(db, offer, ctx) if offer is not None else None
-                    if view is None or any(key not in view for key in draft["keys"]):
-                        return False
+        for line_id, field_id in row.get("delivery_fields", []):
+            stored = db.scalar(select(FieldValue.id).where(
+                FieldValue.subject_type == "presales_inquiry",
+                FieldValue.subject_id == f"line:{line_id}", FieldValue.field_def_id == field_id))
+            # 旧交期迁移到行列后会删除 M7 值，不能据此撤销历史工作簿授权。
+            if stored is None:
+                continue
+            subject = field_pool.Subject("presales_inquiry", f"line:{line_id}", "line")
+            visible = field_pool.read_values(db, [subject], ctx, common.bypass)[subject.subject_id]
+            if field_id not in {field["field_def_id"] for field in visible}:
+                return False
+        for offer_id in row.get("active_offer_ids", []):
+            offer = db.get(PresalesOffer, offer_id)
+            viewers = [ctx, *(common.resolve_actor(db, inquiry.created_by)[1]
+                             for inquiry in inquiries.values())]
+            if offer is None or any(visibility.offer_view(db, offer, viewer) is None for viewer in viewers):
+                return False
     return True
 
 
@@ -210,15 +170,15 @@ def _history_accessible(db, operations, lines, ctx):
         for row in operation.plan.get("rows", []):
             if row.get("entity_id") is None:
                 continue
-            members = [by_id[value] for value in _source_ids(row["entity_id"])]
+            line_ids = _source_ids(row["entity_id"])
+            if not all(value in by_id for value in line_ids):
+                return False
+            members = [by_id[value] for value in line_ids]
             inquiries = {line.inquiry_id: db.get(PresalesInquiry, line.inquiry_id) for line in members}
             values = dict(row.get("values", {}))
             for change in row.get("changes", []):
                 if values.get(change["key"]) in (None, "") and change.get("before") not in (None, ""):
                     values[change["key"]] = change["before"]
-            if any(values.get(key) not in (None, "") for key in ("supplier", "source_key")):
-                if not work_items.has_permission(ctx, "data_supplier"):
-                    return False
             if values.get("customer_requirements"):
                 if any(not visibility._allowed(db, inquiry.notes_audience_rule_id, ctx, inquiry.created_by)
                        for inquiry in inquiries.values()):
@@ -243,7 +203,6 @@ def _history_accessible(db, operations, lines, ctx):
 def _load(db, ids, ctx):
     user, ctx = common.resolve_actor(db, ctx)
     common.require(ctx, "page_presales")
-    common.require(ctx, "action_presales_quote")
     initial = list(db.scalars(select(PresalesInquiryLine).where(PresalesInquiryLine.id.in_(ids))))
     if len(initial) != len(ids):
         raise Forbidden("来源询价行不存在或不可处理")
@@ -251,8 +210,8 @@ def _load(db, ids, ctx):
     tasks = {}
     for inquiry_id in sorted({line.inquiry_id for line in initial}):
         inquiry = common.lock_inquiry(db, inquiry_id)
-        if inquiry.kind != "sales_inquiry" or inquiry.status != "submitted":
-            raise Forbidden("只能导出已提交且本人有待办的销售询价")
+        if inquiry.kind != "sales_inquiry" or inquiry.status not in {"submitted", "revising"}:
+            raise Forbidden("只能导出已提交的销售询价")
         tasks[inquiry.id] = _task(db, inquiry, ctx, user)
         inquiries[inquiry.id] = inquiry
     lines = list(db.scalars(select(PresalesInquiryLine).where(PresalesInquiryLine.id.in_(ids))
@@ -272,19 +231,24 @@ def _load(db, ids, ctx):
 
 
 def _state(db, line, drafts, responses, ctx):
-    own = [draft for draft in drafts if draft.line_id == line.id]
+    """同时返回字段的真实来源，供导出记录未发布草稿的访问边界。"""
+    if line.answer_state == "skip":
+        return {"mode": "skip", "reason": line.answer_reason}, False
+    if line.current_offer_id is not None:
+        offer = db.get(PresalesOffer, line.current_offer_id)
+    else:
+        own = [draft for draft in drafts if draft.line_id == line.id]
+        offer = own[0] if len(own) == 1 else None
+    if offer is not None:
+        view = visibility.offer_view(db, offer, ctx)
+        if view is not None:
+            supplier = db.get(DimSupplier, view["supplier_id"]) if view.get("supplier_id") is not None else None
+            return {**{key: view[key] for key in _DATA_KEYS if key in view},
+                    "mode": "quote", "supplier": supplier.name_raw if supplier else None}, offer.status == "draft"
     response = next((row for row in responses if row.line_id == line.id and row.line_version == line.version), None)
-    result = {}
-    if len(own) == 1:
-        draft = own[0]
-        view = visibility.offer_view(db, draft, ctx) or {}
-        result.update({key: view.get(key) for key in _DATA_KEYS})
-        supplier = db.get(DimSupplier, view["supplier_id"]) if view.get("supplier_id") is not None else None
-        result.update(mode="quote", supplier=supplier.name_raw if supplier else None)
-        result.update({key: (draft.workbook_choice or {}).get(key) for key in ("on_existing", "existing_offer_id")})
-    elif response is not None:
-        result.update(mode=response.mode, ref_offer_id=response.ref_offer_id, reason=response.reason)
-    return result
+    if response is not None:
+        return {"mode": response.mode, "ref_offer_id": response.ref_offer_id, "reason": response.reason}, response.is_draft
+    return {}, False
 
 
 def _same(states, key):
@@ -326,7 +290,9 @@ def _row(db, data, refs=None):
     user, ctx, inquiries, tasks, lines, drafts, responses = data
     if len({_group_key(line) for line in lines}) != 1:
         raise WorkbookError("合并行来源的 PN、一致要求或坏件返回条件已改变，请重新导出")
-    states = [_state(db, line, drafts, responses, ctx) for line in lines]
+    sources = [_state(db, line, drafts, responses, ctx) for line in lines]
+    states = [state for state, _ in sources]
+    private_keys = {key for state, is_draft in sources if is_draft for key in state}
     values = {key: _same(states, key) for key in {column.key for column in QUOTE_SCHEMA.sheets[0].columns if column.editable}}
     part = db.get(DimPart, lines[0].part_id) if lines[0].part_id is not None else None
     requirements = []
@@ -372,14 +338,13 @@ def _row(db, data, refs=None):
     version_data = [
         [(row.id, row.version, row.status) for row in inquiries.values()],
         [(row.id, row.version, row.part_id, row.pn_raw, row.require_exact_pn, row.return_defective) for row in lines],
-        [(row.id, row.version, row.status, row.paused, row.assignee_id, row.claimed_by) for row in tasks.values()],
         [(row.id, row.version) for row in drafts],
         [(row.id, row.line_version, row.mode, row.ref_offer_id, row.ref_offer_revision_no, row.reason,
           getattr(row, "is_draft", False)) for row in responses],
         active_versions,
     ]
     version = int(hashlib.sha256(json.dumps(version_data, ensure_ascii=False).encode()).hexdigest()[:13], 16)
-    return version, values
+    return version, values, private_keys
 
 
 def load_current(db, sheet, ids, ctx):
@@ -393,10 +358,6 @@ def load_current(db, sheet, ids, ctx):
             continue
     # 文件可自由调整行顺序；始终按单号锁定，避免不同上传顺序形成反向锁。
     all_ids = {value for values in sources.values() for value in values}
-    # M4 不把文件导出者传给回调；按来源追溯所有相关导出，阻止转交文件绕过 M8。
-    # 必须直接拒绝，不能转为 conflict 行，否则禁删行仍会把旧基线带回预览。
-    if not _related_exports_accessible(db, all_ids, ctx):
-        raise WorkbookForbidden("来源导出字段当前不可见，不能预览或应用该采购表")
     inquiry_ids = db.scalars(select(PresalesInquiryLine.inquiry_id).where(
         PresalesInquiryLine.id.in_(all_ids)).distinct().order_by(PresalesInquiryLine.inquiry_id))
     for inquiry_id in inquiry_ids:
@@ -405,7 +366,8 @@ def load_current(db, sheet, ids, ctx):
     for entity_id, values in sources.items():
         try:
             data = _load(db, values, ctx)
-            result[entity_id] = _row(db, data)
+            version, current, _ = _row(db, data)
+            result[entity_id] = version, current
         except WorkbookConflict:
             raise
         except (WorkflowError, WorkbookError):
@@ -417,11 +379,10 @@ def export_quote_sheet(db, inquiry_ids, ctx, visible_columns=None):
     ids = _ids(inquiry_ids)
     user, ctx = common.resolve_actor(db, ctx)
     common.require(ctx, "page_presales")
-    common.require(ctx, "action_presales_quote")
     for inquiry_id in ids:
         inquiry = common.lock_inquiry(db, inquiry_id)
-        if inquiry.kind != "sales_inquiry" or inquiry.status != "submitted":
-            raise Forbidden("只能导出已提交且本人有待办的销售询价")
+        if inquiry.kind != "sales_inquiry" or inquiry.status not in {"submitted", "revising"}:
+            raise Forbidden("只能导出已提交的销售询价")
         _task(db, inquiry, ctx, user)
     lines = list(db.scalars(select(PresalesInquiryLine).where(
         PresalesInquiryLine.inquiry_id.in_(ids), PresalesInquiryLine.status == "active",
@@ -432,26 +393,29 @@ def export_quote_sheet(db, inquiry_ids, ctx, visible_columns=None):
     refs = price_reference.batch(db, list({line.part_id for line in lines if line.part_id is not None}), ctx)
     rows = []
     scopes = []
+    contains_private_draft = False
     selected = None if visible_columns is None else visible_columns.get("lines", [])
     columns = [column for column in QUOTE_SCHEMA.sheets[0].columns
                if column_allowed(column, ctx) and (selected is None or column.key in selected or column.mandatory)]
     for members in groups.values():
         entity_id = _entity_id(members)
         data = _load(db, _source_ids(entity_id), ctx)
-        version, values = _row(db, data, refs)
+        version, values, private_keys = _row(db, data, refs)
+        if any(column.key in private_keys and values.get(column.key) not in (None, "") for column in columns):
+            contains_private_draft = True
         rows.append({"entity_id": entity_id, "base_version": version, "values": values})
         scopes.append(_export_scope(db, data, values, columns))
     export_id = str(uuid4())
     content = export_workbook(QUOTE_SCHEMA, {"lines": rows}, export_id=export_id, actor=ctx.user_id,
                               visible_columns=visible_columns, ctx=ctx)
     db.add(PresalesWorkbookExport(schema_name=QUOTE_SCHEMA.name, export_id=export_id,
-                                 actor=ctx.user_id, scope={"rows": scopes}))
+                                 actor=ctx.user_id, scope={"rows": scopes, "contains_private_draft": contains_private_draft}))
     db.flush()
     return content
 
 
 def _export_scope(db, data, values, columns):
-    _, ctx, inquiries, _, lines, drafts, _ = data
+    _, ctx, inquiries, _, lines, _, _ = data
     present = {column.key for column in columns if values.get(column.key) not in (None, "")}
     notes = []
     if "customer_requirements" in present:
@@ -460,13 +424,11 @@ def _export_scope(db, data, values, columns):
         notes.extend({"level": "line", "id": line.id} for line in lines
                      if line.notes and visibility._allowed(db, line.notes_audience_rule_id, ctx,
                                                           inquiries[line.inquiry_id].created_by))
-    draft_keys = sorted(present.intersection(_DATA_KEYS) | ({"supplier_id"} if "supplier" in present else set()))
     return {"line_ids": [line.id for line in lines], "notes": notes,
             "active_offer_ids": [int(match) for match in re.findall(r"^#([0-9]+)：", values["active_offers"], re.MULTILINE)]
                 if "active_offers" in present else [],
             "field_groups": sorted({column.field_group for column in columns
-                                    if column.field_group and column.key in present}),
-            "draft_fields": [{"id": draft.id, "keys": draft_keys} for draft in drafts] if draft_keys else []}
+                                    if column.field_group and column.key in present})}
 
 
 def _supplier_id(db, name):
@@ -483,7 +445,6 @@ def apply_quotes(db, plan, ctx):
         raise WorkbookError("采购报价表不接受额外业务范围")
     applied = []
     used = set()
-    updating = set()
     # 先锁定并验证全部来源，再调用逐行服务，防止一行来源重复分发。
     loaded = []
     for row in plan.rows:
@@ -505,7 +466,7 @@ def apply_quotes(db, plan, ctx):
         values = row["values"]
         supplier_id = _supplier_id(db, values.get("supplier")) if "supplier" in changes else None
         for line in lines:
-            state = _state(db, line, drafts, responses, ctx)
+            state, _ = _state(db, line, drafts, responses, ctx)
             def chosen(key):
                 return values.get(key) if key in changes else state.get(key)
             mode = chosen("mode")
@@ -514,22 +475,32 @@ def apply_quotes(db, plan, ctx):
                 payload["source_key"] = ""
             if "supplier" in changes:
                 payload["supplier_id"] = supplier_id
+            # D-0052：Excel 与页面同一写入口，保存即生效。
             if mode == "quote":
-                payload["no_stock"] = False
-            result = offers.save_line_decision(db, line.inquiry_id, line.id, ctx,
-                expected_version=inquiries[line.inquiry_id].version, work_item_id=tasks[line.inquiry_id].id,
-                mode=mode, data=payload if mode == "quote" else None,
-                ref_offer_id=chosen("ref_offer_id"), reason=chosen("reason"),
-                on_existing=chosen("on_existing"), existing_offer_id=chosen("existing_offer_id"))
-            if result.get("offer_id") is not None:
-                draft = db.get(PresalesOffer, result["offer_id"])
-                target = (draft.workbook_choice or {}).get("existing_offer_id")
-                if target is not None:
-                    if target in updating:
-                        raise InvalidTransition("同一批次不能多次更新同一有效报价，请改为另报或逐单处理")
-                    updating.add(target)
-            applied.append({"inquiry_id": line.inquiry_id, **result})
+                # 文件只改部分字段时，其余字段沿用基线；已有草稿的货源和供应商不能丢。
+                base = {key: state[key] for key in _DATA_KEYS if key in state}
+                if state.get("supplier") and "supplier" not in changes:
+                    base["supplier_id"] = _supplier_id(db, state["supplier"])
+                pool.set_price(db, line.id, ctx, {**base, **payload}, expected_version=line.version)
+            elif mode == "skip":
+                pool.skip(db, line.id, ctx, chosen("reason"), expected_version=line.version)
+            elif mode == "reuse":
+                pool.set_price(db, line.id, ctx, _reused_quote(db, chosen("ref_offer_id"), line.part_id, ctx),
+                               expected_version=line.version)
+            else:
+                raise InvalidTransition("请选择处理方式：报价、沿用或不报")
+            applied.append({"inquiry_id": line.inquiry_id, "line_id": line.id, "mode": mode})
     return {"saved": applied, "replied": False}
+
+
+def _reused_quote(db, offer_id, part_id, ctx):
+    offer = db.get(PresalesOffer, offer_id) if offer_id is not None else None
+    if (offer is None or part_id is None or offer.part_id != part_id
+            or not common.offer_effective(offer) or not visibility.can_view_offer(db, offer, ctx)):
+        raise InvalidTransition("请选择同一 PN 的有效报价沿用")
+    return {"unit_price": offer.unit_price, "is_tax_inclusive": offer.is_tax_inclusive,
+            "price_basis": offer.price_basis, "lead_time": offer.lead_time,
+            "stock_location": offer.stock_location, "qty_available": offer.qty_available}
 
 
 def _error_column(exc):

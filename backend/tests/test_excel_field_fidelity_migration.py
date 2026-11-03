@@ -41,6 +41,17 @@ def _column(table: str, name: str):
         ), {"t": table, "c": name}).first()
 
 
+@pytest.fixture(autouse=True)
+def _pinned_at_revision(db):
+    """从共同父版本单独安装 D-0050，避免将合流点回退后的两个分支误当作单个版本。"""
+    db.rollback()
+    alembic_command.downgrade(_cfg(), _PREVIOUS)
+    alembic_command.upgrade(_cfg(), _REVISION)
+    yield
+    db.rollback()
+    alembic_command.upgrade(_cfg(), "head")
+
+
 def _revision() -> str:
     with engine.connect() as conn:
         return conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
@@ -95,6 +106,18 @@ def _scalar(sql: str):
         return conn.execute(text(sql)).scalar_one()
 
 
+def test_upgrade_from_excel_branch_preserves_raw_text_and_adds_pool(db):
+    assert _revision() == _REVISION
+    assert _column("presales_inquiry_line", "answer_state") is None
+    _seed_line(db, adjust_warehouse_raw="委外库的手工发货备注")
+    db.commit()
+
+    alembic_command.upgrade(_cfg(), "head")
+    assert _column("presales_inquiry_line", "answer_state") is not None
+    assert _scalar("SELECT adjust_warehouse_raw FROM f_maintenance_line WHERE raw_line_id = 'MIG-LINE-1'") == (
+        "委外库的手工发货备注")
+
+
 def test_empty_tables_roundtrip_downgrade_upgrade(db):
     alembic_command.downgrade(_cfg(), _PREVIOUS)
     try:
@@ -103,7 +126,7 @@ def test_empty_tables_roundtrip_downgrade_upgrade(db):
         assert tuple(_column("f_maintenance_order", "receiver")) == (
             "character varying", 64)
     finally:
-        alembic_command.upgrade(_cfg(), "head")
+        alembic_command.upgrade(_cfg(), _REVISION)
 
     assert _revision() == _REVISION
     assert tuple(_column("f_maintenance_order", "receiver")) == ("text", None)
@@ -126,7 +149,7 @@ def test_short_data_survives_downgrade_upgrade(db):
             " WHERE raw_line_id = 'MIG-LINE-1'"
         ) == "短仓"
     finally:
-        alembic_command.upgrade(_cfg(), "head")
+        alembic_command.upgrade(_cfg(), _REVISION)
 
     assert _revision() == _REVISION
     assert _scalar(
@@ -161,7 +184,7 @@ def _expect_downgrade_rejected(db, pattern: str) -> None:
     finally:
         db.rollback()
         if _revision() != _REVISION:
-            alembic_command.upgrade(_cfg(), "head")
+            alembic_command.upgrade(_cfg(), _REVISION)
 
 
 def test_overlong_head_value_rejects_downgrade(db):

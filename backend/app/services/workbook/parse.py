@@ -220,15 +220,21 @@ def parse_workbook(schema, file_bytes: bytes, *, ctx) -> ParseResult:
                         cell.error = str(exc)
                 if not column.editable and kind == "exported":
                     baseline = row.baseline.get(key)
-                    if json_value(cell.value) != baseline or cell.error:
+                    try:
+                        signed_value = normalize(column, baseline, date_system=metadata["date_system"])
+                    except ValueError:
+                        signed_value = baseline
+                    # Excel 数值单元格不保留尾零；只读 decimal 按十进制数值与签名基线比较。
+                    if column.type == "decimal":
+                        changed = cell.value != signed_value
+                    else:
+                        changed = json_value(cell.value) != baseline
+                    if changed or cell.error:
                         cell.warning = "锁定或参考列已改动，已忽略并保留导出值"
                     # 编码数字化与无缓存公式必须报错，其余锁定字段只给警告。
                     if cell.error and not (column.type == "code" or source.data_type == "f"):
                         cell.error = None
-                    try:
-                        cell.value = normalize(column, baseline, date_system=metadata["date_system"])
-                    except ValueError:
-                        cell.value = baseline
+                    cell.value = signed_value
                 if cell.error:
                     message(sheet.key, row_number, column.header, cell.error)
                 if cell.warning:

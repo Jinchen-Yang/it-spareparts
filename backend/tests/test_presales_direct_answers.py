@@ -51,28 +51,6 @@ def test_http_direct_quote_creates_no_document_line_or_task_and_updates_same_ide
         assert db.scalar(select(func.count()).select_from(model)) == 0
 
 
-def test_standalone_quote_preserves_audience_and_supplier_privacy(db, r6_actors):
-    u = r6_actors
-    hidden = offers.direct_offer(db, u.buyer.id, u.part.id,
-        {"unit_price": "10", "notes": "秘密", "notes_audience": {"mode": "private"}},
-        offer_audience={"mode": "private"})
-    assert library.batch(db, [u.part.id], u.sales.id)[u.part.id] == []
-    assert library.batch(db, [u.part.id], u.buyer.id)[u.part.id][0]["id"] == hidden.id
-    assert visibility.pinned_offer_view(db, hidden.id, 1, common.resolve_actor(db, u.sales.id)[1]) is None
-    public = offers.direct_offer(db, u.buyer.id, u.part.id,
-        {"unit_price": "20", "supplier_id": u.supplier.id, "source_key": "secret-source",
-         "notes": "private-note", "notes_audience": {"mode": "private"}}, on_existing="new")
-    view = library.batch(db, [u.part.id], u.sales.id)[u.part.id][0]
-    assert view["id"] == public.id and "supplier_id" not in view and "source_key" not in view
-    assert "notes" not in view
-    with pytest.raises(Forbidden):
-        offers.update_offer(db, public.id, u.peer.id, {"unit_price": "1"}, expected_version=public.version)
-    with pytest.raises(Forbidden):
-        offers.direct_offer(db, u.sales.id, u.part.id, {"unit_price": "1"})
-    history = visibility.revision_views(db, public.id, common.resolve_actor(db, u.buyer.id)[1])
-    assert history[0]["snapshot"]["inquiry_id"] is None
-
-
 def test_standalone_quote_can_be_referenced_and_closed_without_mutating_won_snapshot(db, r6_actors):
     u = r6_actors
     quote = offers.direct_offer(db, u.buyer.id, u.part.id, {"unit_price": "10"})
@@ -143,17 +121,6 @@ def test_reuse_current_answer_updates_but_old_snapshot_and_completed_task_do_not
     view = _view(db, inquiry, u.sales)
     assert view["line_answers"][0] == {"line_id": lines[0].id, "state": "unavailable", "responded": True}
     assert view["can_urge"] is False and view["progress"]["quoted_lines"] == 1
-
-
-def test_current_answer_never_leaks_new_private_price_or_reporter(db, r6_actors):
-    u = r6_actors
-    _, _, _, quote = _publish(db, u)
-    inquiry, lines = _pending(db, u)
-    _reply(db, inquiry, u.buyer, [{"line_id": lines[0].id, "mode": "reuse", "ref_offer_id": quote.id}])
-    _publish(db, u, whole={"mode": "private"}, price="987.65", on_existing="update", existing_offer_id=quote.id)
-    view = _view(db, inquiry, u.sales)
-    assert view["line_answers"][0]["state"] == "unavailable"
-    assert "987.65" not in str(view)
 
 
 def test_paused_tasks_cannot_be_urged_in_read_or_write_paths(db, r6_actors):

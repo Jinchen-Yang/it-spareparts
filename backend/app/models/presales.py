@@ -92,6 +92,14 @@ class PresalesInquiryLine(Base):
     notes: Mapped[str | None] = mapped_column(Text)
     notes_audience_rule_id: Mapped[int | None] = mapped_column(ForeignKey("audience_rule.id"))
     return_defective: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # D-0052：当前答复只由 services.presales.answers 计算写入，共享池列表直接读取。
+    answer_state: Mapped[str] = mapped_column(String(8), default="pending", server_default="pending")
+    current_offer_id: Mapped[int | None] = mapped_column(ForeignKey(
+        "presales_offer.id", use_alter=True, name="fk_presales_line_current_offer",
+    ))
+    answer_reason: Mapped[str | None] = mapped_column(Text)
+    answered_by: Mapped[int | None] = mapped_column(ForeignKey("sys_user.id", name="fk_presales_line_answered_by"))
+    answered_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now(), onupdate=func.now())
 
@@ -99,7 +107,11 @@ class PresalesInquiryLine(Base):
         UniqueConstraint("inquiry_id", "line_key", name="uq_presales_line_key"),
         CheckConstraint("seq >= 1 AND version >= 1 AND qty > 0", name="ck_presales_line_values"),
         CheckConstraint("status IN ('active', 'deleted')", name="ck_presales_line_status"),
+        CheckConstraint("answer_state IN ('pending', 'quoted', 'skip')", name="ck_presales_line_answer_state"),
         Index("ix_presales_line_inquiry_seq", "inquiry_id", "seq"),
+        Index("ix_presales_line_pool", "answer_state", "inquiry_id", postgresql_where=text("status = 'active'")),
+        Index("ix_presales_line_current_offer", "current_offer_id",
+              postgresql_where=text("current_offer_id IS NOT NULL")),
     )
 
 
@@ -137,6 +149,8 @@ class PresalesOffer(Base):
     revision_no: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     created_by: Mapped[int] = mapped_column(ForeignKey("sys_user.id"))
+    # D-0052：谁都能改价，显示和记录的是最后更新人；NULL 表示未被他人更新过。
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("sys_user.id", name="fk_presales_offer_updated_by"))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now(), onupdate=func.now())
 

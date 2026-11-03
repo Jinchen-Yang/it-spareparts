@@ -146,18 +146,20 @@ def test_duplicate_version_and_already_bound_errors_are_distinct(db, actors):
     assert db.scalar(select(func.count()).select_from(ProductSpec)) == 0
 
 
-@pytest.mark.parametrize("denied", ["page_master_data", "action_presales_bind_part", "unassigned", "unclaimed_pool"])
-def test_specs_do_not_expand_binding_permissions(db, actors, denied):
-    _, line = _unbound(db, actors, assigned=denied != "unclaimed_pool")
-    actor = actors.peer if denied == "unassigned" else actors.buyer
-    if denied in {"page_master_data", "action_presales_bind_part"}:
-        actor.perm_overrides = {denied: False}
-        db.commit()
-    response = _client(actor).post(f"/api/presales/lines/{line.id}/create-part", json={
+@pytest.mark.parametrize("missing", ["action_presales_bind_part", "page_master_data"])
+def test_specs_do_not_expand_binding_permissions(db, actors, missing):
+    inquiry, line = _unbound(db, actors)
+    before = (inquiry.version, line.version, inquiry.submitted_snapshot)
+    actors.buyer.perm_overrides = {missing: False}
+    db.commit()
+    response = _client(actors.buyer).post(f"/api/presales/lines/{line.id}/create-part", json={
         "pn_std": line.pn_raw, "expected_version": line.version, "spec_updates": _specs()})
     assert response.status_code == 403, response.text
     assert response.json()["detail"]["code"] == "permission_denied"
-    assert db.scalar(select(func.count()).select_from(DimPart)) == 0
+    db.expire_all()
+    assert line.part_id is None and (inquiry.version, line.version, inquiry.submitted_snapshot) == before
+    for model in (DimPart, ProductSpec, SysAuditLog):
+        assert db.scalar(select(func.count()).select_from(model)) == 0
 
 
 def test_binding_failure_after_part_audit_flush_rolls_back_everything(db, actors, monkeypatch):
