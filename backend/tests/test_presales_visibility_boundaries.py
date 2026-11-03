@@ -248,7 +248,8 @@ def test_revoked_sales_source_hides_won_and_response_ids_without_rewriting_refer
         assert compact["won_offer_id"] is None and compact["won_offer_revision_no"] is None
 
 
-def test_notes_only_edit_keeps_restricted_reference_when_payload_omits_it(db, users):
+@pytest.mark.parametrize("change", [{"qty": 3}, {"ref_offer_id": None}])
+def test_notes_only_edit_keeps_restricted_reference_when_payload_omits_it(db, users, change):
     source_inquiry, source = _quoted(db, users,
         whole={"mode": "include", "user_ids": [users.other.username]})
     inquiry = inquiries.create_draft(db, users.other.id, lines=[{
@@ -266,11 +267,15 @@ def test_notes_only_edit_keeps_restricted_reference_when_payload_omits_it(db, us
     assert line.notes == "仅补充客户备注"
     assert (line.ref_offer_id, line.ref_offer_revision_no) == original
     inquiries.update_draft(db, inquiry.id, users.other.id, inquiry.version,
-        lines=[{"line_key": line.line_key, "qty": 3}],
+        lines=[{"line_key": line.line_key, **change}],
         expected_line_versions={line.line_key: line.version}, confirm_reset=True)
     assert line.ref_offer_id is None and line.ref_offer_revision_no is None
     assert line.current_offer_id is None and line.answer_state == "pending"
     assert source.status == "published"
+    if "ref_offer_id" in change:
+        assert line.qty == 1
+        inquiries.resubmit(db, inquiry.id, users.other.id, inquiry.version)
+        assert inquiry.status == "submitted"
 
 
 @pytest.mark.parametrize("action", ["check", "bind", "create"])

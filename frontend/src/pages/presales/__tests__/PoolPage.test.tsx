@@ -297,7 +297,7 @@ describe("询价报价共享池", () => {
     localStorage.setItem("permissions", JSON.stringify({ action_presales_supervise: true }));
     vi.spyOn(presalesPool, "lines").mockResolvedValue({ ...page([line()]), counts: { pending: 1, quoted: 0, skip: 0, mine: 1, all: 1, drafts: 2 } });
     show();
-    expect(await screen.findByRole("link", { name: "我的草稿 2" })).toHaveAttribute("href", "/presales/inquiries?status=draft");
+    expect(await screen.findByRole("link", { name: "我的草稿 2" })).toHaveAttribute("href", "/presales/inquiries?status=draft&scope=mine");
     fireEvent.click(screen.getByRole("button", { name: "关闭询价 XJ20261101001" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).queryByRole("radio", { name: /已成交/ })).not.toBeInTheDocument();

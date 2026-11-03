@@ -40,10 +40,10 @@ function lineOffers(detail: Inquiry | undefined, line: InquiryLine): Offer[] {
 
 export default function InquiryListPage() {
   const navigate = useNavigate();
-  const canSeeAll = isPresalesAdmin() || readPermissionMap().action_presales_quote === true;
-  const [scope, setScope] = useState<"mine" | "shared" | "all">(canSeeAll ? "all" : "mine");
-  const [kind, setKind] = useState<Inquiry["kind"]>();
   const [params] = useSearchParams();
+  const canSeeAll = isPresalesAdmin() || readPermissionMap().action_presales_quote === true;
+  const [scope, setScope] = useState<"mine" | "shared" | "all">(params.get("scope") === "mine" ? "mine" : canSeeAll ? "all" : "mine");
+  const [kind, setKind] = useState<Inquiry["kind"]>();
   const [status, setStatus] = useState<Inquiry["status"] | undefined>(params.get("status") === "draft" ? "draft" : undefined);
   const [stage, setStage] = useState("");
   const [query, setQuery] = useState("");

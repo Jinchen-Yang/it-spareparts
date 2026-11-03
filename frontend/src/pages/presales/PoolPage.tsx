@@ -298,7 +298,7 @@ export default function PoolPage() {
     <PageHeader title="询价报价" subtitle="默认查看本人和指定给自己的询价，采购／报价人可查看全部已提交询价，管理员可查看全部询价" extra={<Space>
       <Link to="/presales/inquiries/new">Excel 询价</Link>
       <Link to="/presales/library">报价库</Link>
-      <Link to="/presales/inquiries?status=draft">我的草稿{counts?.drafts ? ` ${counts.drafts}` : ""}</Link>
+      <Link to="/presales/inquiries?status=draft&scope=mine">我的草稿{counts?.drafts ? ` ${counts.drafts}` : ""}</Link>
       <Button onClick={() => setDirect(!direct)}>主动报价</Button>
     </Space>} />
     {direct && <div className="presales-panel"><DirectQuote onClose={() => setDirect(false)} onDone={(text) => { setDirect(false); void message.success(text); void load(); }} /></div>}

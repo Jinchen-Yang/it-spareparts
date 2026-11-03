@@ -1,6 +1,8 @@
 """假业务 demo：逐格预览、权限复查、事务回滚和首次回执重放。"""
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from io import BytesIO
+import json
 from threading import Barrier
 from types import SimpleNamespace
 
@@ -19,7 +21,7 @@ from app.security import UserContext
 from app.services.workbook import operations, registry
 from app.services.workbook.export import export_workbook
 from app.services.workbook.parse import CellResult, ParsedRow, ParseResult
-from app.services.workbook.plan import plan
+from app.services.workbook.plan import Plan, plan
 from app.services.workbook.registry import ApplyFailed, Conflict, Forbidden, WorkbookSpec
 from app.services.workbook.schema import ColumnSpec, SheetSpec, WorkbookError, WorkbookSchema
 
@@ -117,6 +119,42 @@ def test_plan_all_statuses_and_only_actual_cell_changes():
     assert result.rows[0]["changes"] == [{"key": "name", "header": "名称", "before": "旧值", "after": "新值"}]
     assert result.rows[1]["changes"] == []
     assert result.rows[-1]["values"] == {"name": "删除"}
+    assert all("access" not in row for row in result.rows)
+    assert result.digest == "71d984e83389480c5f04cc337999869eec06a126b9461a195a5ac3b875d38306"
+
+
+@pytest.mark.parametrize(("kind", "current_version", "value", "status"), [
+    ("exported", 1, "新值", "modified"),
+    ("exported", 1, "旧值", "unchanged"),
+    ("exported", 2, "新值", "conflict"),
+    ("deleted", 1, None, "deleted"),
+    ("deleted", 2, None, "conflict"),
+])
+def test_plan_copies_server_access_metadata_and_includes_it_in_digest(kind, current_version, value, status):
+    row = ParsedRow("items", 2, kind, 1, 1, "token-1",
+        cells={"name": CellResult(value, value, header="名称")},
+        editable_keys=["name"], baseline={"name": "旧值"})
+    parsed = ParseResult("demo", "1", "export", "sha", [row])
+    metadata = {"state_offer_ids": [11], "scope": {"line_versions": {3: Decimal("2.00")}}}
+    current = {1: (current_version, {"name": "旧值"}, metadata)}
+    result = plan(parsed, lambda sheet, ids: current)
+    saved = result.rows[0]
+    assert saved["status"] == status
+    assert saved["access"] == {"state_offer_ids": [11], "scope": {"line_versions": {"3": "2.00"}}}
+    assert metadata["scope"]["line_versions"] == {3: Decimal("2.00")}
+    initial_digest = result.digest
+
+    metadata["state_offer_ids"].append(12)
+    metadata["scope"]["line_versions"][3] = Decimal("9.00")
+    assert saved["access"] == {"state_offer_ids": [11], "scope": {"line_versions": {"3": "2.00"}}}
+    assert result.digest == initial_digest
+
+    saved["access"]["state_offer_ids"].append(13)
+    assert metadata["state_offer_ids"] == [11, 12]
+    assert result.digest != initial_digest
+    restored = Plan.from_dict(json.loads(json.dumps(result.to_dict())))
+    assert restored.to_dict() == result.to_dict()
+    assert restored.digest == result.digest
 
 
 def test_preview_apply_and_replay_never_rerun_business(db, demo):

@@ -172,6 +172,39 @@ def _export_accessible(db, exported, lines, ctx):
     return True
 
 
+def _plan_row_accessible(db, row, ctx):
+    access = row.get("access")
+    if access is None:
+        # 旧计划可能已把预览时的新价格放入 changes.before；导出来源不足以证明其权限。
+        dynamic_keys = {*_DATA_KEYS, "mode", "supplier", "ref_offer_id", "active_offers"}
+        has_values = any(key in dynamic_keys and value not in (None, "")
+                         for key, value in row.get("values", {}).items())
+        has_changes = any(change["key"] in dynamic_keys
+            and (change.get("before") not in (None, "") or change.get("after") not in (None, ""))
+            for change in row.get("changes", []))
+        return not has_values and not has_changes
+    keys = ("state_offer_ids", "source_inquiry_ids", "owned_draft_offer_ids")
+    if (not isinstance(access, dict) or access.get("version") != 1
+            or any(not isinstance(access.get(key), list)
+                   or any(type(value) is not int or value < 1 for value in access[key]) for key in keys)):
+        return False
+    inquiry_ids = set(access["source_inquiry_ids"])
+    allowed_inquiries = set(db.scalars(select(PresalesInquiry.id).where(
+        PresalesInquiry.id.in_(inquiry_ids), visibility.inquiry_access_filter(db, ctx))))
+    if inquiry_ids != allowed_inquiries:
+        return False
+    offer_ids = set(access["state_offer_ids"])
+    owned_drafts = set(access["owned_draft_offer_ids"])
+    if not owned_drafts <= offer_ids:
+        return False
+    allowed_offers = set(db.scalars(select(PresalesOffer.id).where(
+        PresalesOffer.id.in_(offer_ids), visibility.offer_access_filter(db, ctx))))
+    missing = offer_ids - allowed_offers
+    # 本人随后删除草稿不撤销本人旧回执；仍存在但失去权限的报价不能使用此例外。
+    return missing <= owned_drafts and not db.scalar(select(PresalesOffer.id).where(
+        PresalesOffer.id.in_(missing)).limit(1))
+
+
 def _history_accessible(db, operations, lines, ctx):
     # 禁删的采购表仍会保存带基线的错误计划；回放也不能返回后来失权的字段。
     by_id = {line.id: line for line in lines}
@@ -179,6 +212,8 @@ def _history_accessible(db, operations, lines, ctx):
         for row in operation.plan.get("rows", []):
             if row.get("entity_id") is None:
                 continue
+            if not _plan_row_accessible(db, row, ctx):
+                return False
             line_ids = _source_ids(row["entity_id"])
             if not all(value in by_id for value in line_ids):
                 return False
@@ -246,7 +281,7 @@ def _load(db, ids, ctx):
     return user, ctx, inquiries, tasks, lines, drafts, responses
 
 
-def _state(db, line, drafts, responses, ctx):
+def _state(db, line, drafts, responses, ctx, *, read_offers=None):
     """同时返回字段的真实来源，供导出记录未发布草稿的访问边界。"""
     if line.answer_requires_review:
         return {}, False
@@ -260,6 +295,8 @@ def _state(db, line, drafts, responses, ctx):
     if offer is not None:
         view = visibility.offer_view(db, offer, ctx)
         if view is not None and not view.get("answer_requires_review"):
+            if read_offers is not None:
+                read_offers[offer.id] = offer
             supplier = db.get(DimSupplier, view["supplier_id"]) if view.get("supplier_id") is not None else None
             return {**{key: view[key] for key in _DATA_KEYS if key in view},
                     "mode": "quote", "supplier": supplier.name_raw if supplier else None}, offer.status == "draft"
@@ -270,6 +307,8 @@ def _state(db, line, drafts, responses, ctx):
                 PresalesOffer.id == response.ref_offer_id, common.offer_source_eligible(),
                 visibility.offer_access_filter(db, ctx))):
             return {}, False
+        if response.mode == "reuse" and read_offers is not None:
+            read_offers[response.ref_offer_id] = db.get(PresalesOffer, response.ref_offer_id)
         return {"mode": response.mode, "ref_offer_id": response.ref_offer_id, "reason": response.reason}, response.is_draft
     return {}, False
 
@@ -313,7 +352,8 @@ def _row(db, data, refs=None):
     user, ctx, inquiries, tasks, lines, drafts, responses = data
     if len({_group_key(line) for line in lines}) != 1:
         raise WorkbookError("合并行来源的 PN、一致要求或坏件返回条件已改变，请重新导出")
-    sources = [_state(db, line, drafts, responses, ctx) for line in lines]
+    read_offers = {}
+    sources = [_state(db, line, drafts, responses, ctx, read_offers=read_offers) for line in lines]
     states = [state for state, _ in sources]
     private_keys = {key for state, is_draft in sources if is_draft for key in state}
     values = {key: _same(states, key) for key in {column.key for column in QUOTE_SCHEMA.sheets[0].columns if column.editable}}
@@ -343,8 +383,10 @@ def _row(db, data, refs=None):
                        if entry["id"] in locked_offer_ids}
             active = visible if active is None else {key: value for key, value in active.items() if key in visible}
         # 预览后沿用价或可更新的本人报价发生变化时，必须重新确认。
+        active_models = library._active(db, [part.id], ctx=ctx)
+        read_offers.update({offer.id: offer for offer in active_models if offer.id in (active or {})})
         active_versions = [(offer.id, offer.version, offer.revision_no)
-            for offer in library._active(db, [part.id], ctx=ctx)
+            for offer in active_models
             if offer.id in locked_offer_ids and (offer.created_by == user.id or offer.id in (active or {}))]
         # 摘要不显示报价人，避免不同来源所有人的报价人字段可见性不一致。
         values["active_offers"] = "\n".join(
@@ -370,7 +412,12 @@ def _row(db, data, refs=None):
     if review_ids:
         version_data.append(["answer_requires_review", review_ids])
     version = int(hashlib.sha256(json.dumps(version_data, ensure_ascii=False).encode()).hexdigest()[:13], 16)
-    return version, values, private_keys
+    access = {"version": 1, "state_offer_ids": sorted(read_offers),
+              "source_inquiry_ids": sorted({offer.inquiry_id for offer in read_offers.values()
+                                             if offer.inquiry_id is not None}),
+              "owned_draft_offer_ids": sorted(offer.id for offer in read_offers.values()
+                  if offer.status == "draft" and offer.created_by == user.id)}
+    return version, values, private_keys, access
 
 
 def load_current(db, sheet, ids, ctx):
@@ -392,8 +439,8 @@ def load_current(db, sheet, ids, ctx):
     for entity_id, values in sources.items():
         try:
             data = _load(db, values, ctx)
-            version, current, _ = _row(db, data)
-            result[entity_id] = version, current
+            version, current, _, access = _row(db, data)
+            result[entity_id] = version, current, access
         except WorkbookConflict:
             raise
         except (WorkflowError, WorkbookError):
@@ -426,7 +473,7 @@ def export_quote_sheet(db, inquiry_ids, ctx, visible_columns=None):
     for members in groups.values():
         entity_id = _entity_id(members)
         data = _load(db, _source_ids(entity_id), ctx)
-        version, values, private_keys = _row(db, data, refs)
+        version, values, private_keys, _ = _row(db, data, refs)
         if any(column.key in private_keys and values.get(column.key) not in (None, "") for column in columns):
             contains_private_draft = True
         rows.append({"entity_id": entity_id, "base_version": version, "values": values})

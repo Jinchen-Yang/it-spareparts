@@ -52,6 +52,14 @@ it.each(["admin", "boss"])("管理员角色 %s 默认查看全部询价", async 
   expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ scope: "all" }));
 });
 
+it("管理员从我的草稿入口进入时保留本人筛选", async () => {
+  localStorage.setItem("role", "admin");
+  render(<MemoryRouter initialEntries={["/presales/inquiries?status=draft&scope=mine"]}><InquiryListPage /></MemoryRouter>);
+  await screen.findByText("XJ001");
+  expect(screen.getByRole("tab", { name: "我的询价" })).toHaveAttribute("aria-selected", "true");
+  expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ scope: "mine", status: "draft" }));
+});
+
 it("仅主管动作权限不扩大默认可见范围", async () => {
   localStorage.setItem("permissions", JSON.stringify({ action_presales_supervise: true }));
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);

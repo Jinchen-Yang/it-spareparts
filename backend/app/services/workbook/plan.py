@@ -81,6 +81,9 @@ def plan(parse_result, load_current) -> Plan:
             found = current.get(row.sheet, {}).get(row.entity_id)
             if found is not None:
                 before = found[1]
+                if len(found) > 2:
+                    # 仅接收服务端读取回调的来源证明，并与可变回调对象隔离。
+                    item["access"] = json_value(found[2])
             if found is None or found[0] != row.base_version:
                 item["status"] = "conflict"
                 item["warnings"] = [*warnings, {
