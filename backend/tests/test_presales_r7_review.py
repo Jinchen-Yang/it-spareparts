@@ -88,7 +88,7 @@ def test_close_pins_version_at_adoption_independently_from_earlier_reference(db,
     offers.update_offer(db, source.id, users.buyer.id, {"unit_price": "80.00"},
         expected_version=source.version)
     inquiries.close(db, inquiry.id, users.sales.id, inquiry.version,
-        outcome="won", won_offer_id=source.id)
+        outcome="won", won_offer_id=source.id, expected_offer_revision_no=source.revision_no)
     offers.update_offer(db, source.id, users.buyer.id, {"unit_price": "60.00"},
         expected_version=source.version)
     assert line.ref_offer_revision_no == 1 and inquiry.won_offer_revision_no == 2

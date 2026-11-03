@@ -18,7 +18,7 @@ function line(patch: Partial<PoolLine> = {}): PoolLine {
 }
 
 const quoted = (value = "100.00", by = "李四", version = 4) => line({ line_version: version, answer_state: "quoted", answered_by: by, answered_at: "2026-11-01T01:00:00Z",
-  price: { offer_id: 7, unit_price: value, is_tax_inclusive: true, price_basis: "sale", lead_time: null, stock_location: null, qty_available: null, notes: null, supplier_id: null, supplier_name: null } });
+  price: { offer_id: 7, revision_no: 1, unit_price: value, is_tax_inclusive: true, price_basis: "sale", lead_time: null, stock_location: null, qty_available: null, notes: null, supplier_id: null, supplier_name: null } });
 
 function page(items: PoolLine[]): PoolPageData {
   return { items, total: items.length, page: 1, page_size: 50, counts: { pending: 1, quoted: 2, skip: 0, mine: 0, all: 3, drafts: 0 } };
@@ -227,8 +227,28 @@ describe("询价报价共享池", () => {
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getByRole("radio", { name: /已成交/ }));
     fireEvent.click(within(dialog).getByRole("button", { name: "确定关单" }));
-    await waitFor(() => expect(close).toHaveBeenCalledWith(9, { expected_version: 1, outcome: "won", won_offer_id: 7 }));
+    await waitFor(() => expect(close).toHaveBeenCalledWith(9, { expected_version: 1, outcome: "won", won_offer_id: 7, expected_offer_revision_no: 1 }));
     await waitFor(() => expect(lines).toHaveBeenCalledTimes(2));
+  });
+
+  it("成交时价格变更要重新选价，不能沿用旧弹窗确认新价格", async () => {
+    const original = { ...quoted("100.00"), is_mine: true };
+    const current = { ...original, line_version: 5, price: { ...original.price!, unit_price: "200.00", revision_no: 2 } };
+    vi.spyOn(presalesPool, "lines").mockResolvedValueOnce(page([original])).mockResolvedValue(page([current]));
+    const close = vi.spyOn(presales, "closeInquiry").mockRejectedValueOnce({ response: { status: 409,
+      data: { detail: { code: "offer_revision_conflict", message: "采纳报价已更新" } } } })
+      .mockResolvedValueOnce({} as Inquiry);
+    show();
+    for (const [revision, price] of [[1, "100"], [2, "200"]] as const) {
+      fireEvent.click(await screen.findByRole("button", { name: "关闭询价 XJ20261101001" }));
+      const dialog = await screen.findByRole("dialog");
+      fireEvent.click(within(dialog).getByRole("radio", { name: new RegExp(`已成交.*${price}`) }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "确定关单" }));
+      await waitFor(() => expect(close).toHaveBeenNthCalledWith(revision, 9, expect.objectContaining({
+        outcome: "won", won_offer_id: 7, expected_offer_revision_no: revision,
+      })));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    }
   });
 
   it("主管可关闭他人询价，未报价行没有已成交选项；草稿入口显示本人草稿数", async () => {

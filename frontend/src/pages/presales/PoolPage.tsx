@@ -12,6 +12,7 @@ import PartThumb from "../../components/gallery/PartThumb";
 import { WorkbookExportButton } from "../../components/workbook";
 import { formatBusinessDateTime } from "../../utils/date";
 import { moneyExact } from "../../utils/format";
+import { parseApiError } from "../../utils/apiError";
 import CandidateSelect from "./CandidateSelect";
 import { DirectQuote } from "./DirectQuote";
 import NewInquiryPanel from "./NewInquiryPanel";
@@ -173,13 +174,18 @@ export default function PoolPage() {
     try {
       const { row, outcome } = closing;
       await presales.closeInquiry(row.inquiry_id, { expected_version: row.inquiry_version, outcome,
-        ...(outcome === "won" && row.price ? { won_offer_id: row.price.offer_id } : {}) });
+        ...(outcome === "won" && row.price ? { won_offer_id: row.price.offer_id, expected_offer_revision_no: row.price.revision_no } : {}) });
       void message.success(`${row.inquiry_no} 已关单`);
       setClosing(undefined);
       notifyPoolChanged();
       void load();
-    } catch (error) { await handleError(error, load); }
-    finally { setCloseBusy(false); }
+    } catch (error) {
+      if (parseApiError(error).code === "offer_revision_conflict") {
+        setClosing(undefined);
+        void message.warning("报价已更新，请核对最新价格后重新关单");
+        await load();
+      } else await handleError(error, load);
+    } finally { setCloseBusy(false); }
   };
 
   const showHistory = async (row: PoolLine) => {

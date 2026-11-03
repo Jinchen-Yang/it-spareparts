@@ -15,9 +15,10 @@ from app.auth import _make_token
 from app.main import app
 from app.models.dimensions import DimPart
 from app.models.master_data import ProductSpec
+from app.models.presales import PresalesLineResponse, PresalesOffer
 from app.models.system import SysAuditLog, SysUser
 from app.services import master_edit, part_search, spec_extract
-from app.services.presales import common, inquiries
+from app.services.presales import answers, common, inquiries
 from app.services.workflow.registry import Conflict, InvalidTransition
 
 
@@ -144,6 +145,61 @@ def test_duplicate_version_and_already_bound_errors_are_distinct(db, actors):
     assert repeated.status_code == 409 and repeated.json()["detail"]["code"] == "already_bound"
     assert repeated.json()["detail"]["part_id"] == part["id"]
     assert db.scalar(select(func.count()).select_from(ProductSpec)) == 0
+
+
+@pytest.mark.parametrize("endpoint", ["bind-part", "create-part"])
+def test_binding_after_skip_keeps_the_published_answer_and_the_other_buyers_private_draft(db, actors, endpoint):
+    inquiry, line = _unbound(db, actors)
+    client = _client(actors.buyer)
+    skipped = client.post(f"/api/presales/pool/lines/{line.id}/skip",
+                          json={"expected_version": line.version, "reason": "此型号停产"})
+    assert skipped.status_code == 200, skipped.text
+    version = skipped.json()["line_version"]
+    draft = PresalesLineResponse(line_id=line.id, created_by=actors.peer.id, line_version=version,
+                                 mode="skip", reason="尚未发布的决定", is_draft=True)
+    obsolete = PresalesLineResponse(line_id=line.id, created_by=actors.seller.id, line_version=version - 1,
+                                    mode="skip", reason="以前的条件")
+    db.add_all([draft, obsolete])
+    db.commit()
+    body = {"expected_version": version}
+    if endpoint == "bind-part":
+        body["part_id"] = master_edit.create_part(db, pn_std="KNOWN-BIND-342", force=True)["id"]
+    else:
+        body["pn_std"] = line.pn_raw
+    bound = client.post(f"/api/presales/lines/{line.id}/{endpoint}", json=body)
+    assert bound.status_code == 200, bound.text
+    detail = _client(actors.seller).get(f"/api/presales/inquiries/{inquiry.id}")
+    assert detail.status_code == 200, detail.text
+    answer, = detail.json()["line_answers"]
+    assert (answer["state"], answer.get("reason"), answer.get("reporter")) == ("skip", "此型号停产", "buyer")
+    assert draft.reason not in detail.text
+    db.expire_all()
+    answers.refresh(db, [line.id])
+    db.refresh(line)
+    assert (line.version, line.answer_state, line.answer_reason, line.answered_by) == (
+        version + 1, "skip", "此型号停产", actors.buyer.id)
+    assert (draft.line_version, draft.is_draft, obsolete.line_version) == (version, True, version - 1)
+
+
+@pytest.mark.parametrize("source", ["skip", "no_stock"])
+def test_detail_and_pool_choose_the_same_latest_legacy_negative_answer(db, actors, source):
+    inquiry, line = _unbound(db, actors)
+    for user, reason in ((actors.buyer, "库存不足"), (actors.peer, "此型号停产")):
+        if source == "skip":
+            row = PresalesLineResponse(line_id=line.id, created_by=user.id, line_version=line.version,
+                                       mode="skip", reason=reason)
+        else:
+            row = PresalesOffer(line_id=line.id, inquiry_id=inquiry.id, created_by=user.id, notes=reason,
+                                status="published", valid_from=common.now(), no_stock=True)
+        db.add(row)
+        db.flush()
+    answers.refresh(db, [line.id])
+    db.commit()
+    response = _client(actors.seller).get(f"/api/presales/inquiries/{inquiry.id}")
+    assert response.status_code == 200, response.text
+    answer, = response.json()["line_answers"]
+    assert (line.answer_state, line.answer_reason, line.answered_by) == ("skip", "此型号停产", actors.peer.id)
+    assert (answer["state"], answer["reason"], answer["reporter"]) == ("skip", "此型号停产", "peer")
 
 
 @pytest.mark.parametrize("missing", ["action_presales_bind_part", "page_master_data"])

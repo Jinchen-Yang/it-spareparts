@@ -156,8 +156,8 @@ def test_http_two_buyers_share_price_compare_close_and_audit(db, users):
     assert len(detail["offers"]) == 1 and detail["work_items"] == []
     history = seller.get(f"/api/presales/pool/lines/{line['id']}/history").json()
     assert [Decimal(h["unit_price"]) for h in history if h["kind"] == "price"] == [Decimal("24.50"), Decimal("25.50")]
-    closed = seller.post(path + "/close", json={"expected_version": detail["version"],
-                                               "outcome": "won", "won_offer_id": first_offer})
+    closed = seller.post(path + "/close", json={"expected_version": detail["version"], "outcome": "won",
+        "won_offer_id": first_offer, "expected_offer_revision_no": detail["offers"][0]["revision_no"]})
     assert closed.status_code == 200 and closed.json()["status"] == "closed", closed.text
     copied = seller.post(path + "/copy", json={"expected_version": closed.json()["version"]})
     assert copied.status_code == 201 and copied.json()["status"] == "draft", copied.text
@@ -283,13 +283,16 @@ def test_quote_metadata_edit_does_not_certify_price_for_new_inquiry_conditions(d
     owner, buyer = _client(users.seller), _client(users.buyer)
     path = f"/api/presales/inquiries/{inquiry.id}"
     editing = owner.post(path + "/withdraw", json={"expected_version": inquiry.version}).json()
-    line = editing["lines"][0]
-    saved = owner.patch(path, json={"expected_version": editing["version"],
-        "expected_line_versions": {line["line_key"]: line["version"]}, "lines": [{"line_key": line["line_key"], "qty": 7}]})
-    assert saved.status_code == 200, saved.text
+    # 旧版本撤回后只改条件，报价在重新提交之前仍是 published。模拟真实存量格式。
+    db.refresh(inquiry)
+    inquiry.submitted_snapshot = {k: v for k, v in inquiry.submitted_snapshot.items()
+                                  if k not in {"answers_synced_on_edit", "editor_line_versions"}}
+    old_line = inquiries.lines_for(db, inquiry.id)[0]
+    old_line.qty, old_line.version = 7, old_line.version + 1
+    db.commit()
     changed = buyer.patch(f"/api/presales/offers/{offer.id}", json={"expected_version": offer.version, "notes": "仅修改货源说明"})
     assert changed.status_code == 200, changed.text
-    result = owner.post(path + "/resubmit", json={"expected_version": saved.json()["version"]})
+    result = owner.post(path + "/resubmit", json={"expected_version": editing["version"]})
     assert result.status_code == 200, result.text
     db.refresh(offer)
     assert offer.status == "stale"

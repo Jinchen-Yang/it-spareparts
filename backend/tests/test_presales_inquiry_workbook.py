@@ -1,6 +1,7 @@
 """销售模板通过 M4 注册回调往返，保持领域编辑与权限约束。"""
 
 from datetime import date
+from decimal import Decimal
 from io import BytesIO
 import os
 import shutil
@@ -100,6 +101,24 @@ def test_revising_signed_workbook_checks_current_line_versions_after_shared_edit
     assert [row.qty for row in inquiries.lines_for(db, inquiry.id)] == [2, 9]
 
 
+def test_signed_condition_change_only_invalidates_price_when_applied(db, presales_users, presales_parts):
+    user, buyer = presales_users.sales, presales_users.buyer
+    inquiry = inquiries.create_draft(db, user.id, lines=[{"part_id": presales_parts[0].id}])
+    inquiries.submit(db, inquiry.id, user.id, inquiry.version, open_tasks=False)
+    inquiries.withdraw(db, inquiry.id, user.id, inquiry.version)
+    line = inquiries.lines_for(db, inquiry.id)[0]
+    quoted = pool.set_price(db, line.id, _ctx(db, buyer), {"unit_price": Decimal("18")}, expected_version=line.version)
+    assert quoted["answer_state"] == "quoted"
+    content = _edit(workbook.export_inquiry(db, inquiry.id, _ctx(db, user)),
+                    lambda sheet, cols: _set(sheet, cols, 2, **{"数量": 4}))
+    preview = _preview(db, user, content, inquiry)
+    assert pool.line_view(db, line.id, user.id)["answer_state"] == "quoted"
+    _apply(db, user, preview)
+    current = pool.line_view(db, line.id, user.id)
+    assert current["answer_state"] == "pending" and Decimal(current["qty"]) == 4
+    assert any(row.get("unit_price") and Decimal(row["unit_price"]) == 18 for row in pool.history(db, line.id, user.id))
+
+
 def test_delete_insert_modify_only_confirmed_deletions(db, presales_users, presales_parts):
     user = presales_users.sales
     inquiry = inquiries.create_draft(db, user.id, lines=[{"part_id": part.id} for part in presales_parts[:2]])
@@ -134,7 +153,7 @@ def test_unconfirmed_delete_preserves_line_and_omitted_columns(db, presales_user
     assert len(rows) == 2 and rows[0].notes == "保留" and rows[0].qty == 8
 
 
-def test_submitted_rejected_and_withdrawn_edit_uses_existing_stale_diff(db, presales_users, presales_parts):
+def test_submitted_rejected_and_confirming_withdrawn_edit_invalidates_price_immediately(db, presales_users, presales_parts):
     user = presales_users.sales
     inquiry = inquiries.create_draft(db, user.id, assignee_ids=[presales_users.buyer.id],
                                     lines=[{"part_id": presales_parts[0].id}])
@@ -149,7 +168,7 @@ def test_submitted_rejected_and_withdrawn_edit_uses_existing_stale_diff(db, pres
     content = _edit(workbook.export_inquiry(db, inquiry.id, _ctx(db, user)),
                     lambda sheet, cols: _set(sheet, cols, 2, **{"数量": 5}))
     _apply(db, user, _preview(db, user, content, inquiry))
-    assert inquiry.status == "revising" and offer.status == "published"
+    assert inquiry.status == "revising" and offer.status == "stale"
     inquiries.resubmit(db, inquiry.id, user.id, inquiry.version)
     assert offer.status == "stale"
 

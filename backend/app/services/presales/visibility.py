@@ -299,7 +299,8 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
     for line in lines:
         visible_responses = [row for row in responses if row.line_id == line.id
             and not row.is_draft and row.line_version == line.version]
-        ids = {offer.id for offer in offer_models if offer.line_id == line.id}
+        line_offers = [offer for offer in offer_models if offer.line_id == line.id]
+        ids = {offer.id for offer in line_offers}
         if line_references.get(line.id) is not None:
             ids.add(line.ref_offer_id)
         ids.update(row.ref_offer_id for row in visible_responses
@@ -315,9 +316,11 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
             answer.update(state="quoted", offer=latest,
                           reporter=latest.get("reporter", {}).get("name", "采购"))
         else:
-            skipped = next((row for row in visible_responses if row.mode == "skip"), None)
-            no_stock = next((current_views[key] for key in ids if key in current_views
-                and current_models[key].status == "published" and current_models[key].no_stock), None)
+            skipped = max((row for row in visible_responses if row.mode == "skip"),
+                          key=lambda row: row.id, default=None)
+            no_stock = max((current_views[offer.id] for offer in line_offers
+                            if offer.id in current_views and offer.status == "published" and offer.no_stock),
+                           key=lambda view: view["id"], default=None)
             if skipped is not None:
                 reporter = db.get(SysUser, skipped.created_by)
                 answer.update(state="skip", reason=skipped.reason,

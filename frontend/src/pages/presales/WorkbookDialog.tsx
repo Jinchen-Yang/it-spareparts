@@ -10,7 +10,7 @@ export default function WorkbookDialog({ mode, inquiryId, onClose, onApplied }: 
   return <Modal open title={inquiry ? inquiryId ? "上传本单 Excel" : "从 Excel 新建询价" : "上传报价表"}
     width={1000} footer={null} onCancel={onClose} destroyOnHidden>
     <Space direction="vertical" style={{ width: "100%" }}>
-      <Alert type="info" message={inquiry
+      <Alert type="info" description={inquiry && inquiryId ? "确认后，修改报价条件或删除已答复的行会使原答复失效。旧报价仍可查历史。" : undefined} message={inquiry
         ? "预览核对后再应用；应用后刷新为 Excel 保存的草稿，页面上尚未保存的修改会被替换。"
         : "支持单张或合并报价表，按文件中的来源分发；应用后价格立即生效，所有人可见。"} />
       {inquiry && !inquiryId && <WorkbookExportButton schemaName="presales_inquiry_lines" label="下载空模板"

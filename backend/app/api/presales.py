@@ -88,6 +88,7 @@ class CreateInquiry(Input):
 
 
 class UpdateInquiry(VersionInput):
+    confirm_reset: bool = False
     expected_line_versions: dict[str, Annotated[int, Field(strict=True, ge=1)]] | None = None
     priority: Literal["normal", "urgent"] | None = None
     customer_id: int | None = Field(default=None, gt=0)
@@ -106,6 +107,7 @@ class AppendLines(VersionInput):
 class CloseInquiry(VersionInput):
     outcome: Literal["won", "lost", "cancelled"]
     won_offer_id: int | None = Field(default=None, gt=0)
+    expected_offer_revision_no: int | None = Field(default=None, ge=1, le=2**31 - 1)
 
 
 class OfferData(Input):
@@ -365,9 +367,9 @@ def get_inquiry(inquiry_id: int, db: Db, ctx: Ctx):
 
 @router.patch("/inquiries/{inquiry_id}")
 def update_inquiry(inquiry_id: int, body: UpdateInquiry, db: Db, ctx: Ctx):
-    data = body.model_dump(exclude_unset=True, exclude={"expected_version"})
+    data = body.model_dump(exclude_unset=True, exclude={"expected_version", "confirm_reset"})
     return _inquiry_action(db, ctx, lambda: inquiries.update_draft(
-        db, inquiry_id, ctx, body.expected_version, **data))
+        db, inquiry_id, ctx, body.expected_version, confirm_reset=body.confirm_reset, **data))
 
 
 @router.delete("/inquiries/{inquiry_id}", status_code=204)
@@ -406,7 +408,8 @@ def urge_inquiry(inquiry_id: int, db: Db, ctx: Ctx):
 @router.post("/inquiries/{inquiry_id}/close")
 def close_inquiry(inquiry_id: int, body: CloseInquiry, db: Db, ctx: Ctx):
     return _inquiry_action(db, ctx, lambda: inquiries.close(db, inquiry_id, ctx,
-        body.expected_version, outcome=body.outcome, won_offer_id=body.won_offer_id))
+        body.expected_version, outcome=body.outcome, won_offer_id=body.won_offer_id,
+        expected_offer_revision_no=body.expected_offer_revision_no))
 
 
 @router.post("/inquiries/{inquiry_id}/copy", status_code=201)
