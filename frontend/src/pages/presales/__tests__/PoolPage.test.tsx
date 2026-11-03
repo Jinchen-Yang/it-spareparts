@@ -44,6 +44,17 @@ describe("询价报价共享池", () => {
     expect(screen.getByText("张三")).toBeInTheDocument();
   });
 
+  it("报价表按未关单的询价选择来源，已关单行不可勾选", async () => {
+    const open = line({ inquiry_no: "XJ1" });
+    const closed = line({ line_id: 2, inquiry_id: 2, inquiry_no: "XJ2", inquiry_status: "closed", closed_outcome: "lost" });
+    vi.spyOn(presalesPool, "lines").mockResolvedValue(page([open, closed]));
+    show();
+    await screen.findByText("未成交");
+    expect(screen.getByLabelText(`选择报价表来源 XJ1 ${open.pn}`)).toBeEnabled();
+    expect(screen.getByLabelText(`选择报价表来源 XJ2 ${closed.pn}`)).toBeDisabled();
+    expect(screen.getByText(/旧版直接引用报价的行请在页面改价/)).toBeInTheDocument();
+  });
+
   it.each([
     [true, false, false], [false, true, false], [true, true, true],
   ])("绑定入口校验动作权限 %s 和主数据权限 %s", async (action, master, allowed) => {
@@ -131,6 +142,26 @@ describe("询价报价共享池", () => {
     fireEvent.change(await screen.findByRole("textbox", { name: "PN-1 交期" }), { target: { value: "3天" } });
     fireEvent.click(screen.getByRole("button", { name: "保 存" }));
     await waitFor(() => expect(setPrice).toHaveBeenCalledWith(1, expect.objectContaining({ expected_version: 4, unit_price: 100, lead_time: "3天" })));
+  });
+
+  it("失焦保存询价备注后仍可用新行版本提交原来填写的单价和交期", async () => {
+    vi.spyOn(presalesPool, "lines").mockResolvedValue(page([line()]));
+    const edit = vi.spyOn(presalesPool, "edit").mockResolvedValue(line({ line_version: 4, notes: "原厂包装" }));
+    const save = vi.spyOn(presalesPool, "setPrice").mockResolvedValue(quoted("88.50", "李四", 5));
+    show();
+    fireEvent.change(await screen.findByRole("spinbutton", { name: "PN-1 单价" }), { target: { value: "88.50" } });
+    fireEvent.click(screen.getByRole("button", { name: /展开行|Expand row/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "PN-1 交期" }), { target: { value: "3天" } });
+    const notes = screen.getByRole("textbox", { name: "PN-1 询价备注" });
+    fireEvent.change(notes, { target: { value: "原厂包装" } });
+    fireEvent.blur(notes);
+    await waitFor(() => expect(edit).toHaveBeenCalledWith(1, { expected_version: 3, notes: "原厂包装" }));
+    const button = screen.getByRole("button", { name: "保 存" });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() => expect(save).toHaveBeenCalledWith(1, expect.objectContaining({
+      expected_version: 4, unit_price: 88.5, lead_time: "3天",
+    })));
   });
 
   it("只改价时不传交期等字段，服务端保留原值", async () => {

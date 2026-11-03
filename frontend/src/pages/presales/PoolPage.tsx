@@ -117,13 +117,13 @@ export default function PoolPage() {
     || taxFor(row) !== row.price.is_tax_inclusive || basisFor(row) !== row.price.price_basis || detailChanged(row));
 
   /** 写入成功只换这一行，不重读整张表；冲突时显示最新内容并保留本人输入。 */
-  const write = async (row: PoolLine, action: () => Promise<PoolLine>, success?: string) => {
+  const write = async (row: PoolLine, target: "quote" | "inquiry", action: () => Promise<PoolLine>, success?: string) => {
     if (busy != null) return;
     setBusy(row.line_id);
     try {
       const updated = await action();
       replace(updated);
-      clearDraft(row.line_id);
+      if (target === "quote") clearDraft(row.line_id);
       notifyPoolChanged();
       // 这一行留在当前页不跳走，但筛选数量要跟上。
       void presalesPool.counts().then(setCounts).catch(() => undefined);
@@ -144,14 +144,14 @@ export default function PoolPage() {
     const unitPrice = priceFor(row);
     if (unitPrice == null) return;
     const detail = detailChanged(row) ? detailOf(row) : undefined;
-    void write(row, () => presalesPool.setPrice(row.line_id, { expected_version: row.line_version, unit_price: unitPrice,
+    void write(row, "quote", () => presalesPool.setPrice(row.line_id, { expected_version: row.line_version, unit_price: unitPrice,
       is_tax_inclusive: taxFor(row), price_basis: basisFor(row), ...(detail ? { lead_time: detail.lead_time.trim() || null,
         stock_location: detail.stock_location.trim() || null, notes: detail.notes.trim() || null,
         qty_available: detail.qty_available, supplier_id: detail.supplier_id } : {}) }), `${row.pn} 报价已生效`);
   };
 
   const edit = (row: PoolLine, patch: Omit<PoolLineEdit, "expected_version" | "confirm_reset">) => {
-    const send = (confirmReset: boolean) => void write(row, () => presalesPool.edit(row.line_id, { expected_version: row.line_version, ...patch, ...(confirmReset ? { confirm_reset: true } : {}) }));
+    const send = (confirmReset: boolean) => void write(row, "inquiry", () => presalesPool.edit(row.line_id, { expected_version: row.line_version, ...patch, ...(confirmReset ? { confirm_reset: true } : {}) }));
     // 备注不影响价格；待报价行没有可作废的答复。
     if (row.answer_state === "pending" || !["qty", "return_defective", "require_exact_pn"].some((key) => key in patch)) { send(false); return; }
     modal.confirm({ title: "修改后原答复作废", content: `${row.pn} 改条件后，原来的${row.answer_state === "quoted" ? "报价" : "不报记录"}会作废并留在历史中，这一行回到待报价。确定修改吗？`,
@@ -228,7 +228,7 @@ export default function PoolPage() {
     </div> },
     { title: "操作", key: "actions", width: 150, render: (_, row) => <Space size={4} wrap>
       <Button type="primary" size="small" loading={busy === row.line_id} disabled={busy != null || !dirty(row)} onClick={() => save(row)}>保存</Button>
-      {row.answer_state !== "skip" && <SkipButton disabled={busy != null} onConfirm={(reason) => void write(row, () => presalesPool.skip(row.line_id, { expected_version: row.line_version, reason }), `${row.pn} 已标为不报`)} />}
+      {row.answer_state !== "skip" && <SkipButton disabled={busy != null} onConfirm={(reason) => void write(row, "quote", () => presalesPool.skip(row.line_id, { expected_version: row.line_version, reason }), `${row.pn} 已标为不报`)} />}
       <Button type="link" size="small" onClick={() => void showHistory(row)}>历史</Button>
       {row.answer_state === "quoted" && <Button type="link" size="small" aria-label={`复制 ${row.pn} 报价给客户`} onClick={() => void copy(row)}>复制</Button>}
       {row.inquiry_status !== "closed" && <Button type="link" size="small" aria-label={`关闭询价 ${row.inquiry_no}`} disabled={busy != null} onClick={() => setClosing({ row, outcome: "lost" })}>关单</Button>}
@@ -258,11 +258,13 @@ export default function PoolPage() {
         <WorkbookExportButton label="下载所选询价单的报价表" schemaName="presales_quote_sheet" disabled={!exportIds.length}
           fetchSchema={() => presalesWorkbooks.getQuoteSheetSchema()} filename="合并报价表.xlsx" onExport={(visible) => presalesWorkbooks.exportQuoteSheet(exportIds, visible)} />
         <Button onClick={() => setImportOpen(true)}>上传报价表</Button>
-        <span className="presales-muted">勾选行后下载这些行所在询价单的全部行；上传后价格立即生效。</span>
+        <span className="presales-muted">勾选行后，报价表按未关单的询价单导出可填行。旧版直接引用报价的行请在页面改价。上传后须预览并确认。</span>
       </div>
       {failed && <Alert type="error" message="询价报价加载失败" action={<Button onClick={() => void load()}>重试</Button>} />}
       <Table aria-label="询价报价" rowKey="line_id" size="middle" dataSource={rows} columns={columns} tableLayout="fixed" scroll={{ x: 1260 }} loading={loading}
-        rowSelection={{ selectedRowKeys: selected, onChange: (keys) => setSelected(keys as number[]) }}
+        rowSelection={{ selectedRowKeys: selected, onChange: (keys) => setSelected(keys as number[]),
+          getCheckboxProps: (row) => ({ disabled: row.inquiry_status === "closed",
+            "aria-label": `选择报价表来源 ${row.inquiry_no} ${row.pn}` }) }}
         rowClassName={(row) => dirty(row) ? "presales-row-editing" : ""}
         expandable={{ expandedRowRender: (row) => {
           const detail = detailOf(row);
