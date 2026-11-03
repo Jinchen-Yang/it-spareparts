@@ -18,7 +18,9 @@ def base():
         old_app_id="a"*64, old_front_id="b"*64, old_app_image="sha256:"+"1"*64,
         old_front_image="sha256:"+"2"*64, app_image="sha256:"+"3"*64, frontend_image="sha256:"+"4"*64,
         source_sha256="a"*64, controller_sha256="a"*64, smoke_sha256="a"*64, nginx_sha256="a"*64,
-        caddyfile="/opt/it-spareparts/Caddyfile", port=18098, nginx_upstream_count=3, additional_writers=[])
+        caddyfile="/opt/it-spareparts/Caddyfile", port=18098, nginx_upstream_count=3, additional_writers=[],
+        db_id="a"*64, db_image="sha256:"+"5"*64,
+        proxy_identities={n: {"id":"b"*64,"image":"sha256:"+"6"*64,"process":n} for n in ("caddy","nginx","cloudflared")})
 
 
 class PoolReleaseTests(TestCase):
@@ -112,11 +114,63 @@ class PoolReleaseTests(TestCase):
 
     def test_writers_exact_requires_matching_names(self):
         r=MagicMock()
-        r.old_app="original"
-        r.database_target.return_value=("db",5432,"/spareparts")
-        r.run.side_effect=[b"id\n", json.dumps([{"Name":"/unexpected"}]).encode()]
+        r.m=base()
+        r.inspect.return_value={"Id":r.m["db_id"],"Image":r.m["db_image"]}
+        r.run.side_effect=[b"id\n", json.dumps([{"Id":"third","Name":"/unexpected","Config":{
+            "Env":["DATABASE_URL=postgresql://it-spareparts-db-1/spareparts"]}}]).encode()]
         with self.assertRaisesRegex(RuntimeError, "writer"):
             ops.Release.writers_exact(r, {"original"})
+
+    def test_idle_writer_declared_by_any_alias_ip_or_forwarded_port_is_never_ignored(self):
+        for url in ("postgresql://db/spareparts", "postgresql+psycopg://it-spareparts-db-1/spareparts",
+                    "postgresql://shareddb/spareparts", "postgresql://10.0.0.3/spareparts",
+                    "postgresql://127.0.0.1:15432/%73pareparts", "postgresql://host/other?dbname=spareparts",
+                    "postgresql://?service=unknown", "service=unknown"):
+            with self.subTest(url=url):
+                self.assertIs(ops.db_declaration({"Config":{"Env":["DATABASE_URL="+url]}}), True)
+
+    def test_absent_dsn_on_database_bridge_or_reachable_published_port_requires_pinned_proxy(self):
+        db={"NetworkSettings":{"Networks":{"production":{}},"Ports":{"5432/tcp":[{"HostIp":"127.0.0.1"}]}}}
+        other={"Id":"container","Name":"/other","HostConfig":{"NetworkMode":"private"},
+               "NetworkSettings":{"Networks":{"private":{}}}}
+        self.assertFalse(ops.can_reach_without_dsn(other, db, [other]))
+        other["HostConfig"]["NetworkMode"]="host"
+        self.assertTrue(ops.can_reach_without_dsn(other, db, [other]))
+        shared={"Id":"shared","Name":"/shared","HostConfig":{"NetworkMode":"container:container"}}
+        self.assertTrue(ops.can_reach_without_dsn(shared, db, [other,shared]))
+        other["HostConfig"]["NetworkMode"]="private"
+        db["NetworkSettings"]["Ports"]["5432/tcp"][0]["HostIp"]="0.0.0.0"
+        self.assertTrue(ops.can_reach_without_dsn(other, db, [other]))
+        db["NetworkSettings"]["Ports"]={}
+        other["NetworkSettings"]["Networks"]["production"]={}
+        self.assertTrue(ops.can_reach_without_dsn(other, db, [other]))
+
+    def test_pinned_proxy_cannot_hide_a_database_dsn_or_changed_process(self):
+        row={"Name":"/nginx","Id":"b"*64,"Image":"sha256:"+"6"*64,"Path":"/docker-entrypoint.sh","Args":["nginx"],
+             "Config":{"Env":["PGDATABASE=spareparts"]}}
+        self.assertTrue(ops.nonwriter_proxy(row,base()["proxy_identities"]))
+        self.assertIs(ops.db_declaration(row),True)
+        row["Args"]=["python"]
+        self.assertFalse(ops.nonwriter_proxy(row,base()["proxy_identities"]))
+
+    def test_repeated_recover_after_two_transient_errors_creates_independent_receipts(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(ops.h,"BASE",Path(folder)), patch.object(ops,"file_mode",return_value=True):
+            r = MagicMock()
+            r.root=Path(folder)/"deploy"
+            r.root.mkdir()
+            r.sha="a"*40
+            r.manifest_bytes=b"identity"
+            r.preflight.return_value={}
+            ops.Release.execute(r,"preflight")
+            r.rollback.side_effect=[RuntimeError("connection"),RuntimeError("second connection"),{"schema":ops.OLD_HEAD}]
+            for _ in range(2):
+                with self.assertRaises(RuntimeError):
+                    ops.Release.execute(r,"recover")
+            ops.Release.execute(r,"recover")
+            self.assertEqual(len(list(r.root.glob("recover-*.intent.json"))),3)
+            completed=[p for p in r.root.glob("recover-*.json") if not p.name.endswith(".intent.json")]
+            self.assertEqual(len(completed),1)
+            self.assertEqual(json.loads(completed[0].read_bytes())["schema"],ops.OLD_HEAD)
 
     def test_cannot_restart_after_manual_or_unverified_downgrade(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -133,6 +187,31 @@ class PoolReleaseTests(TestCase):
         r.data_fingerprints.return_value = {"offers": "changed"}
         with self.assertRaisesRegex(RuntimeError, "business records"):
             ops.Release.check_business(r, guard)
+
+    def test_saved_guard_allows_retry_after_downgrade_without_rewriting_user_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            r = object.__new__(ops.Release)
+            r.root, r.sha, r.manifest_bytes = Path(folder), "a"*40, b"frozen"
+            expected={"release":r.sha,"manifest_sha256":ops.h.digest(r.manifest_bytes),"counts":{"offer":3},
+                      "columns":{"offers":["price"]},"fingerprints":{"offers":"frozen"}}
+            ops.h.save(r.root/"rollback-guard.json",expected)
+            r.counts=MagicMock(return_value={"offer":3})
+            r.data_fingerprints=MagicMock(side_effect=[{"offers":"changed"},{"offers":"frozen"}])
+            r.impact=MagicMock(return_value={"cancelled_marked":0})
+            with self.assertRaisesRegex(RuntimeError,"business records"):
+                r.verify_downgrade()
+            self.assertFalse((r.root/"rollback-schema-verified.json").exists())
+            r.verify_downgrade()
+            self.assertTrue((r.root/"rollback-schema-verified.json").is_file())
+            # Routing may still require retry after the old process restarted and users wrote new data.
+            r.counts.side_effect=AssertionError("do not compare new traffic against the old snapshot")
+            r.verify_downgrade()
+
+    def test_declared_database_server_and_client_in_same_process_are_not_exempt(self):
+        row={"Path":"docker-entrypoint.sh","Args":["postgres"],"Config":{"Env":["POSTGRES_DB=spareparts"]}}
+        self.assertIsNone(ops.db_declaration(row))
+        row["Config"]["Env"].append("DATABASE_URL=postgresql://localhost:19999/spareparts")
+        self.assertIs(ops.db_declaration(row),True)
 
     def test_phase_refuses_replay_and_owner_change(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(ops.h,"BASE",Path(folder)), patch.object(ops,"file_mode",return_value=True):
