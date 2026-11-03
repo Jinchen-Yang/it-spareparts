@@ -387,19 +387,19 @@ def withdraw_inquiry(inquiry_id: int, body: VersionInput, db: Db, ctx: Ctx):
 
 @router.post("/inquiries/{inquiry_id}/resubmit")
 def resubmit_inquiry(inquiry_id: int, body: VersionInput, db: Db, ctx: Ctx):
-    return _inquiry_action(db, ctx, lambda: inquiries.resubmit(db, inquiry_id, ctx, body.expected_version))
+    return _inquiry_action(db, ctx, lambda: inquiries.resubmit(db, inquiry_id, ctx, body.expected_version, open_tasks=False))
 
 
 @router.post("/inquiries/{inquiry_id}/lines")
 def append_lines(inquiry_id: int, body: AppendLines, db: Db, ctx: Ctx):
     lines = body.model_dump(exclude_unset=True)["lines"]
     return _inquiry_action(db, ctx, lambda: inquiries.append_lines(
-        db, inquiry_id, ctx, body.expected_version, lines))
+        db, inquiry_id, ctx, body.expected_version, lines, open_tasks=False))
 
 
 @router.post("/inquiries/{inquiry_id}/urge")
 def urge_inquiry(inquiry_id: int, db: Db, ctx: Ctx):
-    return _inquiry_action(db, ctx, lambda: inquiries.urge(db, inquiry_id, ctx))
+    raise HTTPException(410, {"code": "shared_pool", "message": "共享池已取消催办，请在询价报价页查看待报价行"})
 
 
 @router.post("/inquiries/{inquiry_id}/close")

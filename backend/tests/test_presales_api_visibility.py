@@ -130,7 +130,7 @@ def test_revision_api_reads_pre_pool_snapshots_without_rewriting_them(db, users)
     assert revision.snapshot == legacy
 
 
-def test_http_two_buyers_reply_compare_close_and_audit(db, users):
+def test_http_two_buyers_share_price_compare_close_and_audit(db, users):
     seller, buyer, peer = (_client(user) for user in (users.seller, users.buyer, users.peer))
     response = seller.post("/api/presales/inquiries", json={
         "customer_id": users.customer.id, "lines": [{"part_id": users.part.id, "qty": "2"}],
@@ -144,16 +144,18 @@ def test_http_two_buyers_reply_compare_close_and_audit(db, users):
     response = seller.post(path + "/submit", json={"expected_version": inquiry["version"]})
     assert response.status_code == 200, response.text
     inquiry = response.json()
-    first_offer = None
+    line = inquiry["lines"][0]
+    line_version = line["version"]
     for client, price in ((buyer, "25.50"), (peer, "24.50")):
-        quote = client.post(path + f"/lines/{inquiry['lines'][0]['id']}/offers", json={
-            "expected_version": inquiry["version"], "unit_price": price})
+        quote = client.put(f"/api/presales/pool/lines/{line['id']}/price", json={
+            "expected_version": line_version, "unit_price": price})
         assert quote.status_code == 200, quote.text
-        first_offer = first_offer or quote.json()["id"]
-        reply = client.post(path + "/reply", json={"expected_version": inquiry["version"]})
-        assert reply.status_code == 200, reply.text
+        row = quote.json()
+        first_offer, line_version = row["price"]["offer_id"], row["line_version"]
     detail = seller.get(path).json()
-    assert len(detail["offers"]) == 2 and all(item["status"] == "done" for item in detail["work_items"])
+    assert len(detail["offers"]) == 1 and detail["work_items"] == []
+    history = seller.get(f"/api/presales/pool/lines/{line['id']}/history").json()
+    assert [Decimal(h["unit_price"]) for h in history if h["kind"] == "price"] == [Decimal("24.50"), Decimal("25.50")]
     closed = seller.post(path + "/close", json={"expected_version": detail["version"],
                                                "outcome": "won", "won_offer_id": first_offer})
     assert closed.status_code == 200 and closed.json()["status"] == "closed", closed.text
@@ -161,7 +163,45 @@ def test_http_two_buyers_reply_compare_close_and_audit(db, users):
     assert copied.status_code == 201 and copied.json()["status"] == "draft", copied.text
     assert copied.json()["lines"][0]["line_key"] != inquiry["lines"][0]["line_key"]
     actions = set(db.scalars(select(SysAccessLog.action).where(SysAccessLog.resource == "presales")))
-    assert {"inquiry.created", "inquiry.submitted", "presales.offer.replied", "inquiry.closed"} <= actions
+    assert {"inquiry.created", "inquiry.submitted", "presales.pool.offer.updated", "inquiry.closed"} <= actions
+
+
+def test_shared_inquiry_header_edits_are_owner_or_supervisor_only_and_never_create_tasks(db, users):
+    owner, peer, supervisor = (_client(u) for u in (users.seller, users.other, users.supervisor))
+    draft = owner.post("/api/presales/inquiries", json={
+        "customer_id": users.customer.id, "assignee_ids": [users.buyer.id],
+        "lines": [{"part_id": users.part.id, "qty": 3}]}).json()
+    path = f"/api/presales/inquiries/{draft['id']}"
+    workbook = f"/api/presales/workbooks/inquiry/{draft['id']}"
+    submitted = owner.post(path + "/submit", json={"expected_version": draft["version"]}).json()
+    assert submitted["is_owner"] and not peer.get(path).json()["is_owner"]
+    version = {"expected_version": submitted["version"]}
+    for action, payload in (("/withdraw", version), ("/close", {**version, "outcome": "lost"}),
+                            ("/lines", {**version, "lines": [{"pn_raw": "越权附行"}]})):
+        assert peer.post(path + action, json=payload).status_code == 403
+    assert peer.post(path + "/withdraw", json={"expected_version": draft["version"]}).status_code == 403
+    revising = owner.post(path + "/withdraw", json=version).json()
+    version = {"expected_version": revising["version"]}
+    assert peer.patch(path, json={**version, "customer_id": None, "lines": []}).status_code == 403
+    assert peer.post(path + "/resubmit", json=version).status_code == 403
+    assert peer.get(workbook).status_code == 403
+    signed = supervisor.get(workbook)
+    assert signed.status_code == 200
+    forwarded = peer.post("/api/workbooks/presales_inquiry_lines/preview",
+        params={"subject_type": "presales_inquiry", "subject_id": draft["id"]},
+        files={"file": ("inquiry.xlsx", signed.content)})
+    assert forwarded.status_code == 403, forwarded.text
+    checked = owner.get(path).json()
+    assert (checked["status"], checked["version"], checked["customer_id"]) == (
+        "revising", revising["version"], users.customer.id)
+    assert len(checked["lines"]) == 1 and Decimal(checked["lines"][0]["qty"]) == 3
+    resumed = supervisor.post(path + "/resubmit", json=version)
+    assert resumed.status_code == 200, resumed.text
+    appended = owner.post(path + "/lines", json={
+        "expected_version": resumed.json()["version"], "lines": [{"pn_raw": "新增型号"}]})
+    assert appended.status_code == 200 and len(appended.json()["lines"]) == 2
+    assert owner.post(path + "/urge").status_code == 410
+    assert owner.get(path).json()["work_items"] == []
 
 
 def test_http_anonymous_denied_and_conflict_never_mutates(db, users):
@@ -201,7 +241,7 @@ def test_http_proactive_notice_reference_library_and_revisions(db, users):
     library_response = _client(users.other).get(f"/api/presales/library?part_ids={users.part.id}")
     assert library_response.status_code == 200 and len(library_response.json()[str(users.part.id)]) == 1
     notices = _client(users.other).get("/api/work-items?subject_type=presales_offer_notice")
-    assert notices.status_code == 200 and notices.json()["total"] == 1, notices.text
+    assert notices.status_code == 200 and notices.json()["total"] == 0, notices.text
     refs = buyer.post("/api/presales/reference", json={"inquiry_id": inquiry["id"]})
     assert refs.status_code == 200, refs.text
     assert refs.json()["gallery"] == [{"part_id": users.part.id}]

@@ -218,6 +218,7 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
     omitted = {"submitted_snapshot", "offer_audience_rule_id", "notes_audience_rule_id"}
     result = {col.name: getattr(inquiry, col.name) for col in inquiry.__table__.columns
               if col.name not in omitted}
+    result["is_owner"] = owner
     result = audience.filter_fields(db, [result], ctx,
                 field_rules={"notes": (inquiry.notes_audience_rule_id, author)}, bypass=_public)[0]
     # D-0052：询价全员可见，客户名只看系统数据权限。
@@ -330,9 +331,7 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
     result["line_answers"] = line_answers
     result["progress"]["effective_quoted_lines"] = sum(row["state"] == "quoted" for row in line_answers)
     subject_tasks = work_items.list_by_subject(db, Subject("presales_inquiry", inquiry.id), ctx)
-    result["can_urge"] = (owner and inquiry.kind == "sales_inquiry" and inquiry.status == "submitted"
-                          and work_items.has_permission(ctx, "action_presales_inquire")
-                          and any(item.status in work_items.ACTIVE and not item.paused for item in subject_tasks))
+    result["can_urge"] = False  # D-0052 取消催办，旧计数及时间线照常回读。
     if detail:
         result.update(audience.read_rules(db, {
             "offer_audience": (inquiry.offer_audience_rule_id, author),
