@@ -6,7 +6,8 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select
 
-from app.models.presales import PresalesLineResponse, PresalesOffer, PresalesOfferLineLink
+from app.models.presales import PresalesLineResponse, PresalesOffer, PresalesOfferLineLink, PresalesOfferRevision
+from app.models.workflow import SubjectEvent
 from app.services.presales import answers, common, inquiries, offers, pool
 from tests.test_presales_api_visibility import _client, users  # noqa: F401
 from tests.test_presales_pool import _inquiry, _price
@@ -150,3 +151,60 @@ def test_pre_upgrade_revising_conditions_do_not_reactivate_echoed_old_reference(
     _price(db, users.peer, source, "46")
     assert line.answer_state == "pending"
     assert {Decimal(h["unit_price"]) for h in pool.history(db, line.id, users.seller.id) if h.get("unit_price")} == {35}
+
+
+@pytest.mark.parametrize(("ref_state", "stored_qty"), [(None, "1E+1"), (None, "10.000"), (True, 10.0)])
+def test_legacy_reference_and_equivalent_quantities_leave_all_priced_sources_alone(db, users, ref_state, stored_qty):
+    reference_line = _inquiry(db, users.peer, users.part)
+    ref_id = _price(db, users.peer, reference_line, "11")["price"]["offer_id"]
+    linked_line = _inquiry(db, users.buyer, users.part)
+    linked_id = _price(db, users.buyer, linked_line, "22")["price"]["offer_id"]
+    line = _inquiry(db, users.seller, users.part, qty=10)
+    own_id = _price(db, users.seller, line, "33")["price"]["offer_id"]
+    inquiry = common.get_inquiry(db, line.inquiry_id)
+    prior = dict(inquiries.quote_conditions(line), qty=stored_qty, legacy_extra="保留")
+    del prior["return_defective"]  # D-0047 之前默认返回坏件。
+    if ref_state is not None:
+        prior["has_reference"] = ref_state
+    line.ref_offer_id, line.ref_offer_revision_no = ref_id, 1
+    db.add(PresalesOfferLineLink(line_id=line.id, offer_id=linked_id, offer_revision_no=1))
+    inquiry.status = "revising"
+    inquiry.submitted_snapshot = {"lines": {line.line_key: prior}}
+    db.commit()
+    owner = _client(users.seller)
+    saved = owner.post(f"/api/presales/inquiries/{inquiry.id}/resubmit", json={"expected_version": inquiry.version})
+    assert saved.status_code == 200, saved.text
+    db.expire_all()
+    assert (line.ref_offer_id, line.ref_offer_revision_no) == (ref_id, 1)
+    assert db.get(PresalesOfferLineLink, (line.id, linked_id)).offer_revision_no == 1
+    assert [(db.get(PresalesOffer, key).status, db.get(PresalesOffer, key).revision_no)
+            for key in (own_id, ref_id, linked_id)] == [("published", 1)] * 3
+    assert {Decimal(row["unit_price"]) for row in pool.history(db, line.id, users.seller.id)
+            if row.get("unit_price")} == {11, 22, 33}
+    assert db.scalar(select(SubjectEvent.id).where(SubjectEvent.kind == "line.price_unlinked")) is None
+    assert db.scalar(select(SubjectEvent.payload).where(SubjectEvent.kind == "inquiry.resubmitted",
+        SubjectEvent.subject_id == inquiry.id))["changed_line_keys"] == []
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_changed_conditions_only_keep_complete_numerically_matching_legacy_price_proof(db, users, complete):
+    line = _inquiry(db, users.seller, users.part, qty=10)
+    key = _price(db, users.buyer, line, "45")["price"]["offer_id"]
+    offer = db.get(PresalesOffer, key)
+    revision = db.scalar(select(PresalesOfferRevision).where(PresalesOfferRevision.offer_id == key))
+    conditions = dict(inquiries.quote_conditions(line), qty="10.000")
+    if not complete:
+        del conditions["return_defective"]  # 默认值只适用于旧单据基线，不能补作报价人的确认。
+    snapshot = {**revision.snapshot, "revision_no": 2, "_inquiry": {**revision.snapshot["_inquiry"],
+                                                                   "line_conditions": conditions}}
+    db.add(PresalesOfferRevision(offer_id=key, revision_no=2, snapshot=snapshot, actor=users.buyer.id))
+    offer.revision_no, offer.version = 2, offer.version + 1
+    inquiry = common.get_inquiry(db, line.inquiry_id)
+    inquiry.status = "revising"
+    inquiry.submitted_snapshot = {"lines": {line.line_key: dict(inquiries.quote_conditions(line), qty="3")}}
+    db.commit()
+    saved = _client(users.seller).post(f"/api/presales/inquiries/{inquiry.id}/resubmit",
+                                       json={"expected_version": inquiry.version})
+    assert saved.status_code == 200, saved.text
+    db.refresh(offer)
+    assert offer.status == ("published" if complete else "stale")
