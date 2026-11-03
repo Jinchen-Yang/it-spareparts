@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from app import permissions
 from app.db import SessionLocal
 from app.models.dimensions import DimPart
+from app.models.fields_audience import AudienceRule
 from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer, PresalesOfferRevision
 from app.models.system import SysAccessLog, SysUser
 from app.services import field_pool, master_edit
@@ -190,7 +191,8 @@ def test_draft_versions_ownership_and_originally_private_copy(db, presales_users
     with pytest.raises(Forbidden):
         inquiries.update_draft(db, inquiry.id, users.other_sales.id, inquiry.version, notes="越权")
     copied = inquiries.copy_as_new(db, inquiry.id, users.sales.id, inquiry.version)
-    assert copied.offer_audience_rule_id == inquiry.offer_audience_rule_id
+    assert copied.offer_audience_rule_id != inquiry.offer_audience_rule_id
+    assert db.get(AudienceRule, copied.offer_audience_rule_id).mode == "private"
     assert copied.notes_audience_rule_id == inquiry.notes_audience_rule_id
     assert inquiries.lines_for(db, copied.id)[0].notes_audience_rule_id == inquiries.lines_for(db, inquiry.id)[0].notes_audience_rule_id
     inquiries.delete_draft(db, inquiry.id, users.sales.id, inquiry.version)

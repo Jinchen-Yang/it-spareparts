@@ -13,7 +13,8 @@ import PartThumb from "../../components/gallery/PartThumb";
 import { lineAnswer } from "./answers";
 import { CurrentAnswer } from "./InquiryOffers";
 type InquirySort = { key: string; dir: "asc" | "desc" };
-import { isOfferActive, isPresalesSupervisor, useNow } from "./shared";
+import { isOfferActive, isPresalesAdmin, useNow } from "./shared";
+import { readPermissionMap } from "../../nav";
 import { moneyExact } from "../../utils/format";
 import { parseApiError, type ApiErrorInfo } from "../../utils/apiError";
 import { ApiErrorFeedback } from "../../components/ApiErrorFeedback";
@@ -39,8 +40,8 @@ function lineOffers(detail: Inquiry | undefined, line: InquiryLine): Offer[] {
 
 export default function InquiryListPage() {
   const navigate = useNavigate();
-  const supervisor = isPresalesSupervisor();
-  const [scope, setScope] = useState<"mine" | "shared" | "all">("mine");
+  const canSeeAll = isPresalesAdmin() || readPermissionMap().action_presales_quote === true;
+  const [scope, setScope] = useState<"mine" | "shared" | "all">(canSeeAll ? "all" : "mine");
   const [kind, setKind] = useState<Inquiry["kind"]>();
   const [params] = useSearchParams();
   const [status, setStatus] = useState<Inquiry["status"] | undefined>(params.get("status") === "draft" ? "draft" : undefined);
@@ -135,7 +136,7 @@ export default function InquiryListPage() {
       <Button onClick={() => setImportOpen(true)}>从 Excel 新建</Button><Button type="primary" onClick={() => navigate("/presales/inquiries/new")}>新建询价</Button></Space>} />
     <div className="presales-panel">
       <Tabs activeKey={scope} onChange={(value) => { setScope(value as typeof scope); setPage(1); }} items={[
-        { key: "mine", label: "我的询价" }, { key: "shared", label: "共享给我" }, ...(supervisor ? [{ key: "all", label: "全部" }] : []),
+        { key: "mine", label: "我的询价" }, { key: "shared", label: "共享给我" }, ...(canSeeAll ? [{ key: "all", label: "全部" }] : []),
       ]} />
       <div className="presales-toolbar">
         <Segmented value={stage} options={[{ value: "", label: "全部状态" }, ...["草稿", "待处理", "处理中", "已回复", "已结束"].map((value) => ({ value, label: value }))]}

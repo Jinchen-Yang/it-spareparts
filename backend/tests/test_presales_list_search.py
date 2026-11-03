@@ -25,7 +25,7 @@ def test_list_search_matches_each_public_field_and_customer_names(db, users, ter
 
 
 def test_customer_permission_is_required_even_for_owner_or_supervisor(db, users):
-    row, _ = _quoted(db, users)
+    row, _ = _quoted(db, users, whole={"mode": "include", "user_ids": [users.supervisor.username]})
     for user in (users.seller, users.supervisor):
         user.template_perms = {**user.template_perms, "data_customer": False}
     db.commit()

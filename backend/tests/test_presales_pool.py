@@ -25,8 +25,11 @@ from app.services.workflow import work_items
 from tests.test_presales_api_visibility import _client, _ctx, users  # noqa: F401
 
 
-def _inquiry(db, user, part, *, qty=1, customer=None, priority="normal"):
+def _inquiry(db, user, part, *, qty=1, customer=None, priority="normal", visible_to=None):
+    # 池写入/并发契约使用已明确共享的销售账号，默认私有由独立 ACL 用例覆盖。
+    visible_to = ["api_other"] if visible_to is None else visible_to
     result = pool.create_inquiry(db, _ctx(db, user), customer_id=customer.id if customer else None, priority=priority,
+        visible_to=visible_to,
         lines=[{"part_id": part.id, "pn_raw": part.pn_std, "qty": Decimal(qty)}])
     db.commit()
     return db.scalar(select(PresalesInquiryLine).where(PresalesInquiryLine.inquiry_id == result["inquiry_id"]))
@@ -449,7 +452,7 @@ def test_skip_then_quote_and_latest_same_pn_hint(db, users):
 
 
 def test_customer_follows_data_permission_and_drafts_stay_private(db, users):
-    line = _inquiry(db, users.seller, users.part, customer=users.customer)
+    line = _inquiry(db, users.seller, users.part, customer=users.customer, visible_to=[users.supervisor.username])
     assert "customer_name" not in pool.line_view(db, line.id, _ctx(db, users.buyer))
     assert pool.line_view(db, line.id, _ctx(db, users.supervisor))["customer_name"] == "客户机密"
     draft = inquiries.create_draft(db, _ctx(db, users.seller), lines=[
@@ -466,13 +469,14 @@ def test_customer_follows_data_permission_and_drafts_stay_private(db, users):
     db.rollback()
 
 
-def test_private_legacy_offer_is_public_and_no_page_permission_is_denied(db, users):
+def test_private_legacy_offer_excludes_other_sales_and_no_page_permission_is_denied(db, users):
     rule = common.rule_id(db, {"mode": "private"}, _ctx(db, users.seller))
     inquiry = inquiries.create_draft(db, _ctx(db, users.seller), offer_audience={"mode": "private"}, lines=[
         {"part_id": users.part.id, "pn_raw": users.part.pn_std, "qty": Decimal(1)}])
     inquiries.submit(db, inquiry.id, _ctx(db, users.seller), inquiry.version, open_tasks=False)
     db.commit()
-    assert rule is not None and visibility.can_view_inquiry(db, inquiry, _ctx(db, users.other))
+    assert rule is not None and not visibility.can_view_inquiry(db, inquiry, _ctx(db, users.other))
+    assert visibility.can_view_inquiry(db, inquiry, _ctx(db, users.buyer))
     with pytest.raises(Forbidden):
         pool.counts(db, _ctx(db, users.denied))
     db.rollback()
@@ -573,7 +577,7 @@ def test_default_sales_without_data_supplier_sees_supplier_in_pool(db, users):
                     template_perms=graph, perm_overrides={})
     db.add(plain)
     db.commit()
-    line = _inquiry(db, users.seller, users.part)
+    line = _inquiry(db, users.seller, users.part, visible_to=[plain.username])
     _price(db, users.buyer, line, "10", supplier_id=users.supplier.id)
     client = _client(plain)
     assert client.get("/api/presales/suppliers").status_code == 200
@@ -673,7 +677,8 @@ def test_condition_cannot_be_null(db, users, key):
 
 
 def test_revising_owner_edits_the_inquiry_but_other_users_can_quote_shared_lines(db, users):
-    draft = inquiries.create_draft(db, _ctx(db, users.seller), lines=[
+    draft = inquiries.create_draft(db, _ctx(db, users.seller),
+        offer_audience={"mode": "include", "user_ids": [users.other.username]}, lines=[
         {"part_id": users.part.id, "pn_raw": users.part.pn_std, "qty": Decimal(1)}])
     db.commit()
     with pytest.raises(Forbidden):

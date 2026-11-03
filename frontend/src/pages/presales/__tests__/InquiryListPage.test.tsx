@@ -30,8 +30,8 @@ beforeEach(() => {
 });
 afterEach(cleanupAntd);
 
-it("列表按处理人回复显示 1/2 进度与标签，主管可切换全部", async () => {
-  localStorage.setItem("permissions", JSON.stringify({ action_presales_supervise: true }));
+it("列表按处理人回复显示 1/2 进度与标签，报价人默认查看全部", async () => {
+  localStorage.setItem("permissions", JSON.stringify({ action_presales_quote: true }));
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
   expect(await screen.findByText("处理中「已回复 1/2」")).toBeVisible();
   expect(screen.getByText("采购甲 · 已回复")).toBeVisible();
@@ -40,8 +40,24 @@ it("列表按处理人回复显示 1/2 进度与标签，主管可切换全部",
   expect(await screen.findByText("客户甲")).toBeVisible();
   expect(mocks.fetchPurchaseAnalyticsOptions).not.toHaveBeenCalled();
   expect(mocks.getInquiry).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("tab", { name: "全部" }));
+  expect(screen.getByRole("tab", { name: "全部" })).toHaveAttribute("aria-selected", "true");
   await waitFor(() => expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ scope: "all" })));
+});
+
+it.each(["admin", "boss"])("管理员角色 %s 默认查看全部询价", async (role) => {
+  localStorage.setItem("role", role);
+  render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
+  await screen.findByText("XJ001");
+  expect(screen.getByRole("tab", { name: "全部" })).toHaveAttribute("aria-selected", "true");
+  expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ scope: "all" }));
+});
+
+it("仅主管动作权限不扩大默认可见范围", async () => {
+  localStorage.setItem("permissions", JSON.stringify({ action_presales_supervise: true }));
+  render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
+  await screen.findByText("XJ001");
+  expect(screen.queryByRole("tab", { name: "全部" })).not.toBeInTheDocument();
+  expect(mocks.listInquiries).toHaveBeenLastCalledWith(expect.objectContaining({ scope: "mine" }));
 });
 
 it("普通用户无全部入口；类型/状态使用服务端支持的筛选键，隐藏字段不补占位", async () => {

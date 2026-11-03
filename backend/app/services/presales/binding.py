@@ -5,7 +5,7 @@ from sqlalchemy import select
 from app.models.dimensions import DimPart
 from app.models.presales import PresalesInquiryLine
 from app.services import field_pool, manual_part_input, master_edit
-from app.services.presales import answers, common, inquiries
+from app.services.presales import answers, common, inquiries, visibility
 from app.services.workflow.registry import Conflict, Forbidden, InvalidTransition, NotFound
 
 
@@ -18,6 +18,8 @@ def _access(db, line_id, actor, *, lock=False, expected_version=None):
     if line is None:
         raise NotFound("询价行不存在")
     inquiry = common.lock_inquiry(db, line.inquiry_id) if lock else common.get_inquiry(db, line.inquiry_id)
+    if not visibility.can_view_inquiry(db, inquiry, ctx):
+        raise Forbidden("无权处理该询价")
     if lock:
         line = db.scalar(select(PresalesInquiryLine).where(PresalesInquiryLine.id == line_id)
                          .with_for_update().execution_options(populate_existing=True))

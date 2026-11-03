@@ -10,7 +10,7 @@ from app.services import part_search
 from app.services.presales import common
 
 
-def _active(db, part_ids=None, *, now=None):
+def _active(db, part_ids=None, *, now=None, ctx=None):
     moment = now or common.now()
     query = select(PresalesOffer).where(
         PresalesOffer.status == "published", PresalesOffer.no_stock.is_(False),
@@ -19,6 +19,9 @@ def _active(db, part_ids=None, *, now=None):
     )
     if part_ids is not None:
         query = query.where(PresalesOffer.part_id.in_(part_ids))
+    if ctx is not None:
+        from app.services.presales.visibility import offer_access_filter
+        query = query.where(offer_access_filter(db, ctx))
     return list(db.scalars(query.order_by(PresalesOffer.part_id,
                                          PresalesOffer.unit_price, PresalesOffer.id)))
 
@@ -38,7 +41,7 @@ def batch(db, part_ids, viewer, *, now=None, owner_id=None):
     result = {part_id: [] for part_id in ids}
     if not ids:
         return result
-    active = _active(db, ids, now=now)
+    active = _active(db, ids, now=now, ctx=ctx)
     owner_views = None
     if owner_id is not None:
         _, owner_ctx = common.resolve_actor(db, owner_id)
@@ -68,7 +71,7 @@ def boost_part_ids(db, q, viewer=None):
         return []
     _, ctx = common.resolve_actor(db, viewer)
     common.require(ctx, "page_presales")
-    return list(dict.fromkeys(offer.part_id for offer in visible_offers(db, _active(db), ctx)))
+    return list(dict.fromkeys(offer.part_id for offer in visible_offers(db, _active(db, ctx=ctx), ctx)))
 
 
 def search(db, q, viewer, *, limit=20):

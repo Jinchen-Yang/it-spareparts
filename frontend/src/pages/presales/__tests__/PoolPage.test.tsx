@@ -35,6 +35,33 @@ describe("询价报价共享池", () => {
   });
   afterEach(cleanup);
 
+  it.each([
+    [true, "sales", false, true], [false, "admin", false, true], [false, "boss", false, true],
+    [false, "purchaser", false, false], [false, "sales", true, false],
+  ])("可见人员管理遵循本人和管理员范围 %s %s %s", async (isMine, role, supervise, allowed) => {
+    localStorage.setItem("role", role);
+    localStorage.setItem("permissions", JSON.stringify({ action_presales_supervise: supervise }));
+    vi.spyOn(presalesPool, "lines").mockResolvedValue(page([line({ is_mine: isMine })]));
+    show();
+    await screen.findByText("PN-1");
+    expect(!!screen.queryByRole("button", { name: "设置 XJ20261101001 可见人员" })).toBe(allowed);
+  });
+
+  it("刷新被拒绝时清除已显示行、数量、历史和本地编辑", async () => {
+    vi.spyOn(presalesPool, "lines").mockResolvedValueOnce(page([line()])).mockRejectedValue({ response: { status: 403 } });
+    vi.spyOn(presalesPool, "history").mockResolvedValue([{ kind: "line.skipped", at: "2026-11-01T01:00:00Z", actor: "李四", reason: "私有原因" }]);
+    show();
+    fireEvent.change(await screen.findByRole("spinbutton", { name: "PN-1 单价" }), { target: { value: "81" } });
+    fireEvent.click(screen.getByRole("button", { name: /历\s*史/ }));
+    await screen.findByText(/私有原因/);
+    fireEvent.click(screen.getByRole("button", { name: /刷\s*新/ }));
+    await screen.findByText("询价报价加载失败");
+    expect(screen.queryByText("PN-1")).toBeNull();
+    expect(screen.queryByRole("spinbutton", { name: "PN-1 单价" })).toBeNull();
+    await waitFor(() => expect(screen.queryByText(/私有原因/)).toBeNull());
+    expect(screen.queryByRole("button", { name: "待报价 1" })).toBeNull();
+  });
+
   it("一次请求显示待报价行和各筛选数量，不逐单读详情", async () => {
     const lines = vi.spyOn(presalesPool, "lines").mockResolvedValue(page([line()]));
     show();

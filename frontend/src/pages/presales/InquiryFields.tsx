@@ -14,6 +14,7 @@ export type DraftLine = {
   key: string; line_key?: string; part_id: number | null; pn_raw: string; description?: string | null;
   brand?: string | null; qty: number; require_exact_pn: boolean; return_defective: boolean; ref_offer_id?: number | null;
   ref_offer_revision_no?: number | null; ref_offer?: Offer;
+  reference_restricted?: boolean;
   notes?: string | null; notes_audience?: AudienceRule; notesVisible: boolean; field_values: CustomFieldValue[];
   savedNotesAudience?: AudienceRuleRead;
   originalFields: ReadField[]; expectedDelivery: string;

@@ -41,6 +41,9 @@ def test_revoked_presales_page_hides_existing_assignment_and_blocks_actions(db, 
     is_notice = subject_type == "presales_offer_notice"
     owner, target = (users.buyer, users.sales) if is_notice else (users.sales, users.buyer)
     inquiry = _inquiry(db, owner, kind="proactive_offer" if is_notice else "sales_inquiry")
+    if is_notice:
+        inquiry.offer_audience_rule_id = common.rule_id(db,
+            {"mode": "include", "user_ids": [target.username]}, common.resolve_actor(db, owner.id)[1])
     subject = Subject(subject_type, inquiry.id)
     item = work_items.open_items(db, subject, [target.id], subject_type, owner.id)[0]
     ctx = common.resolve_actor(db, target.id)[1]
@@ -85,6 +88,33 @@ def test_revoked_page_account_is_not_assignable_or_a_candidate(db, access_users)
                               "presales_inquiry", users.sales.id)
 
 
+def test_public_proactive_notice_rechecks_page_permission_for_supervisor(db, access_users):
+    users = access_users
+    owner = common.resolve_actor(db, users.buyer.id)[1]
+    rule = common.rule_id(db, {"mode": "include", "user_ids": [users.sales.username]}, owner)
+    inquiry = _inquiry(db, users.buyer, rule_id=rule)
+    subject = Subject("presales_offer_notice", inquiry.id)
+    item = work_items.open_items(db, subject, [users.sales.id], subject.subject_type, users.buyer.id)[0]
+    # 主管动作权限仍受当前询价可见范围约束。
+    users.sales.perm_overrides = {"action_presales_supervise": True}
+    db.flush()
+    ctx = common.resolve_actor(db, users.sales.id)[1]
+    assert work_items.visible_items(db, ctx, "assigned", subject.subject_type)["total"] == 1
+    assert work_items.badge(db, ctx)["assigned"] == 1
+    inquiry.offer_audience_rule_id = common.rule_id(db, {"mode": "private"}, owner)
+    db.flush()
+    assert work_items.visible_items(db, ctx, "assigned", subject.subject_type)["total"] == 1
+    users.sales.perm_overrides = {"page_presales": False, "action_presales_supervise": True}
+    db.flush()
+    result = work_items.visible_items(db, ctx, "assigned", subject.subject_type)
+    assert result["total"] == 0 and result["items"] == []
+    assert work_items.badge(db, ctx)["assigned"] == 0
+    with pytest.raises(Forbidden):
+        work_items.serialize_items(db, [item], users.sales.id, ctx)
+    with pytest.raises(Forbidden):
+        events.list_events(db, subject, ctx)
+
+
 @pytest.mark.parametrize("modes, referenced, visible", [
     (["public"], False, True),
     (["public", "private"], False, False),
@@ -98,6 +128,8 @@ def test_notice_creator_obeys_reporter_rules_including_referenced_quotes(
     owner_ctx = common.resolve_actor(db, users.buyer.id)[1]
     inquiry = _inquiry(db, users.buyer)
     origin = _inquiry(db, users.buyer, number=2) if referenced else inquiry
+    inquiry.offer_audience_rule_id = origin.offer_audience_rule_id = common.rule_id(db,
+        {"mode": "include", "user_ids": [users.sales.username]}, owner_ctx)
     for seq, mode in enumerate(modes, start=1):
         line = PresalesInquiryLine(inquiry_id=origin.id, line_key=f"offer-{seq}", seq=seq,
                                    pn_raw=f"RAW-{seq}", qty=1)

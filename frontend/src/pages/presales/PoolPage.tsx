@@ -16,9 +16,10 @@ import { parseApiError } from "../../utils/apiError";
 import CandidateSelect from "./CandidateSelect";
 import { DirectQuote } from "./DirectQuote";
 import NewInquiryPanel from "./NewInquiryPanel";
+import InquiryVisibilityDialog from "./InquiryVisibility";
 import PartBinding, { canBindPresalesPart } from "./PartBinding";
 import WorkbookDialog from "./WorkbookDialog";
-import { isPresalesSupervisor, taxLabel, usePresalesError } from "./shared";
+import { isPresalesAdmin, isPresalesSupervisor, taxLabel, usePresalesError } from "./shared";
 import "./presales.css";
 
 const PAGE_SIZE = 50;
@@ -78,10 +79,18 @@ export default function PoolPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [direct, setDirect] = useState(false);
   const [closing, setClosing] = useState<{ row: PoolLine; outcome: CloseOutcome }>();
+  const [visibilityRow, setVisibilityRow] = useState<PoolLine>();
   const [closeBusy, setCloseBusy] = useState(false);
   const [qtyNonce, setQtyNonce] = useState(0);
   const resetQty = () => setQtyNonce((value) => value + 1);
   const generation = useRef(0);
+  const historyGeneration = useRef(0);
+
+  const clearProtectedData = useCallback(() => {
+    historyGeneration.current += 1;
+    setRows([]); setTotal(0); setCounts(undefined); setSelected([]); setDrafts({});
+    setBinding(undefined); setHistory(undefined); setClosing(undefined); setVisibilityRow(undefined); setImportOpen(false);
+  }, []);
 
   const load = useCallback(async () => {
     const current = ++generation.current;
@@ -90,10 +99,16 @@ export default function PoolPage() {
       const result = await presalesPool.lines({ tab, page, page_size: PAGE_SIZE, ...(query.trim() ? { q: query.trim() } : {}) });
       if (current !== generation.current) return;
       setRows(result.items); setTotal(result.total); setCounts(result.counts);
+      const ids = new Set(result.items.map((row) => row.line_id));
+      setSelected((previous) => previous.filter((id) => ids.has(id)));
+      setHistory((previous) => previous && ids.has(previous.row.line_id) ? previous : undefined);
+      setBinding((previous) => previous && ids.has(previous.line_id) ? previous : undefined);
+      setClosing((previous) => previous && ids.has(previous.row.line_id) ? previous : undefined);
+      setVisibilityRow((previous) => previous && ids.has(previous.line_id) ? previous : undefined);
     } catch (error) {
-      if (current === generation.current) { setFailed(true); await handleError(error); }
+      if (current === generation.current) { clearProtectedData(); setFailed(true); await handleError(error); }
     } finally { if (current === generation.current) setLoading(false); }
-  }, [tab, page, query, handleError]);
+  }, [tab, page, query, handleError, clearProtectedData]);
   useEffect(() => { void load(); return () => { generation.current += 1; }; }, [load]);
 
   const replace = (row: PoolLine) => setRows((previous) => previous.map((item) => item.line_id === row.line_id ? row : item));
@@ -146,7 +161,11 @@ export default function PoolPage() {
         void message.warning(conflict.latest.answered_by
           ? `${row.pn} 刚被 ${conflict.latest.answered_by} 更新为 ${moneyExact(priceOf(conflict.latest))}，你的输入已保留，核对后再保存`
           : `${row.pn} 刚被其他人修改，你的输入已保留，核对后再保存`);
-      } else await handleError(error);
+      } else {
+        const info = parseApiError(error);
+        if (info.kind === "permission" || info.status === 404) { clearProtectedData(); void load(); }
+        await handleError(error);
+      }
     } finally { setBusy(undefined); }
   };
 
@@ -183,7 +202,9 @@ export default function PoolPage() {
       notifyPoolChanged();
       void load();
     } catch (error) {
-      if (parseApiError(error).code === "offer_revision_conflict") {
+      const info = parseApiError(error);
+      if (info.kind === "permission" || info.status === 404) { clearProtectedData(); await load(); }
+      if (info.code === "offer_revision_conflict") {
         setClosing(undefined);
         void message.warning("报价已更新，请核对最新价格后重新关单");
         await load();
@@ -192,9 +213,18 @@ export default function PoolPage() {
   };
 
   const showHistory = async (row: PoolLine) => {
+    const current = ++historyGeneration.current;
     setHistory({ row });
-    try { setHistory({ row, items: await presalesPool.history(row.line_id) }); }
-    catch (error) { setHistory(undefined); await handleError(error); }
+    try {
+      const items = await presalesPool.history(row.line_id);
+      if (current === historyGeneration.current) setHistory((previous) => previous?.row.line_id === row.line_id ? { row, items } : previous);
+    } catch (error) {
+      if (current !== historyGeneration.current) return;
+      setHistory(undefined);
+      const info = parseApiError(error);
+      if (info.kind === "permission" || info.status === 404) { clearProtectedData(); void load(); }
+      await handleError(error);
+    }
   };
 
   const copy = async (row: PoolLine) => {
@@ -208,6 +238,7 @@ export default function PoolPage() {
     { title: "询价人 / 单号", key: "who", width: 150, render: (_, row) => <div className="presales-cell">
       <b className="presales-sales">{row.requester ?? "—"}</b>
       <Link className="presales-muted" to={`/presales/inquiries/${row.inquiry_id}`}>{row.inquiry_no}{row.customer_name ? ` · ${row.customer_name}` : ""}</Link>
+      {(row.is_mine || isPresalesAdmin()) && <Button type="link" size="small" aria-label={`设置 ${row.inquiry_no} 可见人员`} onClick={() => setVisibilityRow(row)}>可见人员</Button>}
       <Space size={4} wrap>
         {row.priority === "urgent" && <Tag color="red">紧急</Tag>}
         {row.inquiry_status === "closed" && <Tag>{({ won: "已成交", lost: "未成交", cancelled: "已取消" })[row.closed_outcome ?? "cancelled"]}</Tag>}
@@ -264,7 +295,7 @@ export default function PoolPage() {
   const tabs: [PoolTab, string, number | undefined][] = [["pending", "待报价", counts?.pending], ["quoted", "已报价", counts?.quoted], ["skip", "不报", counts?.skip], ["mine", "我发起的", counts?.mine], ["all", "全部", counts?.all]];
   const exportIds = [...new Set(rows.filter((row) => selected.includes(row.line_id) && row.inquiry_status !== "closed").map((row) => row.inquiry_id))];
   return <section className="presales-page presales-stack">
-    <PageHeader title="询价报价" subtitle="所有人共用一个池子：谁都能询价、报价和改价，保存立即生效，系统记录更新人" extra={<Space>
+    <PageHeader title="询价报价" subtitle="默认查看本人和指定给自己的询价，采购／报价人可查看全部已提交询价，管理员可查看全部询价" extra={<Space>
       <Link to="/presales/inquiries/new">Excel 询价</Link>
       <Link to="/presales/library">报价库</Link>
       <Link to="/presales/inquiries?status=draft">我的草稿{counts?.drafts ? ` ${counts.drafts}` : ""}</Link>
@@ -324,11 +355,13 @@ export default function PoolPage() {
       <PartBinding compact line={{ id: binding.line_id, version: binding.line_version, pn_raw: binding.pn, description: binding.description } as InquiryLine}
         refresh={load} onBound={() => { setBinding(undefined); void load(); }} />
     </Modal>}
-    <Drawer open={!!history} title={history ? `${history.row.pn} 的历史` : ""} onClose={() => setHistory(undefined)} loading={!!history && !history.items} destroyOnHidden>
+    <Drawer open={!!history} title={history ? `${history.row.pn} 的历史` : ""} onClose={() => { historyGeneration.current += 1; setHistory(undefined); }} loading={!!history && !history.items} destroyOnHidden>
       {history?.items && (history.items.length ? <Timeline items={history.items.map((item, index) => ({ key: index, children: <div className="presales-cell">
         <b>{historyText(item)}</b><span className="presales-muted">{item.actor ?? "—"} · {formatBusinessDateTime(item.at)}</span>
       </div> }))} /> : <span className="presales-muted">还没有记录</span>)}
     </Drawer>
     {importOpen && <WorkbookDialog mode="quote" onClose={() => setImportOpen(false)} onApplied={() => { setImportOpen(false); notifyPoolChanged(); void load(); }} />}
+    {visibilityRow && <InquiryVisibilityDialog inquiryId={visibilityRow.inquiry_id} inquiryNo={visibilityRow.inquiry_no}
+      onClose={() => setVisibilityRow(undefined)} onSaved={() => void load()} onDenied={() => { clearProtectedData(); void load(); }} />}
   </section>;
 }

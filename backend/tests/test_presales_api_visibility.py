@@ -57,6 +57,8 @@ def _client(user):
 
 
 def _quoted(db, users, *, rule=None, whole=None):
+    # 这些报价读写契约显式共享给 other；默认私有另由 D-0053 矩阵覆盖。
+    whole = whole if whole is not None else {"mode": "include", "user_ids": [users.other.username]}
     inquiry = inquiries.create_draft(db, users.seller.id, customer_id=users.customer.id,
         lines=[{"part_id": users.part.id, "qty": 2}],
         assignee_ids=[users.buyer.id, users.peer.id], offer_audience=whole)
@@ -170,6 +172,7 @@ def test_shared_inquiry_header_edits_are_owner_or_supervisor_only_and_never_crea
     owner, peer, supervisor = (_client(u) for u in (users.seller, users.other, users.supervisor))
     draft = owner.post("/api/presales/inquiries", json={
         "customer_id": users.customer.id, "assignee_ids": [users.buyer.id],
+        "offer_audience": {"mode": "include", "user_ids": [users.other.username, users.supervisor.username]},
         "lines": [{"part_id": users.part.id, "qty": 3}]}).json()
     path = f"/api/presales/inquiries/{draft['id']}"
     workbook = f"/api/presales/workbooks/inquiry/{draft['id']}"

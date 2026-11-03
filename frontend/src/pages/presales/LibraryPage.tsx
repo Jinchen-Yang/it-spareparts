@@ -8,6 +8,7 @@ import PriceRefBadge from "../../components/pricing/PriceRefBadge";
 import { usePresalesError, isOfferActive, OfferBadge, useNow, flattenOffers, activeOfferGroups } from "./shared";
 import PageHeader from "../../components/PageHeader";
 import { formatBusinessDateTime } from "../../utils/date";
+import { parseApiError } from "../../utils/apiError";
 import "./presales.css";
 
 interface LibraryRow { part: LibraryPart; offer: Offer }
@@ -52,7 +53,13 @@ export default function LibraryPage() {
                 sourceCache.current[inquiry.id] = inquiry.kind;
                 setSources({ ...sourceCache.current });
               }
-            } catch { /* 无权读取来源单时不推测来源类型，报价仍按库响应显示。 */ }
+            } catch (error) {
+              const info = parseApiError(error);
+              if (!controller.signal.aborted && (info.kind === "permission" || info.status === 404)) {
+                setItems([]); setSelected(undefined); setSources({}); sourceCache.current = {};
+                setError(true);
+              }
+            }
           }
         }));
       }).catch((error: unknown) => {

@@ -13,7 +13,7 @@ from app.models.presales import (
     PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink,
     PresalesOfferRevision,
 )
-from app.services.presales import answers, common
+from app.services.presales import answers, common, visibility
 from app.services.workflow import work_items
 from app.services.workflow.registry import Conflict, Forbidden, InvalidTransition, NotFound, Subject
 
@@ -224,6 +224,8 @@ def save_draft(db, inquiry_id, line_id, actor, data, *, expected_version,
     user, ctx = common.resolve_actor(db, actor)
     common.require(ctx, "page_presales")
     inquiry = common.lock_inquiry(db, inquiry_id)
+    if not visibility.can_view_inquiry(db, inquiry, ctx):
+        raise Forbidden("无权处理该询价")
     if inquiry.kind == "proactive_offer":
         if inquiry.created_by != user.id and not common.bypass(ctx):
             raise Forbidden("只能编辑自己发起的主动报价")
@@ -341,7 +343,7 @@ def _valid_reference(db, line, offer_id, ctx, owner_id=None):
         owner_id = common.get_inquiry(db, line.inquiry_id).created_by
     if type(offer_id) is not int or line.part_id is None:
         raise InvalidTransition("请选择同 PN 的有效报价")
-    offer = next((offer for offer in library._active(db, [line.part_id]) if offer.id == offer_id), None)
+    offer = next((offer for offer in library._active(db, [line.part_id], ctx=ctx) if offer.id == offer_id), None)
     owner_ctx = common.resolve_actor(db, owner_id)[1]
     if (offer is None or not visibility.can_view_offer(db, offer, ctx)
             or visibility.offer_view(db, offer, owner_ctx) is None
@@ -356,7 +358,10 @@ def save_line_decision(db, inquiry_id, line_id, actor, *, expected_version, mode
     """保存采购逐行草稿选择；共享回复校验，但不发布报价或完成待办。"""
     user, ctx = common.resolve_actor(db, actor)
     common.require(ctx, "page_presales")
-    inquiry = common.lock_inquiry(db, inquiry_id, expected_version)
+    inquiry = common.lock_inquiry(db, inquiry_id)
+    if not visibility.can_view_inquiry(db, inquiry, ctx):
+        raise Forbidden("无权处理该询价")
+    common.check_version(inquiry, expected_version)
     if inquiry.kind != "sales_inquiry" or inquiry.status != "submitted":
         raise InvalidTransition("只能处理已提交的销售询价")
     task = _task(db, inquiry, actor, user.id, work_item_id)
@@ -422,7 +427,10 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
           existing_choices=None, line_responses=None):
     user, ctx = common.resolve_actor(db, actor)
     common.require(ctx, "page_presales")
-    inquiry = common.lock_inquiry(db, inquiry_id, expected_version)
+    inquiry = common.lock_inquiry(db, inquiry_id)
+    if not visibility.can_view_inquiry(db, inquiry, ctx):
+        raise Forbidden("无权处理该询价")
+    common.check_version(inquiry, expected_version)
     if inquiry.kind != "sales_inquiry" or inquiry.status != "submitted":
         raise InvalidTransition("只能回复已提交的销售询价")
     task = _task(db, inquiry, actor, user.id, work_item_id)
@@ -536,6 +544,8 @@ def _editable(db, offer_id, actor, expected_version):
     _serialize_source(db, initial.created_by, initial.part_id, initial.source_key)
     offer = db.scalar(select(PresalesOffer).where(PresalesOffer.id == offer_id)
                       .with_for_update().execution_options(populate_existing=True))
+    if not visibility.can_view_offer(db, offer, ctx):
+        raise Forbidden("无权修改该报价")
     if offer.inquiry_id != (inquiry.id if inquiry is not None else None):
         raise Conflict("报价来源已变化，请刷新后重试")
     common.check_version(offer, expected_version)
@@ -603,6 +613,7 @@ def direct_offer(db, actor, part_id, data, *, on_existing="update", existing_off
     candidates = list(db.scalars(select(PresalesOffer).where(
         PresalesOffer.created_by == user.id, PresalesOffer.part_id == part_id,
         PresalesOffer.status == "published", common.offer_source_eligible(),
+        visibility.offer_access_filter(db, ctx),
     ).order_by(PresalesOffer.valid_from.desc(), PresalesOffer.id.desc())))
     if on_existing == "update" and (candidates or existing_offer_id is not None):
         target = next((row for row in candidates if row.id == existing_offer_id), None) \
@@ -670,7 +681,7 @@ def _publication_plans(db, drafts, inquiry, ctx, on_existing, existing_offer_id,
             action, target_id = saved.get("on_existing"), saved.get("existing_offer_id")
         if action not in {None, "update", "new"}:
             raise InvalidTransition("重复报价必须选择更新或另报一条")
-        candidates = [row for row in library._active(db, [draft.part_id])
+        candidates = [row for row in library._active(db, [draft.part_id], ctx=ctx)
                       if row.created_by == draft.created_by] if draft.part_id and not draft.no_stock else []
         if not candidates:
             if action == "update":
@@ -692,6 +703,8 @@ def _publication_plans(db, drafts, inquiry, ctx, on_existing, existing_offer_id,
         origin = _lock_merge_inquiry(db, target.inquiry_id) if target.inquiry_id is not None else None
         target = db.scalar(select(PresalesOffer).where(PresalesOffer.id == target.id)
                            .with_for_update().execution_options(populate_existing=True))
+        if not visibility.can_view_offer(db, target, ctx):
+            raise Forbidden("无权修改原报价")
         # 旧单锁取得后重新核验，避免等待时旧单撤回使报价变更失效。
         if target.inquiry_id != (origin.id if origin else None) or not common.offer_effective(target):
             raise Conflict("原报价已变化，请刷新后重试")
@@ -729,7 +742,10 @@ def publish_proactive(db, inquiry_id, actor, *, expected_version, notice_user_id
                       on_existing=None, existing_offer_id=None, existing_choices=None):
     user, ctx = common.resolve_actor(db, actor)
     common.require(ctx, "page_presales")
-    inquiry = common.lock_inquiry(db, inquiry_id, expected_version)
+    inquiry = common.lock_inquiry(db, inquiry_id)
+    if not visibility.can_view_inquiry(db, inquiry, ctx):
+        raise Forbidden("无权处理该询价")
+    common.check_version(inquiry, expected_version)
     if inquiry.kind != "proactive_offer" or inquiry.status != "draft":
         raise InvalidTransition("只能发布主动报价草稿单")
     if inquiry.created_by != user.id and not common.bypass(ctx):

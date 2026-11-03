@@ -28,6 +28,7 @@ class CreateInquiry(Input):
     customer_id: int | None = Field(default=None, gt=0)
     priority: Literal["normal", "urgent"] = "normal"
     notes: str | None = None
+    visible_to: list[str] = Field(default_factory=list)
     lines: list[PoolLine] = Field(min_length=1, max_length=200)
 
 

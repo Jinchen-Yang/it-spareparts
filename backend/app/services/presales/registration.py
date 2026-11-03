@@ -12,7 +12,7 @@ from app.models.presales import (
 from app.models.system import SysUser
 from app.services import audience
 from app.services.presales.common import bypass, resolve_actor
-from app.services.workflow.registry import InvalidTransition, SubjectSpec, register, registered
+from app.services.workflow.registry import Forbidden, InvalidTransition, SubjectSpec, register, registered
 
 
 def _can_view(db, inquiry_id, ctx):
@@ -42,15 +42,15 @@ def _summarize(db, inquiry_ids, ctx):
 
 
 def _filter_events(rows, ctx):
-    from app.services.presales.visibility import can_view_offer, offer_view
+    from app.services.presales.visibility import can_view_inquiry, can_view_offer
     result = []
     for row in rows:
         db = object_session(row)
         inquiry = db.get(PresalesInquiry, row.subject_id)
-        user, ctx = resolve_actor(db, ctx)
-        own = inquiry.created_by == user.id
+        if not can_view_inquiry(db, inquiry, ctx):
+            continue
         payload = row.payload or {}
-        # D-0052：时间线全员可见，谁改的如实显示。
+        # 时间线与当前询价授权一致，保留实际操作人。
         actor = row.actor
         offer_id = payload.get("offer_id")
         if offer_id is not None:
@@ -85,6 +85,11 @@ def _notice_view(db, inquiry_id, ctx):
 
 
 def _filter_notice_items(db, rows, ctx):
+    from app.services.presales.visibility import inquiry_access_filter
+    allowed_ids = set(db.scalars(select(PresalesInquiry.id).where(
+        PresalesInquiry.id.in_({row["subject_id"] for row in rows}), inquiry_access_filter(db, ctx))))
+    if any(row["subject_id"] not in allowed_ids for row in rows):
+        raise Forbidden("无权访问该询价的通知")
     if not rows or bypass(ctx):
         return rows
     inquiry_ids = {row["subject_id"] for row in rows}
@@ -164,24 +169,9 @@ def _can_manage(db, inquiry_id, ctx):
 
 def _notice_badge_ids(db, ctx):
     """批量 M8 准入，不读取待办表，让角标仍只有一条待办聚合 SQL。"""
-    from app.services.workflow import work_items
-    user, ctx = resolve_actor(db, ctx)
-    rows = list(db.scalars(select(PresalesInquiry).where(PresalesInquiry.kind == "proactive_offer")))
-    if bypass(ctx):
-        return [row.id for row in rows]
-    owned = [row.id for row in rows if row.created_by == user.id]
-    if not any(work_items.has_permission(ctx, key) for key in (
-        "action_presales_inquire", "action_presales_quote"
-    )):
-        return owned
-    shared = [row for row in rows if row.created_by != user.id and row.submitted_at is not None
-              and row.status != "draft"]
-    authors = dict(db.execute(select(SysUser.id, SysUser.username).where(
-        SysUser.id.in_({row.created_by for row in shared}))).all()) if shared else {}
-    filtered = audience.filter_fields(db, [{row.id: row.id} for row in shared], ctx,
-        field_rules={row.id: (row.offer_audience_rule_id, authors.get(row.created_by, "")) for row in shared},
-        bypass=bypass)
-    return owned + [inquiry_id for record in filtered for inquiry_id in record]
+    from app.services.presales.visibility import inquiry_access_filter
+    return list(db.scalars(select(PresalesInquiry.id).where(
+        PresalesInquiry.kind == "proactive_offer", inquiry_access_filter(db, ctx))))
 
 
 def register_subjects():
