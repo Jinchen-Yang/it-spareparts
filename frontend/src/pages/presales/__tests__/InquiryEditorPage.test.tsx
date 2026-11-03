@@ -227,6 +227,26 @@ describe("销售询价编辑", () => {
     expect(body).not.toHaveProperty("lines");
   });
 
+  it("作废原答复须在确认后用同一行版本重试", async () => {
+    const editing = inquiry({ status: "revising", version: 5 });
+    mocks.presales.getInquiry.mockResolvedValue(editing);
+    mocks.presales.updateInquiry
+      .mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: "price_reset_required" } } } })
+      .mockResolvedValueOnce(inquiry({ status: "revising", version: 6 }));
+    mount("/presales/inquiries/1/edit");
+    await openLine("PN-A");
+    fireEvent.change(await screen.findByRole("spinbutton", { name: "PN-A 数量" }), { target: { value: "9" } });
+    fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
+    const confirm = await screen.findByRole("button", { name: "确认修改" });
+    const first = mocks.presales.updateInquiry.mock.calls[0][1];
+    expect(first).not.toHaveProperty("confirm_reset");
+    expect(mocks.presales.updateInquiry).toHaveBeenCalledTimes(1);
+    fireEvent.click(confirm);
+    await waitFor(() => expect(mocks.presales.updateInquiry).toHaveBeenNthCalledWith(2, 1, {
+      ...first, confirm_reset: true,
+    }));
+  });
+
   it("撤回后的单据保留 line_key，先保存最新版本再重新提交且不重置可见性", async () => {
     mocks.presales.getInquiry.mockResolvedValue(inquiry({ status: "revising", version: 5 }));
     mocks.presales.updateInquiry.mockResolvedValueOnce(inquiry({ status: "revising", version: 6 }));

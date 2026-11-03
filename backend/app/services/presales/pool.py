@@ -1,11 +1,11 @@
 """询价报价共享池（D-0052）：按行读写，只锁单行，谁更新记录谁。"""
 
-from sqlalchemy import and_, case, delete, func, null, or_, select, union_all, update
+from sqlalchemy import case, func, null, or_, select, union_all
 from sqlalchemy.orm import aliased
 
 from app.models.dimensions import DimCustomer, DimSupplier
 from app.models.presales import (
-    PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink,
+    PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer,
     PresalesOfferRevision,
 )
 from app.models.system import SysUser
@@ -109,7 +109,8 @@ def _view(row, user_id, ctx, latest, fields):
         "expected_delivery": inquiries.delivery_value(line, fields), "answer_state": line.answer_state,
         "answer_reason": line.answer_reason, "answered_by": _name(answerer), "answered_at": line.answered_at,
         "price": None if offer is None else {
-            "offer_id": offer.id, "unit_price": _money(offer.unit_price), "is_tax_inclusive": offer.is_tax_inclusive,
+            "offer_id": offer.id, "revision_no": offer.revision_no,
+            "unit_price": _money(offer.unit_price), "is_tax_inclusive": offer.is_tax_inclusive,
             "price_basis": offer.price_basis, "lead_time": offer.lead_time, "stock_location": offer.stock_location,
             "qty_available": _quantity(offer.qty_available),
             "notes": offer.notes, "supplier_id": offer.supplier_id, "supplier_name": supplier,
@@ -204,55 +205,6 @@ def _touch(line):
     line.updated_at = common.now()
 
 
-def _linked_revision_ranges(line):
-    """本行有效的引用、沿用与跨单迁移关联，从钉住版本到本次读到的源版本。"""
-    line_id = line.id
-    pins = union_all(
-        select(PresalesInquiryLine.ref_offer_id.label("offer_id"),
-               PresalesInquiryLine.ref_offer_revision_no.label("revision_no")).where(
-            PresalesInquiryLine.id == line_id, PresalesInquiryLine.ref_offer_revision_no.is_not(None)),
-        select(PresalesLineResponse.ref_offer_id, PresalesLineResponse.ref_offer_revision_no).join(
-            PresalesInquiryLine, PresalesInquiryLine.id == PresalesLineResponse.line_id).where(
-            PresalesLineResponse.line_id == line_id, PresalesLineResponse.mode == "reuse",
-            PresalesLineResponse.is_draft.is_(False),
-            PresalesLineResponse.line_version == PresalesInquiryLine.version),
-        select(PresalesOfferLineLink.offer_id, PresalesOfferLineLink.offer_revision_no).where(
-            PresalesOfferLineLink.line_id == line_id),
-    ).subquery()
-    sources = select(pins.c.offer_id, func.min(pins.c.revision_no).label("pin")).group_by(pins.c.offer_id).subquery()
-    # 缺钉号不能猜历史版本。只确认这一刻本行实际采用的有效价，或快照明确归属本行的修订。
-    adopted = and_(PresalesOffer.id == line.current_offer_id, line.answer_state == "quoted",
-                   PresalesOffer.status == "published", PresalesOffer.no_stock.is_(False),
-                   PresalesOffer.unit_price.is_not(None), PresalesOffer.valid_from <= func.clock_timestamp())
-    first = func.coalesce(sources.c.pin, case((adopted, PresalesOffer.revision_no)))
-    own_snapshot = select(PresalesOfferRevision.id).where(
-        PresalesOfferRevision.offer_id == PresalesOffer.id, PresalesOfferRevision.snapshot["line_id"].as_integer() == line_id,
-        PresalesOfferRevision.snapshot["valid_from"].astext.is_not(None)).exists()
-    return select(sources.c.offer_id, first.label("first_revision"),
-                  case((first.is_not(None), PresalesOffer.revision_no)).label("last_revision")).join(
-        PresalesOffer, PresalesOffer.id == sources.c.offer_id).where(
-        PresalesOffer.revision_no > 0, or_(first.is_not(None), own_snapshot))
-
-
-def _clear_answers(db, line, user, reason, *, keep_offer_id=None, linked_ranges=None):
-    """让本行旧答复失效；历史修订和其他行对原报价的引用不变。"""
-    if linked_ranges is None:
-        linked_ranges = db.execute(_linked_revision_ranges(line))
-    for offer_id, first, last in linked_ranges:
-        common.event(db, db.get(PresalesInquiry, line.inquiry_id), user.id, "line.price_unlinked",
-                     {"line_id": line.id, "offer_id": offer_id, "first_revision": first, "last_revision": last})
-    rows = db.scalars(select(PresalesOffer).where(
-        PresalesOffer.line_id == line.id, PresalesOffer.status == "published",
-    ).order_by(PresalesOffer.id).with_for_update()).all()
-    for offer in rows:
-        if offer.id != keep_offer_id:
-            offers.mark_stale(db, offer, user.id, reason, already_versioned_line=line.id)
-    db.execute(delete(PresalesLineResponse).where(
-        PresalesLineResponse.line_id == line.id, PresalesLineResponse.is_draft.is_(False)))
-    db.execute(delete(PresalesOfferLineLink).where(PresalesOfferLineLink.line_id == line.id))
-    line.ref_offer_id, line.ref_offer_revision_no = None, None
-
-
 def set_price(db, line_id, actor, data, *, expected_version):
     line, inquiry, user, ctx = _lock(db, line_id, actor, expected_version)
     if line.part_id is None:
@@ -262,7 +214,7 @@ def set_price(db, line_id, actor, data, *, expected_version):
         PresalesOffer.line_id == line.id, PresalesOffer.status == "published",
     ).order_by(PresalesOffer.valid_from.desc(), PresalesOffer.id.desc()).limit(1).with_for_update())
     # 发布修订会刷新本行 current_offer_id，必须在此之前确定即将解除的旧关联。
-    linked_ranges = db.execute(_linked_revision_ranges(line)).all()
+    linked_ranges = db.execute(answers.linked_revision_ranges(line)).all()
     moment = common.now()
     if current is None:
         current = PresalesOffer(inquiry_id=inquiry.id, line_id=line.id, part_id=line.part_id, created_by=user.id,
@@ -282,7 +234,7 @@ def set_price(db, line_id, actor, data, *, expected_version):
                                already_versioned_line=line.id)
         kind = "offer.updated"
     offer_id = current.id
-    _clear_answers(db, line, user, "同一询价行已有新价", keep_offer_id=offer_id, linked_ranges=linked_ranges)
+    answers.clear_line_answers(db, line, user.id, "同一询价行已有新价", keep_offer_id=offer_id, linked_ranges=linked_ranges)
     _touch(line)
     answers.refresh(db, [line_id])
     common.event(db, inquiry, user.id, kind, {"offer_id": offer_id, "line_id": line_id})
@@ -295,12 +247,12 @@ def skip(db, line_id, actor, reason, *, expected_version):
     reason = reason.strip() if isinstance(reason, str) else ""
     if not reason:
         raise InvalidTransition("不报必须填写原因")
-    _clear_answers(db, line, user, f"改为不报：{reason}")
+    answers.clear_line_answers(db, line, user.id, f"改为不报：{reason}")
     _touch(line)
     response = offers._response(db, line, user.id, None, "skip", reason=reason)
     response.created_at = common.now()
     answers.refresh(db, [line_id])
-    common.event(db, inquiry, user.id, "line.skipped", {"line_id": line_id, "reason": reason})
+    answers.record_published_skip(db, inquiry.id, response)
     common.audit(db, user.id, "presales.pool.line.skipped", line_id)
     return line_view(db, line_id, actor)
 
@@ -319,14 +271,11 @@ def edit_line(db, line_id, actor, data, *, expected_version, confirm_reset=False
                        version=line.version, latest=line_view(db, line_id, actor))
     for key in changed:
         setattr(line, key, data[key])
-    if resets:
-        _clear_answers(db, line, user, "询价条件已修改：" + "、".join(conditions))
-    elif not conditions:
-        # 只改备注或交期不改变答复条件；过期答复和私有草稿保留各自的原版本。
-        db.execute(update(PresalesLineResponse).where(
-            PresalesLineResponse.line_id == line.id, PresalesLineResponse.line_version == line.version,
-            PresalesLineResponse.is_draft.is_(False)).values(line_version=line.version + 1))
+    if conditions:
+        answers.clear_line_answers(db, line, user.id, "询价条件已修改：" + "、".join(conditions))
     _touch(line)
+    if not conditions:
+        answers.carry_current_responses(db, [line.id])
     answers.refresh(db, [line_id])
     common.event(db, inquiry, user.id, "line.edited", {"line_id": line_id, "changed": sorted(changed)})
     common.audit(db, user.id, "presales.pool.line.edited", line_id)
@@ -368,7 +317,7 @@ def history(db, line_id, actor):
     sources = union_all(
         select(PresalesOffer.id.label("offer_id"), null().label("first_revision"),
                null().label("last_revision")).where(PresalesOffer.line_id == line.id),
-        _linked_revision_ranges(line),
+        answers.linked_revision_ranges(line),
         select(payload["offer_id"].as_integer(), payload["first_revision"].as_integer(),
                payload["last_revision"].as_integer()).where(*line_events, SubjectEvent.kind == "line.price_unlinked"),
     ).subquery()
@@ -390,8 +339,14 @@ def history(db, line_id, actor):
               "price_basis": revision.snapshot.get("price_basis", "sale")} for revision, user in revisions]
     events = db.execute(select(SubjectEvent, SysUser).join(SysUser, SysUser.id == SubjectEvent.actor).where(
         *line_events, SubjectEvent.kind.in_(("line.edited", "line.skipped")),
-    ).order_by(SubjectEvent.id.desc()).limit(100))
+    ).order_by(SubjectEvent.created_at.desc(), SubjectEvent.id.desc()).limit(100))
     items += [{"kind": event.kind, "at": event.created_at, "actor": _name(user),
                "changed": event.payload.get("changed", []), "reason": event.payload.get("reason")}
               for event, user in events]
+    # 首次改动前，旧版已发布不报可能只在行答复表中。
+    legacy = answers.unrecorded_skips([line_id]).add_columns(SysUser).join(
+        SysUser, SysUser.id == PresalesLineResponse.created_by).order_by(
+        PresalesLineResponse.created_at.desc(), PresalesLineResponse.id.desc()).limit(100)
+    items += [{"kind": "line.skipped", "at": response.created_at, "actor": _name(user),
+               "changed": [], "reason": response.reason} for response, _, user in db.execute(legacy)]
     return sorted(items, key=lambda item: item["at"], reverse=True)[:100]

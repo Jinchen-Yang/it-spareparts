@@ -5,7 +5,7 @@ from sqlalchemy import select
 from app.models.dimensions import DimPart
 from app.models.presales import PresalesInquiryLine
 from app.services import field_pool, manual_part_input, master_edit
-from app.services.presales import common, inquiries
+from app.services.presales import answers, common, inquiries
 from app.services.workflow.registry import Conflict, Forbidden, InvalidTransition, NotFound
 
 
@@ -61,7 +61,7 @@ def _apply(db, inquiry, line, part, user, ctx, kind):
     inquiry.version += 1
     inquiry.updated_at = common.now()
     field_pool.template_for(db, inquiries.SUBJECT_TYPE, "line", ctx, anchor=f"part:{part.id}")
-    db.flush()
+    answers.carry_current_responses(db, [line.id])
     common.event(db, inquiry, user.id, kind, {"line_id": line.id, "part_id": part.id})
     common.audit(db, user.id, kind, inquiry.id)
     return line

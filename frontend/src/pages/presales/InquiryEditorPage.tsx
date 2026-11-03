@@ -157,7 +157,7 @@ function InquiryEditorContent() {
     expected_delivery: line.expectedDelivery || null,
     field_values: serializeFields(line.field_values, line.originalFields, true),
   }));
-  const save = async (submit: boolean) => {
+  const save = async (submit: boolean, confirmReset = false) => {
     if (busy || blocked) return;
     if (!lines.length && (submit || append)) { void message.warning("请至少加入一行询价"); return; }
     if (lines.some((line) => !Number.isFinite(line.qty) || line.qty <= 0)) { void message.warning("数量必须大于 0"); return; }
@@ -181,7 +181,8 @@ function InquiryEditorContent() {
               expected_line_versions: Object.fromEntries((inquiry.lines ?? []).map((line) => [line.line_key, line.version])),
             } : {}),
           };
-          saved = await presales.updateInquiry(inquiry.id, { ...payload, ...lineUpdate, expected_version: inquiry.version });
+          saved = await presales.updateInquiry(inquiry.id, { ...payload, ...lineUpdate, expected_version: inquiry.version,
+            ...(confirmReset ? { confirm_reset: true } : {}) });
         } else {
           saved = await presales.createInquiry({ ...payload, lines: serializeLines(), kind: "sales_inquiry" });
         }
@@ -199,7 +200,13 @@ function InquiryEditorContent() {
     } catch (error) {
       if (!mounted.current) return;
       // 冲突时保留草稿，不用服务端内容覆盖尚未保存的行与字段。
-      if (parseApiError(error).kind === "version_conflict") setVersionConflict(true);
+      const info = parseApiError(error);
+      if (info.code === "price_reset_required" && !confirmReset) {
+        modal.confirm({ title: "确认作废受影响行的原答复？", content: "改动条件、切换引用或删除已答复的行，会使这些行的原答复失效。旧报价仍可查历史。",
+          okText: "确认修改", cancelText: "继续编辑", onOk: () => save(submit, true) });
+        return;
+      }
+      if (info.kind === "version_conflict") setVersionConflict(true);
       await handleError(error);
     } finally { if (mounted.current) setBusy(false); }
   };

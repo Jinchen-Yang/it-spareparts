@@ -142,7 +142,7 @@ describe("询价详情", () => {
     await user.click(screen.getByRole("combobox", { name: "采纳报价" }));
     await user.click(await screen.findByText(/PN-8 · 报价 #2/));
     await user.click(screen.getByRole("button", { name: "确认关单" }));
-    await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 2 }));
+    await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 2, expected_offer_revision_no: 1 }));
     expect(await screen.findByText("已结束")).toBeInTheDocument();
   });
 
@@ -266,7 +266,7 @@ it("采纳已更新的沿用报价时，下拉明确告知当前价格税基及�
   await user.click(screen.getByRole("combobox", { name: "采纳报价" }));
   await user.click(await screen.findByText(/PN-8 · 报价 #7 · 采购7 · 当前¥75.00 · 不含税 · 第 2 版/));
   await user.click(screen.getByRole("button", { name: "确认关单" }));
-  await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 7 }));
+  await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 7, expected_offer_revision_no: 2 }));
 });
 
 it("同一报价ID在不同询价行钉住不同版本时，逐行使用各自快照比价", async () => {
@@ -296,7 +296,7 @@ it("点矩阵报价选择成交采纳，过期与旧版本不可选择，时间�
   expect(screen.queryByText("时间线 presales_inquiry 5")).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "关单" }));
   await user.click(screen.getByRole("button", { name: "确认关单" }));
-  await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 2 }));
+  await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 2, expected_offer_revision_no: 1 }));
 });
 
 it("详情草稿沿用不进入可采纳报价，草稿不报与沿用均标为未回复", async () => {

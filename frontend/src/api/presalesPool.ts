@@ -8,6 +8,7 @@ export type PriceBasis = "sale" | "cost";
 
 export interface PoolPrice {
   offer_id: number;
+  revision_no: number;
   unit_price: string | null;
   is_tax_inclusive: boolean | null;
   price_basis: PriceBasis;

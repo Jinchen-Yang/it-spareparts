@@ -1,3 +1,4 @@
+import { parseApiError } from "../../utils/apiError";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Alert, App, Button, Descriptions, Drawer, Form, Modal, Radio, Select, Space, Spin, Table, Tag, Typography } from "antd";
@@ -42,7 +43,11 @@ function InquiryDetailContent({ id }: { id: number }) {
   const [historyError, setHistoryError] = useState("");
   const [closeOpen, setCloseOpen] = useState(false);
   const [outcome, setOutcome] = useState<"won" | "lost" | "cancelled">("won");
-  const [wonOfferId, setWonOfferId] = useState<number>();
+  const [wonOffer, setWonOffer] = useState<{ id: number; revision: number }>();
+  const wonOfferId = wonOffer?.id;
+  const selectWonOffer = (offer?: Offer) => setWonOffer(offer ? {
+    id: offer.id, revision: offer.latest?.revision_no ?? offer.revision_no,
+  } : undefined);
   const generation = useRef(0);
   const historyGeneration = useRef(0);
   const now = useNow([...(inquiry?.offers ?? []), ...(inquiry?.lines ?? []).flatMap((line) => [...(line.linked_offers ?? []), ...(line.ref_offer ? [line.ref_offer] : [])]),
@@ -93,10 +98,16 @@ function InquiryDetailContent({ id }: { id: number }) {
     setBusy(true);
     try {
       const data = await presales.closeInquiry(id, { expected_version: inquiry.version, outcome,
-        ...(outcome === "won" && wonOfferId ? { won_offer_id: wonOfferId } : {}) });
+        ...(outcome === "won" && wonOffer ? { won_offer_id: wonOffer.id, expected_offer_revision_no: wonOffer.revision } : {}) });
       setInquiry(data); setCloseOpen(false); message.success("已关单");
-    } catch (error) { await handlePresalesError(error, load); }
-    finally { setBusy(false); }
+    } catch (error) {
+      if (parseApiError(error).code === "offer_revision_conflict") {
+        setWonOffer(undefined);
+        setCloseOpen(false);
+        void message.warning("报价已更新，请重新选择要成交的报价");
+        await load();
+      } else await handlePresalesError(error, load);
+    } finally { setBusy(false); }
   };
 
   if (!inquiry) return <>{loading && <Spin aria-label="询价单加载中" />}{error && <Alert type="error" message={error}
@@ -131,7 +142,7 @@ function InquiryDetailContent({ id }: { id: number }) {
       <button type="button" aria-label={`采纳 ${line.pn_raw} 报价 ${offer.id}`} aria-pressed={wonOfferId === offer.id}
         className={`presales-offer-choice ${wonOfferId === offer.id ? "is-selected" : lowest ? "is-lowest" : ""}`}
         disabled={!canClose || busy || !active || !!offer.no_stock} title={detail}
-        onClick={() => setWonOfferId(wonOfferId === offer.id ? undefined : offer.id)}><OfferPrice offer={offer} />
+        onClick={() => selectWonOffer(wonOfferId === offer.id ? undefined : offer)}><OfferPrice offer={offer} />
         {lowest && <span className="presales-muted">{taxLabel(offer.is_tax_inclusive)}最低价</span>}
         {active && <Tag color="green">有效</Tag>}
         {offer.status === "stale" && <span>基于旧版本</span>}
@@ -204,7 +215,7 @@ function InquiryDetailContent({ id }: { id: number }) {
     </Drawer>
     <Modal open={closeOpen} title="关单" onCancel={() => { if (!busy) setCloseOpen(false); }} onOk={() => void close()} confirmLoading={busy} okText="确认关单" cancelButtonProps={{ disabled: busy }} maskClosable={!busy} closable={!busy}>
       <Form layout="vertical"><Form.Item label="关单结果"><Radio.Group value={outcome} onChange={(event) => setOutcome(event.target.value)}><Radio value="won">成交</Radio><Radio value="lost">未成交</Radio><Radio value="cancelled">取消</Radio></Radio.Group></Form.Item>
-        {outcome === "won" && <Form.Item label="采纳本单报价（可选）"><Select aria-label="采纳报价" allowClear value={wonOfferId} onChange={setWonOfferId} placeholder="选择采纳的本单报价（可选）" options={closeOptions.map((offer) => ({ value: offer.id,
+        {outcome === "won" && <Form.Item label="采纳本单报价（可选）"><Select aria-label="采纳报价" allowClear value={wonOfferId} onChange={(id) => selectWonOffer(closeOptions.find((offer) => offer.id === id))} placeholder="选择采纳的本单报价（可选）" options={closeOptions.map((offer) => ({ value: offer.id,
           label: `${lineForOffer(offer)?.pn_raw || ""} · 报价 #${offer.id}${offer.reporter ? ` · ${offer.reporter.name}` : ""} · ${offer.latest ? `当前${formatMoney(offer.latest.unit_price, { prefix: "¥" })} · ${taxLabel(offer.latest.is_tax_inclusive)}${offer.latest.price_basis ? ` · ${basisLabel(offer.latest)}` : ""} · 第 ${offer.latest.revision_no} 版` : `${formatMoney(offer.unit_price, { prefix: "¥" })} · ${taxLabel(offer.is_tax_inclusive)} · ${basisLabel(offer)}`}`,
         }))} /></Form.Item>}
       </Form>

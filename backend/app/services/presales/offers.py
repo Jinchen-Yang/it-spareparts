@@ -325,6 +325,8 @@ def _response(db, line, user_id, task_id, mode, *, ref_offer_id=None, reason=Non
     if row is None:
         row = PresalesLineResponse(line_id=line.id, created_by=user_id)
         db.add(row)
+    elif row.mode == "skip" and not row.is_draft:
+        answers.archive_published_skips(db, [line.id])
     row.line_version, row.work_item_id = line.version, task_id
     row.mode, row.ref_offer_id, row.reason = mode, ref_offer_id, reason
     row.ref_offer_revision_no = ref_offer_revision_no
@@ -493,6 +495,10 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
         _publishable(db, offer)
     plans = _publication_plans(db, drafts, inquiry, ctx, on_existing, existing_offer_id, existing_choices)
     # 先验证整单，再落处理结果与报价，任何一行错误都不会完成待办。
+    removed_skip_lines = [row.line_id for row in previous if row.mode == "skip" and not row.is_draft
+                          and decisions.get(row.line_id, {}).get("mode", "quote") == "quote"]
+    if removed_skip_lines:
+        answers.archive_published_skips(db, removed_skip_lines)
     for row in previous:
         if decisions.get(row.line_id, {}).get("mode", "quote") == "quote":
             db.delete(row)
