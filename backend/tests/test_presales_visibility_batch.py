@@ -4,13 +4,11 @@ from contextlib import contextmanager
 from datetime import timedelta
 from decimal import Decimal
 
-import pytest
 from sqlalchemy import event
 
 from app.db import engine
 from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesOffer
 from app.models.system import SysUser
-from app.services import audience
 from app.services.presales import common, inquiries, library, offers, visibility
 from app.services.workflow import work_items
 from app.services.workflow.registry import Subject
@@ -32,56 +30,33 @@ def _selects():
         event.remove(engine, "before_cursor_execute", capture)
 
 
-@pytest.mark.parametrize("viewer", ["buyer", "other", "peer", "supervisor"])
-def test_batch_and_single_views_share_field_matrix_without_cross_record_rules(db, users, monkeypatch, viewer):
-    original_filter = audience.filter_fields
-    calls = []
-
-    def track(*args, **kwargs):
-        calls.append(True)
-        return original_filter(*args, **kwargs)
-
-    monkeypatch.setattr(audience, "filter_fields", track)
-    for mode in ("public", "private", "include", "exclude"):
-        rule = {"mode": mode}
-        if mode in {"include", "exclude"}:
-            rule["user_ids"] = [users.other.username]
-        inquiry, first = _quoted(db, users, rule=rule)
-        second = offers.save_draft(db, inquiry.id, inquiries.lines_for(db, inquiry.id)[0].id,
-            users.peer.id, {"unit_price": "51.00", "supplier_id": users.supplier.id,
-                "notes": "另一条公开备注", "supplier_audience": {"mode": "public"}},
-            expected_version=inquiry.version)
-        offers.reply(db, inquiry.id, users.peer.id,
-            expected_version=inquiry.version, on_existing="new")
-        ctx = _ctx(db, getattr(users, viewer))
-        before = len(calls)
-        result = visibility.offer_views(db, [first, second], ctx)
-        assert len(calls) == before + 1
-        assert result == [visibility.offer_view(db, first, ctx), visibility.offer_view(db, second, ctx)]
-        assert [row["id"] for row in result] == [first.id, second.id]
-        expected = viewer in {"buyer", "supervisor"} or mode == "public" or (
-            mode == "include" and viewer == "other") or (mode == "exclude" and viewer != "other")
-        for field in ("supplier_id", "source_key", "reporter", "notes"):
-            assert (field in result[0]) is expected, (mode, viewer, field)
-            assert field in result[1]
-        assert all("created_by" not in row and "work_item_id" not in row and "customer_id" not in row
-                   for row in result)
-
-
-def test_batch_record_access_and_field_groups_keep_the_strict_intersection(db, users):
-    public, first = _quoted(db, users)
-    private, second = _quoted(db, users, whole={"mode": "private"})
-    ctx = _ctx(db, users.other)
-    assert [row["id"] for row in visibility.offer_views(db, [first, second], ctx)] == [first.id]
-    assert visibility.visible_offers(db, [first, second], ctx) == [first]
-    assert not visibility.can_view_inquiry(db, private, ctx)
-    graph = dict(users.buyer.template_perms)
-    graph["data_supplier"] = False
-    users.buyer.template_perms = graph
+def test_shared_offer_fields_match_across_readers_and_omit_internal_fields(db, users):
+    private = {"mode": "private"}
+    inquiry, first = _quoted(db, users, whole=private, rule=private)
+    line = inquiries.lines_for(db, inquiry.id)[0]
+    second = offers.save_draft(db, inquiry.id, line.id, users.peer.id,
+        {"unit_price": "51.00", "supplier_id": users.supplier.id, "source_key": "peer",
+         "notes": "另一条备注"}, expected_version=inquiry.version)
+    offers.reply(db, inquiry.id, users.peer.id, expected_version=inquiry.version, on_existing="new")
+    users.other.perm_overrides = {"data_supplier": False, "data_customer": False}
     db.flush()
-    own = visibility.offer_views(db, [first, second], _ctx(db, users.buyer))
-    assert len(own) == 2
-    assert all("supplier_id" not in row and "source_key" not in row for row in own)
+    viewer = _ctx(db, users.other)
+    batch = visibility.offer_views(db, [first, second], viewer)
+    assert batch == [visibility.offer_view(db, row, viewer) for row in (first, second)]
+    detail = visibility.inquiry_view(db, inquiry, viewer)
+    assert "customer_id" not in detail and "customer_name" not in detail
+    library_rows = library.batch(db, [users.part.id], viewer)[users.part.id]
+    for rows in (batch, detail["offers"], library_rows):
+        by_id = {row["id"]: row for row in rows}
+        assert set(by_id) == {first.id, second.id}
+        for offer, writer in ((first, users.buyer), (second, users.peer)):
+            row = by_id[offer.id]
+            assert row["unit_price"] == offer.unit_price and row["notes"] == offer.notes
+            assert row["supplier_id"] == users.supplier.id and row["source_key"] == offer.source_key
+            assert row["reporter"] == {"id": writer.id, "name": writer.display_name}
+            assert not {"created_by", "work_item_id", "customer_id", "workbook_choice",
+                        "offer_audience_rule_id", "supplier_audience_rule_id",
+                        "notes_audience_rule_id", "reporter_audience_rule_id"}.intersection(row)
 
 
 def test_workflow_batch_participation_matches_single_and_refreshes_after_claim(db, users):
@@ -137,7 +112,6 @@ def test_1500_effective_quotes_have_bounded_library_and_boost_queries(db, users)
         result = library.batch(db, [part_id], viewer_id, now=moment)
     assert len(result[part_id]) == 1500
     assert len(statements) <= 8, len(statements)
-    assert all("supplier_id" not in row and "notes" not in row for row in result[part_id])
     db.expire_all()
     with _selects() as statements:
         boost = library.boost_part_ids(db, "任意匹配文本", viewer_id)

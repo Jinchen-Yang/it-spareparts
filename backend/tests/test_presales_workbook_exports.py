@@ -60,7 +60,7 @@ def test_summary_column_selection_keeps_pn_and_rejects_other_owners_even_for_bos
         sales_workbook.export_sales_summary(db, [inquiry.id], users.sales.id, {"summary": "qty"})
 
 
-def test_summary_prices_use_pinned_adoption_and_hide_private_reporter(db, r6_actors):
+def test_summary_prices_keep_pinned_adoption_when_the_shared_price_changes(db, r6_actors):
     users = r6_actors
     source = inquiries.create_draft(db, users.buyer.id, kind="proactive_offer",
                                     lines=[{"part_id": users.part.id}])
@@ -73,13 +73,10 @@ def test_summary_prices_use_pinned_adoption_and_hide_private_reporter(db, r6_act
         "part_id": users.part.id, "ref_offer_id": offer.id}])
     inquiries.submit(db, inquiry.id, users.sales.id, inquiry.version)
     inquiries.close(db, inquiry.id, users.sales.id, inquiry.version, outcome="won", won_offer_id=offer.id)
-    offers.update_offer(db, offer.id, users.buyer.id, {"unit_price": "23.45"},
-                        expected_version=offer.version)
-    rows = sales_workbook.summary_rows(db, [inquiry.id], users.sales.id)
-    assert "buyer" not in rows[0]["handler_min_prices"]
-    assert "其他采购" in rows[0]["handler_min_prices"]
-    assert "12.34" in rows[0]["adopted_prices"]
-    assert "23.45" not in rows[0]["adopted_prices"]
+    offers.update_offer(db, offer.id, users.buyer.id, {"unit_price": "23.45"}, expected_version=offer.version)
+    _, rows = _summary(sales_workbook.export_sales_summary(db, [inquiry.id], users.sales.id))
+    assert "buyer" in rows[0]["各处理人最低价"]
+    assert "12.34" in rows[0]["采纳价"] and "23.45" not in rows[0]["采纳价"]
 
 
 def test_export_endpoints_download_and_write_literal_access_actions(db, r6_actors):
@@ -127,12 +124,12 @@ def test_export_invalid_identifiers_are_rejected(db, r6_actors, inquiry_ids):
 
 def test_summary_schema_supports_column_picker_but_export_cannot_be_imported(db, r6_actors):
     users = r6_actors
-    inquiry = inquiries.create_draft(db, users.sales.id,
-                                    lines=[{"part_id": users.part.id}])
+    inquiry = inquiries.create_draft(db, users.sales.id, lines=[{"part_id": users.part.id}])
     inquiry_id = inquiry.id
     db.commit()
     seller = _client(users.sales)
-    schema = seller.get("/api/workbooks/presales_sales_summary/schema")
+    schema_url = "/api/workbooks/presales_sales_summary/schema"
+    schema = seller.get(schema_url)
     assert schema.status_code == 200, schema.text
     columns = schema.json()["sheets"][0]["columns"]
     assert all(column["edit"] == "reference" for column in columns)
@@ -140,9 +137,8 @@ def test_summary_schema_supports_column_picker_but_export_cannot_be_imported(db,
         "pn", "description", "qty", "inquiry_nos", "require_exact_pn",
         "handler_min_prices", "adopted_prices",
     }
-    assert _client(users.buyer).get("/api/workbooks/presales_sales_summary/schema").status_code == 403
-    exported = seller.post("/api/presales/workbooks/sales-summary",
-                           json={"inquiry_ids": [inquiry_id]})
+    assert _client(users.buyer).get(schema_url).status_code == 200
+    exported = seller.post("/api/presales/workbooks/sales-summary", json={"inquiry_ids": [inquiry_id]})
     assert exported.status_code == 200, exported.text
     preview = seller.post("/api/workbooks/presales_sales_summary/preview", files={
         "file": ("summary.xlsx", exported.content,

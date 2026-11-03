@@ -85,26 +85,6 @@ def test_removing_reference_reopens_previously_completed_handler(
     assert item.status == "pending"
 
 
-def test_adding_reference_cancels_quote_task_without_staling_offer(
-        db, presales_users, presales_parts):
-    users, parts = presales_users, presales_parts
-    inquiry = _submitted(db, users, parts)
-    line = inquiries.lines_for(db, inquiry.id)[0]
-    quote = _quote(db, inquiry, line, users.buyer)
-    work_items.open_items(db, inquiries.subject(inquiry), [users.buyer.id], inquiries.SUBJECT_TYPE,
-                          users.sales.id)
-    inquiries.withdraw(db, inquiry.id, users.sales.id, inquiry.version)
-    inquiries.update_draft(db, inquiry.id, users.sales.id, inquiry.version,
-                           lines=[{"line_key": line.line_key, "ref_offer_id": quote.id}])
-    inquiries.resubmit(db, inquiry.id, users.sales.id, inquiry.version)
-    assert quote.status == "published"
-    assert not [item for item in work_items.list_by_subject(db, inquiries.subject(inquiry), users.sales.id)
-                if item.status in work_items.ACTIVE]
-    with pytest.raises(Forbidden, match="待办"):
-        offers.save_draft(db, inquiry.id, line.id, users.buyer.id,
-            {"unit_price": "99.00"}, expected_version=inquiry.version)
-
-
 def test_legacy_snapshot_notes_only_resubmit_keeps_completed_handler_closed(
         db, presales_users, presales_parts):
     users, parts = presales_users, presales_parts

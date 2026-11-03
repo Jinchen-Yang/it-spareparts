@@ -24,22 +24,6 @@ def test_list_search_matches_each_public_field_and_customer_names(db, users, ter
     assert data["items"][0]["is_owner"] is True
 
 
-def test_shared_inquiry_customer_is_null_and_never_a_search_side_channel(db, users):
-    row, _ = _quoted(db, users)
-    other = _client(users.other)
-    visible = other.get("/api/presales/inquiries", params={"scope": "all", "q": users.part.pn_std}).json()
-    assert visible["total"] == 1 and visible["items"][0]["id"] == row.id
-    assert visible["items"][0]["customer_name"] is None
-    assert visible["items"][0]["is_owner"] is False
-    assert "customer_id" not in visible["items"][0]
-    hidden = other.get("/api/presales/inquiries", params={"scope": "all", "q": users.customer.name_raw}).json()
-    assert hidden["items"] == [] and hidden["total"] == 0
-    owner = _client(users.seller).get("/api/presales/inquiries", params={"q": users.customer.name_raw}).json()
-    assert owner["items"][0]["customer_name"] == users.customer.name_raw
-    supervisor = _client(users.supervisor).get("/api/presales/inquiries", params={"scope": "all", "q": users.customer.name_raw}).json()
-    assert supervisor["items"][0]["customer_name"] == users.customer.name_raw
-
-
 def test_customer_permission_is_required_even_for_owner_or_supervisor(db, users):
     row, _ = _quoted(db, users)
     for user in (users.seller, users.supervisor):

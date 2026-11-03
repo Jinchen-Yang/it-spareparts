@@ -32,6 +32,11 @@ def require(ctx, key):
         raise Forbidden("无此操作权限")
 
 
+def was_submitted(inquiry):
+    """删除草稿也会关单，只有实际提交过的单据才进入共享范围。"""
+    return inquiry.status != "draft" and inquiry.submitted_at is not None
+
+
 def bypass(ctx):
     return ctx.role in ("admin", "boss") or work_items.has_permission(ctx, "action_presales_supervise")
 

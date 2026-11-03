@@ -348,6 +348,24 @@ def test_locked_and_reference_modifications_are_warnings_and_keep_baseline():
     assert parsed.rows[0].cells["text"].value == "新备注"
 
 
+@pytest.mark.parametrize("edit", ["locked", "reference"])
+@pytest.mark.parametrize(("changes", "warn", "error"), [
+    ({}, False, False),                    # XLSX 把 1.000 存为数值 1。
+    ({"合计数量": "1.001"}, True, False),
+    ({"合计数量": "无效"}, True, False),
+    ({"合计数量": "=1+0"}, True, True),     # 无缓存公式仍须报错。
+])
+def test_readonly_decimal_compares_value_and_preserves_signed_scale(edit, changes, warn, error):
+    qty = ColumnSpec("qty", "合计数量", "decimal", edit, "按来源行合计", decimals=3)
+    schema = WorkbookSchema("decimal_sheet", 1, [SheetSpec("items", "明细", [qty])])
+    payload = _export(schema, rows=[{"entity_id": 1, "base_version": 1, "values": {"qty": Decimal("1.000")}}])
+    parsed = parse_workbook(schema, _edit(payload, changes), ctx=CTX)
+    assert [w["column"] for w in parsed.warnings] == (["合计数量"] if warn else [])
+    assert [e["column"] for e in parsed.errors] == (["合计数量"] if error else [])
+    assert parsed.rows[0].baseline["qty"] == "1.000"
+    assert str(parsed.rows[0].cells["qty"].value) == "1.000"
+
+
 def test_revoked_field_permission_ignores_uploaded_column_and_baseline():
     parsed = parse_workbook(_schema(), _export(), ctx=WorkbookContext())
     assert not parsed.errors

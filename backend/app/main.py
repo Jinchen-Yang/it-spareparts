@@ -66,6 +66,7 @@ from app.api import (
     pools,
     profit,
     presales,
+    presales_pool,
     presales_workbooks,
     purchases,
     replenishment,
@@ -139,6 +140,7 @@ app.include_router(field_pool.router, prefix=settings.api_prefix)
 app.include_router(role_templates.router, prefix=settings.api_prefix)
 app.include_router(work_items.router, prefix=settings.api_prefix)
 app.include_router(workbooks.router, prefix=settings.api_prefix)
+app.include_router(presales_pool.router, prefix=settings.api_prefix)
 app.include_router(presales.router, prefix=settings.api_prefix)
 app.include_router(presales_workbooks.router, prefix=settings.api_prefix)
 app.include_router(imports.router, prefix=settings.api_prefix)

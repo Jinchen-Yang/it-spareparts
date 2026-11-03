@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Key } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Alert, Button, DatePicker, Input, Drawer, Select, Segmented, Space, Table, Tabs, Tag } from "antd";
 import type { Dayjs } from "dayjs";
 import { presales, type Inquiry, type InquiryLine, type Offer } from "../../api/presales";
@@ -44,7 +44,8 @@ export default function InquiryListPage() {
   const supervisor = !!permissions.action_presales_supervise || ["admin", "boss"].includes(localStorage.getItem("role") || "");
   const [scope, setScope] = useState<"mine" | "shared" | "all">("mine");
   const [kind, setKind] = useState<Inquiry["kind"]>();
-  const [status, setStatus] = useState<Inquiry["status"]>();
+  const [params] = useSearchParams();
+  const [status, setStatus] = useState<Inquiry["status"] | undefined>(params.get("status") === "draft" ? "draft" : undefined);
   const [stage, setStage] = useState("");
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");

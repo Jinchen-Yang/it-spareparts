@@ -106,14 +106,12 @@ const loadSystemSettings = () => import("./pages/SystemSettingsPage");
 const loadInquiryList = () => import("./pages/presales/InquiryListPage");
 const loadInquiryEditor = () => import("./pages/presales/InquiryEditorPage");
 const loadInquiryDetail = () => import("./pages/presales/InquiryDetailPage");
-const loadPresalesWorkbench = () => import("./pages/presales/QuoteWorkbenchPage");
 const loadPresalesQuote = () => import("./pages/presales/ProcessPage");
 const PresalesQuotePage = lazy(loadPresalesQuote);
 const loadPresalesRedirect = () => import("./pages/presales/TaskRedirect");
 const loadOfferNew = () => import("./pages/presales/OfferNewPage");
 const loadPresalesLibrary = () => import("./pages/presales/LibraryPage");
-const loadPresalesAsk = () => import("./pages/presales/AskPage");
-const loadPresalesQuoteRows = () => import("./pages/presales/QuotePage");
+const loadPresalesPool = () => import("./pages/presales/PoolPage");
 
 const BossBoardPage = lazy(loadBossBoard);
 const PoolsPage = lazy(loadPools);
@@ -150,12 +148,10 @@ const SystemSettingsPage = lazy(loadSystemSettings);
 const InquiryListPage = lazy(loadInquiryList);
 const InquiryEditorPage = lazy(loadInquiryEditor);
 const InquiryDetailPage = lazy(loadInquiryDetail);
-const PresalesWorkbenchPage = lazy(loadPresalesWorkbench);
 const PresalesRedirectPage = lazy(loadPresalesRedirect);
 const OfferNewPage = lazy(loadOfferNew);
 const PresalesLibraryPage = lazy(loadPresalesLibrary);
-const PresalesAskPage = lazy(loadPresalesAsk);
-const PresalesQuoteRowsPage = lazy(loadPresalesQuoteRows);
+const PresalesPoolPage = lazy(loadPresalesPool);
 
 // 组 key 加 grp- 前缀与 item key 隔离命名空间（防止将来改用 SubMenu 时 keyPath 相撞）
 export const NAV_GROUPS: NavGroup[] = [
@@ -179,8 +175,7 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-presales",
     label: "售前系统",
     items: [
-      { key: "presales-ask", path: "/presales/ask", label: "询价", icon: <FileSearchOutlined />, perm: "page_presales", page: PresalesAskPage, load: loadPresalesAsk },
-      { key: "presales-quote-rows", path: "/presales/quote", label: "报价", menuLabel: <PresalesWorkLabel label="报价" />, icon: <ScheduleOutlined />, perm: "page_presales", page: PresalesQuoteRowsPage, load: loadPresalesQuoteRows },
+      { key: "presales-pool", path: "/presales/pool", label: "询价报价", menuLabel: <PresalesWorkLabel label="询价报价" />, icon: <FileSearchOutlined />, perm: "page_presales", page: PresalesPoolPage, load: loadPresalesPool },
     ],
   },
   {
@@ -325,15 +320,14 @@ export interface DetailRoute {
 }
 
 export const DETAIL_ROUTES: DetailRoute[] = [
-  { key: "presales-inquiries", path: "/presales/inquiries", pattern: /^\/presales\/inquiries$/, label: "询价单", perm: "page_presales", menuKey: "presales-ask", page: InquiryListPage, load: loadInquiryList },
-  { key: "presales-library", path: "/presales/library", pattern: /^\/presales\/library$/, label: "报价库", perm: "page_presales", menuKey: "presales-quote-rows", page: PresalesLibraryPage, load: loadPresalesLibrary },
-  { key: "presales-workbench", path: "/presales/workbench", pattern: /^\/presales\/workbench$/, label: "报价工作台", perm: "page_presales", menuKey: "presales-quote-rows", page: PresalesWorkbenchPage, load: loadPresalesWorkbench },
-  { key: "presales-offers-new", path: "/presales/offers/new", pattern: /^\/presales\/offers\/new$/, label: "主动报价", perm: "page_presales", menuKey: "presales-quote-rows", page: OfferNewPage, load: loadOfferNew },
-  { key: "presales-inquiry-new", path: "/presales/inquiries/new", pattern: /^\/presales\/inquiries\/new$/, label: "新建询价", perm: "page_presales", menuKey: "presales-ask", page: InquiryEditorPage, load: loadInquiryEditor },
-  { key: "presales-inquiry-edit", path: "/presales/inquiries/:id/edit", pattern: /^\/presales\/inquiries\/\d+\/edit$/, label: "编辑询价", perm: "page_presales", menuKey: "presales-ask", page: InquiryEditorPage, load: loadInquiryEditor },
-  { key: "presales-inquiry-detail", path: "/presales/inquiries/:id", pattern: /^\/presales\/inquiries\/\d+$/, label: "询价详情", perm: "page_presales", menuKey: "presales-ask", page: InquiryDetailPage, load: loadInquiryDetail },
-  { key: "presales-quote", path: "/presales/workbench/:id", pattern: /^\/presales\/workbench\/\d+$/, label: "填写报价", perm: "page_presales", menuKey: "presales-quote-rows", page: PresalesQuotePage, load: loadPresalesQuote },
-  { key: "presales-task-process", path: "/presales/tasks/:id", pattern: /^\/presales\/tasks\/\d+$/, label: "报价工作台", perm: "page_presales", menuKey: "presales-quote-rows", page: PresalesRedirectPage, load: loadPresalesRedirect },
+  { key: "presales-inquiries", path: "/presales/inquiries", pattern: /^\/presales\/inquiries$/, label: "询价单", perm: "page_presales", menuKey: "presales-pool", page: InquiryListPage, load: loadInquiryList },
+  { key: "presales-library", path: "/presales/library", pattern: /^\/presales\/library$/, label: "报价库", perm: "page_presales", menuKey: "presales-pool", page: PresalesLibraryPage, load: loadPresalesLibrary },
+  { key: "presales-offers-new", path: "/presales/offers/new", pattern: /^\/presales\/offers\/new$/, label: "主动报价", perm: "page_presales", menuKey: "presales-pool", page: OfferNewPage, load: loadOfferNew },
+  { key: "presales-inquiry-new", path: "/presales/inquiries/new", pattern: /^\/presales\/inquiries\/new$/, label: "新建询价", perm: "page_presales", menuKey: "presales-pool", page: InquiryEditorPage, load: loadInquiryEditor },
+  { key: "presales-inquiry-edit", path: "/presales/inquiries/:id/edit", pattern: /^\/presales\/inquiries\/\d+\/edit$/, label: "编辑询价", perm: "page_presales", menuKey: "presales-pool", page: InquiryEditorPage, load: loadInquiryEditor },
+  { key: "presales-inquiry-detail", path: "/presales/inquiries/:id", pattern: /^\/presales\/inquiries\/\d+$/, label: "询价详情", perm: "page_presales", menuKey: "presales-pool", page: InquiryDetailPage, load: loadInquiryDetail },
+  { key: "presales-quote", path: "/presales/workbench/:id", pattern: /^\/presales\/workbench\/\d+$/, label: "填写报价", perm: "page_presales", menuKey: "presales-pool", page: PresalesQuotePage, load: loadPresalesQuote },
+  { key: "presales-task-process", path: "/presales/tasks/:id", pattern: /^\/presales\/tasks\/\d+$/, label: "报价工作台", perm: "page_presales", menuKey: "presales-pool", page: PresalesRedirectPage, load: loadPresalesRedirect },
   {
     // 项目面板：从项目卡「进入面板」进来，不占导航项（菜单只挂主页 + 需求单与同步）
     key: "maintenance-project-panel",
@@ -368,7 +362,11 @@ export function matchDetailRoute(pathname: string): DetailRoute | undefined {
  */
 export interface NavRedirect { from: string; to: string; perm?: string }
 export const NAV_REDIRECTS: NavRedirect[] = [
-  { from: "/presales/tasks", to: "/presales/workbench", perm: "page_presales" },
+  // D-0052：询价、报价、工作台合并为共享池一个页面
+  { from: "/presales/ask", to: "/presales/pool", perm: "page_presales" },
+  { from: "/presales/quote", to: "/presales/pool", perm: "page_presales" },
+  { from: "/presales/workbench", to: "/presales/pool", perm: "page_presales" },
+  { from: "/presales/tasks", to: "/presales/pool", perm: "page_presales" },
   // 采购拆分：旧 /purchases 收藏跳到默认采购子页（采购分析）
   { from: "/purchases", to: "/purchases/analysis", perm: "page_purchases" },
   // 补库申请迁维保组（2026-08-17）：旧销售组路径的收藏/外链自动跳新址

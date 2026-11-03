@@ -169,7 +169,9 @@ def test_waiting_earlier_transaction_exports_a_later_version(db):
 
 def test_trigger_covers_every_ordinary_column_and_preserves_schema(db):
     scripts = ScriptDirectory.from_config(_alembic_cfg())
-    assert scripts.get_heads() == [REVISION]
+    heads = scripts.get_heads()
+    assert len(heads) == 1
+    assert REVISION in {item.revision for item in scripts.iterate_revisions(heads[0], "base")}
     revision = scripts.get_revision(REVISION)
     assert revision.down_revision == PARENT
     columns = inspect(db.get_bind()).get_columns("dim_part")

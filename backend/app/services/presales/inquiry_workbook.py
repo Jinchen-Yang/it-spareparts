@@ -62,12 +62,12 @@ class _WorkbookSession:
 def _editable_inquiry(db, inquiry_id, ctx, *, lock=False):
     user, ctx = common.resolve_actor(db, ctx)
     common.require(ctx, "page_presales")
-    common.require(ctx, "action_presales_inquire")
     query = select(PresalesInquiry).where(PresalesInquiry.id == inquiry_id)
     if lock:
         query = query.with_for_update().execution_options(populate_existing=True)
     inquiry = db.scalar(query)
-    if inquiry is None or (inquiry.created_by != user.id and not common.bypass(ctx)):
+    # D-0052：只有草稿还属于本人。
+    if inquiry is None or (inquiry.status == "draft" and inquiry.created_by != user.id and not common.bypass(ctx)):
         raise Forbidden("无权编辑该询价单")
     if inquiry.kind != "sales_inquiry" or inquiry.status not in {"draft", "revising"}:
         raise InvalidTransition("仅草稿或撤回中的销售询价可导入导出")
@@ -78,7 +78,6 @@ def can_access(db, ctx, subject_type, subject_id):
     try:
         _, ctx = common.resolve_actor(db, ctx)
         common.require(ctx, "page_presales")
-        common.require(ctx, "action_presales_inquire")
         if not _exports_accessible(db, ctx, subject_id):
             return False
         if subject_type is None and subject_id is None:

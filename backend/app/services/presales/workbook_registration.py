@@ -12,7 +12,7 @@ def register_workbooks():
                      inquiry_workbook.validate_inquiry),
         WorkbookSpec(quote_workbook.QUOTE_SCHEMA, quote_workbook.load_current,
                      quote_workbook.apply_quotes, quote_workbook.can_access,
-                     quote_workbook.validate_quotes),
+                     quote_workbook.validate_quotes, can_access_export=quote_workbook.can_access_export),
         WorkbookSpec(sales_workbook.SUMMARY_SCHEMA, sales_workbook.reject_import,
                      sales_workbook.reject_import, sales_workbook.can_access),
     ]

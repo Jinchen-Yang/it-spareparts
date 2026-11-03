@@ -18,6 +18,7 @@ from app.services.workbook import operations, registry
 from app.services.workbook.registry import ApplyFailed, Conflict, Forbidden as WorkbookForbidden, WorkbookSpec
 from app.services.workbook.schema import WorkbookError
 from app.services.workflow.registry import Forbidden, InvalidTransition
+from tests.test_presales_api_visibility import _client
 from tests.test_presales_inquiries import _offer, presales_parts, presales_users
 
 
@@ -288,9 +289,18 @@ def test_history_replay_rejects_custom_field_after_visibility_narrows(db, presal
         _apply(db, user, preview)
 
 
-def test_template_requires_sales_inquiry_permission(db, presales_users):
-    with pytest.raises(Forbidden):
-        workbook.export_template(db, _ctx(db, presales_users.buyer))
+def test_template_download_requires_page_but_not_sales_inquiry_action(db, presales_users):
+    buyer = presales_users.buyer
+    buyer.perm_overrides = {"page_presales": True, "action_presales_inquire": False}
+    db.commit()
+    client = _client(buyer)
+    path = "/api/presales/workbooks/inquiry-template"
+    response = client.get(path)
+    assert response.status_code == 200, response.text
+    assert "询价明细" in load_workbook(BytesIO(response.content), read_only=True).sheetnames
+    buyer.perm_overrides = {"page_presales": False, "action_presales_inquire": True}
+    db.commit()
+    assert client.get(path).status_code == 403
 
 
 @pytest.mark.parametrize("create_from_template", [False, True])

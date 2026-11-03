@@ -72,36 +72,6 @@ def test_revoked_presales_page_blocks_public_pool_claim(db, access_users):
     assert item.assignee_id is None and item.version == 1
 
 
-def test_notice_group_membership_is_rechecked_before_total_and_pagination(db, access_users):
-    users = access_users
-    owner_ctx = common.resolve_actor(db, users.buyer.id)[1]
-    group = audience.create_group(db, "售前通知受众", "personal", [users.sales.username],
-                                  owner_ctx, bypass=common.bypass)
-    rule = audience.create_rule(db, "include", [], [group.id], owner_ctx)
-    public = _inquiry(db, users.buyer, number=1)
-    grouped = _inquiry(db, users.buyer, number=2, rule_id=rule)
-    notice = "presales_offer_notice"
-    public_item = work_items.open_items(db, Subject(notice, public.id), [users.sales.id],
-                                        notice, users.buyer.id)[0]
-    grouped_item = work_items.open_items(db, Subject(notice, grouped.id), [users.sales.id],
-                                         notice, users.buyer.id)[0]
-    viewer = common.resolve_actor(db, users.sales.id)[1]
-    before = work_items.visible_items(db, viewer, "assigned", notice, page_size=1)
-    assert before["total"] == 2 and before["items"][0]["id"] == grouped_item.id
-    assert work_items.badge(db, viewer)["assigned"] == 2
-
-    audience.update_group(db, group.id, owner_ctx, user_ids=[], bypass=common.bypass)
-    after = work_items.visible_items(db, viewer, "assigned", notice, page_size=1)
-    assert after["total"] == 1
-    assert work_items.badge(db, viewer)["assigned"] == 1
-    assert [item["id"] for item in after["items"]] == [public_item.id]
-    assert work_items.visible_items(db, viewer, "assigned", notice, page=2, page_size=1)["items"] == []
-    with pytest.raises(Forbidden):
-        events.list_events(db, Subject(notice, grouped.id), viewer)
-    with pytest.raises(Forbidden):
-        work_items.start(db, grouped_item.id, users.sales.id, expected_version=grouped_item.version)
-
-
 def test_revoked_page_account_is_not_assignable_or_a_candidate(db, access_users):
     users = access_users
     inquiry = _inquiry(db, users.sales, kind="sales_inquiry")

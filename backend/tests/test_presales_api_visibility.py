@@ -5,13 +5,14 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select, text
+from sqlalchemy.orm import Session
 
 from app import permissions
 from app.auth import _make_token
 from app.main import app
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier
-from app.models.presales import PresalesOffer
+from app.models.presales import PresalesOffer, PresalesOfferRevision
 from app.models.system import SysAccessLog, SysUser
 from app.services import audience
 from app.services.presales import common, inquiries, library, offers, visibility
@@ -72,83 +73,6 @@ def _quoted(db, users, *, rule=None, whole=None):
     return inquiry, offer
 
 
-@pytest.mark.parametrize("mode", ["public", "private", "include", "exclude"])
-@pytest.mark.parametrize("viewer", ["buyer", "other", "peer", "supervisor"])
-def test_field_visibility_matrix_removes_values_and_identity_bypasses(db, users, mode, viewer):
-    rule = {"mode": mode}
-    if mode in {"include", "exclude"}:
-        rule["user_ids"] = [users.other.username]
-    inquiry, offer = _quoted(db, users, rule=rule)
-    ctx = _ctx(db, getattr(users, viewer))
-    result = library.batch(db, [users.part.id], ctx)[users.part.id][0]
-    expected = viewer in {"buyer", "supervisor"} or mode == "public" or (
-        mode == "include" and viewer == "other") or (mode == "exclude" and viewer != "other")
-    for field in ("supplier_id", "source_key", "reporter", "notes"):
-        assert (field in result) is expected, (mode, viewer, field, result)
-    assert "created_by" not in result and "work_item_id" not in result
-    assert "customer_id" not in result
-    if viewer == "other":
-        detail = visibility.inquiry_view(db, inquiry, ctx)
-        assert "customer_id" not in detail and "assignee_ids" not in detail
-
-
-def test_default_supplier_private_and_data_group_intersection_even_for_author(db, users):
-    inquiry, offer = _quoted(db, users)
-    seller = visibility.offer_view(db, offer, _ctx(db, users.seller))
-    assert "supplier_id" not in seller and "source_key" not in seller
-    assert seller["reporter"]["id"] == users.buyer.id and seller["notes"] == "采购机密"
-    graph = dict(users.buyer.template_perms)
-    graph["data_supplier"] = False
-    users.buyer.template_perms = graph
-    db.commit()
-    own = visibility.offer_view(db, offer, _ctx(db, users.buyer))
-    assert "supplier_id" not in own and "source_key" not in own
-    assert "customer_id" in visibility.inquiry_view(db, inquiry, _ctx(db, users.seller))
-    assert "customer_id" not in visibility.inquiry_view(db, inquiry, _ctx(db, users.peer))
-
-
-def test_whole_inquiry_private_blocks_detail_reference_library_and_search_badges(db, users):
-    inquiry, offer = _quoted(db, users, whole={"mode": "private"})
-    ctx = _ctx(db, users.other)
-    assert not visibility.can_view_inquiry(db, inquiry, ctx)
-    assert not visibility.can_view_offer(db, offer, ctx)
-    assert library.batch(db, [users.part.id], ctx) == {users.part.id: []}
-    assert library.boost_part_ids(db, users.part.pn_std, ctx) == []
-    with pytest.raises(Exception) as exc:
-        inquiries.create_draft(db, users.other.id, lines=[{
-            "part_id": users.part.id, "ref_offer_id": offer.id}])
-    assert getattr(exc.value, "status_code", None) == 403
-    db.rollback()
-    assert _client(users.other).get(f"/api/presales/inquiries/{inquiry.id}").status_code == 403
-
-
-def test_group_membership_changes_take_effect_on_existing_offer(db, users):
-    ctx = _ctx(db, users.buyer)
-    group = audience.create_group(db, "销售可见组", "personal", [users.other.username], ctx,
-                                  bypass=common.bypass)
-    inquiry, offer = _quoted(db, users, rule={"mode": "include", "group_ids": [group.id]})
-    other = _ctx(db, users.other)
-    assert "notes" in visibility.offer_view(db, offer, other)
-    audience.update_group(db, group.id, ctx, user_ids=[], bypass=common.bypass)
-    assert "notes" not in visibility.offer_view(db, offer, other)
-
-
-def test_history_and_timeline_do_not_reveal_now_private_notes_or_reporter(db, users):
-    inquiry, offer = _quoted(db, users)
-    offers.update_offer(db, offer.id, users.buyer.id,
-        {"notes": "新私密备注", "notes_audience": {"mode": "private"},
-         "reporter_audience": {"mode": "private"}}, expected_version=offer.version)
-    db.commit()
-    ctx = _ctx(db, users.seller)
-    revisions = visibility.revision_views(db, offer.id, ctx)
-    assert len(revisions) == 2
-    assert all("notes" not in row["snapshot"] and "reporter" not in row["snapshot"] for row in revisions)
-    timeline = events.list_events(db, Subject("presales_inquiry", inquiry.id), ctx)
-    offer_events = [row for row in timeline if row.kind.startswith("offer.")]
-    assert offer_events and all(row.actor is None for row in offer_events)
-    assert all("采购机密" not in str(row.payload) and "新私密备注" not in str(row.payload) for row in timeline)
-
-
 def test_generic_work_item_complete_cannot_bypass_per_line_reply_validation(db, users):
     inquiry = inquiries.create_draft(db, users.seller.id, lines=[{"part_id": users.part.id}],
                                      assignee_ids=[users.buyer.id])
@@ -157,6 +81,53 @@ def test_generic_work_item_complete_cannot_bypass_per_line_reply_validation(db, 
     with pytest.raises(InvalidTransition, match="每行"):
         work_items.complete(db, item.id, users.buyer.id, item.version)
     assert item.status == "pending"
+
+
+def test_pool_deadlock_at_commit_preserves_price_and_version(db, users):
+    inquiry, offer = _quoted(db, users)
+    line = inquiries.lines_for(db, inquiry.id)[0]
+    url = f"/api/presales/pool/lines/{line.id}/price"
+    original_version, original_revision = line.version, offer.revision_no
+    client = _client(users.peer)
+    change = {"expected_version": original_version, "unit_price": "97.50"}
+
+    def deadlock(session):
+        session.execute(text("DO $$ BEGIN RAISE EXCEPTION 'concurrent update' "
+                             "USING ERRCODE = '40P01'; END $$"))
+
+    event.listen(Session, "before_commit", deadlock, once=True)
+    try:
+        response = client.put(url, json=change)
+    finally:
+        event.remove(Session, "before_commit", deadlock)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "concurrent_write"
+    db.refresh(line)
+    db.refresh(offer)
+    assert (line.version, offer.revision_no, offer.unit_price) == (original_version, original_revision, Decimal("50.25"))
+    saved = client.put(url, json=change)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["price"]["unit_price"] == "97.50"
+
+
+def test_revision_api_reads_pre_pool_snapshots_without_rewriting_them(db, users):
+    _, offer = _quoted(db, users)
+    previous = db.scalar(select(PresalesOfferRevision).where(PresalesOfferRevision.offer_id == offer.id))
+    offer.revision_no += 1
+    legacy = dict(previous.snapshot, revision_no=offer.revision_no)
+    legacy.pop("updated_by")
+    legacy.pop("price_basis")
+    revision = PresalesOfferRevision(offer_id=offer.id, revision_no=offer.revision_no,
+        snapshot=legacy, actor=users.buyer.id, changed_fields=["unit_price"])
+    db.add(revision)
+    db.commit()
+    response = _client(users.other).get(f"/api/presales/offers/{offer.id}/revisions")
+    assert response.status_code == 200
+    snapshot = response.json()[-1]["snapshot"]
+    assert snapshot["reporter"]["id"] == users.buyer.id
+    assert snapshot["unit_price"] == legacy["unit_price"] and snapshot["price_basis"] == "sale"
+    db.refresh(revision)
+    assert revision.snapshot == legacy
 
 
 def test_http_two_buyers_reply_compare_close_and_audit(db, users):
@@ -248,42 +219,6 @@ def test_supervisor_can_manage_team_fields_and_public_groups(db, users):
     group = client.post("/api/audience/groups", json={"scope": "public", "name": "售前采购组",
                                                     "user_ids": [users.buyer.username]})
     assert group.status_code == 201, group.text
-
-
-def test_public_pool_owner_sees_claimant_while_other_sales_cannot(db, users):
-    inquiry = inquiries.create_draft(db, users.seller.id, lines=[{"part_id": users.part.id}])
-    inquiries.submit(db, inquiry.id, users.seller.id, inquiry.version)
-    item = work_items.list_by_subject(db, Subject("presales_inquiry", inquiry.id), users.seller.id)[0]
-    work_items.claim(db, item.id, users.buyer.id, item.version)
-    offer = offers.save_draft(db, inquiry.id, inquiries.lines_for(db, inquiry.id)[0].id,
-        users.buyer.id, {"unit_price": "25", "reporter_audience": {"mode": "private"}},
-        expected_version=inquiry.version)
-    offers.reply(db, inquiry.id, users.buyer.id, expected_version=inquiry.version)
-    db.commit()
-    ctx = _ctx(db, users.seller)
-    detail = visibility.inquiry_view(db, inquiry, ctx)
-    assert "reporter" not in detail["offers"][0]
-    assert detail["assignee_ids"] == []
-    assert detail["work_items"][0]["assignee_id"] == users.buyer.id
-    assert detail["work_items"][0]["claimed_by"] == users.buyer.id
-    assert detail["work_items"][0]["status"] == "done"
-    other_detail = visibility.inquiry_view(db, inquiry, _ctx(db, users.other))
-    assert "reporter" not in other_detail["offers"][0]
-    assert "assignee_ids" not in other_detail
-    assert other_detail["work_items"] == []
-    for row in events.list_events(db, Subject("presales_inquiry", inquiry.id), ctx):
-        if row.actor is None:
-            assert row.work_item_id is None
-    assert "reporter" in visibility.offer_view(db, offer, _ctx(db, users.buyer))
-
-
-def test_deleted_unsubmitted_draft_does_not_become_visible_to_other_sales(db, users):
-    inquiry = inquiries.create_draft(db, users.seller.id, notes="未提交草稿", lines=[{"part_id": users.part.id}])
-    inquiries.delete_draft(db, inquiry.id, users.seller.id, inquiry.version)
-    db.commit()
-    assert not visibility.can_view_inquiry(db, inquiry, _ctx(db, users.other))
-    response = _client(users.other).get("/api/presales/inquiries?scope=all")
-    assert response.status_code == 200 and response.json()["total"] == 0
 
 
 def test_http_binding_check_then_existing_bind_and_create_new_are_versioned(db, users):

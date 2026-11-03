@@ -51,20 +51,6 @@ def test_preview_collects_supplier_errors_for_every_row_and_rolls_back(db, quote
     assert all(row["errors"] for row in result["plan"]["rows"])
 
 
-def test_invisible_reuse_is_located_before_apply(db, quote_data):
-    data = quote_data
-    hidden = _published(db, data, private=True)
-    inquiry = _submitted(db, data)
-    content = _edit(quote_workbook.export_quote_sheet(db, [inquiry.id], data.buyer.id),
-                    {2: {"处理方式": "沿用", "沿用报价编号": hidden.id}})
-    before = _snapshot(db)
-    result = _preview_quote(db, data, content)
-    error = result["plan"]["rows"][0]["errors"][0]
-    assert error["row_number"] == 2 and error["column"] == "ref_offer_id"
-    assert "不可见" in error["message"]
-    assert _snapshot(db) == before
-
-
 def test_preview_version_conflict_is_a_located_row_error(db, quote_data):
     data = quote_data
     inquiry = _submitted(db, data)

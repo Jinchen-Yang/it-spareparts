@@ -92,76 +92,6 @@ def test_same_buyer_same_pn_requires_explicit_existing_choice(db, r6_actors, kin
         assert work_items.list_by_subject(db, inquiries.subject(inquiry), users.sales.id)[0].status == "pending"
 
 
-@pytest.mark.parametrize("kind", ["proactive_offer", "sales_inquiry"])
-@pytest.mark.parametrize("mode", ["private", "include"])
-def test_explicit_new_keeps_restricted_quote_out_of_public_views(db, r6_actors, kind, mode):
-    users = r6_actors
-    original, _, _, first = _publish(db, users)
-    rule = {"mode": mode}
-    if mode == "include":
-        rule["user_ids"] = [users.sales.username]
-    restricted, _, draft_id, second = _publish(db, users, kind=kind,
-        whole=rule, price="1.00", on_existing="new")
-    assert first.id != second.id and second.id == draft_id
-    assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 2
-    assert first.unit_price == Decimal("100.00") and first.revision_no == 1
-    _, ctx = common.resolve_actor(db, users.other.id)
-    assert [row["unit_price"] for row in library.batch(db, [users.part.id], ctx)[users.part.id]] == [Decimal("100.00")]
-    assert [row["unit_price"] for row in visibility.inquiry_view(db, original, ctx)["offers"]] == [Decimal("100.00")]
-    with pytest.raises(Forbidden):
-        visibility.inquiry_view(db, restricted, ctx)
-    results = library.search(db, users.part.pn_std, ctx)
-    matched = next(row for row in results if row["part_id"] == users.part.id)
-    assert matched["offer_count"] == 1
-    assert [row["unit_price"] for row in matched["offers"]] == [Decimal("100.00")]
-
-
-@pytest.mark.parametrize("kind", ["proactive_offer", "sales_inquiry"])
-@pytest.mark.parametrize("mode", ["private", "include"])
-def test_explicit_update_moves_authority_and_filters_original_public_views(db, r6_actors, kind, mode):
-    users = r6_actors
-    public_fields = {name + "_audience": {"mode": "public"} for name in ("supplier", "reporter", "notes")}
-    original, old_line, _, first = _publish(db, users, fields=public_fields)
-    old_inquiry_id = original.id
-    old_line_id = old_line.id
-    first_id = first.id
-    rule = {"mode": mode}
-    if mode == "include":
-        rule["user_ids"] = [users.sales.username]
-    private_fields = {name + "_audience": {"mode": "private"} for name in ("supplier", "reporter", "notes")}
-    updated_inquiry, line, _, updated = _publish(db, users, kind=kind, whole=rule,
-        fields=private_fields, source="source-B", price="1.00", on_existing="update",
-        existing_offer_id=first_id)
-    assert updated.id == first_id and updated.revision_no == 2
-    assert updated.inquiry_id == updated_inquiry.id and updated.line_id == line.id
-    assert updated.unit_price == Decimal("1.00") and updated.source_key == "source-B"
-    assert db.scalar(select(func.count()).select_from(PresalesOffer)) == 1
-    history = list(db.scalars(select(PresalesOfferRevision).where(
-        PresalesOfferRevision.offer_id == first_id).order_by(PresalesOfferRevision.revision_no)))
-    assert history[0].snapshot["inquiry_id"] == old_inquiry_id
-    assert history[0].snapshot["line_id"] == old_line_id
-    assert history[0].snapshot["unit_price"] == "100.00"
-    assert history[1].snapshot["inquiry_id"] == updated_inquiry.id
-    for name in ("supplier", "reporter", "notes"):
-        assert history[1].snapshot[name + "_audience_rule_id"] != history[0].snapshot[name + "_audience_rule_id"]
-    _, other = common.resolve_actor(db, users.other.id)
-    assert library.batch(db, [users.part.id], other)[users.part.id] == []
-    old_view = visibility.inquiry_view(db, original, other)
-    assert [row["unit_price"] for row in old_view["offers"]] == [Decimal("100.00")]
-    assert all("latest" not in row for row in old_view["offers"])
-    assert library.boost_part_ids(db, users.part.pn_std, other) == []
-    results = library.search(db, users.part.pn_std, other)
-    matched = next(row for row in results if row["part_id"] == users.part.id)
-    assert matched["offer_count"] == 0 and matched["offers"] == []
-    _, buyer = common.resolve_actor(db, users.buyer.id)
-    latest = visibility.inquiry_view(db, updated_inquiry, buyer)
-    assert [row["id"] for row in latest["offers"]] == [first_id]
-    if mode == "include" or kind == "sales_inquiry":
-        owner_view = visibility.offer_view(db, updated, common.resolve_actor(db, users.sales.id)[1])
-        assert owner_view is not None
-        assert all(key not in owner_view for key in ("supplier_id", "source_key", "reporter", "notes"))
-
-
 def test_multiple_existing_offers_require_explicit_update_target(db, r6_actors):
     users = r6_actors
     _, _, _, first = _publish(db, users)
@@ -179,40 +109,35 @@ def test_multiple_existing_offers_require_explicit_update_target(db, r6_actors):
     assert second.unit_price == Decimal("80.00") and second.revision_no == 2
 
 
-@pytest.mark.parametrize("restricted", [False, True], ids=["both-public", "one-private"])
-def test_original_line_keeps_each_source_link_after_separate_cross_inquiry_updates(db, r6_actors, restricted):
+def test_original_line_keeps_each_source_link_after_separate_cross_inquiry_updates(db, r6_actors):
     users = r6_actors
     original, original_line, first = _prepared(db, users, source="source-A", price="100.00")
     second = offers.save_draft(db, original.id, original_line.id, users.buyer.id,
-        {"unit_price": "200.00", "source_key": "source-B"},
-        expected_version=original.version)
+        {"unit_price": "200.00", "source_key": "source-B"}, expected_version=original.version)
     published = offers.publish_proactive(db, original.id, users.buyer.id,
         expected_version=original.version, on_existing="new")
     assert {row.id for row in published} == {first.id, second.id}
-    _, _, _, updated_first = _publish(db, users, source="source-A-updated", price="80.00",
+
+    next_a, line_a, _, _ = _publish(db, users, source="source-A-updated", price="80.00",
         on_existing="update", existing_offer_id=first.id)
-    _, _, _, updated_second = _publish(db, users, source="source-B-updated", price="70.00",
-        whole={"mode": "private"} if restricted else {"mode": "public"},
-        on_existing="update", existing_offer_id=second.id)
-    assert updated_first.id == first.id and updated_second.id == second.id
-    assert updated_first.inquiry_id != original.id and updated_second.inquiry_id != original.id
-    _, sales = common.resolve_actor(db, users.other.id)
-    original_view = visibility.inquiry_view(db, original, sales)
-    line_view = next(row for row in original_view["lines"] if row["id"] == original_line.id)
-    expected_ids = {first.id, second.id}
-    assert set(line_view["linked_offer_ids"]) == expected_ids
-    assert {row["id"] for row in original_view["offers"]} == expected_ids
-    assert {row["unit_price"] for row in original_view["offers"]} == {Decimal("100.00"), Decimal("200.00")}
-    by_id = {row["id"]: row for row in original_view["offers"]}
-    assert by_id[first.id]["latest"]["unit_price"] == Decimal("80.00")
-    if restricted:
-        assert "latest" not in by_id[second.id]
-    else:
-        assert by_id[second.id]["latest"]["unit_price"] == Decimal("70.00")
-    owner_view = visibility.inquiry_view(db, original, common.resolve_actor(db, users.buyer.id)[1])
-    owner_line = next(row for row in owner_view["lines"] if row["id"] == original_line.id)
-    assert set(owner_line["linked_offer_ids"]) == {first.id, second.id}
-    assert {row["unit_price"] for row in owner_view["offers"]} == {Decimal("100.00"), Decimal("200.00")}
+    next_b, line_b, _, _ = _publish(db, users, source="source-B-updated", price="70.00",
+        whole={"mode": "private"}, on_existing="update", existing_offer_id=second.id)
+    assert len({original.id, next_a.id, next_b.id}) == 3
+    assert (first.inquiry_id, first.line_id) == (next_a.id, line_a.id)
+    assert (second.inquiry_id, second.line_id) == (next_b.id, line_b.id)
+    expected = {
+        first.id: ("source-A", Decimal("100"), Decimal("80")),
+        second.id: ("source-B", Decimal("200"), Decimal("70")),
+    }
+    for reader in (users.other, users.buyer):
+        view = visibility.inquiry_view(db, original, common.resolve_actor(db, reader.id)[1])
+        line, = view["lines"]
+        assert set(line["linked_offer_ids"]) == expected.keys()
+        for quotes in (view["offers"], line["linked_offers"]):
+            assert {quote["id"]: (quote["source_key"], quote["unit_price"], quote["latest"]["unit_price"])
+                    for quote in quotes} == expected
+            assert all(quote["line_id"] == original_line.id and quote["revision_no"] == 1
+                       and quote["latest"]["revision_no"] == 2 for quote in quotes)
 
 
 def test_old_quote_still_requires_repeat_choice_until_withdrawn(db, r6_actors, monkeypatch):

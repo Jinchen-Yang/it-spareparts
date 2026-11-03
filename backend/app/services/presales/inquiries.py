@@ -13,7 +13,7 @@ from app.models.presales import (
     PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink,
 )
 from app.services import field_pool
-from app.services.presales import common
+from app.services.presales import answers, common
 from app.services.workflow import work_items
 from app.services.workflow.registry import Conflict, Forbidden, InvalidTransition, Subject
 
@@ -43,14 +43,15 @@ def lines_for(db, inquiry_id, *, active=True, lock=False):
 
 def _permission(ctx, kind):
     common.require(ctx, "page_presales")
-    common.require(ctx, "action_presales_inquire" if kind == "sales_inquiry" else "action_presales_offer")
+    # D-0052：不再区分询价、报价动作权限；kind 只保留调用方兼容。
 
 
 def _owner(db, inquiry, actor):
     user, ctx = common.resolve_actor(db, actor)
     _permission(ctx, inquiry.kind)
-    if inquiry.created_by != user.id and not common.bypass(ctx):
-        raise Forbidden("只有发起人或主管可以修改询价单")
+    # D-0052：已提交的询价谁都能改；草稿仍只属于本人。
+    if inquiry.status == "draft" and inquiry.created_by != user.id and not common.bypass(ctx):
+        raise Forbidden("只有发起人或主管可以修改草稿")
     return user, ctx
 
 
@@ -70,6 +71,7 @@ def _touch(inquiry):
 
 def _record(db, inquiry, actor, kind, payload=None):
     db.flush()
+    answers.refresh_inquiry(db, inquiry.id)
     common.event(db, inquiry, actor, kind, payload)
     common.audit(db, actor, kind, inquiry.id)
     return inquiry
@@ -95,7 +97,6 @@ def _assignees(db, ids):
     result = list(dict.fromkeys(ids))
     for value in result:
         _, ctx = common.resolve_actor(db, value)
-        common.require(ctx, "action_presales_quote")
     return result
 
 
@@ -136,9 +137,10 @@ def delivery_value(line, visible_fields):
 
 
 def _migrate_delivery(db, line, ctx, *, explicit=False):
+    from app.services.presales.visibility import _public
     subject = field_pool.Subject(SUBJECT_TYPE, f"line:{line.id}", "line")
     field_pool._lock(db, f"field-values:{SUBJECT_TYPE}:{subject.subject_id}:line")
-    values = field_pool.read_values(db, [subject], ctx, common.bypass)[subject.subject_id]
+    values = field_pool.read_values(db, [subject], ctx, _public)[subject.subject_id]
     legacy = [value for value in values if value["name"] == "期望交期"]
     if not explicit:
         line.expected_delivery = delivery_value(line, legacy)
@@ -355,14 +357,14 @@ def _versions(items):
     return {item.id: item.version for item in items if item.status in work_items.ACTIVE}
 
 
-def submit(db, inquiry_id, actor, expected_version):
+def submit(db, inquiry_id, actor, expected_version, *, open_tasks=True):
     inquiry, user, ctx = _locked(db, inquiry_id, actor, expected_version)
     if inquiry.kind != "sales_inquiry" or inquiry.status != "draft":
         raise InvalidTransition("只能提交销售询价草稿；主动报价请使用发布")
     rows = _validate_submit(db, inquiry, ctx)
     inquiry.status, inquiry.submitted_at = "submitted", common.now()
     inquiry.submitted_snapshot = _snapshot(db, inquiry)
-    if any(line.ref_offer_id is None for line in rows):
+    if open_tasks and any(line.ref_offer_id is None for line in rows):
         work_items.open_items(db, subject(inquiry), inquiry.assignee_ids, SUBJECT_TYPE, user.id)
     _touch(inquiry)
     return _record(db, inquiry, user.id, "inquiry.submitted")

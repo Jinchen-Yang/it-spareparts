@@ -8,8 +8,8 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import and_, case, func, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import case, func, or_, select
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.api.audience import audience_user
@@ -230,6 +230,12 @@ def _call(db, fn, *, write=False):
         db.rollback()
         raise HTTPException(409, {"code": "integrity_conflict",
                                  "message": "记录存在冲突或关联数据不可用，请刷新后核对"}) from exc
+    except OperationalError as exc:
+        db.rollback()
+        if write and getattr(exc.orig, "sqlstate", None) == "40P01":
+            raise HTTPException(409, {"code": "concurrent_write",
+                                     "message": "关联报价正在同时修改，本次未保存，请核对最新价格后重试"}) from exc
+        raise
     except PriceReferenceUnavailable as exc:
         db.rollback()
         raise HTTPException(503, {"code": "reference_unavailable",
@@ -310,12 +316,9 @@ def list_inquiries(db: Db, ctx: Ctx,
                 ).correlate(PresalesInquiry).exists()]
             from app.services.workflow import work_items
             if work_items.has_permission(ctx, "data_customer"):
-                # 与询价输出相同：客户字段只向单据所有人或主管开放。
-                customer_match = or_(DimCustomer.name_raw.ilike(pattern, escape="\\"),
-                                     DimCustomer.name_normalized.ilike(pattern, escape="\\"))
-                if not common.bypass(ctx):
-                    customer_match = and_(PresalesInquiry.created_by == user.id, customer_match)
-                matches.append(customer_match)
+                # 与询价输出相同：客户字段只看系统数据权限。
+                matches.append(or_(DimCustomer.name_raw.ilike(pattern, escape="\\"),
+                                   DimCustomer.name_normalized.ilike(pattern, escape="\\")))
             query = query.where(or_(*matches))
         zone = ZoneInfo("Asia/Shanghai")
         if date_from:
@@ -374,7 +377,7 @@ def delete_inquiry(inquiry_id: int, body: VersionInput, db: Db, ctx: Ctx):
 
 @router.post("/inquiries/{inquiry_id}/submit")
 def submit_inquiry(inquiry_id: int, body: VersionInput, db: Db, ctx: Ctx):
-    return _inquiry_action(db, ctx, lambda: inquiries.submit(db, inquiry_id, ctx, body.expected_version))
+    return _inquiry_action(db, ctx, lambda: inquiries.submit(db, inquiry_id, ctx, body.expected_version, open_tasks=False))
 
 
 @router.post("/inquiries/{inquiry_id}/withdraw")
@@ -505,7 +508,6 @@ def search_library(db: Db, ctx: Ctx, q: str = Query(default="", max_length=256),
 @router.post("/reference")
 def reference(body: ReferenceInput, db: Db, ctx: Ctx):
     def read():
-        common.require(ctx, "action_presales_quote")
         part_ids = body.part_ids
         owner_id = None
         if body.inquiry_id is not None:

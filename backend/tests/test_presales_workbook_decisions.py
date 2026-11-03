@@ -13,6 +13,7 @@ from app.services.presales import common, inquiries, offers, visibility
 from app.services.workflow import work_items
 from app.services.workflow.registry import Conflict, InvalidTransition
 from tests.conftest import _alembic_cfg
+from tests.test_presales_api_visibility import _client
 from tests.test_presales_r6_existing import _publish, r6_actors
 from tests.test_presales_r6_responses import _item, _pending
 
@@ -73,18 +74,29 @@ def test_workbook_cannot_adopt_an_unreplied_reuse(db, r6_actors):
                         outcome="won", won_offer_id=original.id)
 
 
-def test_workbook_reuse_checks_owner_visibility_and_reply_validity(db, r6_actors, monkeypatch):
+def test_saved_reuse_withdrawn_before_reply_keeps_all_decisions_in_draft(db, r6_actors):
     users = r6_actors
-    _, _, _, private = _publish(db, users, whole={"mode": "private"})
-    inquiry, lines = _pending(db, users)
-    with pytest.raises(InvalidTransition, match="不可见"):
-        _save(db, users, inquiry, lines[0], mode="reuse", ref_offer_id=private.id)
-    _, _, _, public = _publish(db, users, on_existing="new")
-    _save(db, users, inquiry, lines[0], mode="reuse", ref_offer_id=public.id)
-    offers.withdraw(db, public.id, users.buyer.id, "停止供货", expected_version=public.version)
-    with pytest.raises(InvalidTransition, match="失效"):
-        offers.reply(db, inquiry.id, users.buyer.id, expected_version=inquiry.version)
-    assert _item(db, inquiry, users, users.buyer).status == "pending"
+    _, _, _, original = _publish(db, users, whole={"mode": "private"})
+    inquiry, (priced, reused) = _pending(db, users, lines=[
+        {"part_id": users.other_part.id}, {"part_id": users.part.id}])
+    result = _save(db, users, inquiry, priced, mode="quote", data={"unit_price": "88.00"})
+    _save(db, users, inquiry, reused, mode="reuse", ref_offer_id=original.id)
+    pinned = original.revision_no
+    offers.withdraw(db, original.id, users.buyer.id, "停止供货", expected_version=original.version)
+    version = inquiry.version
+    db.commit()
+
+    response = _client(users.buyer).post(f"/api/presales/inquiries/{inquiry.id}/reply",
+                                         json={"expected_version": version})
+    assert response.status_code == 422 and "失效" in response.json()["detail"]["message"], response.text
+    db.expire_all()
+    draft = db.get(PresalesOffer, result["offer_id"])
+    saved = db.scalar(select(PresalesLineResponse).where(PresalesLineResponse.line_id == reused.id))
+    assert saved.is_draft and (saved.ref_offer_id, saved.ref_offer_revision_no) == (original.id, pinned)
+    assert draft.status == "draft" and draft.revision_no == 0
+    assert not db.scalar(select(PresalesOfferRevision.id).where(PresalesOfferRevision.offer_id == draft.id))
+    assert inquiry.version == version and _item(db, inquiry, users, users.buyer).status == "pending"
+    assert priced.answer_state == reused.answer_state == "pending"
 
 
 def test_workbook_reuse_does_not_silently_repin_updated_price(db, r6_actors):

@@ -33,6 +33,11 @@ def _authorize(db, spec, ctx, subject_type, subject_id):
         raise Forbidden("无权操作该工作簿")
 
 
+def _authorize_export(db, spec, ctx, export_id):
+    if spec.can_access_export is not None and not spec.can_access_export(db, ctx, export_id):
+        raise Forbidden("该次导出的字段当前不可见，请重新导出")
+
+
 def _result(operation, *, replayed=False):
     result = {"operation_id": operation.id, "plan_digest": digest_plan(operation.plan),
               "plan": deepcopy(operation.plan), "replayed": replayed,
@@ -127,12 +132,14 @@ def preview(db: Session, schema_name: str, file_bytes: bytes, *, ctx: UserContex
     if applied is not None:
         if (applied.subject_type, applied.subject_id) != (subject_type, subject_id):
             raise Conflict("该文件已关联其他工作簿对象，请重新导出")
+        _authorize_export(db, spec, ctx, applied.export_id)
         _check_plan_permissions(spec, applied.plan, ctx)
         record_access_log(ctx, "workbook_replay", "workbook_operation", {"operation_id": applied.id})
         return _result(applied, replayed=True)
     parsed = parse_workbook(spec.schema, file_bytes, ctx=ctx)
     if len(parsed.export_id) > 128:
         raise WorkbookError("导出编号过长，请重新导出模板")
+    _authorize_export(db, spec, ctx, parsed.export_id)
     # 同文件并发预览串行化；唯一约束仍是最终数据库防线。
     lock_key = int.from_bytes(hashlib.sha256(
         f"{parsed.export_id}:{parsed.file_sha256}:{ctx.user_id}".encode()).digest()[:8],
@@ -191,6 +198,7 @@ def apply(db: Session, operation_id: int, actor, expected_plan_digest: str,
         raise Forbidden("只能确认本人上传的工作簿")
     spec = get_spec(operation.schema_name)
     _authorize(db, spec, ctx, operation.subject_type, operation.subject_id)
+    _authorize_export(db, spec, ctx, operation.export_id)
     _check_plan_permissions(spec, operation.plan, ctx)
     if not isinstance(expected_plan_digest, str) or not hmac.compare_digest(
         digest_plan(operation.plan), expected_plan_digest,

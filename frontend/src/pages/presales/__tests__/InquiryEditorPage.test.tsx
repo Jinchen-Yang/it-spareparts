@@ -136,13 +136,10 @@ describe("销售询价编辑", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "客户要求" }), { target: { value: "尽快报价" } });
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "客户" }));
     fireEvent.click(await screen.findByText("客户甲"));
-    fireEvent.mouseDown(screen.getByRole("combobox", { name: "处理人" }));
-    fireEvent.click(await screen.findByText("采购甲"));
-    fireEvent.click(await screen.findByText("采购乙"));
     fireEvent.click(screen.getByRole("button", { name: "提交" }));
     await waitFor(() => expect(mocks.presales.submitInquiry).toHaveBeenCalledWith(9, { expected_version: 1 }));
     expect(mocks.presales.createInquiry).toHaveBeenCalledWith(expect.objectContaining({ kind: "sales_inquiry", customer_id: 5,
-      notes: "尽快报价", assignee_ids: [2, 3], offer_audience: { mode: "public", user_ids: [], group_ids: [] }, lines: [
+      notes: "尽快报价", lines: [
         expect.objectContaining({ part_id: 10, qty: 4, require_exact_pn: true, ref_offer_id: 70, expected_delivery: "2026-11-01", field_values: [
           { field_def_id: 31, value: "三年" },
         ] }), expect.objectContaining({ part_id: 11, ref_offer_id: null }), expect.objectContaining({ part_id: null, pn_raw: "RAW-NEW" }),
@@ -151,10 +148,12 @@ describe("销售询价编辑", () => {
     await waitFor(() => expect(pathname).toBe("/presales/inquiries/9"));
   });
 
-  it("处理人留空进公共池，保存草稿不提交", async () => {
+  it("不再指派处理人，保存草稿不提交", async () => {
     mount(); await addPart("PN-B");
+    expect(screen.queryByRole("combobox", { name: "处理人" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
-    await waitFor(() => expect(mocks.presales.createInquiry).toHaveBeenCalledWith(expect.objectContaining({ assignee_ids: [] })));
+    await waitFor(() => expect(mocks.presales.createInquiry).toHaveBeenCalled());
+    expect(mocks.presales.createInquiry.mock.calls[0][0]).not.toHaveProperty("assignee_ids");
     expect(mocks.presales.submitInquiry).not.toHaveBeenCalled();
   });
 
@@ -177,7 +176,7 @@ describe("销售询价编辑", () => {
     expect(mocks.presales.updateInquiry.mock.calls[0][1]).not.toHaveProperty("customer_id");
   });
 
-  it("整单、备注及 M7 回读真实可见性，修改内容时全部沿用原规则", async () => {
+  it("备注及 M7 回读真实可见性，修改内容时全部沿用原规则", async () => {
     const privateRule = { mode: "private" as const, users: [], groups: [] };
     const includeRule = { mode: "include" as const, users: [{ id: "sale-a", name: "销售甲" }], groups: [] };
     const excludeRule = { mode: "exclude" as const, users: [], groups: [{ id: 88, name: "旧分组" }] };
@@ -194,14 +193,13 @@ describe("销售询价编辑", () => {
     await openLine("PN-A");
     const warranty = await screen.findByRole("textbox", { name: "质保要求字段值" });
     fireEvent.click(screen.getByRole("button", { name: "客户要求 / 自定义字段" }));
-    fireEvent.click(screen.getByRole("button", { name: "设置本单报价可见范围" }));
+    expect(screen.queryByRole("button", { name: "设置本单报价可见范围" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "客户要求可见性：私密" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "PN-A 行备注可见性：不给谁看" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /PN-A 期望交期可见性/ })).not.toBeInTheDocument();
     expect(screen.getByLabelText("PN-A 期望交期")).toHaveValue("2026-11-01");
     expect(screen.getByRole("button", { name: "质保要求可见性：私密" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "单头说明可见性：不给谁看" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "谁可以看" }).closest(".ant-select")).toHaveTextContent("销售甲");
     fireEvent.change(warranty, { target: { value: "三年" } });
     fireEvent.change(screen.getByRole("textbox", { name: "单头说明字段值" }), { target: { value: "新说明" } });
     fireEvent.click(screen.getByRole("button", { name: "存草稿" }));

@@ -1,11 +1,11 @@
-"""旧单读取钉住的完整快照；候选沿用按所有人权限，报价库去重。"""
+"""旧单读取钉住的完整快照，报价库展示共享报价并按报价人去重。"""
 from datetime import timedelta
 from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
 
-from app.models.presales import PresalesLineResponse, PresalesOfferRevision
+from app.models.presales import PresalesOfferRevision
 from app.services.presales import common, inquiries, library, offers, visibility
 from app.services.workflow.registry import InvalidTransition
 from tests.test_presales_api_visibility import _client
@@ -40,18 +40,6 @@ def test_reference_keeps_pinned_price_tax_source_and_field_audience_but_is_super
     assert ref["latest"] == {"unit_price": Decimal("75.00"), "is_tax_inclusive": False, "revision_no": 2, "price_basis": "sale"}
     assert "_inquiry" not in ref
     assert ref["expired"] is True and ref["original_withdrawn"] is False
-
-
-def test_reference_keeps_snapshot_scope_and_hides_latest_when_new_scope_denies_viewer(db, r6_actors):
-    u = r6_actors
-    _, _, _, original = _publish(db, u)
-    inquiry, _ = _refer(db, u, original)
-    _publish(db, u, whole={"mode": "private"}, price="1.00", on_existing="update", existing_offer_id=original.id)
-    owner = visibility.inquiry_view(db, inquiry, _ctx(db, u.sales))["lines"][0]["ref_offer"]
-    assert owner["unit_price"] == Decimal("100.00") and "latest" not in owner
-    boss = visibility.inquiry_view(db, inquiry, _ctx(db, u.boss))["lines"][0]["ref_offer"]
-    assert boss["unit_price"] == Decimal("100.00") and boss["latest"]["unit_price"] == Decimal("1.00")
-    assert library.batch(db, [u.part.id], u.sales.id)[u.part.id] == []
 
 
 def test_reference_is_superseded_by_price_update_never_by_time_and_withdrawn_is_separate(db, r6_actors, monkeypatch):
@@ -117,50 +105,6 @@ def test_legacy_revision_without_price_basis_defaults_to_sale_in_history_and_ref
                for row in response.json())
 
 
-def test_reuse_requires_owner_visibility_even_when_purchaser_can_see_private_quote(db, r6_actors):
-    u = r6_actors
-    _, _, _, private = _publish(db, u, whole={"mode": "private"})
-    inquiry, lines = _pending(db, u)
-    assert visibility.can_view_offer(db, private, _ctx(db, u.buyer))
-    with pytest.raises(InvalidTransition):
-        _reply(db, inquiry, u.buyer, [{"line_id": lines[0].id, "mode": "reuse", "ref_offer_id": private.id}])
-    assert db.scalar(select(PresalesLineResponse)) is None
-    db.commit()
-    response = _client(u.buyer).post("/api/presales/reference", json={"inquiry_id": inquiry.id})
-    assert response.status_code == 200, response.text
-    assert response.json()["offers"][str(u.part.id)] == []
-    denied = _client(u.buyer).post(f"/api/presales/inquiries/{inquiry.id}/reply", json={
-        "expected_version": inquiry.version,
-        "line_responses": [{"line_id": lines[0].id, "mode": "reuse", "ref_offer_id": private.id}]})
-    assert denied.status_code == 422
-
-
-def test_reuse_pins_original_reporter_time_and_masks_name_for_owner(db, r6_actors):
-    u = r6_actors
-    _, _, _, original = _publish(db, u, fields={"reporter_audience": {"mode": "private"}})
-    published = original.valid_from
-    inquiry, lines = _pending(db, u)
-    _reply(db, inquiry, u.buyer, [{"line_id": lines[0].id, "mode": "reuse", "ref_offer_id": original.id}])
-    row = _response_view(db, inquiry, u.sales, lines[0].id)
-    assert row["ref_offer_revision_no"] == 1 and row["offer"]["revision_no"] == 1
-    assert row["offer"]["unit_price"] == Decimal("100.00") and row["offer"]["valid_from"] == published
-    assert "reporter" not in row["offer"] and row["reporter_label"] == "其他采购"
-    offers.update_offer(db, original.id, u.buyer.id, {"unit_price": "50.00"}, expected_version=original.version)
-    row = _response_view(db, inquiry, u.sales, lines[0].id)
-    assert row["offer"]["unit_price"] == Decimal("100.00") and row["offer"]["latest"]["unit_price"] == Decimal("50.00")
-
-
-def test_won_offer_snapshot_survives_update_and_record_scope_change(db, r6_actors):
-    u = r6_actors
-    _, _, _, original = _publish(db, u)
-    inquiry, _ = _refer(db, u, original)
-    inquiries.close(db, inquiry.id, u.sales.id, inquiry.version, outcome="won", won_offer_id=original.id)
-    assert inquiry.won_offer_revision_no == 1
-    _publish(db, u, whole={"mode": "private"}, price="2.00", on_existing="update", existing_offer_id=original.id)
-    won = visibility.inquiry_view(db, inquiry, _ctx(db, u.sales))["won_offer"]
-    assert won["unit_price"] == Decimal("100.00") and won["revision_no"] == 1 and "latest" not in won
-
-
 def test_missing_historical_pin_does_not_substitute_current_price(db, r6_actors):
     u = r6_actors
     _, _, _, original = _publish(db, u)
@@ -172,20 +116,68 @@ def test_missing_historical_pin_does_not_substitute_current_price(db, r6_actors)
     assert not view["offers"]
 
 
+def test_won_offer_snapshot_survives_update_and_record_scope_change(db, r6_actors):
+    u = r6_actors
+    _, _, _, original = _publish(db, u, fields={"is_tax_inclusive": False, "price_basis": "cost"})
+    inquiry, _ = _refer(db, u, original)
+    inquiries.close(db, inquiry.id, u.sales.id, inquiry.version, outcome="won", won_offer_id=original.id)
+    _publish(db, u, whole={"mode": "private"}, price="2.00",
+        fields={"is_tax_inclusive": True, "price_basis": "sale"}, on_existing="update", existing_offer_id=original.id)
+    assert (inquiry.won_offer_id, inquiry.won_offer_revision_no) == (original.id, 1)
+    view = visibility.inquiry_view(db, inquiry, _ctx(db, u.other))
+    for pinned in (view["won_offer"], view["lines"][0]["ref_offer"]):
+        assert (pinned["id"], pinned["revision_no"], pinned["unit_price"]) == (original.id, 1, Decimal("100"))
+        assert pinned["is_tax_inclusive"] is False and pinned["price_basis"] == "cost"
+        assert pinned["latest"] == {"revision_no": 2, "unit_price": Decimal("2"),
+                                    "is_tax_inclusive": True, "price_basis": "sale"}
+
+
+def test_reuse_of_legacy_private_offer_pins_original_reporter_and_time(db, r6_actors, monkeypatch):
+    u = r6_actors
+    source, _, _, original = _publish(db, u, fields={"reporter_audience": {"mode": "private"}})
+    source.offer_audience_rule_id = common.rule_id(db, {"mode": "private"}, _ctx(db, u.buyer))
+    db.flush()
+    published = original.valid_from
+    inquiry, lines = _pending(db, u)
+    candidates = library.batch(db, [u.part.id], u.peer.id, owner_id=u.sales.id)[u.part.id]
+    assert [offer["id"] for offer in candidates] == [original.id]
+    _reply(db, inquiry, u.buyer, [{"line_id": lines[0].id, "mode": "reuse", "ref_offer_id": original.id}])
+    later = published + timedelta(days=1)
+    monkeypatch.setattr(common, "now", lambda: later)
+    offers.update_offer(db, original.id, u.peer.id, {"unit_price": "50.00"}, expected_version=original.version)
+    row = _response_view(db, inquiry, u.sales, lines[0].id)
+    pinned = row["offer"]
+    assert (row["ref_offer_revision_no"], pinned["revision_no"], pinned["valid_from"]) == (1, 1, published)
+    assert pinned["reporter"] == {"id": u.buyer.id, "name": "buyer"} and row["reporter_label"] == "buyer"
+    assert pinned["unit_price"] == Decimal("100") and pinned["latest"]["unit_price"] == Decimal("50")
+    assert row["current_offer"]["reporter"] == {"id": u.peer.id, "name": "peer"}
+
+
 def test_library_groups_latest_then_sorts_tax_buckets_and_filters_more(db, r6_actors):
     u = r6_actors
-    _, _, _, old = _publish(db, u, price="5.00", fields={"is_tax_inclusive": True})
-    _, _, _, main = _publish(db, u, price="50.00", fields={"is_tax_inclusive": False}, on_existing="new")
-    _, _, _, hidden = _publish(db, u, price="1.00", whole={"mode": "private"}, on_existing="new")
+    u.sales.perm_overrides = {"data_supplier": False}
+    _, _, _, old = _publish(db, u, price="5.00", source="旧来源", fields={
+        "is_tax_inclusive": True, "notes": "旧备注", "price_basis": "cost",
+        **{key + "_audience": {"mode": "private"} for key in ("supplier", "reporter", "notes")}})
+    _, _, _, older = _publish(db, u, price="3.00", fields={"is_tax_inclusive": None}, on_existing="new")
+    _, _, _, withdrawn = _publish(db, u, price="0.50", on_existing="new")
+    _, _, _, main = _publish(db, u, price="50.00", whole={"mode": "private"},
+        fields={"is_tax_inclusive": False}, on_existing="new")
     _, _, _, peer_old = _publish(db, u, buyer=u.peer, price="40.00", fields={"is_tax_inclusive": True})
-    _, _, _, peer_main = _publish(db, u, buyer=u.peer, price="100.00", fields={"is_tax_inclusive": True}, on_existing="new")
+    _, _, _, peer_main = _publish(db, u, buyer=u.peer, price="100.00",
+        fields={"is_tax_inclusive": True}, on_existing="new")
+    offers.withdraw(db, withdrawn.id, u.buyer.id, "已撤回报价不应出现在更多来源", expected_version=withdrawn.version)
     rows = library.batch(db, [u.part.id], u.sales.id)[u.part.id]
     assert [row["id"] for row in rows] == [peer_main.id, main.id]
-    assert [[item["id"] for item in row["more"]] for row in rows] == [[peer_old.id], [old.id]]
-    assert hidden.id not in {item["id"] for row in rows for item in [row, *row["more"]]}
+    assert [[item["id"] for item in row["more"]] for row in rows] == [[peer_old.id], [old.id, older.id]]
+    old_view = rows[1]["more"][0]
+    assert (old_view["price_basis"], old_view["source_key"], old_view["notes"]) == ("cost", "旧来源", "旧备注")
+    assert (old_view["supplier_id"], old_view["reporter"]["id"]) == (u.supplier.id, u.buyer.id)
+    assert (rows[1]["price_basis"], rows[1]["source_key"], rows[1]["notes"]) == ("sale", "source-A", "报价备注")
     result = next(row for row in library.search(db, u.part.pn_std, u.sales.id) if row["part_id"] == u.part.id)
-    assert result["offer_count"] == 2 and [row["id"] for row in result["offers"]] == [peer_main.id, main.id]
-    offers.update_offer(db, peer_main.id, u.peer.id, {"is_tax_inclusive": None, "unit_price": "1.00"}, expected_version=peer_main.version)
+    assert result["offer_count"] == 2 and result["offers"] == rows
+    offers.update_offer(db, peer_main.id, u.peer.id, {"is_tax_inclusive": None, "unit_price": "1.00"},
+                        expected_version=peer_main.version)
     rows = library.batch(db, [u.part.id], u.sales.id)[u.part.id]
     assert [row["id"] for row in rows] == [main.id, peer_main.id]
 
@@ -251,34 +243,3 @@ def test_same_offer_returning_to_inquiry_keeps_original_line_snapshot_distinct_f
     assert old["linked_offers"][0]["unit_price"] == Decimal("100.00")
     assert old["linked_offers"][0]["revision_no"] == 1
     assert next(row for row in view["offers"] if row["line_id"] == new_line.id)["unit_price"] == Decimal("60.00")
-
-
-def test_more_items_keep_their_own_m8_field_rules_and_field_groups(db, r6_actors):
-    u = r6_actors
-    _, _, _, old = _publish(db, u, fields={name + "_audience": {"mode": "private"}
-        for name in ("supplier", "reporter", "notes")})
-    _, _, _, current = _publish(db, u, price="50.00", on_existing="new",
-        fields={name + "_audience": {"mode": "public"} for name in ("supplier", "reporter", "notes")})
-    row = library.batch(db, [u.part.id], u.sales.id)[u.part.id][0]
-    assert row["id"] == current.id and row["supplier_id"] == u.supplier.id
-    assert row["reporter"]["id"] == u.buyer.id and row["notes"] == "报价备注"
-    nested = row["more"][0]
-    assert nested["id"] == old.id
-    assert all(key not in nested for key in ("supplier_id", "source_key", "reporter", "notes"))
-    u.sales.perm_overrides = {"data_supplier": False}
-    db.flush()
-    row = library.batch(db, [u.part.id], u.sales.id)[u.part.id][0]
-    assert "supplier_id" not in row and "source_key" not in row
-    assert all("supplier_id" not in item and "source_key" not in item for item in row["more"])
-
-
-def test_reuse_owner_visibility_matches_library_after_source_record_rule_changes(db, r6_actors):
-    u = r6_actors
-    source, _, _, quote = _publish(db, u)
-    source.offer_audience_rule_id = common.rule_id(db, {"mode": "private"}, _ctx(db, u.buyer))
-    db.flush()
-    assert library.batch(db, [u.part.id], u.sales.id)[u.part.id] == []
-    inquiry, lines = _pending(db, u)
-    with pytest.raises(InvalidTransition):
-        _reply(db, inquiry, u.buyer, [{"line_id": lines[0].id, "mode": "reuse", "ref_offer_id": quote.id}])
-    assert library.batch(db, [u.part.id], u.buyer.id, owner_id=u.sales.id)[u.part.id] == []

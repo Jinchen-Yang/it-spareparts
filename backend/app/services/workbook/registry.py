@@ -38,6 +38,7 @@ class WorkbookSpec:
     apply_fn: Callable
     can_access: Callable
     validate_fn: Callable | None = None
+    can_access_export: Callable | None = None
 
 
 _specs: dict[str, WorkbookSpec] = {}
@@ -52,6 +53,8 @@ def register(name: str, spec: WorkbookSpec) -> None:
         raise ValueError("必须提供读取、应用和权限回调")
     if spec.validate_fn is not None and not callable(spec.validate_fn):
         raise ValueError("校验回调必须可调用")
+    if spec.can_access_export is not None and not callable(spec.can_access_export):
+        raise ValueError("导出权限回调必须可调用")
     _specs[name] = spec
 
 

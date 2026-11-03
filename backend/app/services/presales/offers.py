@@ -13,7 +13,7 @@ from app.models.presales import (
     PresalesInquiry, PresalesInquiryLine, PresalesLineResponse, PresalesOffer, PresalesOfferLineLink,
     PresalesOfferRevision,
 )
-from app.services.presales import common
+from app.services.presales import answers, common
 from app.services.workflow import work_items
 from app.services.workflow.registry import Conflict, Forbidden, InvalidTransition, NotFound, Subject
 
@@ -85,6 +85,7 @@ def append_revision(db, offer, actor, changed_fields, reason=None):
     )
     db.add(revision)
     db.flush()
+    answers.refresh_for_offer(db, offer)
     return revision
 
 
@@ -118,9 +119,13 @@ def _task(db, inquiry, actor, user_id, work_item_id=None):
     candidates = [item for item in items if item.assignee_id == user_id
                   and item.status in work_items.ACTIVE and not item.paused
                   and (work_item_id is None or item.id == work_item_id)]
-    if len(candidates) != 1:
-        raise Forbidden("请先领取或接受自己的未暂停待办")
-    return candidates[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    if work_item_id is None and not candidates:
+        # D-0052 不再领取；Excel 等旧写路径需要的待办由系统按当前操作人补一条。
+        return work_items.open_items(db, Subject("presales_inquiry", inquiry.id), [user_id],
+                                     "presales_inquiry", actor)[0]
+    raise Forbidden("请先领取或接受自己的未暂停待办")
 
 
 def _serialize_source(db, user_id, part_id, source_key):
@@ -207,14 +212,12 @@ def save_draft(db, inquiry_id, line_id, actor, data, *, expected_version,
     common.require(ctx, "page_presales")
     inquiry = common.lock_inquiry(db, inquiry_id)
     if inquiry.kind == "proactive_offer":
-        common.require(ctx, "action_presales_offer")
         if inquiry.created_by != user.id and not common.bypass(ctx):
             raise Forbidden("只能编辑自己发起的主动报价")
         if inquiry.status != "draft":
             raise InvalidTransition("发布后请直接更新报价")
         task = None
     else:
-        common.require(ctx, "action_presales_quote")
         if inquiry.status != "submitted":
             raise InvalidTransition("询价未提交或已撤回、关单")
         task = _task(db, inquiry, actor, user.id, work_item_id)
@@ -337,7 +340,6 @@ def save_line_decision(db, inquiry_id, line_id, actor, *, expected_version, mode
     """保存采购逐行草稿选择；共享回复校验，但不发布报价或完成待办。"""
     user, ctx = common.resolve_actor(db, actor)
     common.require(ctx, "page_presales")
-    common.require(ctx, "action_presales_quote")
     inquiry = common.lock_inquiry(db, inquiry_id, expected_version)
     if inquiry.kind != "sales_inquiry" or inquiry.status != "submitted":
         raise InvalidTransition("只能处理已提交的销售询价")
@@ -404,7 +406,6 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
           existing_choices=None, line_responses=None):
     user, ctx = common.resolve_actor(db, actor)
     common.require(ctx, "page_presales")
-    common.require(ctx, "action_presales_quote")
     inquiry = common.lock_inquiry(db, inquiry_id, expected_version)
     if inquiry.kind != "sales_inquiry" or inquiry.status != "submitted":
         raise InvalidTransition("只能回复已提交的销售询价")
@@ -499,6 +500,7 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
     db.flush()
     common.event(db, inquiry, actor, "offer.replied", {"offer_ids": [o.id for o in published]})
     common.audit(db, actor, "presales.offer.replied", inquiry.id)
+    answers.refresh_inquiry(db, inquiry.id)
     current = {offer.id: offer for offer in own if offer.status == "published"}
     current.update({offer.id: offer for offer in published})
     return list(current.values())
@@ -517,9 +519,6 @@ def _editable(db, offer_id, actor, expected_version):
     if offer.inquiry_id != (inquiry.id if inquiry is not None else None):
         raise Conflict("报价来源已变化，请刷新后重试")
     common.check_version(offer, expected_version)
-    common.require(ctx, "action_presales_offer" if inquiry is None or inquiry.kind == "proactive_offer" else "action_presales_quote")
-    if offer.created_by != user.id and not common.bypass(ctx):
-        raise Forbidden("只能修改自己的报价")
     if offer.status != "published":
         raise InvalidTransition("只能更新或撤销已发布报价")
     return offer, inquiry, ctx
@@ -540,6 +539,7 @@ def update_offer(db, offer_id, actor, data, *, expected_version):
     offer.valid_from = published_at
     offer.valid_until = None
     offer.updated_at = published_at
+    offer.updated_by = common.resolve_actor(db, actor)[0].id
     offer.version += 1
     append_revision(db, offer, actor, changed + ["valid_from"], "更新报价")
     if inquiry is not None:
@@ -553,6 +553,7 @@ def withdraw(db, offer_id, actor, reason, *, expected_version):
         raise InvalidTransition("撤销报价必须填写原因")
     offer, inquiry, _ = _editable(db, offer_id, actor, expected_version)
     offer.status = "withdrawn"
+    offer.updated_by = common.resolve_actor(db, actor)[0].id
     offer.version += 1
     offer.updated_at = common.now()
     append_revision(db, offer, actor, ["status"], reason.strip())
@@ -569,7 +570,6 @@ def direct_offer(db, actor, part_id, data, *, on_existing="update", existing_off
 
     user, ctx = common.resolve_actor(db, actor)
     common.require(ctx, "page_presales")
-    common.require(ctx, "action_presales_offer")
     part = db.get(DimPart, part_id)
     if part is None or part.status != "active":
         raise InvalidTransition("请选择已建档的有效型号")
@@ -728,7 +728,6 @@ def publish_proactive(db, inquiry_id, actor, *, expected_version, notice_user_id
                       on_existing=None, existing_offer_id=None, existing_choices=None):
     user, ctx = common.resolve_actor(db, actor)
     common.require(ctx, "page_presales")
-    common.require(ctx, "action_presales_offer")
     inquiry = common.lock_inquiry(db, inquiry_id, expected_version)
     if inquiry.kind != "proactive_offer" or inquiry.status != "draft":
         raise InvalidTransition("只能发布主动报价草稿单")

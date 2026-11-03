@@ -33,7 +33,6 @@ def can_access(db, ctx, subject_type, subject_id):
     try:
         _, ctx = common.resolve_actor(db, ctx)
         common.require(ctx, "page_presales")
-        common.require(ctx, "action_presales_inquire")
         return subject_type is None and subject_id is None
     except WorkflowError:
         return False
@@ -70,7 +69,6 @@ def _offer_prices(views):
 def summary_rows(db, inquiry_ids, ctx):
     user, ctx = common.resolve_actor(db, ctx)
     common.require(ctx, "page_presales")
-    common.require(ctx, "action_presales_inquire")
     ids = _ids(inquiry_ids)
     inquiries = list(db.scalars(select(PresalesInquiry).where(PresalesInquiry.id.in_(ids))
                                .order_by(PresalesInquiry.id)))

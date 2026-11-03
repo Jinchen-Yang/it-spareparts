@@ -1,15 +1,17 @@
 """售前热修：页外历史增加不增加准入 SQL，权限仍与逐条规则一致。"""
 
 from contextlib import contextmanager
+from datetime import date
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 
 from app.db import engine
+from app.models.fields_audience import FieldValue
 from app.models.presales import PresalesInquiry
 from app.models.workflow import WorkItem
 from app.services import field_pool
-from app.services.presales import common, inquiries, visibility
+from app.services.presales import common, inquiries, pool, visibility
 from app.services.workflow import work_items
 from tests.test_presales_api_visibility import _client, _ctx, _quoted, users  # noqa: F401
 
@@ -128,18 +130,37 @@ def test_list_summary_preserves_detail_business_fields_and_permissions(db, users
                         if key not in {"field_values", "field_template", "notes_audience"}}
 
 
-def test_list_summary_keeps_legacy_delivery_visibility_without_loading_templates(db, users, monkeypatch):
+def test_shared_reads_keep_legacy_delivery_without_loading_list_templates_or_writing_back(db, users, monkeypatch):
     inquiry, _ = _quoted(db, users)
     line = inquiries.lines_for(db, inquiry.id)[0]
-    field_pool.save_values(db,
-        field_pool.Subject(inquiries.SUBJECT_TYPE, f"line:{line.id}", "line"),
+    subject = field_pool.Subject(inquiries.SUBJECT_TYPE, f"line:{line.id}", "line")
+    field_pool.save_values(db, subject,
         [{"new_name": "期望交期", "value": "2026-12-03", "rule": {"mode": "private"}}],
         _ctx(db, users.seller))
-    expected = {viewer: visibility.inquiry_view(db, inquiry, _ctx(db, getattr(users, viewer)))["lines"][0]["expected_delivery"]
-                for viewer in ("seller", "other")}
-    monkeypatch.setattr(field_pool, "template_for", lambda *args, **kwargs: pytest.fail("summary loaded a template"))
-    for viewer in ("seller", "other"):
-        summary = visibility.inquiry_view(db, inquiry, _ctx(db, getattr(users, viewer)), detail=False, summary=True)
-        assert summary["lines"][0]["expected_delivery"] == expected[viewer]
-    assert expected["seller"] is not None and expected["other"] is None
+    viewers = [_ctx(db, user) for user in (users.seller, users.other)]
+    expected = date(2026, 12, 3)
+    for viewer in viewers:
+        assert visibility.inquiry_view(db, inquiry, viewer)["lines"][0]["expected_delivery"] == expected
+
+    def no_template(*args, **kwargs):
+        pytest.fail("摘要和共享池行读出不应加载字段模板")
+
+    monkeypatch.setattr(field_pool, "template_for", no_template)
+    for viewer in viewers:
+        summary = visibility.inquiry_view(db, inquiry, viewer, detail=False, summary=True)
+        assert summary["lines"][0]["expected_delivery"] == expected
+        assert pool.list_lines(db, viewer, tab="all")["items"][0]["expected_delivery"] == expected
+        assert pool.line_view(db, line.id, viewer)["expected_delivery"] == expected
+    db.flush()
+    db.refresh(line)
     assert line.expected_delivery is None
+    legacy_value = select(FieldValue.value).where(FieldValue.subject_id == subject.subject_id)
+    assert db.scalar(legacy_value) == "2026-12-03"
+
+    version = line.version
+    cleared = pool.edit_line(db, line.id, users.other.id, {"expected_delivery": None}, expected_version=version)
+    assert cleared["expected_delivery"] is None and cleared["line_version"] == version + 1
+    assert db.scalar(legacy_value) is None
+    summary = visibility.inquiry_view(db, inquiry, viewers[0], detail=False, summary=True)
+    assert summary["lines"][0]["expected_delivery"] is None
+    assert pool.list_lines(db, users.seller.id, tab="all")["items"][0]["expected_delivery"] is None

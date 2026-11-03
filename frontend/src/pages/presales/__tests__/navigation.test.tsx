@@ -8,7 +8,7 @@ vi.mock("../../../context/TaxBasis", () => ({ TaxBasisProvider: ({ children }: {
 vi.mock("../../../pages/PartSearchPage", () => ({ default: () => <div>型号页面</div> }));
 vi.mock("../InquiryListPage", () => ({ default: () => <div>询价列表内容</div> }));
 vi.mock("../ProcessPage", () => ({ default: () => <div>独立报价内容</div> }));
-vi.mock("../QuoteWorkbenchPage", () => ({ default: () => <div>报价工作台内容</div> }));
+vi.mock("../PoolPage", () => ({ default: () => <div>共享池内容</div> }));
 vi.mock("../InquiryDetailPage", () => ({ default: () => <div>询价详情内容</div> }));
 vi.mock("../../../AppShell", async () => {
   const { Outlet } = await import("react-router-dom");
@@ -27,19 +27,19 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
-it("售前系统菜单只留询价、报价，旧页面改为深链并复用 page_presales 权限及懒加载工厂", () => {
+it("售前系统菜单只留询价报价，旧页面改为深链并复用 page_presales 权限及懒加载工厂", () => {
   const menus = NAV_GROUPS.find((group) => group.label === "售前系统")!.items;
-  expect(menus.map((item) => [item.label, item.path])).toEqual([["询价", "/presales/ask"], ["报价", "/presales/quote"]]);
+  expect(menus.map((item) => [item.label, item.path])).toEqual([["询价报价", "/presales/pool"]]);
   expect(menus.every((item) => item.perm === "page_presales" && typeof item.load === "function")).toBe(true);
   for (const label of ["销售管理", "采购管理"]) {
     expect(NAV_GROUPS.find((group) => group.label === label)!.items.some((item) => item.key.startsWith("presales-"))).toBe(false);
   }
   const details = DETAIL_ROUTES.filter((item) => item.key.startsWith("presales-"));
-  expect(details.map((item) => item.path)).toEqual(expect.arrayContaining(["/presales/inquiries", "/presales/library", "/presales/workbench", "/presales/offers/new"]));
-  expect(details).toHaveLength(9);
+  expect(details.map((item) => item.path)).toEqual(expect.arrayContaining(["/presales/inquiries", "/presales/library", "/presales/offers/new"]));
+  expect(details).toHaveLength(8);
   expect(details.every((item) => item.perm === "page_presales" && typeof item.load === "function"
-    && ["presales-ask", "presales-quote-rows"].includes(item.menuKey))).toBe(true);
-  expect(NAV_ITEMS.find((item) => item.key === "presales-quote-rows")?.menuLabel).toBeTruthy();
+    && item.menuKey === "presales-pool")).toBe(true);
+  expect(NAV_ITEMS.find((item) => item.key === "presales-pool")?.menuLabel).toBeTruthy();
 });
 
 it("无 page_presales 时菜单不出现，直接访问售前深链也回到可访问页面", async () => {
@@ -52,20 +52,27 @@ it("无 page_presales 时菜单不出现，直接访问售前深链也回到可�
   expect(screen.queryByText("询价详情内容")).not.toBeInTheDocument();
 });
 
-it("授予 page_presales 后询价、报价菜单和详情深链同时开放", async () => {
+it("授予 page_presales 后询价报价菜单和详情深链同时开放", async () => {
   localStorage.setItem("permissions", JSON.stringify({ page_presales: true }));
   window.history.replaceState({}, "", "/presales/inquiries/12");
   render(<App />);
   expect(await screen.findByText("询价详情内容")).toBeInTheDocument();
-  for (const label of ["询价", "报价"]) expect(screen.getByText(label)).toBeInTheDocument();
+  expect(screen.getByText("询价报价")).toBeInTheDocument();
 });
 
 
-it.each(["/presales/tasks", "/presales/tasks/12"])("旧链接 %s 重定向工作台并保留待办身份", async (path) => {
+it.each(["/presales/ask", "/presales/quote", "/presales/workbench", "/presales/tasks"])("旧链接 %s 跳到共享池", async (path) => {
   localStorage.setItem("permissions", JSON.stringify({ page_presales: true }));
   window.history.replaceState({}, "", path);
   render(<App />);
-  expect(await screen.findByText(path.endsWith("/12") ? "独立报价内容" : "报价工作台内容")).toBeInTheDocument();
-  expect(window.location.pathname).toBe(path.endsWith("/12") ? "/presales/workbench/12" : "/presales/workbench");
-  expect(window.location.search).toBe("");
+  expect(await screen.findByText("共享池内容")).toBeInTheDocument();
+  expect(window.location.pathname).toBe("/presales/pool");
+});
+
+it("旧链接 /presales/tasks/12 仍打开独立报价页", async () => {
+  localStorage.setItem("permissions", JSON.stringify({ page_presales: true }));
+  window.history.replaceState({}, "", "/presales/tasks/12");
+  render(<App />);
+  expect(await screen.findByText("独立报价内容")).toBeInTheDocument();
+  expect(window.location.pathname).toBe("/presales/workbench/12");
 });
