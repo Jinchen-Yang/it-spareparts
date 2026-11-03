@@ -4,6 +4,9 @@ from unittest import TestCase
 from unittest.mock import MagicMock, patch
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 import tempfile
 
 DEPLOY = Path(__file__).resolve().parents[1]
@@ -21,6 +24,126 @@ def base():
         caddyfile="/opt/it-spareparts/Caddyfile", port=18098, nginx_upstream_count=3, additional_writers=[],
         db_id="a"*64, db_image="sha256:"+"5"*64,
         proxy_identities={n: {"id":"b"*64,"image":"sha256:"+"6"*64,"process":n} for n in ("caddy","nginx","cloudflared")})
+
+
+def route_config(target, hidden):
+    return {"apps": {"http": {"servers": {"primary": {"routes": [
+        {"match": [{"host": sorted(ops.h.HOSTS)}], "handle": [
+            {"handler": "reverse_proxy", "upstreams": [{"dial": target}]}]},
+        {"match": [{"host": ["files.invalid"]}], "handle": [{"handler": "file_server", "hide": [hidden]}]},
+    ]}}}}}
+
+
+class CaddyCutoverTests(TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.r = object.__new__(ops.Release)
+        self.r.root = Path(folder.name)
+        self.r.old_app = "previous-app"
+        self.r.old_front, self.r.front = "previous", "candidate"
+        self.r.cas = MagicMock()
+        self.r.caddy_destination = MagicMock(return_value="/fixture/Caddyfile")
+        self.before = b"http://ybwznt.com, http://www.ybwznt.com {\n reverse_proxy previous:80\n}\n" + \
+            b"http://files.invalid {\n root * /srv\n file_server\n}\n"
+        (self.r.root / "Caddyfile.baseline").write_bytes(self.before)
+        self.pre = {"active": route_config("previous:80", "/fixture/Caddyfile"), "inode": [1, 2]}
+
+    def test_protected_site_changes_still_reject_complete_candidate_tree(self):
+        r = self.r
+        r.mounted_caddy = MagicMock(return_value=self.pre["active"])
+        old, new = route_config("previous:80", "./-"), route_config("candidate:80", "/different/hidden")
+        r.run = MagicMock(side_effect=[b"", json.dumps(old), b"", json.dumps(new)])
+        with self.assertRaisesRegex(RuntimeError, "changed other settings"):
+            r.plan_caddy_change(self.pre)
+        commands = [call.args[0] for call in r.run.call_args_list]
+        self.assertTrue(all(cmd[:7] == ["docker", "exec", "-i", "-w", "/fixture", ops.h.CADDY, "caddy"]
+                            and cmd[8:] == ["--config", "-", "--adapter", "caddyfile"] for cmd in commands))
+        self.assertEqual([cmd[7] for cmd in commands], ["validate", "adapt", "validate", "adapt"])
+        self.assertFalse((r.root / "exposure-started.json").exists())
+
+    def test_live_mount_drift_fails_before_stdin_or_exposure(self):
+        r = self.r
+        r.mounted_caddy = MagicMock(return_value=route_config("previous:80", "drift"))
+        r.run = MagicMock()
+        with self.assertRaisesRegex(RuntimeError, "differs from baseline runtime"):
+            r.plan_caddy_change(self.pre)
+        r.run.assert_not_called()
+        self.assertFalse((r.root / "exposure-started.json").exists())
+
+    def test_preflight_and_freeze_both_reject_before_stopping_writer(self):
+        r = MagicMock()
+        r.plan_caddy_change.side_effect = RuntimeError("unsafe Caddy adaptation")
+        with patch.object(ops.hf.Hotfix, "preflight", return_value=self.pre):
+            # Use a Release instance so the inherited preflight is actually called.
+            self.r.writers_exact = MagicMock()
+            self.r.plan_caddy_change = r.plan_caddy_change
+            with self.assertRaisesRegex(RuntimeError, "unsafe Caddy"):
+                self.r.preflight()
+        with patch.object(ops.hf.Hotfix, "freeze") as freeze:
+            with self.assertRaisesRegex(RuntimeError, "unsafe Caddy"):
+                ops.Release.freeze(r)
+            freeze.assert_not_called()
+
+    def test_real_candidate_mount_must_match_before_admin_load(self):
+        r = MagicMock()
+        r.root, r.sha = self.r.root, "a" * 40
+        r.schema.return_value = ops.TARGET
+        r.marker.side_effect = lambda phase: self.pre if phase == "preflight" else {"app": {}, "frontend": {}}
+        desired = route_config("candidate:80", "/fixture/Caddyfile")
+        r.plan_caddy_change.return_value = (self.before.replace(b"previous:80", b"candidate:80"), desired)
+        r.mounted_caddy.return_value = route_config("candidate:80", "./-")
+        with patch.object(ops.h, "fingerprint", return_value={}):
+            with self.assertRaisesRegex(RuntimeError, "mounted candidate differs"):
+                ops.Release.cutover(r)
+        r.load_active.assert_not_called()
+        self.assertTrue((r.root / "exposure-started.json").is_file())
+
+    def test_real_file_server_source_name_and_full_runtime_patch(self):
+        r = self.r
+        image = os.environ.get("ITSP_CADDY_CONTRACT_IMAGE")
+        if not image and not shutil.which("caddy"):
+            self.skipTest("Caddy binary or ITSP_CADDY_CONTRACT_IMAGE required")
+        # Only expose the synthetic Caddyfiles. The host's private TemporaryDirectory and
+        # receipt directory remain 0700; the container runs as an unrelated uid/gid.
+        fixture = r.root / "source"
+        fixture.mkdir()
+        fixture.chmod(0o755)
+        mount = "/fixture" if image else str(fixture)
+        actual = Path(mount) / "Caddyfile"
+        after = self.before.replace(b"previous:80", b"candidate:80")
+        for name, content in (("Caddyfile", self.before), ("Caddyfile.candidate", after)):
+            path = fixture / name
+            path.write_bytes(content)
+            path.chmod(0o644)
+        r.caddy_destination.return_value = str(actual)
+        if image:
+            cid = subprocess.check_output(["docker", "run", "-d", "--user", "65534:65534", "--network", "none", "--read-only",
+                "--cap-drop", "ALL", "--cap-add", "NET_BIND_SERVICE", "--tmpfs", "/data", "--tmpfs", "/config", "--mount",
+                "type=bind,source=" + str(fixture) + ",target=/fixture,readonly",
+                "--entrypoint", "sleep", image, "180"], text=True).strip()
+            self.addCleanup(subprocess.run, ["docker", "rm", "-f", "-v", cid], check=True, capture_output=True)
+
+        def invoke(cmd, *, input=None):
+            split = cmd.index("caddy")
+            args = cmd[split:]
+            if image:
+                args = ["docker", "exec", "-i", "-w", mount, cid, *args]
+            result = subprocess.run(args, input=input, cwd=fixture, capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 0, (result.stderr + result.stdout).decode(errors="replace"))
+            return result.stdout
+
+        r.run = invoke
+        baseline = r.mounted_caddy()
+        different_name = json.loads(invoke(["caddy", "adapt", "--config", str(actual) + ".candidate",
+                                            "--adapter", "caddyfile"]))
+        desired = ops.h.replace_active(baseline, "previous:80", "candidate:80")
+        self.assertNotEqual(different_name, desired)
+        self.assertIn(str(actual) + ".candidate", json.dumps(different_name))
+        self.assertIn(str(actual), json.dumps(desired))
+        self.assertEqual(r.plan_caddy_change({"active": baseline, "inode": [1, 2]}), (after, desired))
+        (fixture / "Caddyfile").write_bytes(after)
+        self.assertEqual(r.mounted_caddy(), desired)
 
 
 class PoolReleaseTests(TestCase):
