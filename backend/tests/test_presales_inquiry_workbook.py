@@ -13,7 +13,7 @@ from sqlalchemy import select
 from app.models.fields_audience import FieldAnchorUsage
 from app.models.presales import PresalesInquiry, PresalesInquiryLine, PresalesWorkbookExport
 from app.services import audience, field_pool
-from app.services.presales import common, inquiries, inquiry_workbook as workbook
+from app.services.presales import common, inquiries, inquiry_workbook as workbook, pool
 from app.services.workbook import operations, registry
 from app.services.workbook.registry import ApplyFailed, Conflict, Forbidden as WorkbookForbidden, WorkbookSpec
 from app.services.workbook.schema import WorkbookError
@@ -80,6 +80,24 @@ def test_empty_template_creates_draft_exact_match_and_pending_raw(db, presales_u
     replay = _preview(db, user, content)
     assert replay["replayed"] and replay["response"] == result["response"]
     assert len(db.scalars(select(PresalesInquiry)).all()) == 1
+
+
+def test_revising_signed_workbook_checks_current_line_versions_after_shared_edit(db, presales_users, presales_parts):
+    user, peer = presales_users.sales, presales_users.buyer
+    inquiry = inquiries.create_draft(db, user.id, lines=[{"part_id": p.id} for p in presales_parts[:2]])
+    inquiries.submit(db, inquiry.id, user.id, inquiry.version, open_tasks=False)
+    inquiries.withdraw(db, inquiry.id, user.id, inquiry.version)
+    original = workbook.export_inquiry(db, inquiry.id, _ctx(db, user))
+    edit_first = lambda sheet, cols: _set(sheet, cols, 2, **{"数量": 6})
+    preview = _preview(db, user, _edit(original, edit_first), inquiry)
+    first, _ = inquiries.lines_for(db, inquiry.id)
+    pool.edit_line(db, first.id, _ctx(db, peer), {"qty": 2}, expected_version=first.version)
+    with pytest.raises(Conflict):
+        _apply(db, user, preview)
+    fresh = workbook.export_inquiry(db, inquiry.id, _ctx(db, user))
+    edit_second = lambda sheet, cols: _set(sheet, cols, 3, **{"数量": 9})
+    _apply(db, user, _preview(db, user, _edit(fresh, edit_second), inquiry))
+    assert [row.qty for row in inquiries.lines_for(db, inquiry.id)] == [2, 9]
 
 
 def test_delete_insert_modify_only_confirmed_deletions(db, presales_users, presales_parts):

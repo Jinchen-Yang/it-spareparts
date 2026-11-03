@@ -78,6 +78,19 @@ def append_revision(db, offer, actor, changed_fields, reason=None, *, already_ve
             "status": "submitted", "submitted_at": _json(offer.valid_from)})
     if offer.status == "published":
         snapshot["_inquiry"].update(status="submitted", submitted_at=_json(offer.valid_from))
+        if offer.line_id is not None:
+            if "unit_price" in changed_fields or already_versioned_line == offer.line_id:
+                from app.services.presales.inquiries import quote_conditions
+                line = db.get(PresalesInquiryLine, offer.line_id, populate_existing=True)
+                snapshot["_inquiry"]["line_conditions"] = quote_conditions(line)
+            else:
+                # 只改货源或备注不代表在当前询价条件下重新确认了价格。
+                previous = db.scalar(select(PresalesOfferRevision.snapshot).where(
+                    PresalesOfferRevision.offer_id == offer.id, PresalesOfferRevision.revision_no == offer.revision_no - 1))
+                if previous and previous.get("line_id") == offer.line_id:
+                    conditions = (previous.get("_inquiry") or {}).get("line_conditions")
+                    if conditions is not None:
+                        snapshot["_inquiry"]["line_conditions"] = conditions
     revision = PresalesOfferRevision(
         offer_id=offer.id, revision_no=offer.revision_no, snapshot=snapshot,
         changed_fields=sorted(set(changed_fields)), reason=reason, actor=user.id,

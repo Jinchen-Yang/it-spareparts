@@ -88,6 +88,7 @@ class CreateInquiry(Input):
 
 
 class UpdateInquiry(VersionInput):
+    expected_line_versions: dict[str, Annotated[int, Field(strict=True, ge=1)]] | None = None
     priority: Literal["normal", "urgent"] | None = None
     customer_id: int | None = Field(default=None, gt=0)
     notes: str | None = None

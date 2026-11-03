@@ -53,6 +53,7 @@ function InquiryEditorContent() {
   const customerVisible = localStorage.getItem("role") === "admin" || readPermissionMap().data_customer !== false;
   const [inquiry, setInquiry] = useState<Inquiry>();
   const [lines, setLines] = useState<DraftLine[]>([]);
+  const loadedLines = useRef<DraftLine[]>([]);
   const [editing, setEditing] = useState<string>();
   const [headOpen, setHeadOpen] = useState(false);
   const [pasteOpen, setPasteOpen] = useState(false);
@@ -81,6 +82,7 @@ function InquiryEditorContent() {
     setVersionConflict(false);
     currentInquiry.current = data;
     const next = append ? [] : (data.lines || []).map(fromLine);
+    loadedLines.current = next;
     setInquiry(data); setLines(next);
     setCustomerId(data.customer_id ?? undefined); setNotes(data.notes || "");
     setFields(editableFields((data.field_values || []) as ReadField[]));
@@ -170,10 +172,19 @@ function InquiryEditorContent() {
       } else {
         const payload = { ...(customerVisible && (!inquiry || "customer_id" in inquiry) ? { customer_id: customerId ?? null } : {}),
           ...(!inquiry || "notes" in inquiry ? { notes } : {}),
-          lines: serializeLines(), field_values: serializeFields(fields, (inquiry?.field_values || []) as ReadField[]),
+          field_values: serializeFields(fields, (inquiry?.field_values || []) as ReadField[]),
           ...(changedAudience(notesAudience, inquiry?.notes_audience) ? { notes_audience: notesAudience } : {}) };
-        saved = inquiry ? await presales.updateInquiry(inquiry.id, { ...payload, expected_version: inquiry.version })
-          : await presales.createInquiry({ ...payload, kind: "sales_inquiry" });
+        if (inquiry) {
+          const lineUpdate = inquiry.status === "revising" && lines === loadedLines.current ? {} : {
+            lines: serializeLines(),
+            ...(inquiry.status === "revising" ? {
+              expected_line_versions: Object.fromEntries((inquiry.lines ?? []).map((line) => [line.line_key, line.version])),
+            } : {}),
+          };
+          saved = await presales.updateInquiry(inquiry.id, { ...payload, ...lineUpdate, expected_version: inquiry.version });
+        } else {
+          saved = await presales.createInquiry({ ...payload, lines: serializeLines(), kind: "sales_inquiry" });
+        }
         if (!mounted.current) return;
         // 保存成功即同步版本与 line_key；提交失败重试时继续使用已保存的草稿身份。
         apply(saved);

@@ -213,6 +213,20 @@ describe("销售询价编辑", () => {
     expect(body.lines[0].expected_delivery).toBe("2026-11-01");
   });
 
+  it("撤回中只保存单头备注时省略整张行表", async () => {
+    mocks.presales.getInquiry.mockResolvedValue(inquiry({ status: "revising", version: 5 }));
+    mocks.presales.updateInquiry.mockResolvedValueOnce(inquiry({ status: "revising", version: 6, notes: "新备注" }));
+    mount("/presales/inquiries/1/edit");
+    fireEvent.click(await screen.findByRole("button", { name: "客户要求 / 自定义字段" }));
+    const notes = await screen.findByDisplayValue("客户原要求");
+    fireEvent.change(notes, { target: { value: "新备注" } });
+    fireEvent.click(screen.getByRole("button", { name: "存草稿" }));
+    await waitFor(() => expect(mocks.presales.updateInquiry).toHaveBeenCalled());
+    const body = mocks.presales.updateInquiry.mock.calls[0][1];
+    expect(body).toMatchObject({ expected_version: 5, notes: "新备注" });
+    expect(body).not.toHaveProperty("lines");
+  });
+
   it("撤回后的单据保留 line_key，先保存最新版本再重新提交且不重置可见性", async () => {
     mocks.presales.getInquiry.mockResolvedValue(inquiry({ status: "revising", version: 5 }));
     mocks.presales.updateInquiry.mockResolvedValueOnce(inquiry({ status: "revising", version: 6 }));
@@ -223,6 +237,7 @@ describe("销售询价编辑", () => {
     await waitFor(() => expect(mocks.presales.resubmitInquiry).toHaveBeenCalledWith(1, { expected_version: 6 }));
     const body = mocks.presales.updateInquiry.mock.calls[0][1];
     expect(body.expected_version).toBe(5);
+    expect(body.expected_line_versions).toEqual({ "stable-a": 1 });
     expect(body.lines[0]).toMatchObject({ line_key: "stable-a", qty: 7 });
     expect(body).not.toHaveProperty("offer_audience");
     expect(body).not.toHaveProperty("notes_audience");

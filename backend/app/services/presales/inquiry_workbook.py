@@ -446,7 +446,9 @@ def apply_inquiry(db, plan, ctx):
         payload = [{"line_key": line.line_key, **(changes.get(line.id) or {})}
                    for line in existing if line.id not in changes or changes[line.id] is not None]
         if plan.rows:
-            inquiry = inquiries.update_draft(db, inquiry.id, ctx, inquiry.version, lines=[*payload, *added])
+            # 引擎已核对签名行基线，其他行在锁内从当前数据库构造，不能使用旧页面快照。
+            inquiry = inquiries.update_draft(db, inquiry.id, ctx, inquiry.version, lines=[*payload, *added],
+                expected_line_versions={row.line_key: row.version for row in existing})
     return {"inquiry_id": inquiry.id, "inquiry_no": inquiry.inquiry_no, "status": inquiry.status,
             "version": inquiry.version, "line_count": len(inquiries.lines_for(db, inquiry.id))}
 
