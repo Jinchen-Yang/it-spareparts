@@ -29,7 +29,7 @@ function offer(id: number, patch: Partial<Offer> = {}): Offer {
 
 function inquiry(patch: Partial<Inquiry> = {}): Inquiry {
   return {
-    id: 5, inquiry_no: "XJ0005", kind: "sales_inquiry", status: "submitted", revision: 1, version: 4,
+    id: 5, is_owner: true, inquiry_no: "XJ0005", kind: "sales_inquiry", status: "submitted", revision: 1, version: 4,
     created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-02T00:00:00Z", customer_id: 31,
     notes: "需要质保", line_count: 1, progress: { quoted_lines: 1, line_count: 1 },
     lines: [{ id: 11, inquiry_id: 5, seq: 1, part_id: 8, pn_raw: "PN-8", line_key: "line-a", qty: "2",
@@ -59,6 +59,13 @@ beforeEach(() => { vi.clearAllMocks(); mocks.library.mockResolvedValue({}); });
 afterEach(() => { cleanup(); });
 
 describe("询价详情", () => {
+  it("他人可以看已提交询价与报价，不能从详情追加行或代表发起人关单", async () => {
+    await openPage(inquiry({ is_owner: false }));
+    expect(screen.queryByRole("button", { name: "追加行" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "关单" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "未成交关单" })).toBeNull();
+  });
+
   it("逐行横向比价，同口径找最低；旧版本及过期不参与，撤销报价不出现", async () => {
     await openPage(inquiry({ offers: [
       offer(1, { unit_price: "100.00" }), offer(2, { unit_price: "90.00" }),

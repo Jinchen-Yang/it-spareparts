@@ -66,8 +66,7 @@ def _editable_inquiry(db, inquiry_id, ctx, *, lock=False):
     if lock:
         query = query.with_for_update().execution_options(populate_existing=True)
     inquiry = db.scalar(query)
-    # D-0052：只有草稿还属于本人。
-    if inquiry is None or (inquiry.status == "draft" and inquiry.created_by != user.id and not common.bypass(ctx)):
+    if inquiry is None or (inquiry.created_by != user.id and not common.bypass(ctx)):
         raise Forbidden("无权编辑该询价单")
     if inquiry.kind != "sales_inquiry" or inquiry.status not in {"draft", "revising"}:
         raise InvalidTransition("仅草稿或撤回中的销售询价可导入导出")

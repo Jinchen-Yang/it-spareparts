@@ -64,7 +64,7 @@ def _json(value):
     return value
 
 
-def append_revision(db, offer, actor, changed_fields, reason=None):
+def append_revision(db, offer, actor, changed_fields, reason=None, *, already_versioned_line=None):
     user, _ = common.resolve_actor(db, actor)
     offer.revision_no += 1
     db.flush()
@@ -85,17 +85,17 @@ def append_revision(db, offer, actor, changed_fields, reason=None):
     )
     db.add(revision)
     db.flush()
-    answers.refresh_for_offer(db, offer)
+    answers.refresh_for_offer(db, offer, already_versioned_line=already_versioned_line)
     return revision
 
 
-def mark_stale(db, offer, actor, reason):
+def mark_stale(db, offer, actor, reason, *, already_versioned_line=None):
     if offer.status == "stale":
         return offer
     offer.status = "stale"
     offer.version += 1
     offer.updated_at = common.now()
-    append_revision(db, offer, actor, ["status"], reason)
+    append_revision(db, offer, actor, ["status"], reason, already_versioned_line=already_versioned_line)
     if offer.inquiry_id is not None:
         inquiry = common.get_inquiry(db, offer.inquiry_id)
         common.event(db, inquiry, actor, "offer.stale", {"offer_id": offer.id})
@@ -121,11 +121,11 @@ def _task(db, inquiry, actor, user_id, work_item_id=None):
                   and (work_item_id is None or item.id == work_item_id)]
     if len(candidates) == 1:
         return candidates[0]
-    if work_item_id is None and not candidates:
-        # D-0052 不再领取；Excel 等旧写路径需要的待办由系统按当前操作人补一条。
-        return work_items.open_items(db, Subject("presales_inquiry", inquiry.id), [user_id],
-                                     "presales_inquiry", actor)[0]
-    raise Forbidden("请先领取或接受自己的未暂停待办")
+    if work_item_id is not None:
+        raise Forbidden("指定的历史待办未分给当前账号或不可处理")
+    if not candidates:
+        raise InvalidTransition("没有可处理的历史待办，请在售前共享池逐行报价")
+    raise Conflict("请指定需要处理的历史待办")
 
 
 def _serialize_source(db, user_id, part_id, source_key):
@@ -283,7 +283,7 @@ def save_draft(db, inquiry_id, line_id, actor, data, *, expected_version,
     return offer
 
 
-def _publish(db, offer, actor, published_at, reason="发布报价"):
+def _publish(db, offer, actor, published_at, reason="发布报价", *, already_versioned_line=None):
     _publishable(db, offer)
     offer.status = "published"
     offer.valid_from = published_at
@@ -291,7 +291,8 @@ def _publish(db, offer, actor, published_at, reason="发布报价"):
     offer.version += 1
     offer.updated_at = published_at
     offer.workbook_choice = {}
-    append_revision(db, offer, actor, list(PresalesOffer.__table__.columns.keys()), reason)
+    append_revision(db, offer, actor, list(PresalesOffer.__table__.columns.keys()), reason,
+                    already_versioned_line=already_versioned_line)
 
 
 def _copy_quote(target, source):
@@ -500,7 +501,7 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
     db.flush()
     common.event(db, inquiry, actor, "offer.replied", {"offer_ids": [o.id for o in published]})
     common.audit(db, actor, "presales.offer.replied", inquiry.id)
-    answers.refresh_inquiry(db, inquiry.id)
+    answers.refresh_inquiry(db, inquiry.id, bump_versions=True)
     current = {offer.id: offer for offer in own if offer.status == "published"}
     current.update({offer.id: offer for offer in published})
     return list(current.values())
@@ -611,30 +612,6 @@ def direct_offer(db, actor, part_id, data, *, on_existing="update", existing_off
     return offer
 
 
-def _notice_targets(db, inquiry, user_ids):
-    from app.services.presales.visibility import can_view_inquiry
-
-    if user_ids is None:
-        return []
-    if not isinstance(user_ids, list) or any(type(value) is not int or value < 1 for value in user_ids):
-        raise InvalidTransition("通知对象必须为账号 ID 列表")
-    targets = list(dict.fromkeys(user_ids))
-    # 只按发布后的准入判定，不让草稿状态本身挡住合法销售；验证不落库。
-    original_status = inquiry.status
-    original_submitted_at = inquiry.submitted_at
-    inquiry.status = "submitted"
-    inquiry.submitted_at = common.now()
-    try:
-        for target in targets:
-            _, ctx = common.resolve_actor(db, target)
-            if not can_view_inquiry(db, inquiry, ctx):
-                raise InvalidTransition("通知对象无权查看该主动报价")
-    finally:
-        inquiry.status = original_status
-        inquiry.submitted_at = original_submitted_at
-    return targets
-
-
 def _lock_merge_inquiry(db, inquiry_id):
     # 发布者已经持有新单和 PN 锁；旧单用 NOWAIT 防止与关单、直接更新形成反向锁序。
     # 显式刷新后使用同连接保存点，避免释放内部保存点触发 M4 的 Session 提交保护。
@@ -712,6 +689,9 @@ def _publish_choice(db, draft, target, inquiry, actor, published_at, task_id=Non
     # 报价归属迁至本次单据，整单 M8 立即使用最新规则；旧单只保留实时受控关联。
     old_line = db.get(PresalesInquiryLine, target.line_id) if target.line_id is not None else None
     if old_line is not None and old_line.id != draft.line_id:
+        # 目标报价已加锁，写旧行关联前不可反向等待共享池正在修改的行。
+        answers._lock_affected_lines(db, [old_line.id])
+        db.refresh(old_line)
         if db.get(PresalesOfferLineLink, (old_line.id, target.id)) is None:
             db.add(PresalesOfferLineLink(line_id=old_line.id, offer_id=target.id,
                                         offer_revision_no=target.revision_no))
@@ -733,7 +713,7 @@ def publish_proactive(db, inquiry_id, actor, *, expected_version, notice_user_id
         raise InvalidTransition("只能发布主动报价草稿单")
     if inquiry.created_by != user.id and not common.bypass(ctx):
         raise Forbidden("只能发布自己的主动报价")
-    targets = _notice_targets(db, inquiry, notice_user_ids)
+    # 旧客户端仍会提交 notice_user_ids；D-0052 只发布草稿，不再产生通知待办。
     lines = list(db.scalars(select(PresalesInquiryLine).where(
         PresalesInquiryLine.inquiry_id == inquiry.id, PresalesInquiryLine.status == "active",
     ).order_by(PresalesInquiryLine.id).with_for_update()))
@@ -757,11 +737,6 @@ def publish_proactive(db, inquiry_id, actor, *, expected_version, notice_user_id
     inquiry.version += 1
     inquiry.updated_at = published_at
     db.flush()
-    if targets:
-        from app.services.presales.registration import register_subjects
-        register_subjects()
-        work_items.open_items(db, Subject("presales_offer_notice", inquiry.id),
-                              targets, "presales_offer_notice", actor)
     common.event(db, inquiry, actor, "offer.published", {"offer_ids": [o.id for o in result]})
     common.audit(db, actor, "presales.offer.published", inquiry.id)
     return result

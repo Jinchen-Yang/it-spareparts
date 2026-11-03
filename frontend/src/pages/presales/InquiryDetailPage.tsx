@@ -11,7 +11,7 @@ import { hasValue, FieldValues, OfferPrice, offersForLine, OfferDetails, history
 import "./presales.css";
 import { formatBusinessDateTime } from "../../utils/date";
 import { formatMoney } from "../../utils/format";
-import { usePresalesError, isOfferActive, OfferBadge, taxLabel, useNow, OfferUpdates, basisLabel } from "./shared";
+import { isPresalesSupervisor, usePresalesError, isOfferActive, OfferBadge, taxLabel, useNow, OfferUpdates, basisLabel } from "./shared";
 
 const statusLabels: Record<string, string> = { draft: "草稿", submitted: "已提交", revising: "撤回修改中", closed: "已结束" };
 const outcomeLabels: Record<string, string> = { won: "成交", lost: "未成交", cancelled: "取消" };
@@ -104,7 +104,8 @@ function InquiryDetailContent({ id }: { id: number }) {
 
   const lines = inquiry.lines ?? [];
   const offers = inquiry.offers ?? [];
-  const canAmend = inquiry.kind === "sales_inquiry";
+  const canManage = inquiry.is_owner === true || isPresalesSupervisor();
+  const canAmend = canManage && inquiry.kind === "sales_inquiry";
   const adopted = inquiry.won_offer;
   const lineForOffer = (offer: Offer) => lines.find((line) => line.id === offer.line_id || line.ref_offer_id === offer.id
     || line.linked_offer_ids?.includes(offer.id) || line.linked_offers?.some((linked) => linked.id === offer.id) || inquiry.line_responses?.some((row) => !row.is_draft && row.line_id === line.id && row.mode === "reuse" && row.ref_offer_id === offer.id));
@@ -117,7 +118,7 @@ function InquiryDetailContent({ id }: { id: number }) {
   const referenceIds = (line: InquiryLine) => new Set([...(line.linked_offer_ids ?? []), ...(line.linked_offers ?? []).map((offer) => offer.id),
     ...(line.ref_offer_id ? [line.ref_offer_id] : []), ...(inquiry.line_responses ?? []).filter((response) => !response.is_draft && response.line_id === line.id && response.mode === "reuse")
       .flatMap((response) => response.ref_offer_id ? [response.ref_offer_id] : [])]);
-  const canClose = !readOnly && ["submitted", "revising"].includes(inquiry.status);
+  const canClose = !readOnly && canManage && ["submitted", "revising"].includes(inquiry.status);
   const renderOffer = (line: InquiryLine, offer: Offer) => {
     const active = isOfferActive(offer, now);
     const candidates = (lineOffers.get(line.id) ?? []).filter((candidate) => isOfferActive(candidate, now) && !candidate.no_stock
@@ -150,8 +151,8 @@ function InquiryDetailContent({ id }: { id: number }) {
   return <section className="presales-page">
     <PageHeader title={`询价单 ${inquiry.inquiry_no}`} subtitle={<><Tag>{statusLabels[inquiry.status]}</Tag>{lines.length} 行 · 版本 {inquiry.revision}</>} extra={<Space wrap>
       <Button onClick={() => navigate("/presales/inquiries")}>返回列表</Button>
-      {!readOnly && (inquiry.status === "closed" ? <Button loading={busy} onClick={() => void copy()}>复制为新单</Button> : <>
-        {inquiry.kind === "proactive_offer" && inquiry.status === "draft" && <Button disabled={busy} onClick={() => navigate(`/presales/offers/new?draft=${id}`)}>继续填写主动报价</Button>}
+      {!readOnly && (inquiry.status === "closed" ? canManage && <Button loading={busy} onClick={() => void copy()}>复制为新单</Button> : <>
+        {canManage && inquiry.kind === "proactive_offer" && inquiry.status === "draft" && <Button disabled={busy} onClick={() => navigate(`/presales/offers/new?draft=${id}`)}>继续填写主动报价</Button>}
         {inquiry.kind === "proactive_offer" && inquiry.status === "submitted" && <Button disabled={busy} onClick={() => navigate(`/presales/workbench/${id}`)}>更新 / 撤销报价</Button>}
         {canAmend && ["draft", "revising"].includes(inquiry.status) && <Button disabled={busy} onClick={() => navigate(`/presales/inquiries/${id}/edit`)}>编辑询价</Button>}
         {canAmend && inquiry.status === "submitted" && <Button disabled={busy} onClick={() => navigate(`/presales/inquiries/${id}/edit?append=1`)}>追加行</Button>}
@@ -181,7 +182,7 @@ function InquiryDetailContent({ id }: { id: number }) {
         { title: "操作", key: "actions", width: 120, render: (_, line) => <Space direction="vertical"><Button type="link" aria-label={`查看 ${line.pn_raw} 详情`} onClick={() => setLineId(line.id)}>查看详情</Button>{line.part_id && <Button type="link" onClick={() => { setGalleryLineId(line.id); setGalleryOpen(true); }}>图库多选下载</Button>}</Space> },
       ]} />
     </div>
-    <footer className="presales-footer"><span>{readOnly ? "报价通知 · 只读" : wonOfferId ? `已选择报价 #${wonOfferId}` : "点报价格子选择成交采纳报价"}</span>
+    <footer className="presales-footer"><span>{readOnly ? "报价通知 · 只读" : wonOfferId ? `已选择报价 #${wonOfferId}` : canClose ? "点报价格子选择成交采纳报价" : "询价详情"}</span>
       {canClose && <Space><Button disabled={busy} onClick={() => { setOutcome("lost"); setCloseOpen(true); }}>未成交关单</Button><Button type="primary" aria-label="关单" disabled={busy} onClick={() => { setOutcome("won"); setCloseOpen(true); }}>成交关单</Button></Space>}
     </footer>
     <Drawer title="询价动态" open={timelineOpen} onClose={() => setTimelineOpen(false)} width={480} destroyOnHidden>

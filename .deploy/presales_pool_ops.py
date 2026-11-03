@@ -11,6 +11,8 @@ import stat
 import sys
 import traceback
 from types import ModuleType
+from urllib.parse import parse_qs, unquote, urlsplit
+import uuid
 
 OLD_SHA = "e2e335bc72bf8cb95ce72ffae5e0e8e151b6da5c"
 OLD_HEAD = "a3c5e7f9b2d4"
@@ -48,6 +50,89 @@ def validate(m):
     for key in ("old_app_image", "old_front_image", "app_image", "frontend_image"):
         h.need(re.fullmatch("sha256:[a-f0-9]{64}", m[key]), "invalid image: " + key)
     h.need(type(m["nginx_upstream_count"]) is int and m["nginx_upstream_count"] > 0, "nginx upstream count")
+    h.need(re.fullmatch("[a-f0-9]{64}", m["db_id"]) and re.fullmatch("sha256:[a-f0-9]{64}", m["db_image"]),
+           "database container identity")
+    proxies = m["proxy_identities"].values()
+    h.need(sorted(p["process"] for p in proxies) == ["caddy", "cloudflared", "nginx"] and all(
+        re.fullmatch("[0-9a-f]{64}", p["id"]) and re.fullmatch("sha256:[a-f0-9]{64}", p["image"])
+        for p in proxies), "reviewed proxy identities required")
+
+
+def db_declaration(row):
+    """True = possible writer, False = explicit other database, None = no client declaration.
+
+    Deliberately ignore the spelling of a DSN's host or port: all aliases, IPs,
+    published ports, multi-host DSNs and remote forwarders for this database are in scope.
+    Unknown libpq service files/keyword DSNs are not proof of a different target.
+    """
+    declared_other = False
+    ambiguous = False
+    for item in row["Config"].get("Env") or []:
+        key, _, raw_value = item.partition("=")
+        value = raw_value.strip()
+        if key in {"PGSERVICE", "PGSERVICEFILE", "DATABASE_URL_FILE", "DATABASE_DSN_FILE"} and value:
+            ambiguous = True
+        if key in {"POSTGRES_DB", "PGDATABASE", "DB_NAME", "DATABASE_NAME"} and value:
+            if key == "POSTGRES_DB" and row.get("Path", "").rsplit("/", 1)[-1] == "docker-entrypoint.sh" and row.get("Args") == ["postgres"]:
+                continue  # In a database-server container, this variable initializes its own cluster.
+            if value == "spareparts":
+                return True
+            if not re.fullmatch(r"[\w.-]+", value):
+                ambiguous = True
+            declared_other = True
+        if key in {"PGHOST", "DB_HOST", "DATABASE_HOST"} and value:
+            ambiguous = True
+        if not (value.lower().startswith(("postgres:", "postgresql:", "postgresql+")) or
+                key.endswith(("DATABASE_URL", "DATABASE_DSN", "DATABASE_URI"))):
+            continue
+        try:
+            url = urlsplit(value)
+            if url.scheme in {"sqlite", "mysql", "redis"}:
+                continue
+            if url.scheme.split("+")[0] not in {"postgres", "postgresql"}:
+                return True
+            args = parse_qs(url.query, keep_blank_values=True)
+            if set(args) & {"service", "servicefile", "hostaddr", "options"}:
+                return True
+            names = [unquote(url.path.lstrip("/")), *args.get("dbname", []), *args.get("database", [])]
+            if "spareparts" in names or not all(re.fullmatch(r"[\w.-]+", n) for n in names):
+                return True
+            declared_other = True
+        except ValueError:
+            return True
+    if ambiguous:
+        return True
+    return False if declared_other else None
+
+
+def can_reach_without_dsn(row, db, rows):
+    mode = row["HostConfig"]["NetworkMode"]
+    if mode.startswith("container:"):
+        peer = mode.partition(":")[2]
+        peers = [r for r in rows if r["Id"] == peer or r["Name"].lstrip("/") == peer]
+        h.need(len(peers) == 1 and not peers[0]["HostConfig"]["NetworkMode"].startswith("container:"),
+               "unknown shared network namespace")
+        return can_reach_without_dsn(peers[0], db, rows)
+    if mode == "none":
+        return False
+    if set(row["NetworkSettings"]["Networks"]) & set(db["NetworkSettings"]["Networks"]):
+        return True
+    bindings = db["NetworkSettings"]["Ports"].get("5432/tcp") or []
+    return bool(bindings) if mode == "host" else any(b["HostIp"] not in {"127.0.0.1", "::1"} for b in bindings)
+
+
+def nonwriter_proxy(row, pinned):
+    name = row["Name"].lstrip("/")
+    spec = pinned.get(name)
+    if spec is None or spec["id"] != row["Id"] or spec["image"] != row["Image"]:
+        return False
+    command = [row["Path"].rsplit("/", 1)[-1], *(row.get("Args") or [])]
+    executable = spec["process"]
+    if executable == "nginx":
+        return command[:2] == ["docker-entrypoint.sh", "nginx"]
+    if executable == "cloudflared":
+        return command[0] == "cloudflared" and "tunnel" in command[1:]
+    return executable == "caddy" and command[:2] == ["caddy", "run"]
 
 
 IMPACT = """SELECT json_build_object(
@@ -87,17 +172,25 @@ class Release(hf.Hotfix):
         self.caddyfile = Path(self.m["caddyfile"])
 
     def writers_exact(self, allowed):
-        target = self.database_target(self.inspect(self.old_app))
-        h.need(target in {("db", 5432, "/spareparts"), (h.DB, 5432, "/spareparts")}, "old database target drift")
+        db = self.inspect(h.DB)
+        h.need(db["Id"] == self.m["db_id"] and db["Image"] == self.m["db_image"], "database identity drift")
         names = self.run(["docker", "ps", "-q"]).decode().split()
         rows = json.loads(self.run(["docker", "inspect", *names]))
-        actual = {row["Name"].lstrip("/") for row in rows if self.database_target(row) == target}
+        actual = set()
+        for row in rows:
+            if row["Id"] == db["Id"]:
+                continue
+            declaration = db_declaration(row)
+            if declaration is True or (declaration is None and can_reach_without_dsn(row, db, rows)
+                                       and not nonwriter_proxy(row, self.m["proxy_identities"])):
+                actual.add(row["Name"].lstrip("/"))
         h.need(actual == allowed, "unreviewed database writer or writer missing")
 
     def impact(self):
         return json.loads(self.sql(IMPACT))
 
     def preflight(self):
+        self.writers_exact({self.old_app})
         result = super().preflight()
         h.need(self.alembic(["heads"]) == TARGET + " (head)", "release has unrelated/multiple migration heads")
         history = self.alembic(["show", TARGET])
@@ -116,6 +209,21 @@ class Release(hf.Hotfix):
         result["impact"] = self.impact()
         h.need(result["impact"]["cancelled_marked"] == 0, "unexpected cancellation marker")
         return result
+
+    def frozen(self):
+        super().frozen()
+        candidate_allowed = set()
+        if (self.root / "bluegreen.intent.json").exists():
+            names = self.run(["docker", "ps", "--format", "{{.Names}}"]).decode().splitlines()
+            if self.app in names:
+                self.marker("backup-new")
+                row = self.inspect(self.app)
+                h.need(row["Image"] == self.m["app_image"] and row["Config"]["Labels"].get("bg.release") == self.sha,
+                       "candidate identity before cutover")
+                candidate_allowed.add(self.app)
+        self.writers_exact(candidate_allowed)
+        if not candidate_allowed:
+            self.source_tcp_zero()
 
     def migrate(self):
         backup = self.marker("backup-old")
@@ -161,6 +269,7 @@ class Release(hf.Hotfix):
         return result
 
     def verify(self):
+        self.writers_exact({self.app})
         result = super().verify()
         root = "/usr/share/nginx/html"
         paths = self.run(["docker", "exec", self.front, "grep", "-rlF", "1.44.0", root + "/assets"]).decode().splitlines()
@@ -302,7 +411,9 @@ class Release(hf.Hotfix):
             h.need(phase == "preflight", "no matching preparation")
             h.save(owner, identity)
         h.need(file_mode(owner, 0o600) and json.loads(owner.read_bytes()) == identity, "release owner mismatch")
-        suffix = phase + ("-" + h.stamp() if phase == "verify" else "")
+        # Recovery must remain available after arbitrarily many interrupted attempts.
+        # Each mutation still has its own non-overwritable intent and immutable outcome.
+        suffix = phase + ("-" + h.stamp() + "-" + uuid.uuid4().hex if phase in {"verify", "recover"} else "")
         h.save(self.root / (suffix + ".intent.json"), {**identity, "phase": phase, "time": h.stamp()})
         if phase in {"backup-old", "backup-new"}:
             result = self.backup(phase.split("-")[1])

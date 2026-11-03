@@ -42,6 +42,21 @@ describe("询价报价共享池", () => {
     expect(screen.getByRole("button", { name: "待报价 1" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "已报价 2" })).toBeInTheDocument();
     expect(screen.getByText("张三")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "关闭询价 XJ20261101001" })).toBeNull();
+  });
+
+  it("报价表按未关单的询价选择来源，已关单行不可勾选", async () => {
+    const open = line({ inquiry_no: "XJ1" });
+    const closed = line({ line_id: 2, inquiry_id: 2, inquiry_no: "XJ2", pn: "PN-2", inquiry_status: "closed", closed_outcome: "lost" });
+    vi.spyOn(presalesPool, "lines").mockResolvedValue(page([open, closed]));
+    show();
+    await screen.findByText("未成交");
+    expect(screen.getByLabelText(`选择报价表来源 XJ1 ${open.pn}`)).toBeEnabled();
+    expect(screen.getByLabelText(`选择报价表来源 XJ2 ${closed.pn}`)).toBeDisabled();
+    expect(screen.getByLabelText("PN-1 单价")).toBeEnabled();
+    expect(screen.getByLabelText("PN-2 单价")).toBeDisabled();
+    expect(within(screen.getByText("XJ2").closest("tr")!).queryByText("不报")).toBeNull();
+    expect(screen.getByText(/旧版直接引用报价的行请在页面改价/)).toBeInTheDocument();
   });
 
   it.each([
@@ -133,6 +148,26 @@ describe("询价报价共享池", () => {
     await waitFor(() => expect(setPrice).toHaveBeenCalledWith(1, expect.objectContaining({ expected_version: 4, unit_price: 100, lead_time: "3天" })));
   });
 
+  it("失焦保存询价备注后仍可用新行版本提交原来填写的单价和交期", async () => {
+    vi.spyOn(presalesPool, "lines").mockResolvedValue(page([line()]));
+    const edit = vi.spyOn(presalesPool, "edit").mockResolvedValue(line({ line_version: 4, notes: "原厂包装" }));
+    const save = vi.spyOn(presalesPool, "setPrice").mockResolvedValue(quoted("88.50", "李四", 5));
+    show();
+    fireEvent.change(await screen.findByRole("spinbutton", { name: "PN-1 单价" }), { target: { value: "88.50" } });
+    fireEvent.click(screen.getByRole("button", { name: /展开行|Expand row/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: "PN-1 交期" }), { target: { value: "3天" } });
+    const notes = screen.getByRole("textbox", { name: "PN-1 询价备注" });
+    fireEvent.change(notes, { target: { value: "原厂包装" } });
+    fireEvent.blur(notes);
+    await waitFor(() => expect(edit).toHaveBeenCalledWith(1, { expected_version: 3, notes: "原厂包装" }));
+    const button = screen.getByRole("button", { name: "保 存" });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() => expect(save).toHaveBeenCalledWith(1, expect.objectContaining({
+      expected_version: 4, unit_price: 88.5, lead_time: "3天",
+    })));
+  });
+
   it("只改价时不传交期等字段，服务端保留原值", async () => {
     vi.spyOn(presalesPool, "lines").mockResolvedValue(page([quoted()]));
     const setPrice = vi.spyOn(presalesPool, "setPrice").mockResolvedValue(quoted("90.00", "李四", 5));
@@ -157,7 +192,7 @@ describe("询价报价共享池", () => {
   });
 
   it("行内关单默认未成交，选已成交时带这一行的报价", async () => {
-    const lines = vi.spyOn(presalesPool, "lines").mockResolvedValue(page([quoted()]));
+    const lines = vi.spyOn(presalesPool, "lines").mockResolvedValue(page([{ ...quoted(), is_mine: true }]));
     const close = vi.spyOn(presales, "closeInquiry").mockResolvedValue({} as Inquiry);
     show();
     fireEvent.click(await screen.findByRole("button", { name: "关闭询价 XJ20261101001" }));
@@ -168,7 +203,8 @@ describe("询价报价共享池", () => {
     await waitFor(() => expect(lines).toHaveBeenCalledTimes(2));
   });
 
-  it("未报价行关单没有已成交选项；草稿入口显示本人草稿数", async () => {
+  it("主管可关闭他人询价，未报价行没有已成交选项；草稿入口显示本人草稿数", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ action_presales_supervise: true }));
     vi.spyOn(presalesPool, "lines").mockResolvedValue({ ...page([line()]), counts: { pending: 1, quoted: 0, skip: 0, mine: 1, all: 1, drafts: 2 } });
     show();
     expect(await screen.findByRole("link", { name: "我的草稿 2" })).toHaveAttribute("href", "/presales/inquiries?status=draft");

@@ -54,7 +54,7 @@ def test_return_defective_change_reopens_reply_and_invalidates_old_quote(db, r6_
         work_items.list_by_subject(db, inquiries.subject(inquiry), u.sales.id))
     view = visibility.inquiry_view(db, inquiry, common.resolve_actor(db, u.sales.id)[1])
     assert view["line_answers"] == [{"line_id": line.id, "state": "pending", "responded": False}]
-    assert view["can_urge"] is True
+    assert view["can_urge"] is False
 
 
 def test_legacy_snapshot_without_return_defective_keeps_default_true_reply_done(db, r6_actors):

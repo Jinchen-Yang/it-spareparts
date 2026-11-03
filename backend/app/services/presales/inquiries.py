@@ -49,16 +49,16 @@ def _permission(ctx, kind):
 def _owner(db, inquiry, actor):
     user, ctx = common.resolve_actor(db, actor)
     _permission(ctx, inquiry.kind)
-    # D-0052：已提交的询价谁都能改；草稿仍只属于本人。
-    if inquiry.status == "draft" and inquiry.created_by != user.id and not common.bypass(ctx):
-        raise Forbidden("只有发起人或主管可以修改草稿")
+    # 共享的是业务值与逐行报价。客户、行集和成交等整单操作仍归发起人或主管。
+    if inquiry.created_by != user.id and not common.bypass(ctx):
+        raise Forbidden("只有发起人或主管可以修改询价单")
     return user, ctx
 
 
 def _locked(db, inquiry_id, actor, expected_version):
     inquiry = common.lock_inquiry(db, inquiry_id)
-    common.check_version(inquiry, expected_version)
     user, ctx = _owner(db, inquiry, actor)
+    common.check_version(inquiry, expected_version)
     if inquiry.status == "closed":
         raise InvalidTransition("询价单已关单，请复制为新单")
     return inquiry, user, ctx
@@ -400,7 +400,7 @@ def _reopen(db, inquiry, user, items):
         work_items.open_items(db, subject(inquiry), [], SUBJECT_TYPE, user.id)
 
 
-def resubmit(db, inquiry_id, actor, expected_version):
+def resubmit(db, inquiry_id, actor, expected_version, *, open_tasks=True):
     inquiry, user, ctx = _locked(db, inquiry_id, actor, expected_version)
     if inquiry.kind != "sales_inquiry" or inquiry.status != "revising":
         raise InvalidTransition("只能重新提交已撤回的销售询价")
@@ -433,21 +433,22 @@ def resubmit(db, inquiry_id, actor, expected_version):
             PresalesOffer.status.in_(("draft", "published"))).order_by(PresalesOffer.id).with_for_update()))
         for offer in offers:
             mark_stale(db, offer, user.id, "询价行删除或 PN、数量、要求 PN 一致、坏件返回条件发生变化")
-    items = work_items.list_by_subject(db, subject(inquiry), user.id, lock=True)
-    old_assignees = inquiry.submitted_snapshot.get("assignee_ids", [])
     inquiry.status = "submitted"
-    if old_assignees != inquiry.assignee_ids:
-        work_items.cancel_subject(db, subject(inquiry), user.id, "询价重新指派", expected_versions=_versions(items))
-        if any(line.ref_offer_id is None for line in rows):
-            work_items.open_items(db, subject(inquiry), inquiry.assignee_ids, SUBJECT_TYPE, user.id)
-    else:
-        work_items.resume_subject(db, subject(inquiry), user.id, expected_versions=_versions(items))
-        needs_reply = added | (changed & set(current))
-        if any(line.ref_offer_id is None and (line.line_key in needs_reply or not items)
-               for line in rows):
-            _reopen(db, inquiry, user, items)
-        elif not any(line.ref_offer_id is None for line in rows):
-            work_items.cancel_subject(db, subject(inquiry), user.id, "询价行已全部引用报价", expected_versions=_versions(items))
+    if open_tasks:
+        items = work_items.list_by_subject(db, subject(inquiry), user.id, lock=True)
+        old_assignees = inquiry.submitted_snapshot.get("assignee_ids", [])
+        if old_assignees != inquiry.assignee_ids:
+            work_items.cancel_subject(db, subject(inquiry), user.id, "询价重新指派", expected_versions=_versions(items))
+            if any(line.ref_offer_id is None for line in rows):
+                work_items.open_items(db, subject(inquiry), inquiry.assignee_ids, SUBJECT_TYPE, user.id)
+        else:
+            work_items.resume_subject(db, subject(inquiry), user.id, expected_versions=_versions(items))
+            needs_reply = added | (changed & set(current))
+            if any(line.ref_offer_id is None and (line.line_key in needs_reply or not items)
+                   for line in rows):
+                _reopen(db, inquiry, user, items)
+            elif not any(line.ref_offer_id is None for line in rows):
+                work_items.cancel_subject(db, subject(inquiry), user.id, "询价行已全部引用报价", expected_versions=_versions(items))
     inquiry.revision += 1
     inquiry.submitted_at, inquiry.submitted_snapshot = common.now(), _snapshot(db, inquiry)
     _touch(inquiry)
@@ -455,7 +456,7 @@ def resubmit(db, inquiry_id, actor, expected_version):
         "added_line_keys": sorted(added), "revision": inquiry.revision})
 
 
-def append_lines(db, inquiry_id, actor, expected_version, lines):
+def append_lines(db, inquiry_id, actor, expected_version, lines, *, open_tasks=True):
     inquiry, user, ctx = _locked(db, inquiry_id, actor, expected_version)
     if inquiry.kind != "sales_inquiry" or inquiry.status != "submitted":
         raise InvalidTransition("只能向已提交的销售询价追加行")
@@ -471,8 +472,8 @@ def append_lines(db, inquiry_id, actor, expected_version, lines):
         line = _write_line(db, inquiry, data, seq + offset, ctx)
         keys.add(line.line_key)
         added.append(line)
-    items = work_items.list_by_subject(db, subject(inquiry), user.id, lock=True)
-    if any(line.ref_offer_id is None for line in added):
+    if open_tasks and any(line.ref_offer_id is None for line in added):
+        items = work_items.list_by_subject(db, subject(inquiry), user.id, lock=True)
         _reopen(db, inquiry, user, items)
     inquiry.revision += 1
     inquiry.submitted_snapshot = _snapshot(db, inquiry)
@@ -532,8 +533,8 @@ def close(db, inquiry_id, actor, expected_version, *, outcome, won_offer_id=None
 
 def copy_as_new(db, inquiry_id, actor, expected_version):
     inquiry = common.lock_inquiry(db, inquiry_id)
-    common.check_version(inquiry, expected_version)
     user, ctx = _owner(db, inquiry, actor)
+    common.check_version(inquiry, expected_version)
     source_lines = lines_for(db, inquiry.id)
     payload = [{"part_id": line.part_id, "pn_raw": line.pn_raw, "description": line.description,
         "qty": line.qty, "require_exact_pn": line.require_exact_pn, "notes": line.notes,

@@ -101,7 +101,7 @@ def test_reuse_current_answer_updates_but_old_snapshot_and_completed_task_do_not
     u = r6_actors
     quote = offers.direct_offer(db, u.buyer.id, u.part.id, {"unit_price": "123.45"})
     inquiry, lines = _pending(db, u)
-    assert _view(db, inquiry, u.sales)["can_urge"] is True
+    assert _view(db, inquiry, u.sales)["can_urge"] is False
     _reply(db, inquiry, u.buyer, [{"line_id": lines[0].id, "mode": "reuse", "ref_offer_id": quote.id}])
     offers.direct_offer(db, u.buyer.id, u.part.id, {"unit_price": "234.56", "price_basis": "cost"},
         existing_offer_id=quote.id, expected_version=quote.version)
@@ -161,7 +161,7 @@ def test_previous_line_version_quote_cannot_count_as_new_reply(db, r6_actors, wi
         view = _view(db, inquiry, actor)
         assert view["line_answers"] == [{"line_id": line.id, "state": "pending", "responded": False}]
         assert view["progress"]["quoted_lines"] == 0
-    assert _view(db, inquiry, u.sales)["can_urge"] is True
+    assert _view(db, inquiry, u.sales)["can_urge"] is False
 
 
 def test_non_material_resubmit_keeps_withdrawn_reply_handled(db, r6_actors):

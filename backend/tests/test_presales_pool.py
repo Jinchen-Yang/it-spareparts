@@ -1,12 +1,15 @@
 """D-0052 询价报价共享池：谁都能询价报价、只锁单行、谁更新记录谁。"""
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import date
 from decimal import Decimal
+from queue import Queue
 from threading import Barrier, Thread
+from time import monotonic, sleep
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, select, text
 from sqlalchemy.orm import Session
 
 from app import permissions
@@ -35,6 +38,12 @@ def _price(db, user, line, value, **extra):
                          expected_version=line.version)
     db.commit()
     return row
+
+
+def _legacy_assignment(db, line, user):
+    db.add(WorkItem(subject_type="presales_inquiry", subject_id=line.inquiry_id, pool_key="presales_inquiry",
+                    assignee_id=user.id, status="pending"))
+    db.flush()
 
 
 @contextmanager
@@ -81,6 +90,157 @@ def test_stale_version_conflict_returns_latest_and_keeps_winner(db, users):
     assert pool.line_view(db, line.id, _ctx(db, users.peer))["answered_by"] == "buyer"
 
 
+@pytest.mark.parametrize("writer", ["offer_patch", "offer_withdraw", "direct_update", "pool"])
+def test_price_change_rejects_stale_pool_write_on_all_effective_lines(db, users, writer):
+    source = _inquiry(db, users.seller, users.part)
+    reused = _inquiry(db, users.seller, users.part)
+    competing = _inquiry(db, users.seller, users.part)
+    unrelated = _inquiry(db, users.seller, users.part)
+    priced = _price(db, users.buyer, source, "10")
+    assert priced["line_version"] == 2
+    offer_id = priced["price"]["offer_id"]
+    alternative = _price(db, users.other, competing, "20")["price"]["offer_id"]
+    # 已经沿用的价格、未采用的候选价，以及过期决定和个人私稿。
+    pool.edit_line(db, reused.id, users.seller.id, {"notes": "修改过的行"}, expected_version=reused.version)
+    old = PresalesLineResponse(line_id=reused.id, created_by=users.seller.id, line_version=reused.version - 1,
+                               mode="skip", reason="旧版", is_draft=False)
+    draft = PresalesLineResponse(line_id=reused.id, created_by=users.other.id, line_version=reused.version,
+                                 mode="skip", reason="私稿", is_draft=True)
+    used = PresalesLineResponse(line_id=reused.id, created_by=users.peer.id, line_version=reused.version,
+                                mode="reuse", ref_offer_id=offer_id, ref_offer_revision_no=1, is_draft=False)
+    db.add_all([old, draft, used, PresalesOfferLineLink(line_id=competing.id, offer_id=offer_id, offer_revision_no=1)])
+    answers.refresh(db, [reused.id, competing.id])
+    db.commit()
+    assert (reused.current_offer_id, competing.current_offer_id) == (offer_id, alternative)
+    base = {row.id: row.version for row in (source, reused, competing, unrelated)}
+    versions = (old.line_version, draft.line_version)
+    buyer, peer = _client(users.buyer), _client(users.peer)
+    payload = {"expected_version": db.get(PresalesOffer, offer_id).version, "unit_price": "32"}
+    api = f"/api/presales/offers/{offer_id}"
+    if writer == "offer_withdraw":
+        written = buyer.post(f"{api}/withdraw", json={"expected_version": payload["expected_version"], "reason": "撤销"})
+    elif writer == "offer_patch":
+        written = buyer.patch(api, json=payload)
+    elif writer == "direct_update":
+        written = buyer.post("/api/presales/offers/direct", json={
+            **payload, "part_id": users.part.id, "existing_offer_id": offer_id, "on_existing": "update"})
+    else:
+        written = buyer.put(f"/api/presales/pool/lines/{source.id}/price", json={
+            "expected_version": base[source.id], "unit_price": "32"})
+    assert written.status_code in (200, 201), written.text
+    db.expire_all()
+    touched = [source, reused]
+    if writer == "offer_withdraw":
+        assert (competing.current_offer_id, competing.version) == (alternative, base[competing.id])
+    else:
+        touched.append(competing)
+    for row in touched:
+        stale = peer.put(f"/api/presales/pool/lines/{row.id}/price", json={
+            "expected_version": base[row.id], "unit_price": "99"})
+        assert stale.status_code == 409, stale.text
+        details = stale.json()["detail"]
+        assert details["code"] == "version_conflict"
+        latest = details["latest"]
+        assert latest["line_version"] == base[row.id] + 1 == row.version
+        if writer == "offer_withdraw":
+            assert latest["price"] is None and latest["answer_state"] == "pending"
+        else:
+            assert (latest["price"]["offer_id"], latest["price"]["unit_price"]) == (offer_id, "32.00")
+    assert (old.line_version, draft.line_version) == versions
+    assert (used.line_version, used.ref_offer_revision_no) == (reused.version, 1)
+    assert unrelated.version == base[unrelated.id]
+    assert db.get(PresalesOffer, offer_id).unit_price == Decimal("10" if writer == "offer_withdraw" else "32")
+
+
+def test_offer_writer_does_not_wait_for_a_locked_pool_line_or_leave_a_revision(db, users):
+    line = _inquiry(db, users.seller, users.part)
+    row = _price(db, users.buyer, line, "40")
+    offer_id = row["price"]["offer_id"]
+    offer = db.get(PresalesOffer, offer_id)
+    original = (offer.version, offer.revision_no, offer.unit_price, line.version)
+    buyer, line_id = _client(users.buyer), line.id
+    with ThreadPoolExecutor(max_workers=1) as runner:
+        with Session(engine) as editing:
+            editing.execute(select(PresalesInquiryLine.id).where(PresalesInquiryLine.id == line_id).with_for_update())
+            request = runner.submit(buyer.patch, f"/api/presales/offers/{offer_id}",
+                                    json={"expected_version": offer.version, "unit_price": 51})
+            result = request.result(timeout=10)
+            assert result.status_code == 409 and result.json()["detail"]["code"] == "concurrent_write"
+    db.expire_all()
+    assert (offer.version, offer.revision_no, offer.unit_price, line.version) == original
+    assert buyer.patch(f"/api/presales/offers/{offer_id}",
+                       json={"expected_version": offer.version, "unit_price": 51}).status_code == 200
+
+
+def test_legacy_reply_without_a_price_rejects_stale_pool_write(db, users):
+    line = _inquiry(db, users.seller, users.part)
+    base = line.version
+    _legacy_assignment(db, line, users.buyer)
+    offers.reply(db, line.inquiry_id, users.buyer.id, expected_version=1,
+                 line_responses=[{"line_id": line.id, "mode": "skip", "reason": "已停产"}])
+    db.commit()
+    stale = _client(users.peer).put(f"/api/presales/pool/lines/{line.id}/price",
+                                    json={"expected_version": base, "unit_price": "99"})
+    assert stale.status_code == 409
+    latest = stale.json()["detail"]["latest"]
+    assert (latest["line_version"], latest["answer_state"], latest["answer_reason"]) == (base + 1, "skip", "已停产")
+    db.refresh(line)
+    assert line.version == base + 1 and line.current_offer_id is None
+
+
+def test_closed_inquiry_rejects_all_pool_writes_but_preserves_live_offer_and_won_snapshot(db, users):
+    line = _inquiry(db, users.seller, users.part)
+    row = _price(db, users.buyer, line, "41")
+    offer_id = row["price"]["offer_id"]
+    api = _client(users.seller)
+    inquiry_url = f"/api/presales/inquiries/{line.inquiry_id}"
+    closed = api.post(inquiry_url + "/close", json={"expected_version": 1, "outcome": "won", "won_offer_id": offer_id})
+    assert closed.status_code == 200, closed.text
+    line_url = f"/api/presales/pool/lines/{line.id}"
+    version = {"expected_version": row["line_version"]}
+    for reply in (api.put(line_url + "/price", json={**version, "unit_price": 52}),
+                  api.post(line_url + "/skip", json={**version, "reason": "不应生效"}),
+                  api.patch(line_url, json={**version, "qty": 20, "confirm_reset": True})):
+        assert reply.status_code == 422 and "已关单" in reply.json()["detail"]["message"]
+    db.refresh(line)
+    assert (line.version, line.qty, line.current_offer_id) == (row["line_version"], Decimal(1), offer_id)
+    assert db.get(PresalesOffer, offer_id).revision_no == 1
+    offer_url = f"/api/presales/offers/{offer_id}"
+    edited = api.patch(offer_url, json={"expected_version": db.get(PresalesOffer, offer_id).version, "unit_price": 63})
+    assert edited.status_code == 200 and Decimal(edited.json()["unit_price"]) == 63
+    withdrawn = api.post(offer_url + "/withdraw", json={"expected_version": edited.json()["version"], "reason": "长期价撤回"})
+    assert withdrawn.status_code == 200 and withdrawn.json()["status"] == "withdrawn"
+    won = api.get(inquiry_url).json()["won_offer"]
+    assert Decimal(won["unit_price"]) == 41 and won["revision_no"] == 1
+
+
+def test_pool_write_waiting_for_close_observes_the_committed_closed_state(db, users):
+    line = _inquiry(db, users.seller, users.part)
+    line_id, inquiry_id, buyer_id, seller_id = line.id, line.inquiry_id, users.buyer.id, users.seller.id
+    writer_pid = Queue()
+
+    def submit_price():
+        with Session(engine) as session:
+            writer_pid.put(session.scalar(text("SELECT pg_backend_pid()")))
+            with pytest.raises(InvalidTransition, match="已关单"):
+                pool.set_price(session, line_id, buyer_id, {"unit_price": Decimal("52")}, expected_version=1)
+
+    with ThreadPoolExecutor(max_workers=1) as runner, Session(engine) as closing:
+        blocker = closing.scalar(text("SELECT pg_backend_pid()"))
+        inquiries.close(closing, inquiry_id, seller_id, 1, outcome="lost")
+        writer = runner.submit(submit_price)
+        pid = writer_pid.get(timeout=5)
+        with Session(engine) as monitor:
+            deadline = monotonic() + 5
+            while blocker not in monitor.scalar(text("SELECT pg_blocking_pids(:pid)"), {"pid": pid}):
+                assert monotonic() < deadline, "写报价未在父单锁上等待"
+                sleep(0.02)
+        closing.commit()
+        writer.result(timeout=5)
+    db.refresh(line)
+    assert line.version == 1 and line.current_offer_id is None
+
+
 def test_concurrent_same_line_has_one_winner_and_other_lines_do_not_block(db, users):
     created = pool.create_inquiry(db, _ctx(db, users.seller), lines=[
         {"part_id": users.part.id, "pn_raw": users.part.pn_std, "qty": Decimal(1)},
@@ -111,10 +271,10 @@ def test_concurrent_same_line_has_one_winner_and_other_lines_do_not_block(db, us
 
     # 第一行的行锁未提交时，同单第二行可以立刻写入。
     with Session(engine) as holder, Session(engine) as other:
-        holder.execute(select(PresalesInquiryLine).where(PresalesInquiryLine.id == first_id).with_for_update())
-        other.execute(select(PresalesInquiry).where(PresalesInquiry.id == created["inquiry_id"]).with_for_update(nowait=True))
-        other.rollback()
-        other.execute(select(PresalesInquiryLine).where(PresalesInquiryLine.id == second_id).with_for_update(nowait=True))
+        pool.set_price(holder, first_id, buyer_id, {"unit_price": Decimal("30")}, expected_version=first_version + 1)
+        other.execute(text("SET LOCAL lock_timeout = '2s'"))
+        assert pool.set_price(other, second_id, peer_id, {"unit_price": Decimal("40")},
+                              expected_version=1)["price"]["unit_price"] == "40.00"
 
 
 def test_changing_return_defective_requires_confirm_then_voids_price(db, users):
@@ -146,6 +306,7 @@ def test_metadata_edits_preserve_only_the_current_published_response(db, users, 
     if mode == "reuse":
         source_line = _inquiry(db, users.seller, users.part)
         source = _price(db, users.buyer, source_line, "83")["price"]["offer_id"]
+        _legacy_assignment(db, line, users.buyer)
         offers.reply(db, line.inquiry_id, users.buyer.id, expected_version=1, line_responses=[
             {"line_id": line.id, "mode": "reuse", "ref_offer_id": source}])
     else:
@@ -207,9 +368,6 @@ def test_detaching_multiple_price_sources_keeps_only_associated_revisions(db, us
     elif action == "skip":
         pool.skip(db, target.id, users.other.id, "停止采购", expected_version=target.version)
     else:
-        # 已提交后关单仍可更新价格，并各自保留本行的源修订。
-        inquiry = db.get(PresalesInquiry, target.inquiry_id)
-        inquiries.close(db, inquiry.id, users.seller.id, inquiry.version, outcome="lost")
         new = _price(db, users.other, target, "40")["price"]["offer_id"]
         expected.append((Decimal("40"), new, 1, "other", "published"))
     _price(db, users.buyer, reused_line, "300")
@@ -223,6 +381,7 @@ def test_moved_quote_history_follows_each_line_then_stops_at_detachment(db, user
     offer_id = _price(db, users.buyer, old, "51")["price"]["offer_id"]
     other = _inquiry(db, users.seller, users.part)
     header = db.get(PresalesInquiry, other.inquiry_id)
+    _legacy_assignment(db, other, users.buyer)
     offers.save_draft(db, header.id, other.id, users.buyer.id, {"unit_price": "52"},
                       expected_version=header.version)
     offers.reply(db, header.id, users.buyer.id, expected_version=header.version,
@@ -513,7 +672,7 @@ def test_condition_cannot_be_null(db, users, key):
     assert response.status_code == 422
 
 
-def test_revising_inquiry_is_editable_and_exportable_by_anyone_but_draft_is_private(db, users):
+def test_revising_owner_edits_the_inquiry_but_other_users_can_quote_shared_lines(db, users):
     draft = inquiries.create_draft(db, _ctx(db, users.seller), lines=[
         {"part_id": users.part.id, "pn_raw": users.part.pn_std, "qty": Decimal(1)}])
     db.commit()
@@ -523,7 +682,12 @@ def test_revising_inquiry_is_editable_and_exportable_by_anyone_but_draft_is_priv
     inquiries.submit(db, draft.id, _ctx(db, users.seller), draft.version, open_tasks=False)
     inquiries.withdraw(db, draft.id, _ctx(db, users.seller), draft.version)
     db.commit()
-    assert inquiry_workbook._editable_inquiry(db, draft.id, _ctx(db, users.other)).id == draft.id
+    assert inquiry_workbook._editable_inquiry(db, draft.id, _ctx(db, users.seller)).id == draft.id
+    with pytest.raises(Forbidden):
+        inquiry_workbook._editable_inquiry(db, draft.id, _ctx(db, users.other))
+    line = db.scalars(select(PresalesInquiryLine).where(PresalesInquiryLine.inquiry_id == draft.id)).one()
+    assert pool.edit_line(db, line.id, users.other.id, {"notes": "共享行备注"},
+                          expected_version=line.version)["notes"] == "共享行备注"
     assert quote_workbook.export_quote_sheet(db, [draft.id], _ctx(db, users.buyer))
     columns = {column.key for column in quote_workbook.QUOTE_SCHEMA.sheets[0].columns}
     assert not columns & {"on_existing", "existing_offer_id"}
