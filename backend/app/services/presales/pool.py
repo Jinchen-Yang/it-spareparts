@@ -179,12 +179,20 @@ def line_view(db, line_id, actor):
 
 def _lock(db, line_id, actor, expected_version):
     user, ctx = _actor(db, actor)
-    # 只锁这一行：同一张询价的其他行可以同时报价。
-    line = db.scalar(select(PresalesInquiryLine).where(PresalesInquiryLine.id == line_id)
-                     .with_for_update().execution_options(populate_existing=True))
-    inquiry = db.get(PresalesInquiry, line.inquiry_id) if line is not None else None
-    if line is None or line.status != "active" or inquiry.kind != "sales_inquiry" or not common.was_submitted(inquiry):
+    # 和关单保持父单→行的顺序。父单 SHARE 锁允许同单不同行并发写，但与关单互斥。
+    inquiry = db.scalar(select(PresalesInquiry).join(
+        PresalesInquiryLine, PresalesInquiryLine.inquiry_id == PresalesInquiry.id
+    ).where(PresalesInquiryLine.id == line_id).with_for_update(read=True, of=PresalesInquiry)
+                        .execution_options(populate_existing=True))
+    if inquiry is None or inquiry.kind != "sales_inquiry" or not common.was_submitted(inquiry):
         raise NotFound("询价行不存在或已删除")
+    line = db.scalar(select(PresalesInquiryLine).where(
+        PresalesInquiryLine.id == line_id, PresalesInquiryLine.inquiry_id == inquiry.id)
+                     .with_for_update().execution_options(populate_existing=True))
+    if line is None or line.status != "active":
+        raise NotFound("询价行不存在或已删除")
+    if inquiry.status == "closed":
+        raise InvalidTransition("询价已关单，不能修改询价行或重新答复")
     if line.version != expected_version:
         raise Conflict("这一行刚被其他人更新，请核对最新内容", code="version_conflict",
                        version=line.version, latest=line_view(db, line_id, actor))
@@ -299,8 +307,6 @@ def skip(db, line_id, actor, reason, *, expected_version):
 
 def edit_line(db, line_id, actor, data, *, expected_version, confirm_reset=False):
     line, inquiry, user, ctx = _lock(db, line_id, actor, expected_version)
-    if inquiry.status == "closed":
-        raise InvalidTransition("已关单的询价不能修改条件")
     if "expected_delivery" in data:
         inquiries._migrate_delivery(db, line, ctx)
     changed = {key for key, value in data.items() if getattr(line, key) != value}
