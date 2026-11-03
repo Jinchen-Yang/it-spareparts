@@ -42,16 +42,20 @@ describe("询价报价共享池", () => {
     expect(screen.getByRole("button", { name: "待报价 1" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "已报价 2" })).toBeInTheDocument();
     expect(screen.getByText("张三")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "关闭询价 XJ20261101001" })).toBeNull();
   });
 
   it("报价表按未关单的询价选择来源，已关单行不可勾选", async () => {
     const open = line({ inquiry_no: "XJ1" });
-    const closed = line({ line_id: 2, inquiry_id: 2, inquiry_no: "XJ2", inquiry_status: "closed", closed_outcome: "lost" });
+    const closed = line({ line_id: 2, inquiry_id: 2, inquiry_no: "XJ2", pn: "PN-2", inquiry_status: "closed", closed_outcome: "lost" });
     vi.spyOn(presalesPool, "lines").mockResolvedValue(page([open, closed]));
     show();
     await screen.findByText("未成交");
     expect(screen.getByLabelText(`选择报价表来源 XJ1 ${open.pn}`)).toBeEnabled();
     expect(screen.getByLabelText(`选择报价表来源 XJ2 ${closed.pn}`)).toBeDisabled();
+    expect(screen.getByLabelText("PN-1 单价")).toBeEnabled();
+    expect(screen.getByLabelText("PN-2 单价")).toBeDisabled();
+    expect(within(screen.getByText("XJ2").closest("tr")!).queryByText("不报")).toBeNull();
     expect(screen.getByText(/旧版直接引用报价的行请在页面改价/)).toBeInTheDocument();
   });
 
@@ -188,7 +192,7 @@ describe("询价报价共享池", () => {
   });
 
   it("行内关单默认未成交，选已成交时带这一行的报价", async () => {
-    const lines = vi.spyOn(presalesPool, "lines").mockResolvedValue(page([quoted()]));
+    const lines = vi.spyOn(presalesPool, "lines").mockResolvedValue(page([{ ...quoted(), is_mine: true }]));
     const close = vi.spyOn(presales, "closeInquiry").mockResolvedValue({} as Inquiry);
     show();
     fireEvent.click(await screen.findByRole("button", { name: "关闭询价 XJ20261101001" }));
@@ -199,7 +203,8 @@ describe("询价报价共享池", () => {
     await waitFor(() => expect(lines).toHaveBeenCalledTimes(2));
   });
 
-  it("未报价行关单没有已成交选项；草稿入口显示本人草稿数", async () => {
+  it("主管可关闭他人询价，未报价行没有已成交选项；草稿入口显示本人草稿数", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ action_presales_supervise: true }));
     vi.spyOn(presalesPool, "lines").mockResolvedValue({ ...page([line()]), counts: { pending: 1, quoted: 0, skip: 0, mine: 1, all: 1, drafts: 2 } });
     show();
     expect(await screen.findByRole("link", { name: "我的草稿 2" })).toHaveAttribute("href", "/presales/inquiries?status=draft");

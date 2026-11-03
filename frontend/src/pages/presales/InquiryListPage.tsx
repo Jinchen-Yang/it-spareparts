@@ -7,14 +7,13 @@ import { listWorkCandidates, type WorkCandidate } from "../../api/workItems";
 import { presalesWorkbooks } from "../../api/presalesWorkbooks";
 import { WorkbookExportButton } from "../../components/workbook";
 import WorkbookDialog from "./WorkbookDialog";
-import { readPermissionMap } from "../../nav";
 import type { ColumnsType } from "antd/es/table";
 import PageHeader from "../../components/PageHeader";
 import PartThumb from "../../components/gallery/PartThumb";
 import { lineAnswer } from "./answers";
 import { CurrentAnswer } from "./InquiryOffers";
 type InquirySort = { key: string; dir: "asc" | "desc" };
-import { isOfferActive, useNow } from "./shared";
+import { isOfferActive, isPresalesSupervisor, useNow } from "./shared";
 import { moneyExact } from "../../utils/format";
 import { parseApiError, type ApiErrorInfo } from "../../utils/apiError";
 import { ApiErrorFeedback } from "../../components/ApiErrorFeedback";
@@ -40,8 +39,7 @@ function lineOffers(detail: Inquiry | undefined, line: InquiryLine): Offer[] {
 
 export default function InquiryListPage() {
   const navigate = useNavigate();
-  const permissions = readPermissionMap();
-  const supervisor = !!permissions.action_presales_supervise || ["admin", "boss"].includes(localStorage.getItem("role") || "");
+  const supervisor = isPresalesSupervisor();
   const [scope, setScope] = useState<"mine" | "shared" | "all">("mine");
   const [kind, setKind] = useState<Inquiry["kind"]>();
   const [params] = useSearchParams();
