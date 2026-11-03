@@ -30,6 +30,7 @@ describe("询价报价共享池", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.restoreAllMocks();
+    vi.spyOn(presales, "suppliers").mockResolvedValue([]);
     vi.spyOn(presalesPool, "counts").mockResolvedValue({ pending: 1, quoted: 2, skip: 0, mine: 0, all: 3, drafts: 0 });
   });
   afterEach(cleanup);
@@ -91,6 +92,33 @@ describe("询价报价共享池", () => {
     fireEvent.click(screen.getByRole("button", { name: "保 存" }));
     expect(await screen.findByText(/刚被 李四 更新/)).toBeInTheDocument();
     expect(screen.getByRole("spinbutton", { name: "PN-1 单价" })).toHaveValue("90.00");
+  });
+
+  it("刷新和保存询价备注都不会替过期本地报价接受他人的新价格", async () => {
+    const latest = quoted("118.00", "李四", 4);
+    vi.spyOn(presalesPool, "lines").mockResolvedValueOnce(page([line()])).mockResolvedValue(page([latest]));
+    const afterNote = { ...latest, line_version: 5, notes: "送到库房" };
+    const edit = vi.spyOn(presalesPool, "edit").mockResolvedValue(afterNote);
+    const save = vi.spyOn(presalesPool, "setPrice")
+      .mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: "version_conflict", latest: afterNote } } } })
+      .mockResolvedValue(quoted("90.00", "张三", 6));
+    show();
+    fireEvent.change(await screen.findByRole("spinbutton", { name: "PN-1 单价" }), { target: { value: "90" } });
+    fireEvent.click(screen.getByRole("button", { name: /刷\s*新/ }));
+    expect(await screen.findByText(/行已更新，当前答复.*118/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /展开行|Expand row/ }));
+    const notes = screen.getByRole("textbox", { name: "PN-1 询价备注" });
+    fireEvent.change(notes, { target: { value: "送到库房" } });
+    fireEvent.blur(notes);
+    await waitFor(() => expect(edit).toHaveBeenCalledWith(1, { expected_version: 4, notes: "送到库房" }));
+    const button = screen.getByRole("button", { name: "保 存" });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() => expect(save).toHaveBeenNthCalledWith(1, 1, expect.objectContaining({ expected_version: 3, unit_price: 90 })));
+    expect(await screen.findByText(/刚被 李四 更新/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "已核对，按此版本编辑" }));
+    fireEvent.click(button);
+    await waitFor(() => expect(save).toHaveBeenNthCalledWith(2, 1, expect.objectContaining({ expected_version: 5, unit_price: 90 })));
   });
 
   it("已报价行改坏件返回要先确认，确认后才提交并回到待报价", async () => {

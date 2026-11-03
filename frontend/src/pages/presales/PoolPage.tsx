@@ -69,7 +69,7 @@ export default function PoolPage() {
   const [counts, setCounts] = useState<PoolCounts>();
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
-  const [drafts, setDrafts] = useState<Record<number, Draft>>({});
+  const [drafts, setDrafts] = useState<Record<number, Draft & { baseVersion: number }>>({});
   const [busy, setBusy] = useState<number>();
   const [selected, setSelected] = useState<number[]>([]);
   const [binding, setBinding] = useState<PoolLine>();
@@ -97,7 +97,14 @@ export default function PoolPage() {
 
   const replace = (row: PoolLine) => setRows((previous) => previous.map((item) => item.line_id === row.line_id ? row : item));
   const clearDraft = (lineId: number) => setDrafts((previous) => { const next = { ...previous }; delete next[lineId]; return next; });
-  const change = (row: PoolLine, patch: Draft) => setDrafts((previous) => ({ ...previous, [row.line_id]: { ...previous[row.line_id], ...patch } }));
+  const change = (row: PoolLine, patch: Draft) => setDrafts((previous) => ({
+    ...previous, [row.line_id]: { ...previous[row.line_id], ...patch,
+      baseVersion: previous[row.line_id]?.baseVersion ?? row.line_version },
+  }));
+  const advanceDraft = (lineId: number, from: number, to: number) => setDrafts((previous) => {
+    const draft = previous[lineId];
+    return draft?.baseVersion === from ? { ...previous, [lineId]: { ...draft, baseVersion: to } } : previous;
+  });
   const priceFor = (row: PoolLine) => drafts[row.line_id]?.unit_price !== undefined ? drafts[row.line_id].unit_price ?? null : priceOf(row);
   const taxFor = (row: PoolLine) => drafts[row.line_id]?.is_tax_inclusive !== undefined ? drafts[row.line_id].is_tax_inclusive ?? null : row.price ? row.price.is_tax_inclusive : true;
   const basisFor = (row: PoolLine) => drafts[row.line_id]?.price_basis ?? row.price?.price_basis ?? "sale";
@@ -118,13 +125,14 @@ export default function PoolPage() {
     || taxFor(row) !== row.price.is_tax_inclusive || basisFor(row) !== row.price.price_basis || detailChanged(row));
 
   /** 写入成功只换这一行，不重读整张表；冲突时显示最新内容并保留本人输入。 */
-  const write = async (row: PoolLine, target: "quote" | "inquiry", action: () => Promise<PoolLine>, success?: string) => {
+  const write = async (row: PoolLine, target: "price" | "skip" | "inquiry", action: () => Promise<PoolLine>, success?: string) => {
     if (busy != null) return;
     setBusy(row.line_id);
     try {
       const updated = await action();
       replace(updated);
-      if (target === "quote") clearDraft(row.line_id);
+      if (target === "inquiry") advanceDraft(row.line_id, row.line_version, updated.line_version);
+      else clearDraft(row.line_id);
       notifyPoolChanged();
       // 这一行留在当前页不跳走，但筛选数量要跟上。
       void presalesPool.counts().then(setCounts).catch(() => undefined);
@@ -145,7 +153,7 @@ export default function PoolPage() {
     const unitPrice = priceFor(row);
     if (unitPrice == null) return;
     const detail = detailChanged(row) ? detailOf(row) : undefined;
-    void write(row, "quote", () => presalesPool.setPrice(row.line_id, { expected_version: row.line_version, unit_price: unitPrice,
+    void write(row, "price", () => presalesPool.setPrice(row.line_id, { expected_version: drafts[row.line_id]?.baseVersion ?? row.line_version, unit_price: unitPrice,
       is_tax_inclusive: taxFor(row), price_basis: basisFor(row), ...(detail ? { lead_time: detail.lead_time.trim() || null,
         stock_location: detail.stock_location.trim() || null, notes: detail.notes.trim() || null,
         qty_available: detail.qty_available, supplier_id: detail.supplier_id } : {}) }), `${row.pn} 报价已生效`);
@@ -214,6 +222,11 @@ export default function PoolPage() {
     { title: "单价（元）", key: "price", width: 150, render: (_, row) => <div className="presales-cell">
       <InputNumber aria-label={`${row.pn} 单价`} disabled={priceDisabled(row)} min={0} max={999999999999.99} precision={2} style={{ width: "100%" }} placeholder="单价"
         value={priceFor(row)} onChange={(value) => change(row, { unit_price: value })} onPressEnter={() => { if (dirty(row)) save(row); }} />
+      {drafts[row.line_id] && drafts[row.line_id].baseVersion !== row.line_version && <>
+        <span className="presales-muted">行已更新，当前答复：{row.price ? sentence(row) : STATE_LABEL[row.answer_state]}。你的输入已保留。</span>
+        <Button type="link" size="small" disabled={priceDisabled(row)}
+          onClick={() => advanceDraft(row.line_id, drafts[row.line_id].baseVersion, row.line_version)}>已核对，按此版本编辑</Button>
+      </>}
       {row.latest_same_pn && <Button type="link" size="small" className="presales-reuse" disabled={priceDisabled(row)}
         title={`${row.latest_same_pn.reporter ?? ""} ${formatBusinessDateTime(row.latest_same_pn.at)}`}
         onClick={() => change(row, { unit_price: Number(row.latest_same_pn!.unit_price), is_tax_inclusive: row.latest_same_pn!.is_tax_inclusive, price_basis: row.latest_same_pn!.price_basis })}>
@@ -231,7 +244,7 @@ export default function PoolPage() {
     </div> },
     { title: "操作", key: "actions", width: 150, render: (_, row) => <Space size={4} wrap>
       <Button type="primary" size="small" loading={busy === row.line_id} disabled={priceDisabled(row) || !dirty(row)} onClick={() => save(row)}>保存</Button>
-      {row.inquiry_status !== "closed" && row.answer_state !== "skip" && <SkipButton disabled={busy != null} onConfirm={(reason) => void write(row, "quote", () => presalesPool.skip(row.line_id, { expected_version: row.line_version, reason }), `${row.pn} 已标为不报`)} />}
+      {row.inquiry_status !== "closed" && row.answer_state !== "skip" && <SkipButton disabled={busy != null} onConfirm={(reason) => void write(row, "skip", () => presalesPool.skip(row.line_id, { expected_version: row.line_version, reason }), `${row.pn} 已标为不报`)} />}
       <Button type="link" size="small" onClick={() => void showHistory(row)}>历史</Button>
       {row.answer_state === "quoted" && <Button type="link" size="small" aria-label={`复制 ${row.pn} 报价给客户`} onClick={() => void copy(row)}>复制</Button>}
       {(row.is_mine || supervisor) && row.inquiry_status !== "closed" && <Button type="link" size="small" aria-label={`关闭询价 ${row.inquiry_no}`} disabled={busy != null} onClick={() => setClosing({ row, outcome: "lost" })}>关单</Button>}

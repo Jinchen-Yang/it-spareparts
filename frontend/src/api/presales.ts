@@ -247,7 +247,7 @@ export const presales = {
     return (await api.get<Inquiry>(`${root}/inquiries/${id}`, { signal })).data;
   },
   async createInquiry(body: InquiryInput) { return (await api.post<Inquiry>(`${root}/inquiries`, body)).data; },
-  async updateInquiry(id: number, body: Omit<InquiryInput, "kind"> & VersionInput) {
+  async updateInquiry(id: number, body: Omit<InquiryInput, "kind"> & VersionInput & { expected_line_versions?: Record<string, number> }) {
     return (await api.patch<Inquiry>(`${root}/inquiries/${id}`, body)).data;
   },
   submitInquiry: (id: number, body: VersionInput) => inquiryAction(id, "submit", body),

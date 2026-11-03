@@ -204,6 +204,97 @@ def test_shared_inquiry_header_edits_are_owner_or_supervisor_only_and_never_crea
     assert owner.get(path).json()["work_items"] == []
 
 
+def test_revising_editor_cannot_overwrite_delete_or_reorder_changed_pool_lines(db, users):
+    owner, peer = _client(users.seller), _client(users.peer)
+    draft = owner.post("/api/presales/inquiries", json={"lines": [
+        {"pn_raw": "A", "qty": 1}, {"pn_raw": "B", "qty": 4}]}).json()
+    path = f"/api/presales/inquiries/{draft['id']}"
+    submitted = owner.post(path + "/submit", json={"expected_version": draft["version"]}).json()
+    editing = owner.post(path + "/withdraw", json={"expected_version": submitted["version"]}).json()
+    first, second = editing["lines"]
+    versions = {row["line_key"]: row["version"] for row in editing["lines"]}
+    rows = [{"line_key": row["line_key"], "qty": row["qty"]} for row in editing["lines"]]
+    price_row = f"/api/presales/pool/lines/{first['id']}"
+    changed = peer.patch(price_row, json={"expected_version": first["version"], "qty": 2})
+    assert changed.status_code == 200, changed.text
+    header = {"expected_version": editing["version"], "notes": "A 的备注"}
+    # 旧整单客户端不传行版本；新客户端还可删除或换序，均不能覆盖 B 的写入。
+    for patch in ({"lines": rows}, {"lines": rows, "expected_line_versions": versions},
+                  {"lines": rows[1:], "expected_line_versions": versions},
+                  {"lines": rows[::-1], "expected_line_versions": versions}):
+        response = owner.patch(path, json={**header, **patch})
+        assert response.status_code == 409 and response.json()["detail"]["code"] == "version_conflict"
+    current = owner.get(path).json()
+    assert current["notes"] == editing["notes"] and current["version"] == editing["version"]
+    assert [(r["line_key"], Decimal(r["qty"])) for r in current["lines"]] == [
+        (first["line_key"], 2), (second["line_key"], 4)]
+    response = owner.patch(path, json=header)
+    assert response.status_code == 200 and response.json()["notes"] == header["notes"]
+    current = response.json()
+    new_versions = {r["line_key"]: r["version"] for r in current["lines"]}
+    reordered = owner.patch(path, json={"expected_version": current["version"], "expected_line_versions": new_versions,
+                                        "lines": [{"line_key": r["line_key"]} for r in reversed(current["lines"])]})
+    assert reordered.status_code == 200, reordered.text
+    assert [(r["line_key"], Decimal(r["qty"])) for r in reordered.json()["lines"]] == [
+        (second["line_key"], 4), (first["line_key"], 2)]
+    # 新老客户端都能接续已核对过的整单版本。
+    legacy = owner.patch(path, json={"expected_version": reordered.json()["version"], "lines": [{"line_key": first["line_key"]}]})
+    assert legacy.status_code == 200 and len(legacy.json()["lines"]) == 1
+
+
+@pytest.mark.parametrize("decision", ["price", "skip"])
+@pytest.mark.parametrize("edit_other_line", [False, True])
+def test_resubmit_keeps_answer_given_for_new_shared_conditions(db, users, decision, edit_other_line):
+    owner, buyer = _client(users.seller), _client(users.buyer)
+    draft = owner.post("/api/presales/inquiries", json={"lines": [
+        {"part_id": users.part.id}, {"pn_raw": "OTHER"}]}).json()
+    path = f"/api/presales/inquiries/{draft['id']}"
+    submitted = owner.post(path + "/submit", json={"expected_version": draft["version"]}).json()
+    editing = owner.post(path + "/withdraw", json={"expected_version": submitted["version"]}).json()
+    line = editing["lines"][0]
+    row_path = f"/api/presales/pool/lines/{line['id']}"
+    changed = buyer.patch(row_path, json={"expected_version": line["version"], "qty": 2})
+    assert changed.status_code == 200, changed.text
+    version = {"expected_version": changed.json()["line_version"]}
+    answer = (buyer.put(row_path + "/price", json={**version, "unit_price": "101.50"}) if decision == "price"
+              else buyer.post(row_path + "/skip", json={**version, "reason": "按新数量无货"}))
+    assert answer.status_code == 200, answer.text
+    # 对方的新答复之后，旧编辑器还可以用最新基线修改另一行，再重新提交。
+    current = owner.get(path).json()
+    first, second = current["lines"]
+    payload = {"expected_version": current["version"], "notes": "补充说明"}
+    if edit_other_line:
+        payload.update(expected_line_versions={r["line_key"]: r["version"] for r in current["lines"]},
+                       lines=[{"line_key": first["line_key"]}, {"line_key": second["line_key"], "notes": "补充说明"}])
+    saved = owner.patch(path, json=payload)
+    assert saved.status_code == 200, saved.text
+    result = owner.post(path + "/resubmit", json={"expected_version": saved.json()["version"]})
+    assert result.status_code == 200, result.text
+    refreshed = owner.get("/api/presales/pool/lines?tab=all").json()
+    row = next(r for r in refreshed["items"] if r["line_id"] == first["id"])
+    if decision == "price":
+        assert row["answer_state"] == "quoted" and Decimal(row["price"]["unit_price"]) == Decimal("101.50")
+    else:
+        assert row["answer_state"] == "skip" and row["answer_reason"] == "按新数量无货"
+
+
+def test_quote_metadata_edit_does_not_certify_price_for_new_inquiry_conditions(db, users):
+    inquiry, offer = _quoted(db, users)
+    owner, buyer = _client(users.seller), _client(users.buyer)
+    path = f"/api/presales/inquiries/{inquiry.id}"
+    editing = owner.post(path + "/withdraw", json={"expected_version": inquiry.version}).json()
+    line = editing["lines"][0]
+    saved = owner.patch(path, json={"expected_version": editing["version"],
+        "expected_line_versions": {line["line_key"]: line["version"]}, "lines": [{"line_key": line["line_key"], "qty": 7}]})
+    assert saved.status_code == 200, saved.text
+    changed = buyer.patch(f"/api/presales/offers/{offer.id}", json={"expected_version": offer.version, "notes": "仅修改货源说明"})
+    assert changed.status_code == 200, changed.text
+    result = owner.post(path + "/resubmit", json={"expected_version": saved.json()["version"]})
+    assert result.status_code == 200, result.text
+    db.refresh(offer)
+    assert offer.status == "stale"
+
+
 def test_http_anonymous_denied_and_conflict_never_mutates(db, users):
     assert TestClient(app).get("/api/presales/inquiries").status_code == 401
     assert _client(users.denied).get("/api/presales/inquiries").status_code == 403
