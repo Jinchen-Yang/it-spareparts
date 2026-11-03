@@ -34,6 +34,12 @@ def main():
             for inquiry in inquiries:
                 if visibility.can_view_inquiry(db, inquiry, ctx) != (inquiry.id in allowed):
                     raise RuntimeError("SQL and record visibility disagree")
+                submitted = inquiry.status != "draft" and inquiry.submitted_at is not None
+                required = (inquiry.created_by == user.id or user.role in {"admin", "boss"}
+                    or (submitted and (inquiry.kind == "proactive_offer"
+                                       or work_items.has_permission(ctx, "action_presales_quote"))))
+                if required and inquiry.id not in allowed:
+                    raise RuntimeError("author, administrator or quoter lost required access")
                 if inquiry.id in allowed and inquiry.submitted_at is None and inquiry.created_by != user.id and user.role not in {"admin", "boss"}:
                     raise RuntimeError("another user's unsubmitted draft is visible")
             offers = list(db.scalars(select(PresalesOffer).where(visibility.offer_access_filter(db, ctx)).limit(30)))

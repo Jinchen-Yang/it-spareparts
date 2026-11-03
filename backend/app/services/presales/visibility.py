@@ -14,7 +14,9 @@ from app.models.presales import (
 from app.models.system import SysUser
 from app.models.workflow import SubjectEvent
 from app.services import audience, field_pool
-from app.services.presales.common import author_name, bypass, offer_effective, resolve_actor, was_submitted
+from app.services.presales.common import (
+    author_name, bypass, field_rule_bypass, offer_effective, resolve_actor, was_submitted,
+)
 from app.services.workflow import work_items
 from app.services.workflow.registry import Forbidden, Subject
 
@@ -157,7 +159,7 @@ def _offer_batch(db, offers, ctx, *, fields):
         (index, key): (getattr(offer, key + "_rule_id"), authors[offer.created_by].username)
         for index, offer, _ in candidates if (index, "record") in filtered
         for key in ("supplier_audience", "reporter_audience", "notes_audience")
-    }, ctx, bypass=bypass) if fields else {}
+    }, ctx, bypass=field_rule_bypass) if fields else {}
     source_ids = {offer.line_id for _, offer, _ in candidates if offer.line_id is not None}
     held_sources = set(db.scalars(select(PresalesInquiryLine.id).where(
         PresalesInquiryLine.id.in_(source_ids), PresalesInquiryLine.answer_requires_review.is_(True)
@@ -398,17 +400,18 @@ def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
         result.update(audience.read_rules(db, {
             "offer_audience": (inquiry.offer_audience_rule_id, author),
             "notes_audience": (inquiry.notes_audience_rule_id, author),
-        }, ctx, bypass=bypass))
+        }, ctx, bypass=field_rule_bypass))
         header_subject = field_pool.Subject("presales_inquiry", f"inquiry:{inquiry.id}", "header")
-        result["field_values"] = field_pool.read_values(db, [header_subject], ctx, _public, include_rules=True, rule_bypass=bypass).get(
-            header_subject.subject_id, [])
+        result["field_values"] = field_pool.read_values(db, [header_subject], ctx, _public,
+            include_rules=True, rule_bypass=field_rule_bypass).get(header_subject.subject_id, [])
     if detail or summary:
         line_rules = audience.read_rules(db, {
             line.id: (line.notes_audience_rule_id, author) for line in lines
-        }, ctx, bypass=bypass) if detail else {}
+        }, ctx, bypass=field_rule_bypass) if detail else {}
         line_subjects = [field_pool.Subject("presales_inquiry", f"line:{line.id}", "line") for line in lines]
         # 历史交期可能仍存于自定义字段，摘要也必须读取经过权限过滤的值。
-        values = field_pool.read_values(db, line_subjects, ctx, _public, include_rules=detail, rule_bypass=bypass) if lines else {}
+        values = field_pool.read_values(db, line_subjects, ctx, _public,
+            include_rules=detail, rule_bypass=field_rule_bypass) if lines else {}
         result["lines"] = []
         for line in lines:
             row = {col.name: getattr(line, col.name) for col in line.__table__.columns

@@ -161,6 +161,14 @@ class Release(pool.Release):
             return result
         raise RuntimeError("version 1.45 changelog missing")
 
+    def smoke(self, base):
+        result = super().smoke(base)
+        for path in ("/sales/analytics", "/purchases/analytics", "/maintenance/dashboard"):
+            result[path] = self.http(base + path)
+        for path in ("/api/sales/analytics/options", "/api/purchases/analytics/options"):
+            result[path] = self.http(base + path, (401, 403))
+        return result
+
     def rollback(self):
         """Before exposure only. Preserve the expanded schema and every business row."""
         h.need(not (self.root / "cutover.intent.json").exists(), "cutover may have begun; forward repair required")

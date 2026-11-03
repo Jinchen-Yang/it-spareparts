@@ -48,6 +48,11 @@ def bypass(ctx):
     return ctx.role in ("admin", "boss")
 
 
+def field_rule_bypass(ctx):
+    """记录准入通过后，保留主管回读历史字段规则的权限。"""
+    return bypass(ctx) or work_items.has_permission(ctx, "action_presales_supervise")
+
+
 def get_inquiry(db, inquiry_id):
     row = db.get(PresalesInquiry, inquiry_id)
     if row is None:

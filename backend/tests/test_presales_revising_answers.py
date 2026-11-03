@@ -73,7 +73,7 @@ def test_document_reset_is_effective_before_resubmit_and_never_revives_a_price(d
 @pytest.mark.parametrize("writer", ["pool", "document"])
 def test_pending_external_link_detaches_on_condition_change_and_keeps_private_skip(db, users, writer):
     target = _inquiry(db, users.seller, users.part)
-    source = _inquiry(db, users.peer, users.part)
+    source = _inquiry(db, users.peer, users.part, visible_to=[users.seller.username])
     offer_id = _price(db, users.peer, source, "11")["price"]["offer_id"]
     offer = db.get(PresalesOffer, offer_id)
     target.ref_offer_id, target.ref_offer_revision_no = offer.id, offer.revision_no
@@ -103,9 +103,9 @@ def test_pending_external_link_detaches_on_condition_change_and_keeps_private_sk
 
 
 def test_document_can_set_a_different_valid_reference_while_replacing_the_conditions(db, users):
-    first = _inquiry(db, users.peer, users.part)
+    first = _inquiry(db, users.peer, users.part, visible_to=[users.seller.username])
     old_id = _price(db, users.peer, first, "11")["price"]["offer_id"]
-    second = _inquiry(db, users.peer, users.part)
+    second = _inquiry(db, users.peer, users.part, visible_to=[users.seller.username])
     new_id = _price(db, users.buyer, second, "22")["price"]["offer_id"]
     owner = _client(users.seller)
     draft = owner.post("/api/presales/inquiries", json={"lines": [{
@@ -129,7 +129,7 @@ def test_document_can_set_a_different_valid_reference_while_replacing_the_condit
 
 @pytest.mark.parametrize("action", ["resubmit", "replace"])
 def test_pre_upgrade_revising_conditions_do_not_reactivate_echoed_old_reference(db, users, action):
-    source = _inquiry(db, users.peer, users.part)
+    source = _inquiry(db, users.peer, users.part, visible_to=[users.seller.username])
     ref = _price(db, users.peer, source, "35")["price"]["offer_id"]
     inquiry = inquiries.create_draft(db, users.seller.id, lines=[{"part_id": users.part.id, "ref_offer_id": ref}])
     inquiries.submit(db, inquiry.id, users.seller.id, inquiry.version, open_tasks=False)
@@ -155,9 +155,9 @@ def test_pre_upgrade_revising_conditions_do_not_reactivate_echoed_old_reference(
 
 @pytest.mark.parametrize(("ref_state", "stored_qty"), [(None, "1E+1"), (None, "10.000"), (True, 10.0)])
 def test_legacy_reference_and_equivalent_quantities_leave_all_priced_sources_alone(db, users, ref_state, stored_qty):
-    reference_line = _inquiry(db, users.peer, users.part)
+    reference_line = _inquiry(db, users.peer, users.part, visible_to=[users.seller.username])
     ref_id = _price(db, users.peer, reference_line, "11")["price"]["offer_id"]
-    linked_line = _inquiry(db, users.buyer, users.part)
+    linked_line = _inquiry(db, users.buyer, users.part, visible_to=[users.seller.username])
     linked_id = _price(db, users.buyer, linked_line, "22")["price"]["offer_id"]
     line = _inquiry(db, users.seller, users.part, qty=10)
     own_id = _price(db, users.seller, line, "33")["price"]["offer_id"]

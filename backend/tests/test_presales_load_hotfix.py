@@ -118,7 +118,8 @@ def test_work_item_admission_select_count_is_independent_of_unshown_rows(db, use
 
 @pytest.mark.parametrize("viewer", ["seller", "buyer", "peer", "other", "supervisor"])
 def test_list_summary_preserves_detail_business_fields_and_permissions(db, users, viewer):
-    inquiry, _ = _quoted(db, users, rule={"mode": "private"})
+    inquiry, _ = _quoted(db, users, rule={"mode": "private"},
+        whole={"mode": "include", "user_ids": [users.other.username, users.supervisor.username]})
     ctx = _ctx(db, getattr(users, viewer))
     detail = visibility.inquiry_view(db, inquiry, ctx)
     summary = visibility.inquiry_view(db, inquiry, ctx, detail=False, summary=True)

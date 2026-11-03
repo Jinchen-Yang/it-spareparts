@@ -147,6 +147,7 @@ def test_each_buyer_handles_the_same_line_independently(db, r6_actors):
     users = r6_actors
     _, _, _, original = _publish(db, users)
     inquiry, lines = _pending(db, users, multiple=True)
+    inquiries.update_visibility(db, inquiry.id, users.sales.id, inquiry.version, [users.other.username])
     line = lines[0]
     _reply(db, inquiry, users.buyer, [{"line_id": line.id, "mode": "reuse", "ref_offer_id": original.id}])
     assert _item(db, inquiry, users, users.buyer).status == "done"

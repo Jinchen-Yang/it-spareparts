@@ -1,5 +1,6 @@
 """旧单读取钉住的完整快照，报价库展示共享报价并按报价人去重。"""
 from datetime import timedelta
+from copy import deepcopy
 from decimal import Decimal
 
 import pytest
@@ -7,7 +8,7 @@ from sqlalchemy import select
 
 from app.models.presales import PresalesOfferRevision
 from app.services.presales import common, inquiries, library, offers, visibility
-from app.services.workflow.registry import InvalidTransition
+from app.services.workflow.registry import Forbidden, InvalidTransition
 from tests.test_presales_api_visibility import _client
 from tests.test_presales_r6_existing import _publish, r6_actors
 from tests.test_presales_r6_responses import _pending, _reply, _response_view
@@ -120,16 +121,32 @@ def test_won_offer_snapshot_survives_update_and_record_scope_change(db, r6_actor
     u = r6_actors
     _, _, _, original = _publish(db, u, fields={"is_tax_inclusive": False, "price_basis": "cost"})
     inquiry, _ = _refer(db, u, original)
+    inquiries.update_visibility(db, inquiry.id, u.sales.id, inquiry.version, [u.other.username])
     inquiries.close(db, inquiry.id, u.sales.id, inquiry.version, outcome="won", won_offer_id=original.id)
-    _publish(db, u, whole={"mode": "private"}, price="2.00",
+    source, _, _, _ = _publish(db, u, kind="sales_inquiry",
+        whole={"mode": "include", "user_ids": [u.other.username]}, price="2.00",
         fields={"is_tax_inclusive": True, "price_basis": "sale"}, on_existing="update", existing_offer_id=original.id)
     assert (inquiry.won_offer_id, inquiry.won_offer_revision_no) == (original.id, 1)
+    revisions = list(db.scalars(select(PresalesOfferRevision).where(
+        PresalesOfferRevision.offer_id == original.id).order_by(PresalesOfferRevision.revision_no)))
+    snapshots = [deepcopy(revision.snapshot) for revision in revisions]
+    inquiries.update_visibility(db, source.id, u.sales.id, source.version, [])
+    with pytest.raises(Forbidden):
+        visibility.revision_views(db, original.id, _ctx(db, u.other))
+    hidden = visibility.inquiry_view(db, inquiry, _ctx(db, u.other))
+    assert hidden["won_offer"] is None and hidden["won_offer_id"] is None
+    assert hidden["lines"][0]["ref_offer"] is None
+    assert (inquiry.won_offer_id, inquiry.won_offer_revision_no) == (original.id, 1)
+    inquiries.update_visibility(db, source.id, u.sales.id, source.version, [u.other.username])
     view = visibility.inquiry_view(db, inquiry, _ctx(db, u.other))
     for pinned in (view["won_offer"], view["lines"][0]["ref_offer"]):
         assert (pinned["id"], pinned["revision_no"], pinned["unit_price"]) == (original.id, 1, Decimal("100"))
         assert pinned["is_tax_inclusive"] is False and pinned["price_basis"] == "cost"
         assert pinned["latest"] == {"revision_no": 2, "unit_price": Decimal("2"),
                                     "is_tax_inclusive": True, "price_basis": "sale"}
+    for revision in revisions:
+        db.refresh(revision)
+    assert [revision.snapshot for revision in revisions] == snapshots
 
 
 def test_reuse_of_legacy_private_offer_pins_original_reporter_and_time(db, r6_actors, monkeypatch):

@@ -152,7 +152,7 @@ export default function InquiryListPage() {
         fetchSchema={() => presalesWorkbooks.getSalesSummarySchema()} onExport={(visible) => presalesWorkbooks.exportSalesSummary(exportIds, visible)} filename="销售询价汇总.xlsx" />
         <span className="presales-muted">选择本人销售询价后按 PN 汇总下载。处理进度筛选当前页。</span></div>
       {error && <Alert type="error" message="询价单列表加载失败" description={<ApiErrorFeedback info={error} />} action={<Button onClick={() => setReload((value) => value + 1)}>重试</Button>} />}
-      <Table aria-label="询价单列表" rowKey="id" columns={columns} dataSource={filtered} loading={loading} tableLayout="fixed"
+      <Table aria-label="询价单列表" rowKey="id" columns={columns} dataSource={filtered} loading={loading} tableLayout="fixed" scroll={{ x: 1300 }}
         rowSelection={scope === "mine" ? { selectedRowKeys: selected, onChange: setSelected, getCheckboxProps: (row) => ({ "aria-label": `选择 ${row.inquiry_no}`, disabled: !row.is_owner || row.kind !== "sales_inquiry" }) } : undefined}
         pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, showTotal: () => `本页显示 ${filtered.length} / ${items.length} 张 · 范围内共 ${total} 张` }}
         onChange={(pagination, _filters, sorter) => {
