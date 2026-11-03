@@ -52,7 +52,8 @@ def list_lines(db, part_id, ctx, *, page=1, page_size=20):
                     pinned[response["offer"]["id"]] = response["offer"]
             quotes = list(pinned.values()) + [offer for offer in view["offers"]
                 if offer["line_id"] == line["id"] and offer["id"] not in pinned]
-            valid = [offer for offer in quotes if offer["status"] == "published"
+            valid = [offer for offer in quotes if not line["answer_requires_review"] and offer["status"] == "published"
+                     and not offer.get("answer_requires_review")
                      and not offer.get("original_withdrawn") and not offer.get("expired")
                      and not offer["no_stock"] and offer["unit_price"] is not None
                      and offer["valid_from"] is not None and offer["valid_from"] <= moment]

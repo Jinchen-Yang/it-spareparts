@@ -59,6 +59,16 @@ beforeEach(() => { vi.clearAllMocks(); mocks.library.mockResolvedValue({}); });
 afterEach(() => { cleanup(); });
 
 describe("询价详情", () => {
+  it("待核对的旧报价保留历史展示且不可采纳", async () => {
+    const data = inquiry();
+    const lines = data.lines!.map((line) => ({ ...line, answer_requires_review: true }));
+    await openPage(inquiry({ lines, line_answers: [{ line_id: 11, state: "pending", responded: false }] }));
+    expect(await screen.findByText("待核对，请按当前条件重新报价")).toBeVisible();
+    const oldPrice = screen.getByRole("button", { name: "采纳 PN-8 报价 1" });
+    expect(oldPrice).toBeDisabled();
+    expect(within(oldPrice).queryByText(/最低价/)).not.toBeInTheDocument();
+  });
+
   it("他人可以看已提交询价与报价，不能从详情追加行或代表发起人关单", async () => {
     await openPage(inquiry({ is_owner: false }));
     expect(screen.queryByRole("button", { name: "追加行" })).toBeNull();

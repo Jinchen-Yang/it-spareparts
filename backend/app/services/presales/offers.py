@@ -546,6 +546,8 @@ def _editable(db, offer_id, actor, expected_version):
 
 def update_offer(db, offer_id, actor, data, *, expected_version):
     offer, inquiry, ctx = _editable(db, offer_id, actor, expected_version)
+    if offer.line_id is not None and db.get(PresalesInquiryLine, offer.line_id).answer_requires_review:
+        raise Conflict("原报价对应的询价条件已变化，请在共享池按当前条件重新填价", code="answer_review_required")
     if not isinstance(data, dict):
         raise InvalidTransition("报价必须为对象")
     data = dict(data)
@@ -600,7 +602,7 @@ def direct_offer(db, actor, part_id, data, *, on_existing="update", existing_off
     _serialize_source(db, user.id, part_id, "")
     candidates = list(db.scalars(select(PresalesOffer).where(
         PresalesOffer.created_by == user.id, PresalesOffer.part_id == part_id,
-        PresalesOffer.status == "published",
+        PresalesOffer.status == "published", common.offer_source_eligible(),
     ).order_by(PresalesOffer.valid_from.desc(), PresalesOffer.id.desc())))
     if on_existing == "update" and (candidates or existing_offer_id is not None):
         target = next((row for row in candidates if row.id == existing_offer_id), None) \

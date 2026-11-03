@@ -36,6 +36,8 @@ FROM (
         SELECT offer.* FROM presales_offer AS offer
         WHERE offer.status = 'published' AND NOT offer.no_stock AND offer.unit_price IS NOT NULL
           AND offer.valid_from IS NOT NULL AND offer.valid_from <= clock_timestamp()
+          AND NOT EXISTS (SELECT 1 FROM presales_inquiry_line source
+                          WHERE source.id = offer.line_id AND source.answer_requires_review)
           AND (offer.line_id = target.id
                OR (offer.id = target.ref_offer_id AND target.ref_offer_revision_no IS NOT NULL)
                OR EXISTS (SELECT 1 FROM presales_line_response AS response
@@ -44,18 +46,18 @@ FROM (
                OR EXISTS (SELECT 1 FROM presales_offer_line_link AS link
                           WHERE link.line_id = target.id AND link.offer_id = offer.id))
         ORDER BY offer.valid_from DESC, offer.id DESC LIMIT 1
-    ) AS best ON TRUE
+    ) AS best ON NOT target.answer_requires_review
     LEFT JOIN LATERAL (
         SELECT response.* FROM presales_line_response AS response
         WHERE response.line_id = target.id AND response.mode = 'skip'
           AND NOT response.is_draft AND response.line_version = target.version
         ORDER BY response.id DESC LIMIT 1
-    ) AS skipped ON TRUE
+    ) AS skipped ON NOT target.answer_requires_review
     LEFT JOIN LATERAL (
         SELECT offer.* FROM presales_offer AS offer
         WHERE offer.line_id = target.id AND offer.status = 'published' AND offer.no_stock
         ORDER BY offer.id DESC LIMIT 1
-    ) AS no_stock ON TRUE
+    ) AS no_stock ON NOT target.answer_requires_review
     WHERE target.id IN :line_ids
 ) AS answer
 WHERE l.id = answer.id

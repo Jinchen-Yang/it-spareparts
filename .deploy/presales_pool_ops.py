@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Release the shared pool from the exact production hotfix, with a single migration."""
+import ast
 import datetime as dt
 import fcntl
 import hashlib
@@ -9,6 +10,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+import tarfile
 import traceback
 from types import ModuleType
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -17,6 +19,7 @@ import uuid
 OLD_SHA = "e2e335bc72bf8cb95ce72ffae5e0e8e151b6da5c"
 OLD_HEAD = "a3c5e7f9b2d4"
 TARGET = "e5a7c9d1f3b6"
+REVIEW_MIGRATION = "backend/alembic/versions/e5a7c9d1f3b6_presales_shared_pool.py"
 OLD_PREFIX = "itsp-presales-hf-" + OLD_SHA[:12]
 HOTFIX = Path(__file__).with_name("presales_load_hotfix_ops.py")
 HOTFIX_DIGEST = "9227dc2f973185c2f4fe173250436cdada150bd8bb6bf6a4b1828c07d9e101d9"
@@ -33,6 +36,17 @@ def file_mode(path, mode):
     meta = path.lstat()
     return (stat.S_ISREG(meta.st_mode) and meta.st_uid == 0
             and stat.S_IMODE(meta.st_mode) == mode)
+
+
+def review_query(source):
+    """Read the immutable migration's candidate SELECT without executing Python."""
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign) and any(isinstance(lhs, ast.Name) and lhs.id == "REVIEW_LINE_IDS"
+                                                for lhs in node.targets):
+            query = ast.literal_eval(node.value).strip()
+            h.need(re.match(r"^(select|with)\b", query, re.I) and ";" not in query, "invalid review scope")
+            return query
+    raise RuntimeError("release migration is missing its read-only review scope")
 
 
 def validate(m):
@@ -189,6 +203,38 @@ class Release(hf.Hotfix):
     def impact(self):
         return json.loads(self.sql(IMPACT))
 
+    def review_scope(self, query):
+        # Only the count and a set digest enter the private receipt.
+        return json.loads(self.sql(f"""
+            SELECT json_build_object('count', count(*), 'ids_md5', md5(coalesce(string_agg(
+                id::text, ',' ORDER BY id), ''))) FROM (SELECT DISTINCT id FROM ({query}) candidates) ids
+        """))
+
+    def old_review_scope(self):
+        with tarfile.open(self.root / "source.tar.gz", "r:gz") as archive:
+            entry = archive.getmember(REVIEW_MIGRATION)
+            h.need(entry.isfile() and entry.size < 128 * 1024, "unexpected migration archive member")
+            with archive.extractfile(entry) as source:
+                query = review_query(source.read())
+        return self.review_scope(query)
+
+    def verify_review_projection(self, frozen_scope):
+        marked = self.review_scope("SELECT id FROM presales_inquiry_line WHERE answer_requires_review")
+        h.need(marked == frozen_scope, "pre-upgrade review scope differs from migrated rows")
+        self.require_valid_review_answers()
+        return marked
+
+    def require_valid_review_answers(self):
+        invalid = self.sql("""
+            SELECT count(*) FROM presales_inquiry_line l
+            LEFT JOIN presales_offer o ON o.id=l.current_offer_id
+            LEFT JOIN presales_inquiry_line source ON source.id=o.line_id
+            WHERE (l.answer_requires_review AND (l.answer_state<>'pending' OR l.current_offer_id IS NOT NULL
+                OR l.answer_reason IS NOT NULL OR l.answered_by IS NOT NULL OR l.answered_at IS NOT NULL))
+               OR source.answer_requires_review
+        """)
+        h.need(invalid == "0", "unverified legacy answer is still current")
+
     def preflight(self):
         self.writers_exact({self.old_app})
         result = super().preflight()
@@ -200,6 +246,7 @@ class Release(hf.Hotfix):
                "existing migration/lock")
         result["impact"] = self.impact()
         h.need(result["impact"]["cancelled_marked"] == 0, "preexisting pool migration marks")
+        result["legacy_review"] = self.old_review_scope()
         return result
 
     def freeze(self):
@@ -208,6 +255,7 @@ class Release(hf.Hotfix):
         self.writers_exact(set())
         result["impact"] = self.impact()
         h.need(result["impact"]["cancelled_marked"] == 0, "unexpected cancellation marker")
+        result["legacy_review"] = self.old_review_scope()
         return result
 
     def frozen(self):
@@ -242,7 +290,8 @@ class Release(hf.Hotfix):
         h.need(impact["cancelled_marked"] == old["open_tasks"] and impact["open_tasks"] == 0
                and all(impact[k] == old[k] for k in old if k not in {"cancelled_marked", "open_tasks"}),
                "unexpected pool migration impact")
-        return {"old_schema": OLD_HEAD, "schema": TARGET, "impact": impact}
+        review = self.verify_review_projection(self.marker("freeze")["legacy_review"])
+        return {"old_schema": OLD_HEAD, "schema": TARGET, "impact": impact, "legacy_review": review}
 
     def bluegreen(self):
         self.marker("backup-new")
@@ -271,6 +320,7 @@ class Release(hf.Hotfix):
     def verify(self):
         self.writers_exact({self.app})
         result = super().verify()
+        self.require_valid_review_answers()
         root = "/usr/share/nginx/html"
         paths = self.run(["docker", "exec", self.front, "grep", "-rlF", "1.44.0", root + "/assets"]).decode().splitlines()
         phrase = "询价报价"
@@ -351,7 +401,7 @@ class Release(hf.Hotfix):
             projections[table] = json.loads(self.sql("SELECT json_agg(column_name ORDER BY ordinal_position) FROM "
                 "information_schema.columns WHERE table_schema='public' AND table_name='" + table + "'"))
         projections["presales_offer"].remove("updated_by")
-        for name in ("answer_state", "current_offer_id", "answer_reason", "answered_by", "answered_at"):
+        for name in ("answer_state", "current_offer_id", "answer_reason", "answered_by", "answered_at", "answer_requires_review"):
             projections["presales_inquiry_line"].remove(name)
         before = self.data_fingerprints(projections)
         h.save(self.root / "rollback-guard.json", {"release": self.sha, "manifest_sha256": h.digest(self.manifest_bytes),

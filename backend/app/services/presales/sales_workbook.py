@@ -56,7 +56,8 @@ def _tax_label(value):
 def _offer_prices(views):
     prices = {}
     for view in views:
-        if view.get("status") != "published" or view.get("no_stock") or view.get("unit_price") is None:
+        if (view.get("status") != "published" or view.get("no_stock") or view.get("unit_price") is None
+                or view.get("answer_requires_review")):
             continue
         reporter = view.get("reporter") or {}
         key = (reporter.get("id"), reporter.get("name", "其他采购"), view.get("is_tax_inclusive"))
@@ -93,12 +94,14 @@ def summary_rows(db, inquiry_ids, ctx):
                 row["descriptions"].append(line["description"])
             if inquiry.inquiry_no not in row["sources"]:
                 row["sources"].append(inquiry.inquiry_no)
-            row["offers"].extend(offer for offer in detail["offers"] if offer["line_id"] == line["id"])
-            row["offers"].extend(line.get("linked_offers", []))
-            if line.get("ref_offer"):
-                row["offers"].append(line["ref_offer"])
-            row["offers"].extend(response["offer"] for response in detail["line_responses"]
-                                 if response["line_id"] == line["id"] and response.get("offer"))
+            if not line["answer_requires_review"]:
+                row["offers"].extend(offer for offer in detail["offers"] if offer["line_id"] == line["id"])
+                row["offers"].extend(line.get("linked_offers", []))
+                if line.get("ref_offer"):
+                    row["offers"].append(line["ref_offer"])
+                row["offers"].extend(response["offer"] for response in detail["line_responses"]
+                                     if response["line_id"] == line["id"] and not response.get("is_draft")
+                                     and response.get("offer"))
             if (won and won.get("unit_price") is not None and won.get("part_id") == line["part_id"]
                     and won.get("part_id") is not None):
                 adopted = f"{inquiry.inquiry_no}：{Decimal(str(won['unit_price'])):.2f}（{_tax_label(won.get('is_tax_inclusive'))}）"

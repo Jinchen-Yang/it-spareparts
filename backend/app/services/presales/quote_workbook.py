@@ -54,6 +54,7 @@ QUOTE_SCHEMA = WorkbookSchema("presales_quote_sheet", 1, [
     "一行会分发至全部来源单对应行；任何来源校验失败，整份回滚；不新建询价单。",
     "不允许新增或删除行。应用后价格立即生效，所有人可见。",
     "合并来源已有草稿的值不一致时显示空白；未改动的字段按每个来源保留，修改后统一分发。",
+    "旧询价条件待核对的行会留空报价和处理方式；核对后请重新填写，或明确选择沿用同 PN 的有效报价。",
 ])
 
 _DATA_KEYS = {"unit_price", "price_basis", "is_tax_inclusive", "qty_available", "source_key", "stock_location", "lead_time", "notes"}
@@ -232,6 +233,8 @@ def _load(db, ids, ctx):
 
 def _state(db, line, drafts, responses, ctx):
     """同时返回字段的真实来源，供导出记录未发布草稿的访问边界。"""
+    if line.answer_requires_review:
+        return {}, False
     if line.answer_state == "skip":
         return {"mode": "skip", "reason": line.answer_reason}, False
     if line.current_offer_id is not None:
@@ -241,12 +244,16 @@ def _state(db, line, drafts, responses, ctx):
         offer = own[0] if len(own) == 1 else None
     if offer is not None:
         view = visibility.offer_view(db, offer, ctx)
-        if view is not None:
+        if view is not None and not view.get("answer_requires_review"):
             supplier = db.get(DimSupplier, view["supplier_id"]) if view.get("supplier_id") is not None else None
             return {**{key: view[key] for key in _DATA_KEYS if key in view},
                     "mode": "quote", "supplier": supplier.name_raw if supplier else None}, offer.status == "draft"
-    response = next((row for row in responses if row.line_id == line.id and row.line_version == line.version), None)
+    response = next((row for row in responses if row.line_id == line.id
+                     and row.line_version == line.version and row.is_draft), None)
     if response is not None:
+        if response.mode == "reuse" and not db.scalar(select(PresalesOffer.id).where(
+                PresalesOffer.id == response.ref_offer_id, common.offer_source_eligible())):
+            return {}, False
         return {"mode": response.mode, "ref_offer_id": response.ref_offer_id, "reason": response.reason}, response.is_draft
     return {}, False
 
@@ -343,6 +350,9 @@ def _row(db, data, refs=None):
           getattr(row, "is_draft", False)) for row in responses],
         active_versions,
     ]
+    review_ids = [line.id for line in lines if line.answer_requires_review]
+    if review_ids:
+        version_data.append(["answer_requires_review", review_ids])
     version = int(hashlib.sha256(json.dumps(version_data, ensure_ascii=False).encode()).hexdigest()[:13], 16)
     return version, values, private_keys
 
@@ -494,7 +504,8 @@ def apply_quotes(db, plan, ctx):
 
 
 def _reused_quote(db, offer_id, part_id, ctx):
-    offer = db.get(PresalesOffer, offer_id) if offer_id is not None else None
+    offer = db.scalar(select(PresalesOffer).where(
+        PresalesOffer.id == offer_id, common.offer_source_eligible())) if offer_id is not None else None
     if (offer is None or part_id is None or offer.part_id != part_id
             or not common.offer_effective(offer) or not visibility.can_view_offer(db, offer, ctx)):
         raise InvalidTransition("请选择同一 PN 的有效报价沿用")

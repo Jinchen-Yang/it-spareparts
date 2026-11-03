@@ -152,6 +152,8 @@ def _migrate_delivery(db, line, ctx, *, explicit=False):
 
 
 def _reference(db, line, ctx, *, allow_new=False):
+    if line.answer_requires_review and not allow_new:
+        return  # 存量关联保留供核对，不作为有效答复使用。
     if line.ref_offer_id is None:
         line.ref_offer_revision_no = None
         return
@@ -165,7 +167,7 @@ def _reference(db, line, ctx, *, allow_new=False):
         return
     if not allow_new:
         raise InvalidTransition("原引用缺少历史版本，请先取消引用再重新选择")
-    offer = db.scalar(select(PresalesOffer).where(PresalesOffer.id == line.ref_offer_id)
+    offer = db.scalar(select(PresalesOffer).where(PresalesOffer.id == line.ref_offer_id, common.offer_source_eligible())
                       .with_for_update().execution_options(populate_existing=True))
     if offer is None or not common.offer_effective(offer):
         raise InvalidTransition("只能引用有效的报价")
@@ -278,9 +280,10 @@ def _write_line(db, inquiry, data, seq, ctx, existing=None, *, confirm_reset=Tru
 
 
 def _reset_editor_answer(db, line, ctx, reason, confirm_reset, *, keep_offer_id=None):
-    if not confirm_reset and line.answer_state != "pending":
+    if not confirm_reset and (line.answer_state != "pending" or line.answer_requires_review):
         raise Conflict("修改或删除已答复的询价行会使原答复失效，请确认", code="price_reset_required")
-    answers.clear_line_answers(db, line, ctx, reason, keep_offer_id=keep_offer_id)
+    answers.clear_line_answers(db, line, ctx, reason, keep_offer_id=None if line.answer_requires_review else keep_offer_id)
+    line.answer_requires_review = False
 
 
 def _replace_lines(db, inquiry, data, ctx, expected_line_versions=None, *, confirm_reset=True):
@@ -452,7 +455,7 @@ def _reconcile_legacy_answers(db, inquiry, actor, rows):
     refreshed = []
     for line in rows:
         prior = previous.get(line.line_key)
-        if prior is None:
+        if prior is None or line.answer_requires_review:
             continue
         now = quote_conditions(line)
         conditions_changed = line.status != "active" or any(
@@ -557,12 +560,14 @@ def close(db, inquiry_id, actor, expected_version, *, outcome, won_offer_id=None
         offer = db.scalar(select(PresalesOffer).where(PresalesOffer.id == won_offer_id)
                           .with_for_update().execution_options(populate_existing=True))
         line = db.get(PresalesInquiryLine, offer.line_id) if offer and offer.line_id is not None else None
+        if line is not None and line.answer_requires_review:
+            raise InvalidTransition("所选报价对应的询价条件已变化，请先在共享池重新填价")
         own = (offer is not None and offer.inquiry_id == inquiry.id and
                offer.status == "published" and not offer.no_stock and
                line is not None and line.status == "active")
         linked = False
         if offer is not None and not own:
-            rows = lines_for(db, inquiry.id)
+            rows = [row for row in lines_for(db, inquiry.id) if not row.answer_requires_review]
             by_id = {row.id: row for row in rows}
             linked = any(row.ref_offer_id == offer.id and row.part_id == offer.part_id for row in rows)
             if not linked and by_id:

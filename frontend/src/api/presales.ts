@@ -33,6 +33,7 @@ export interface LineInput {
 }
 
 export interface InquiryLine extends Omit<LineInput, "notes_audience" | "field_values"> {
+  answer_requires_review?: boolean;
   id: number;
   inquiry_id: number;
   line_key: string;

@@ -90,7 +90,7 @@ def _latest_by_part(db, part_ids):
         SysUser, SysUser.id == func.coalesce(PresalesOffer.updated_by, PresalesOffer.created_by),
     ).where(PresalesOffer.part_id.in_(part_ids), PresalesOffer.status == "published",
             PresalesOffer.no_stock.is_(False), PresalesOffer.unit_price.is_not(None),
-            PresalesOffer.valid_from <= common.now(),
+            PresalesOffer.valid_from <= common.now(), common.offer_source_eligible(),
     ).order_by(PresalesOffer.part_id, PresalesOffer.valid_from.desc(), PresalesOffer.id.desc()))
     return {offer.part_id: {"offer_id": offer.id, "unit_price": _money(offer.unit_price),
                             "is_tax_inclusive": offer.is_tax_inclusive, "price_basis": offer.price_basis,
@@ -107,6 +107,7 @@ def _view(row, user_id, ctx, latest, fields):
         "part_id": line.part_id, "pn": line.pn_raw, "description": line.description, "qty": _quantity(line.qty),
         "require_exact_pn": line.require_exact_pn, "return_defective": line.return_defective, "notes": line.notes,
         "expected_delivery": inquiries.delivery_value(line, fields), "answer_state": line.answer_state,
+        "answer_requires_review": line.answer_requires_review,
         "answer_reason": line.answer_reason, "answered_by": _name(answerer), "answered_at": line.answered_at,
         "price": None if offer is None else {
             "offer_id": offer.id, "revision_no": offer.revision_no,
@@ -117,7 +118,7 @@ def _view(row, user_id, ctx, latest, fields):
         },
         "latest_same_pn": None,
     }
-    if latest and line.answer_state != "quoted" and line.part_id in latest:
+    if latest and not line.answer_requires_review and line.answer_state != "quoted" and line.part_id in latest:
         result["latest_same_pn"] = latest[line.part_id]
     # 客户名独立于共享池开放，只看系统数据权限。
     if work_items.has_permission(ctx, "data_customer"):
@@ -127,7 +128,7 @@ def _view(row, user_id, ctx, latest, fields):
 
 def _views(db, rows, user_id, ctx):
     lines = [row[0] for row in rows]
-    latest = _latest_by_part(db, {line.part_id for line in lines if line.part_id and line.answer_state != "quoted"})
+    latest = _latest_by_part(db, {line.part_id for line in lines if line.part_id and line.answer_state != "quoted" and not line.answer_requires_review})
     subjects = [field_pool.Subject("presales_inquiry", f"line:{line.id}", "line")
                 for line in lines if line.expected_delivery is None]
     legacy = field_pool.read_values(db, subjects, ctx, visibility._public)
@@ -210,7 +211,8 @@ def set_price(db, line_id, actor, data, *, expected_version):
     if line.part_id is None:
         raise InvalidTransition("请先绑定型号，再填写报价")
     data = {**data, "no_stock": False}
-    current = db.scalar(select(PresalesOffer).where(
+    # 待核对的旧报价属于原条件。重新填价创建独立报价，保留旧修订及关联历史。
+    current = None if line.answer_requires_review else db.scalar(select(PresalesOffer).where(
         PresalesOffer.line_id == line.id, PresalesOffer.status == "published",
     ).order_by(PresalesOffer.valid_from.desc(), PresalesOffer.id.desc()).limit(1).with_for_update())
     # 发布修订会刷新本行 current_offer_id，必须在此之前确定即将解除的旧关联。
@@ -235,6 +237,7 @@ def set_price(db, line_id, actor, data, *, expected_version):
         kind = "offer.updated"
     offer_id = current.id
     answers.clear_line_answers(db, line, user.id, "同一询价行已有新价", keep_offer_id=offer_id, linked_ranges=linked_ranges)
+    line.answer_requires_review = False
     _touch(line)
     answers.refresh(db, [line_id])
     common.event(db, inquiry, user.id, kind, {"offer_id": offer_id, "line_id": line_id})
@@ -248,6 +251,7 @@ def skip(db, line_id, actor, reason, *, expected_version):
     if not reason:
         raise InvalidTransition("不报必须填写原因")
     answers.clear_line_answers(db, line, user.id, f"改为不报：{reason}")
+    line.answer_requires_review = False
     _touch(line)
     response = offers._response(db, line, user.id, None, "skip", reason=reason)
     response.created_at = common.now()
@@ -265,7 +269,7 @@ def edit_line(db, line_id, actor, data, *, expected_version, confirm_reset=False
     if not changed:
         return line_view(db, line_id, actor)
     conditions = sorted(PRICE_CONDITIONS[key] for key in changed & PRICE_CONDITIONS.keys())
-    resets = conditions and line.answer_state != "pending"
+    resets = conditions and (line.answer_state != "pending" or line.answer_requires_review)
     if resets and not confirm_reset:
         raise Conflict("修改后原答复会作废，该行回到待报价，请确认", code="price_reset_required",
                        version=line.version, latest=line_view(db, line_id, actor))
@@ -273,6 +277,7 @@ def edit_line(db, line_id, actor, data, *, expected_version, confirm_reset=False
         setattr(line, key, data[key])
     if conditions:
         answers.clear_line_answers(db, line, user.id, "询价条件已修改：" + "、".join(conditions))
+        line.answer_requires_review = False
     _touch(line)
     if not conditions:
         answers.carry_current_responses(db, [line.id])

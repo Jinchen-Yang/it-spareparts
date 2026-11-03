@@ -46,6 +46,21 @@ describe("询价报价共享池", () => {
     expect(screen.queryByRole("button", { name: "关闭询价 XJ20261101001" })).toBeNull();
   });
 
+  it("旧答复对应条件待核对时解释为何要重新报价", async () => {
+    vi.spyOn(presalesPool, "lines").mockResolvedValue(page([line({ answer_requires_review: true })]));
+    const edit = vi.spyOn(presalesPool, "edit").mockResolvedValue(line({ line_version: 4, return_defective: false }));
+    show();
+    expect(await screen.findByText(/旧答复对应的询价条件待核对/)).toBeInTheDocument();
+    expect(screen.getByLabelText("PN-1 单价")).toBeEnabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: "PN-1 坏件返回" }));
+    const confirm = await screen.findByRole("button", { name: "确定修改" });
+    expect(edit).not.toHaveBeenCalled();
+    fireEvent.click(confirm);
+    await waitFor(() => expect(edit).toHaveBeenCalledWith(1, {
+      expected_version: 3, return_defective: false, confirm_reset: true,
+    }));
+  });
+
   it("报价表按未关单的询价选择来源，已关单行不可勾选", async () => {
     const open = line({ inquiry_no: "XJ1" });
     const closed = line({ line_id: 2, inquiry_id: 2, inquiry_no: "XJ2", pn: "PN-2", inquiry_status: "closed", closed_outcome: "lost" });
