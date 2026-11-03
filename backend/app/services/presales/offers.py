@@ -64,7 +64,7 @@ def _json(value):
     return value
 
 
-def append_revision(db, offer, actor, changed_fields, reason=None):
+def append_revision(db, offer, actor, changed_fields, reason=None, *, already_versioned_line=None):
     user, _ = common.resolve_actor(db, actor)
     offer.revision_no += 1
     db.flush()
@@ -85,17 +85,17 @@ def append_revision(db, offer, actor, changed_fields, reason=None):
     )
     db.add(revision)
     db.flush()
-    answers.refresh_for_offer(db, offer)
+    answers.refresh_for_offer(db, offer, already_versioned_line=already_versioned_line)
     return revision
 
 
-def mark_stale(db, offer, actor, reason):
+def mark_stale(db, offer, actor, reason, *, already_versioned_line=None):
     if offer.status == "stale":
         return offer
     offer.status = "stale"
     offer.version += 1
     offer.updated_at = common.now()
-    append_revision(db, offer, actor, ["status"], reason)
+    append_revision(db, offer, actor, ["status"], reason, already_versioned_line=already_versioned_line)
     if offer.inquiry_id is not None:
         inquiry = common.get_inquiry(db, offer.inquiry_id)
         common.event(db, inquiry, actor, "offer.stale", {"offer_id": offer.id})
@@ -283,7 +283,7 @@ def save_draft(db, inquiry_id, line_id, actor, data, *, expected_version,
     return offer
 
 
-def _publish(db, offer, actor, published_at, reason="发布报价"):
+def _publish(db, offer, actor, published_at, reason="发布报价", *, already_versioned_line=None):
     _publishable(db, offer)
     offer.status = "published"
     offer.valid_from = published_at
@@ -291,7 +291,8 @@ def _publish(db, offer, actor, published_at, reason="发布报价"):
     offer.version += 1
     offer.updated_at = published_at
     offer.workbook_choice = {}
-    append_revision(db, offer, actor, list(PresalesOffer.__table__.columns.keys()), reason)
+    append_revision(db, offer, actor, list(PresalesOffer.__table__.columns.keys()), reason,
+                    already_versioned_line=already_versioned_line)
 
 
 def _copy_quote(target, source):
@@ -500,7 +501,7 @@ def reply(db, inquiry_id, actor, *, expected_version, work_item_id=None,
     db.flush()
     common.event(db, inquiry, actor, "offer.replied", {"offer_ids": [o.id for o in published]})
     common.audit(db, actor, "presales.offer.replied", inquiry.id)
-    answers.refresh_inquiry(db, inquiry.id)
+    answers.refresh_inquiry(db, inquiry.id, bump_versions=True)
     current = {offer.id: offer for offer in own if offer.status == "published"}
     current.update({offer.id: offer for offer in published})
     return list(current.values())
@@ -712,6 +713,9 @@ def _publish_choice(db, draft, target, inquiry, actor, published_at, task_id=Non
     # 报价归属迁至本次单据，整单 M8 立即使用最新规则；旧单只保留实时受控关联。
     old_line = db.get(PresalesInquiryLine, target.line_id) if target.line_id is not None else None
     if old_line is not None and old_line.id != draft.line_id:
+        # 目标报价已加锁，写旧行关联前不可反向等待共享池正在修改的行。
+        answers._lock_affected_lines(db, [old_line.id])
+        db.refresh(old_line)
         if db.get(PresalesOfferLineLink, (old_line.id, target.id)) is None:
             db.add(PresalesOfferLineLink(line_id=old_line.id, offer_id=target.id,
                                         offer_revision_no=target.revision_no))

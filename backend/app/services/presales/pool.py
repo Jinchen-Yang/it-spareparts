@@ -170,7 +170,8 @@ def list_lines(db, actor, *, tab="pending", q="", page=1, page_size=50):
 
 def line_view(db, line_id, actor):
     user, ctx = _actor(db, actor)
-    row = db.execute(_rows_query().where(PresalesInquiryLine.id == line_id)).one_or_none()
+    row = db.execute(_rows_query().where(PresalesInquiryLine.id == line_id)
+                     .execution_options(populate_existing=True)).one_or_none()
     if row is None:
         raise NotFound("询价行不存在")
     return _views(db, [row], user.id, ctx)[0]
@@ -237,7 +238,7 @@ def _clear_answers(db, line, user, reason, *, keep_offer_id=None, linked_ranges=
     ).order_by(PresalesOffer.id).with_for_update()).all()
     for offer in rows:
         if offer.id != keep_offer_id:
-            offers.mark_stale(db, offer, user.id, reason)
+            offers.mark_stale(db, offer, user.id, reason, already_versioned_line=line.id)
     db.execute(delete(PresalesLineResponse).where(
         PresalesLineResponse.line_id == line.id, PresalesLineResponse.is_draft.is_(False)))
     db.execute(delete(PresalesOfferLineLink).where(PresalesOfferLineLink.line_id == line.id))
@@ -261,7 +262,7 @@ def set_price(db, line_id, actor, data, *, expected_version):
                                 revision_no=0, is_tax_inclusive=True)
         db.add(current)
         offers._apply(db, current, data, ctx)
-        offers._publish(db, current, user.id, moment, "共享池报价")
+        offers._publish(db, current, user.id, moment, "共享池报价", already_versioned_line=line.id)
         kind = "offer.published"
     else:
         changed = offers._apply(db, current, data, ctx)
@@ -269,7 +270,8 @@ def set_price(db, line_id, actor, data, *, expected_version):
         current.part_id, current.updated_by = line.part_id, user.id
         current.valid_from, current.valid_until, current.updated_at = moment, None, moment
         current.version += 1
-        offers.append_revision(db, current, user.id, [*changed, "updated_by", "valid_from"], "共享池更新报价")
+        offers.append_revision(db, current, user.id, [*changed, "updated_by", "valid_from"], "共享池更新报价",
+                               already_versioned_line=line.id)
         kind = "offer.updated"
     offer_id = current.id
     _clear_answers(db, line, user, "同一询价行已有新价", keep_offer_id=offer_id, linked_ranges=linked_ranges)

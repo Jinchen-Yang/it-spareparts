@@ -1,5 +1,6 @@
 """D-0052 询价报价共享池：谁都能询价报价、只锁单行、谁更新记录谁。"""
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import date
 from decimal import Decimal
@@ -79,6 +80,104 @@ def test_stale_version_conflict_returns_latest_and_keeps_winner(db, users):
     assert caught.value.detail["code"] == "version_conflict"
     assert caught.value.detail["latest"]["price"]["unit_price"] == "100.00"
     assert pool.line_view(db, line.id, _ctx(db, users.peer))["answered_by"] == "buyer"
+
+
+@pytest.mark.parametrize("writer", ["offer_patch", "offer_withdraw", "direct_update", "pool"])
+def test_price_change_rejects_stale_pool_write_on_all_effective_lines(db, users, writer):
+    source = _inquiry(db, users.seller, users.part)
+    reused = _inquiry(db, users.seller, users.part)
+    competing = _inquiry(db, users.seller, users.part)
+    unrelated = _inquiry(db, users.seller, users.part)
+    priced = _price(db, users.buyer, source, "10")
+    assert priced["line_version"] == 2
+    offer_id = priced["price"]["offer_id"]
+    alternative = _price(db, users.other, competing, "20")["price"]["offer_id"]
+    # 已经沿用的价格、未采用的候选价，以及过期决定和个人私稿。
+    pool.edit_line(db, reused.id, users.seller.id, {"notes": "修改过的行"}, expected_version=reused.version)
+    old = PresalesLineResponse(line_id=reused.id, created_by=users.seller.id, line_version=reused.version - 1,
+                               mode="skip", reason="旧版", is_draft=False)
+    draft = PresalesLineResponse(line_id=reused.id, created_by=users.other.id, line_version=reused.version,
+                                 mode="skip", reason="私稿", is_draft=True)
+    used = PresalesLineResponse(line_id=reused.id, created_by=users.peer.id, line_version=reused.version,
+                                mode="reuse", ref_offer_id=offer_id, ref_offer_revision_no=1, is_draft=False)
+    db.add_all([old, draft, used, PresalesOfferLineLink(line_id=competing.id, offer_id=offer_id, offer_revision_no=1)])
+    answers.refresh(db, [reused.id, competing.id])
+    db.commit()
+    assert (reused.current_offer_id, competing.current_offer_id) == (offer_id, alternative)
+    base = {row.id: row.version for row in (source, reused, competing, unrelated)}
+    versions = (old.line_version, draft.line_version)
+    buyer, peer = _client(users.buyer), _client(users.peer)
+    payload = {"expected_version": db.get(PresalesOffer, offer_id).version, "unit_price": "32"}
+    api = f"/api/presales/offers/{offer_id}"
+    if writer == "offer_withdraw":
+        written = buyer.post(f"{api}/withdraw", json={"expected_version": payload["expected_version"], "reason": "撤销"})
+    elif writer == "offer_patch":
+        written = buyer.patch(api, json=payload)
+    elif writer == "direct_update":
+        written = buyer.post("/api/presales/offers/direct", json={
+            **payload, "part_id": users.part.id, "existing_offer_id": offer_id, "on_existing": "update"})
+    else:
+        written = buyer.put(f"/api/presales/pool/lines/{source.id}/price", json={
+            "expected_version": base[source.id], "unit_price": "32"})
+    assert written.status_code in (200, 201), written.text
+    db.expire_all()
+    touched = [source, reused]
+    if writer == "offer_withdraw":
+        assert (competing.current_offer_id, competing.version) == (alternative, base[competing.id])
+    else:
+        touched.append(competing)
+    for row in touched:
+        stale = peer.put(f"/api/presales/pool/lines/{row.id}/price", json={
+            "expected_version": base[row.id], "unit_price": "99"})
+        assert stale.status_code == 409, stale.text
+        details = stale.json()["detail"]
+        assert details["code"] == "version_conflict"
+        latest = details["latest"]
+        assert latest["line_version"] == base[row.id] + 1 == row.version
+        if writer == "offer_withdraw":
+            assert latest["price"] is None and latest["answer_state"] == "pending"
+        else:
+            assert (latest["price"]["offer_id"], latest["price"]["unit_price"]) == (offer_id, "32.00")
+    assert (old.line_version, draft.line_version) == versions
+    assert (used.line_version, used.ref_offer_revision_no) == (reused.version, 1)
+    assert unrelated.version == base[unrelated.id]
+    assert db.get(PresalesOffer, offer_id).unit_price == Decimal("10" if writer == "offer_withdraw" else "32")
+
+
+def test_offer_writer_does_not_wait_for_a_locked_pool_line_or_leave_a_revision(db, users):
+    line = _inquiry(db, users.seller, users.part)
+    row = _price(db, users.buyer, line, "40")
+    offer_id = row["price"]["offer_id"]
+    offer = db.get(PresalesOffer, offer_id)
+    original = (offer.version, offer.revision_no, offer.unit_price, line.version)
+    buyer, line_id = _client(users.buyer), line.id
+    with ThreadPoolExecutor(max_workers=1) as runner:
+        with Session(engine) as editing:
+            editing.execute(select(PresalesInquiryLine.id).where(PresalesInquiryLine.id == line_id).with_for_update())
+            request = runner.submit(buyer.patch, f"/api/presales/offers/{offer_id}",
+                                    json={"expected_version": offer.version, "unit_price": 51})
+            result = request.result(timeout=10)
+            assert result.status_code == 409 and result.json()["detail"]["code"] == "concurrent_write"
+    db.expire_all()
+    assert (offer.version, offer.revision_no, offer.unit_price, line.version) == original
+    assert buyer.patch(f"/api/presales/offers/{offer_id}",
+                       json={"expected_version": offer.version, "unit_price": 51}).status_code == 200
+
+
+def test_legacy_reply_without_a_price_rejects_stale_pool_write(db, users):
+    line = _inquiry(db, users.seller, users.part)
+    base = line.version
+    buyer = _client(users.buyer)
+    answered = buyer.post(f"/api/presales/inquiries/{line.inquiry_id}/reply", json={
+        "expected_version": 1, "line_responses": [{"line_id": line.id, "mode": "skip", "reason": "已停产"}]})
+    assert answered.status_code == 200, answered.text
+    stale = _client(users.peer).put(f"/api/presales/pool/lines/{line.id}/price",
+                                    json={"expected_version": base, "unit_price": "99"})
+    assert stale.status_code == 409
+    latest = stale.json()["detail"]["latest"]
+    assert (latest["line_version"], latest["answer_state"], latest["answer_reason"]) == (base + 1, "skip", "已停产")
+    db.refresh(line)
+    assert line.version == base + 1 and line.current_offer_id is None
 
 
 def test_concurrent_same_line_has_one_winner_and_other_lines_do_not_block(db, users):
