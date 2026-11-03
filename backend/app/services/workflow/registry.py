@@ -55,6 +55,7 @@ class SubjectSpec:
     access_permission: str | None = None
     badge_subject_ids: Callable | None = None
     filter_items: Callable | None = None
+    can_view_subjects: Callable[[Session, Sequence[int], UserContext], dict[int, bool]] | None = None
 
 
 _specs: dict[str, SubjectSpec] = {}

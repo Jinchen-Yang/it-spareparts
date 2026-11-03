@@ -20,6 +20,13 @@ def _can_view(db, inquiry_id, ctx):
     return can_view_inquiry(db, inquiry_id, ctx)
 
 
+def _can_view_many(db, inquiry_ids, ctx):
+    from app.services.presales.visibility import inquiry_access_batch
+    rows = list(db.scalars(select(PresalesInquiry).where(PresalesInquiry.id.in_(inquiry_ids))))
+    access = inquiry_access_batch(db, rows, ctx)
+    return {inquiry_id: flags["visible"] for inquiry_id, flags in access.items()}
+
+
 def _summarize(db, inquiry_ids, ctx):
     from app.services.presales.visibility import inquiry_view
     result = {}
@@ -194,6 +201,7 @@ def register_subjects():
             validate_complete=_validate_complete,
             can_manage_subject=_can_manage,
             access_permission="page_presales",
+            can_view_subjects=_can_view_many,
         ))
     if "presales_offer_notice" not in specs:
         register("presales_offer_notice", SubjectSpec(

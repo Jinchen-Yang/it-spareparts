@@ -89,6 +89,65 @@ describe("行答复推导", () => {
 describe("报价页", () => {
   const renderQuote = () => render(<MemoryRouter><QuotePage /></MemoryRouter>);
 
+  it("历史待办和详情仍在加载时先显示活动单，历史补齐不会覆盖已填价格", async () => {
+    let resolveHistory!: (value: { items: WorkItem[]; total: number; page: number; page_size: number; can_supervise: boolean }) => void;
+    let resolveDetail!: (value: Inquiry) => void;
+    const historical = { ...inquiry, id: 2, inquiry_no: "XJ-HISTORY", lines: [{ ...inquiry.lines![0],
+      id: 21, inquiry_id: 2, pn_raw: "PN-HISTORY" }], work_items: [{ ...inquiry.work_items![0], id: 72 }] };
+    mocks.listWorkItems.mockImplementation(({ tab }: { tab: string }) => tab === "done"
+      ? new Promise((resolve) => { resolveHistory = resolve; })
+      : Promise.resolve({ items: tab === "claimed" ? [task] : [], total: tab === "claimed" ? 1 : 0,
+        page: 1, page_size: 100, can_supervise: false }));
+    mocks.getInquiry.mockImplementation((id: number) => id === 2
+      ? new Promise((resolve) => { resolveDetail = resolve; }) : Promise.resolve(inquiry));
+    renderQuote();
+    const input = await screen.findByRole("spinbutton", { name: "PN-1 单价" });
+    expect(input.closest(".ant-spin-nested-loading")?.querySelector(".ant-spin-spinning")).toBeNull();
+    expect(screen.getByText(/待办已显示，正在补充历史报价/)).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: "321" } });
+    await act(async () => { resolveHistory({ items: [{ ...task, id: 72, subject_id: 2, status: "done" }],
+      total: 1, page: 1, page_size: 100, can_supervise: false }); });
+    await waitFor(() => expect(mocks.getInquiry).toHaveBeenCalledWith(2));
+    expect(Number((input as HTMLInputElement).value)).toBe(321);
+    await act(async () => { resolveDetail(historical); });
+    // 历史列表可能滞后，详情仍有待处理行时不可被丢弃。
+    expect(await screen.findByRole("spinbutton", { name: "PN-HISTORY 单价" })).toBeInTheDocument();
+    expect(Number((screen.getByRole("spinbutton", { name: "PN-1 单价" }) as HTMLInputElement).value)).toBe(321);
+    await waitFor(() => expect(screen.queryByText(/正在补充历史报价/)).not.toBeInTheDocument());
+  });
+
+  it("历史加载失败单独提示，已加载的活动单仍可填写保存", async () => {
+    mocks.listWorkItems.mockImplementation(async ({ tab }: { tab: string }) => {
+      if (tab === "done") throw new Error("history unavailable");
+      return { items: tab === "claimed" ? [task] : [], total: tab === "claimed" ? 1 : 0,
+        page: 1, page_size: 100, can_supervise: false };
+    });
+    renderQuote();
+    expect(await screen.findByText(/历史报价未全部加载/)).toBeInTheDocument();
+    const input = screen.getByRole("spinbutton", { name: "PN-1 单价" });
+    expect(input).toBeEnabled();
+    fireEvent.change(input, { target: { value: "123" } });
+    expect(within(input.closest("tr")!).getByRole("button", { name: /^保\s?存$/ })).toBeEnabled();
+    expect(screen.queryByText("报价行加载失败")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "待报价 2+" })).toBeInTheDocument();
+  });
+
+  it("离开报价页后不再启动下一批历史详情请求", async () => {
+    const pending: Array<(value: Inquiry) => void> = [];
+    const history = Array.from({ length: 9 }, (_, index) => ({ ...task, id: 100 + index,
+      subject_id: 100 + index, status: "done" as const }));
+    mocks.listWorkItems.mockImplementation(async ({ tab }: { tab: string }) => ({
+      items: tab === "done" ? history : [], total: tab === "done" ? history.length : 0,
+      page: 1, page_size: 100, can_supervise: false,
+    }));
+    mocks.getInquiry.mockImplementation(() => new Promise((resolve) => { pending.push(resolve); }));
+    const view = renderQuote();
+    await waitFor(() => expect(mocks.getInquiry).toHaveBeenCalledTimes(6));
+    view.unmount();
+    await act(async () => { pending.forEach((resolve) => resolve(inquiry)); });
+    expect(mocks.getInquiry).toHaveBeenCalledTimes(6);
+  });
+
   it("询价人前置、行内填价；整单未填完只存草稿不回复", async () => {
     mocks.saveOffer.mockImplementation(async () => { inquiry = { ...inquiry, offers: [offer({ status: "draft", valid_from: null })] }; return inquiry.offers![0]; });
     renderQuote();

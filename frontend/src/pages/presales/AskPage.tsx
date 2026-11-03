@@ -240,10 +240,8 @@ function MyInquiries({ refreshKey }: { refreshKey: number }) {
     setLoading(true); setFailed(false);
     try {
       const result = await presales.listInquiries({ kind: "sales_inquiry", scope: "mine", page, page_size: PAGE_SIZE, sort: "updated_at", dir: "desc", ...(query.trim() ? { q: query.trim() } : {}) });
-      const details = await Promise.allSettled(result.items.map((item) => presales.getInquiry(item.id)));
       if (current !== generation.current) return;
-      setItems(details.map((detail, index) => detail.status === "fulfilled"
-        ? retainCustomerName(detail.value, result.items[index]) : result.items[index]));
+      setItems(result.items);
       setTotal(result.total);
     } catch (error) {
       if (current === generation.current) { setFailed(true); await handleError(error); }

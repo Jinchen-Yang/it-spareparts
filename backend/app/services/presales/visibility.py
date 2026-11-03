@@ -46,6 +46,46 @@ def can_view_inquiry(db, inquiry, ctx):
     return shared_role and _allowed(db, inquiry.offer_audience_rule_id, ctx, inquiry.created_by)
 
 
+def inquiry_access_batch(db, inquiries, ctx):
+    """请求内批量准入；保留历史参与关系，不缓存或替代写入前复核。"""
+    inquiries = list(inquiries)
+    result = {row.id: {"visible": False, "assigned": False} for row in inquiries}
+    if not inquiries or not work_items.has_permission(ctx, "page_presales"):
+        return result
+    user, ctx = resolve_actor(db, ctx)
+    if not work_items.has_permission(ctx, "page_presales"):
+        return result
+    participation = work_items.participation_batch(
+        db, "presales_inquiry", [row.id for row in inquiries if row.created_by != user.id], ctx,
+    )
+    bypassed = bypass(ctx)
+    shared_sales = work_items.has_permission(ctx, "action_presales_inquire")
+    shared_buyer = work_items.has_permission(ctx, "action_presales_quote")
+    shared = []
+    for row in inquiries:
+        flags = participation.get(row.id, {})
+        result[row.id]["assigned"] = flags.get("assigned", False)
+        if bypassed or row.created_by == user.id:
+            result[row.id]["visible"] = True
+        elif row.status != "draft":
+            if flags.get("assigned") or flags.get("unclaimed"):
+                result[row.id]["visible"] = True
+            elif row.submitted_at is not None and (
+                shared_sales or (row.kind == "proactive_offer" and shared_buyer)
+            ):
+                shared.append(row)
+    if shared:
+        authors = dict(db.execute(select(SysUser.id, SysUser.username).where(
+            SysUser.id.in_({row.created_by for row in shared}))).all())
+        markers = {row.id: True for row in shared}
+        rules = {row.id: (row.offer_audience_rule_id, authors.get(row.created_by, ""))
+                 for row in shared}
+        visible = audience.filter_fields(db, [markers], ctx, field_rules=rules, bypass=bypass)[0]
+        for inquiry_id in visible:
+            result[inquiry_id]["visible"] = True
+    return result
+
+
 def _offer_batch(db, offers, ctx, *, fields):
     """一次准入与字段过滤；所有中间索引仅在本次调用内存在。"""
     offers = list(offers)
@@ -209,7 +249,7 @@ def pinned_offer_view(db, offer_id, revision_no, ctx):
             view["latest"] = {key: latest[key] for key in ("unit_price", "is_tax_inclusive", "revision_no", "price_basis")}
     return view
 
-def inquiry_view(db, inquiry, ctx, *, detail=True):
+def inquiry_view(db, inquiry, ctx, *, detail=True, summary=False):
     if not can_view_inquiry(db, inquiry, ctx):
         raise Forbidden("无权查看该询价单")
     user, ctx = resolve_actor(db, ctx)
@@ -346,14 +386,16 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
             "offer_audience": (inquiry.offer_audience_rule_id, author),
             "notes_audience": (inquiry.notes_audience_rule_id, author),
         }, ctx, bypass=bypass))
-        line_rules = audience.read_rules(db, {
-            line.id: (line.notes_audience_rule_id, author) for line in lines
-        }, ctx, bypass=bypass)
         header_subject = field_pool.Subject("presales_inquiry", f"inquiry:{inquiry.id}", "header")
         result["field_values"] = field_pool.read_values(db, [header_subject], ctx, bypass, include_rules=True).get(
             header_subject.subject_id, [])
+    if detail or summary:
+        line_rules = audience.read_rules(db, {
+            line.id: (line.notes_audience_rule_id, author) for line in lines
+        }, ctx, bypass=bypass) if detail else {}
         line_subjects = [field_pool.Subject("presales_inquiry", f"line:{line.id}", "line") for line in lines]
-        values = field_pool.read_values(db, line_subjects, ctx, bypass, include_rules=True) if lines else {}
+        # 历史交期可能仍存于自定义字段，摘要也必须读取经过权限过滤的值。
+        values = field_pool.read_values(db, line_subjects, ctx, bypass, include_rules=detail) if lines else {}
         result["lines"] = []
         for line in lines:
             row = {col.name: getattr(line, col.name) for col in line.__table__.columns
@@ -365,7 +407,8 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
             from app.services.presales.inquiries import delivery_value
             visible_fields = values.get(f"line:{line.id}", [])
             row["expected_delivery"] = delivery_value(line, visible_fields)
-            row["field_values"] = [field for field in visible_fields if field["name"] != "期望交期"]
+            if detail:
+                row["field_values"] = [field for field in visible_fields if field["name"] != "期望交期"]
             if line.id in line_references:
                 ref = line_references[line.id]
                 row["ref_offer"] = ref
@@ -375,10 +418,11 @@ def inquiry_view(db, inquiry, ctx, *, detail=True):
                 if link.line_id == line.id and link_references[(link.line_id, link.offer_id)] is not None]
             row["linked_offers"] = [link_references[(link.line_id, link.offer_id)] for link in links
                 if link.line_id == line.id and link_references[(link.line_id, link.offer_id)] is not None]
-            row["field_template"] = [{"id": f.id, "name": f.name, "value_type": f.value_type,
-                                       "choices": f.choices} for f in field_pool.template_for(
-                db, "presales_inquiry", "line", ctx,
-                anchor=f"part:{line.part_id}" if line.part_id else None) if f.name != "期望交期"]
+            if detail:
+                row["field_template"] = [{"id": f.id, "name": f.name, "value_type": f.value_type,
+                                           "choices": f.choices} for f in field_pool.template_for(
+                    db, "presales_inquiry", "line", ctx,
+                    anchor=f"part:{line.part_id}" if line.part_id else None) if f.name != "期望交期"]
             result["lines"].append(row)
         result["offers"] = offers
         if inquiry.won_offer_id is not None:
