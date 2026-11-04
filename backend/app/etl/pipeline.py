@@ -679,6 +679,27 @@ def transform_workbook(loaded: LoadedWorkbook) -> TransformedWorkbook:
     return TransformedWorkbook(result, extra_report, list(primary.df.columns))
 
 
+def _persist_import_errors(session: Session, batch_id: int, errors) -> None:
+    """把行级错误写入批次明细。raw_row 只留单元格；identity 另存归一身份。"""
+    for error in errors:
+        raw_row = error.raw_row
+        if error.identity:
+            raw_row = {
+                **(raw_row or {}),
+                "_identity": {
+                    key: (value if value is None or isinstance(value, (int, str)) else str(value))
+                    for key, value in error.identity.items()
+                },
+            }
+        session.add(SysImportError(
+            batch_id=batch_id,
+            row_no=error.row_no,
+            error_type=error.error_type,
+            error_detail=error.error_detail,
+            raw_row=raw_row,
+        ))
+
+
 def run_import(session: Session, file_path: str, original_name: str,
                uploaded_by: str | None = None, mode: str = "skip",
                import_job_id: int | None = None,
@@ -776,20 +797,10 @@ def run_import(session: Session, file_path: str, original_name: str,
                 "captured_at": datetime.now(timezone.utc).isoformat(),
             })
 
-        # 错误行入 sys_import_error（失败批次也保留，便于按行修正）
-        for e in result.errors:
-            raw_row = e.raw_row
-            if e.identity:
-                # raw_row 只读本行原始单元格：延续行几乎全空、§17.3 宽松列
-                # （单号/序号/报销金额）不在 full_map 里。identity 是 gvh 归一后
-                # 的那份，留痕以它为准。
-                raw_row = {**(raw_row or {}),
-                           "_identity": {k: (v if v is None or isinstance(v, (int, str))
-                                             else str(v))
-                                         for k, v in e.identity.items()}}
-            session.add(SysImportError(batch_id=batch.id, row_no=e.row_no,
-                                       error_type=e.error_type, error_detail=e.error_detail,
-                                       raw_row=raw_row))
+        # 错误行入 sys_import_error（失败批次也保留，便于按行修正）。
+        # 装载期才发现的行（例如销售单多项目归属）在 load 之后补记。
+        recorded_error_count = len(result.errors)
+        _persist_import_errors(session, batch.id, result.errors)
 
         # 数据库写入前统一门禁：重复明细冲突保守整批拒绝；全部数据行被拒且没有
         # 可接受事实（明细或单头）时不得显示成功。放在 loader.load 之前，异常只
@@ -882,6 +893,10 @@ def run_import(session: Session, file_path: str, original_name: str,
                 raise
         else:
             counts = _load()
+        if len(result.errors) > recorded_error_count:
+            _persist_import_errors(
+                session, batch.id, result.errors[recorded_error_count:],
+            )
 
         storage_path = _archive(file_path, file_hash)
         session.add(SysRawFile(batch_id=batch.id, filename=original_name,
@@ -966,6 +981,10 @@ def run_import(session: Session, file_path: str, original_name: str,
             )
         if auto_assignment is not None:
             report["auto_assignment"] = auto_assignment
+        if counts.get("xsdd_reassignments"):
+            report["xsdd_reassignments"] = counts["xsdd_reassignments"]
+        if counts.get("xsdd_project_conflicts"):
+            report["xsdd_project_conflicts"] = counts["xsdd_project_conflicts"]
         if sales_project_sync is not None:
             report["maintenance_sales_project_sync"] = sales_project_sync
         batch.rows_total = counts["source_rows_total"]

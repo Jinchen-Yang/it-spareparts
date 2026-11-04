@@ -10,7 +10,7 @@ import time
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import desc, func, select, update
-from sqlalchemy.exc import DataError
+from sqlalchemy.exc import DBAPIError, DataError
 from sqlalchemy.orm import Session
 
 from app.auth import current_role
@@ -25,6 +25,10 @@ from app.security import (
     require_page,
 )
 from app.services import inventory, maintenance_cost, master_data, profit
+from app.services.maintenance_project_identity import (
+    XSDD_SINGLE_OWNER_PUBLIC_MESSAGE,
+    is_xsdd_single_owner_violation,
+)
 from app.etl import expense_void, loader, pipeline, precheck as import_precheck
 from app.services import import_void_preview
 from app.etl.reader import ReaderError
@@ -300,6 +304,15 @@ def upload(
                 status.HTTP_422_UNPROCESSABLE_ENTITY,
                 "文件中存在超出字段范围的数据（如金额过大或文本过长），整批未导入，请修正后重试。"
             ) from exc
+        except DBAPIError as exc:
+            if not is_xsdd_single_owner_violation(exc):
+                raise
+            db.rollback()
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                XSDD_SINGLE_OWNER_PUBLIC_MESSAGE,
+                headers={"X-Error-Code": "xsdd_single_owner"},
+            ) from exc
         post_recompute_stats = _post_import_refresh(
             db, batch.file_type in ("purchase", "sales"),
             batch.file_type in ("purchase", "inventory"),
@@ -386,6 +399,35 @@ def _short_err(exc: Exception) -> str:
     return _INTERNAL_IMPORT_ERROR
 
 
+def _xsdd_mount_job_note(filename: str, report: dict | None) -> str | None:
+    """上传人在作业说明里能看到改挂了哪些需求单，以及哪些行没导入。"""
+    report = report or {}
+    rows = list(report.get("xsdd_reassignments") or [])
+    conflicts = int(report.get("xsdd_project_conflicts") or 0)
+    if not rows and not conflicts:
+        return None
+    parts: list[str] = []
+    if rows:
+        shown = []
+        for row in rows[:8]:
+            old_project = row.get("old_project_name") or row.get("old_project_id") or "未挂项目"
+            new_project = row.get("new_project_name") or row.get("new_project_id") or ""
+            shown.append(
+                f"{row.get('order_no') or row.get('raw_order_id')}："
+                f"销售单 {row.get('old_xsdd') or '（空）'}（{old_project}）"
+                f"改为 {row.get('new_xsdd') or '（空）'}（{new_project}）"
+            )
+        extra = f"；另有 {len(rows) - 8} 张" if len(rows) > 8 else ""
+        parts.append(
+            f"已按上传需求单改挂 {len(rows)} 张到销售单所属项目："
+            + "；".join(shown)
+            + extra
+        )
+    if conflicts:
+        parts.append(f"{conflicts} 行因销售单同时归属多个项目未导入，详见批次错误明细")
+    return f"{filename}：" + "。".join(parts)
+
+
 def _public_job_note(note: str | None) -> str | None:
     """清理导入作业对外 note，兼容旧版本已落库的完整数据库异常。
 
@@ -430,8 +472,11 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                     require_void_preview=True,
                 )
                 _maintenance_recompute_in_import_transaction(db, batch.file_type)
+                mount_note = _xsdd_mount_job_note(name, batch.report_json)
                 db.commit()
                 done += 1
+                if mount_note:
+                    notes.append(mount_note)
                 did_ps = did_ps or batch.file_type in ("purchase", "sales")
                 did_pi = did_pi or batch.file_type in ("purchase", "inventory")
             except pipeline.DuplicateFileError as exc:
@@ -462,7 +507,10 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                 db.rollback()
                 errored += 1
                 _log.exception("import job=%s file=%s failed", job_id, name)
-                notes.append(f"导入异常：{name}（{_short_err(exc)}）")
+                if is_xsdd_single_owner_violation(exc):
+                    notes.append(f"销售单归属冲突：{name}（{XSDD_SINGLE_OWNER_PUBLIC_MESSAGE}）")
+                else:
+                    notes.append(f"导入异常：{name}（{_short_err(exc)}）")
             finally:
                 if os.path.exists(tmp):
                     os.remove(tmp)

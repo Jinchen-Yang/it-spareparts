@@ -302,3 +302,66 @@ def test_excluded_warehouse_rows_skipped():
     assert res.rows_excluded_warehouse == 2
     assert [r["raw_inventory_id"] for r in res.inventory] == ["I1"]
     assert not res.errors
+
+
+def test_import_job_maps_xsdd_check_violation_to_chinese(db, tmp_path, monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+
+    from app.services.maintenance_project_identity import XSDD_SINGLE_OWNER_PUBLIC_MESSAGE
+
+    path = tmp_path / "broken.xlsx"
+    path.write_bytes(b"not really an xlsx")
+
+    class _Diag:
+        constraint_name = "ck_maintenance_project_xsdd_single_owner"
+
+    class _Orig(Exception):
+        sqlstate = "23514"
+        diag = _Diag()
+
+        def __str__(self) -> str:
+            return (
+                "XSDD XSDD-20260616-0013 already belongs to another or multiple projects"
+            )
+
+    def _boom(*_args, **_kwargs):
+        raise IntegrityError("SELECT secret", {}, _Orig())
+
+    monkeypatch.setattr("app.api.imports.pipeline.run_import", _boom)
+    job_id = _new_job(db, mode="upsert")
+    _process_import_job(job_id, [(str(path), "10.1-10.15需求单.xlsx")], "upsert", "xsdd")
+    note = db.get(SysImportJob, job_id).note or ""
+    assert XSDD_SINGLE_OWNER_PUBLIC_MESSAGE in note
+    assert "系统处理异常" not in note
+    assert "SELECT" not in note
+    assert "psycopg" not in note.casefold()
+    assert "23514" not in note
+
+
+def test_import_job_note_lists_xsdd_reassignments(db, tmp_path, monkeypatch):
+    path = tmp_path / "ok.xlsx"
+    path.write_bytes(b"placeholder")
+
+    class _Batch:
+        file_type = "other"
+        report_json = {
+            "xsdd_reassignments": [{
+                "order_no": "WBDD-20261002-0010",
+                "old_xsdd": "XSDD-20250421-0034",
+                "old_project_name": "原项目",
+                "new_xsdd": "XSDD-20260616-0013",
+                "new_project_name": "新项目",
+            }],
+            "xsdd_project_conflicts": 2,
+        }
+
+    monkeypatch.setattr("app.api.imports.pipeline.run_import", lambda *_a, **_k: _Batch())
+    job_id = _new_job(db, mode="upsert")
+    _process_import_job(job_id, [(str(path), "10.17-10.24需求单.xlsx")], "upsert", "xsdd")
+    job = db.get(SysImportJob, job_id)
+    assert job.status == "done" and job.error_files == 0
+    assert "WBDD-20261002-0010" in (job.note or "")
+    assert "XSDD-20250421-0034" in job.note
+    assert "XSDD-20260616-0013" in job.note
+    assert "原项目" in job.note and "新项目" in job.note
+    assert "2 行因销售单同时归属多个项目未导入" in job.note

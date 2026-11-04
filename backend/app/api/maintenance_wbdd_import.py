@@ -9,6 +9,7 @@ import logging
 import os
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Response, status
+from sqlalchemy.exc import DBAPIError
 from fastapi import UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
@@ -17,6 +18,10 @@ from app.api.imports import _save_upload_to_temp
 from app.auth import current_identity, current_role
 from app.db import get_db
 from app.etl import loader, pipeline
+from app.services.maintenance_project_identity import (
+    XSDD_SINGLE_OWNER_PUBLIC_MESSAGE,
+    is_xsdd_single_owner_violation,
+)
 from app.etl.reader import ReaderError
 from app.maintenance_boss import require_maintenance_boss
 from app.security import (
@@ -121,6 +126,17 @@ def upload_wbdd(
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 {"code": "reader_error", "message": str(exc)},
+            ) from exc
+        except DBAPIError as exc:
+            if not is_xsdd_single_owner_violation(exc):
+                raise
+            db.rollback()
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                {
+                    "code": "xsdd_single_owner",
+                    "message": XSDD_SINGLE_OWNER_PUBLIC_MESSAGE,
+                },
             ) from exc
         return {**report, "replayed": replayed}
     finally:

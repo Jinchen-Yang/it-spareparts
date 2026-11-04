@@ -697,7 +697,8 @@ export default function ImportPage() {
             )}
             <Descriptions bordered column={2} size="small" style={{ marginBottom: 12 }}>
               {Object.entries(detail.report || {})
-                .filter(([k, v]) => k !== "errors_preview" && k !== "missing_price_columns" && v != null
+                .filter(([k, v]) => k !== "errors_preview" && k !== "missing_price_columns"
+                  && k !== "xsdd_reassignments" && k !== "xsdd_project_conflicts" && v != null
                   && !(detail.file_type === "maintenance" && WBDD_FEEDBACK_KEYS.has(k)))
                 .map(([k, v]) => (
                   <Descriptions.Item key={k} label={REPORT_LABEL[k] ?? k}>{reportValue(k, v)}</Descriptions.Item>
