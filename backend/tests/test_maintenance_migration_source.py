@@ -130,18 +130,22 @@ def _seed_project_facts(db):
     db.commit()
 
 
+_WAREHOUSE_THROUGH_UNSET = object()
+
+
 def _build(
     db,
     *,
     historical_mode="approved_cost_baseline",
     warehouse_ready=True,
-    warehouse_ready_through=None,
+    warehouse_ready_through=_WAREHOUSE_THROUGH_UNSET,
     warehouse_ambiguities=(),
     as_of=None,
     legacy_business_as_of=None,
 ):
     frozen_as_of = as_of or migration_source.business_today()
-    if warehouse_ready_through is None:
+    # 未传才在调用时取业务日。显式 None 表示水位未签，不能在导入时绑死，也不能改写成当天。
+    if warehouse_ready_through is _WAREHOUSE_THROUGH_UNSET:
         warehouse_ready_through = frozen_as_of
     baseline = {
         "amount_ex_tax": "100",
