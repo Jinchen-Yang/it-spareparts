@@ -35,6 +35,7 @@ describe("parseSalesAnalyticsUrl：默认与容错", () => {
       orderId: null,
       // D-44 新键默认
       customers: [], customerTypes: [], salespeople: [], categories: [], brands: [],
+      orderNo: "",
       amountBasis: "amount_ex_tax", amountMin: null, amountMax: null,
       includeNegative: true, includeEmpty: true, order: "desc", tab: "orders",
       groupBy: "customer", groupSort: "amount_ex_tax", groupOrder: "desc", groupTop: 20,

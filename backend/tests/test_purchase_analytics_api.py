@@ -893,7 +893,8 @@ def test_options_customers_default_cap_is_200(db):
 # ---------------------------------------------------------------- 权限矩阵
 
 ENDPOINTS = ("/api/purchases/analytics/options", "/api/purchases/analytics/summary",
-             "/api/purchases/analytics/orders", "/api/purchases/analytics/orders/1")
+             "/api/purchases/analytics/orders", "/api/purchases/analytics/orders/export",
+             "/api/purchases/analytics/pn-boards", "/api/purchases/analytics/orders/1")
 
 
 @pytest.mark.parametrize("role,expected", [
@@ -1143,3 +1144,75 @@ def test_order_detail_id_out_of_bounds_422(boss, ds, oid):
 def test_order_detail_id_at_upper_bound_404(boss, ds):
     r = boss.get(f"/api/purchases/analytics/orders/{PG_INT_MAX}")
     assert r.status_code == 404, r.text
+
+
+def test_group_by_pn_pages_sum_to_line_kpi(boss, ds):
+    first = _summary(boss, group_by="pn", groups_page_size=1, groups_page=1)
+    assert first["basis_mode"] == "line"
+    assert first["total_groups"] == 3
+    assert len(first["groups"]) == 1
+    paid = lines = 0
+    keys = []
+    for page in (1, 2, 3):
+        part = _summary(boss, group_by="pn", groups_page_size=1, groups_page=page)
+        group = part["groups"][0]
+        keys.append(group["key"])
+        paid += group["amount_paid"]
+        lines += group["lines"]
+    assert set(keys) == {"PN-DQ", "PN-FL", "PN-JX"}
+    assert lines == first["kpi"]["lines"]
+    assert paid == pytest.approx(first["kpi"]["amount_paid"])
+    full = {g["key"]: g for g in _summary(boss, group_by="pn", groups_page_size=50)["groups"]}
+    assert full["PN-DQ"]["amount_paid"] == pytest.approx(2760.0)
+    assert "PN-RES" not in full
+
+
+def test_pn_drill_keeps_header_amount_and_filters_lines(boss, ds):
+    listed = _orders(boss, group_by="pn", group_key="PN-DQ")
+    assert listed["basis_mode"] == "line"
+    assert listed["items"]
+    for item in listed["items"]:
+        assert item["products"]
+        assert {p["pn_std"] for p in item["products"]} == {"PN-DQ"}
+    detail = boss.get(f"/api/purchases/analytics/orders/{ds.poa.id}", params={"pn": "PN-DQ"})
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert [ln["pn_std"] for ln in body["lines"]] == ["PN-DQ"]
+    assert body["category_matched"]["amount_paid"] == pytest.approx(500.0)
+    assert body["amount_paid"] == pytest.approx(1130.0)
+
+
+def test_pn_boards_only_two_source_types(boss, ds):
+    data = boss.get("/api/purchases/analytics/pn-boards").json()
+    by_type = {board["source_type"]: board for board in data["boards"]}
+    assert set(by_type) == {"维保需求", "销售订单"}
+    sales = {item["key"]: item for item in by_type["销售订单"]["items"]}
+    assert sales["PN-FL"]["amount_paid"] == pytest.approx(1630.0)
+    assert sales["PN-DQ"]["amount_paid"] == pytest.approx(1560.0)
+    assert by_type["维保需求"]["empty_reason"] is None
+    assert by_type["维保需求"]["items"] == []
+    excluded = boss.get(
+        "/api/purchases/analytics/pn-boards", params={"source_type": ["指定采购"]},
+    ).json()
+    assert all(board["empty_reason"] == "source_type_excluded" for board in excluded["boards"])
+    assert all(board["items"] == [] for board in excluded["boards"])
+
+
+def test_purchase_export_places_sales_order_beside_purchase_order(boss, ds):
+    import csv
+    import io
+    ds.poa.order_no = "=1+1"
+    ds.db.commit()
+    resp = boss.get("/api/purchases/analytics/orders/export", params={"order_no": "=1+1"})
+    assert resp.status_code == 200, resp.text
+    rows = list(csv.reader(io.StringIO(resp.content.decode("utf-8-sig"))))
+    assert rows[0][:3] == ["采购日期", "采购单号", "销售单号"]
+    assert rows[0][rows[0].index("采购类型")] == "采购类型"
+    assert "'=1+1" in rows[1][1]
+
+
+def test_purchase_export_over_limit_413(boss, ds, monkeypatch):
+    monkeypatch.setattr(purchase_analytics, "EXPORT_MAX_ORDERS", 1)
+    resp = boss.get("/api/purchases/analytics/orders/export")
+    assert resp.status_code == 413
+    assert b"PN-DQ" not in resp.content

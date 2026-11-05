@@ -18,9 +18,11 @@
   不受单头缺列影响。税率已标 → ``nominal_side=None``，两侧均非名义。
   ``nominal_inc_share`` = 实际按 13% 推算的含税额之和 ÷ 含税合计；
   ``nominal_ex_share`` = 实际按 13% 推算的不含税额之和 ÷ 不含税合计（分母 0/NULL → null）。
-- **单头批次行**：所有行级统计（行数、分类分组、行级三口径、订单明细行）只计
+- **单头批次行**：所有行级统计（行数、分类分组、PN 分组、PN 下钻、采购紧凑双榜、
+  行级三口径、订单明细行）只计
   ``f_purchase_line.import_batch_id = f_purchase_order.import_batch_id`` 的行——库里 11 张
   已生效单残留旧批次明细行（D-39 补充决策 2026-10-17），全行求和会比单头多算。
+  PN 分组与双榜见 D-0054。
 - 关联销售单按 ``order_no`` 先去重（同一 order_no 多张销售单取 id 最小一条，库中无唯一
   约束）再 LEFT JOIN，防一对多扩行；无关联销售单的采购单（如批量采购）在销售/客户维度
   归「（无关联销售单）」组，不丢。
@@ -55,9 +57,12 @@ NO_LINKED_LABEL = "（无关联销售单）"
 UNCATEGORIZED_LABEL = "未分类"
 EMPTY_LABEL = "(空)"
 
-GROUP_BY_KEYS = ("source_type", "purchaser", "salesperson", "customer", "category", "month", "day")
+GROUP_BY_KEYS = ("source_type", "purchaser", "salesperson", "customer", "category", "pn", "month", "day")
 SORT_KEYS = ("order_date", "amount_inc", "amount_ex", "amount_paid")
 MAX_PAGE_SIZE = 200
+EXPORT_MAX_ORDERS = 10000
+PN_BOARD_TOP = 20
+PN_BOARD_TYPES = (("maintenance_demand", "维保需求"), ("sales_order", "销售订单"))
 
 
 class FilterValidationError(ValueError):
@@ -321,7 +326,14 @@ def _group_dim(group_by: str, po=FPurchaseOrder, link=None, dp=DimPart):
         return func.coalesce(func.to_char(po.order_date, "YYYY-MM"), EMPTY_LABEL)
     if group_by == "day":
         return func.coalesce(func.to_char(po.order_date, "YYYY-MM-DD"), EMPTY_LABEL)
+    if group_by == "pn":
+        return func.coalesce(func.nullif(func.btrim(dp.pn_std), ""), EMPTY_LABEL)
     raise FilterValidationError(f"不支持的分组维度：{group_by}")
+
+
+def _uses_line_mode(category, group_by) -> bool:
+    """分类筛选，或按分类 / PN 分组：行级口径（D-39 / D-0054）。"""
+    return bool(category) or group_by in ("category", "pn")
 
 
 def _validate_common(date_from, date_to):
@@ -512,7 +524,8 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
             purchaser: list[str] | None = None, salesperson: list[str] | None = None,
             customer_id: list[int] | None = None, category: list[str] | None = None,
             group_by: str = "source_type", supplier: str | None = None,
-            order_no: str | None = None, linked_sales_order_no: str | None = None) -> dict:
+            order_no: str | None = None, linked_sales_order_no: str | None = None,
+            groups_page: int = 1, groups_page_size: int = 50) -> dict:
     """KPI + 分组汇总。分类筛选（或按分类分组）→ 行级口径（拆行只计匹配行）；
     其余 → 单头口径（实付取单头「采购金额」原值）。三套金额一次全部返回。
 
@@ -536,7 +549,7 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
     group_link = link if link is not None else (
         _sales_link_bounded(po_where) if group_by in ("salesperson", "customer") else None)
     category = _norm_categories(category)
-    line_mode = bool(category) or group_by == "category"
+    line_mode = _uses_line_mode(category, group_by)
     cat = _category_match(category)
     where = _base_where(po, link, date_from=date_from, date_to=date_to,
                         source_type=source_type, purchaser=purchaser,
@@ -603,10 +616,19 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
         grp_order = (func.count(func.distinct(po.id)).desc(), dim.asc().nullslast())
     else:
         grp_order = (func.sum(paid_e).desc().nullslast(), dim)
-    grp_rows = db.execute(
-        _apply_from(select(dim.label("key"), *measures), group_link).where(*where)
-        .group_by(dim).order_by(*grp_order)
-    ).all()
+    grp_base = (
+        _apply_from(select(dim.label("key"), *measures), group_link)
+        .where(*where).group_by(dim)
+    )
+    total_groups = db.scalar(select(func.count()).select_from(grp_base.subquery())) or 0
+    grp_stmt = grp_base.order_by(*grp_order)
+    # 只有 PN 分组分页送达（D-0054）。其他维度仍一次返回全部分组，分组合计=KPI。
+    page_out, size_out = 1, total_groups
+    if group_by == "pn":
+        page_out = max(1, int(groups_page or 1))
+        size_out = max(1, min(int(groups_page_size or 50), MAX_PAGE_SIZE))
+        grp_stmt = grp_stmt.limit(size_out).offset((page_out - 1) * size_out)
+    grp_rows = db.execute(grp_stmt).all()
     lines_by_key: dict[str, int] = {}
     if not line_mode:
         lines_by_key = {r.key: r.lines for r in db.execute(_lines_stmt(dim, group_link)).all()}
@@ -658,6 +680,9 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
             "nominal_ex_share": _share(kpi_row.nominal_ex, kpi_row.amount_ex),
         },
         "groups": groups,
+        "total_groups": total_groups,
+        "groups_page": page_out,
+        "groups_page_size": size_out,
         "groups_ranking_restricted": groups_ranking_restricted,
     }
 
@@ -665,7 +690,7 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
 # ---------------------------------------------------------------- orders 下钻
 
 def _page_context(db: Session, orders, user_ctx=None, *, category=None,
-                  group_category=None) -> dict[int, dict]:
+                  group_category=None, group_pn=None) -> dict[int, dict]:
     """页内批量读取产品/关联；一对多信息不参与单头金额查询。"""
     if not orders:
         return {}
@@ -702,6 +727,8 @@ def _page_context(db: Session, orders, user_ctx=None, *, category=None,
         stmt = stmt.where(cat)
     if group_category:
         stmt = stmt.where(_category_dim(dp) == group_category)
+    if group_pn:
+        stmt = stmt.where(_group_dim("pn", po, None, dp) == group_pn)
     for row in db.execute(stmt.order_by(pl.order_id, pl.line_no.asc().nulls_last(), pl.id)):
         result[row.order_id]["products"].append({
             "line_id": row.id, "pn_std": row.pn_std, "description": row.description,
@@ -717,7 +744,8 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
            linked_sales_order_no: str | None = None,
            group_by: str | None = None, group_key: str | None = None,
            sort: str = "order_date", order: str = "desc",
-           page: int = 1, page_size: int = 50) -> dict:
+           page: int = 1, page_size: int = 50,
+           allow_large_page: bool = False) -> dict:
     """分组下钻订单列表（分页 + 排序，同额/同日按 id 倒序稳定翻页）。
 
     group_by + group_key：把上一层分组值折成对应维度精确过滤（哨兵值
@@ -741,7 +769,10 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     if group_by is not None and group_by not in GROUP_BY_KEYS:
         raise FilterValidationError(f"不支持的分组维度：{group_by}")
     page = max(1, page)
-    page_size = max(1, min(page_size, MAX_PAGE_SIZE))
+    if allow_large_page:
+        page_size = max(1, page_size)
+    else:
+        page_size = max(1, min(page_size, MAX_PAGE_SIZE))
     # 结构性排序保护（pool.py 复审三轮先例）：被脱敏的金额不能当排序键运行——
     # 行序本身是隐藏金额排名的侧信道，apply_field_visibility 只置空值不改行序。
     # amount_* 同属 purchase_cost 组，一查即全遮。
@@ -764,7 +795,7 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     link = _sales_link_bounded(po_where) if needs_link else None
     # 分类分组（带或不带 group_key）一律行级口径，与 summary 同真值（对抗复审
     # 2026-10-17 确认项：无 group_key 时单头口径会与同参数 KPI 对不上账）
-    line_mode = bool(category) or group_by == "category"
+    line_mode = _uses_line_mode(category, group_by)
     cat = _category_match(category)
     where = _base_where(po, link, date_from=date_from, date_to=date_to,
                         source_type=source_type, purchaser=purchaser,
@@ -840,8 +871,10 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
         cust_names = (dict(db.execute(
             select(DimCustomer.id, DimCustomer.name_normalized)
             .where(DimCustomer.id.in_(cust_ids))).all()) if cust_ids else {})
-    context = _page_context(db, rows, user_ctx, category=category,
-                            group_category=group_key if group_by == "category" else None)
+    context = _page_context(
+        db, rows, user_ctx, category=category,
+        group_category=group_key if group_by == "category" else None,
+        group_pn=group_key if group_by == "pn" else None)
     items = []
     for r in rows:
         if link is not None:
@@ -882,7 +915,7 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
 # ---------------------------------------------------------------- 订单明细
 
 def order_detail(db: Session, order_id: int, user_ctx=None, *,
-                 category: list[str] | None = None) -> dict | None:
+                 category: list[str] | None = None, pn: str | None = None) -> dict | None:
     """采购模块自己的订单明细（不依赖 page_boss_board）：单头三口径 + **单头批次行**。
 
     残留旧批次行不出现在这里（D-39 补充决策）；订单不存在或不是已生效 → None。
@@ -893,6 +926,7 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
     if po is None or po.data_status != config.ACTIVE_STATUS:
         return None
     category = _norm_categories(category)
+    pn_key = pn.strip() if isinstance(pn, str) and pn.strip() else None
     ex, inc = order_amounts_reference(
         po.amount_ex_tax, po.amount_inc_tax, po.tax_rate, po.is_tax_inclusive)
 
@@ -922,6 +956,8 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
     )
     if cat is not None:
         stmt = stmt.where(cat)
+    if pn_key:
+        stmt = stmt.where(_group_dim("pn", po, None, dp) == pn_key)
     stmt = stmt.order_by(pl.line_no.asc().nullslast(), pl.id)
     lines = []
     matched_paid = matched_inc = matched_ex = Decimal(0)
@@ -955,14 +991,14 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
             po.tax_rate, po.is_tax_inclusive, po.amount_ex_tax, po.amount_inc_tax),
         "amount_ex": _f(ex), "amount_inc": _f(inc),
         "amount_paid": _f(po.amount_inc_tax),
-        **_page_context(db, [po], user_ctx, category=category)[po.id],
+        **_page_context(db, [po], user_ctx, category=category, group_pn=pn_key)[po.id],
         "salesperson": link_row.salesperson if link_row else None,
         "customer_id": link_row.customer_id if link_row else None,
         "customer": link_row.name_normalized if link_row else None,
         "lines_count": len(lines),
         "lines": lines,
     }
-    if cat is not None:
+    if cat is not None or pn_key:
         data["category_matched"] = {
             "lines": len(lines),
             "amount_inc": _f(_round2(matched_inc)),
@@ -970,3 +1006,127 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
             "amount_paid": _f(_round2(matched_paid)),
         }
     return data
+
+
+def export_orders(db: Session, user_ctx=None, **kwargs) -> tuple[int, list[dict]]:
+    """与订单列表同筛选、同排序、同一行集。超过上限只返回总数，由 API 拒绝。
+
+    不把列表 ``page_size`` 上限抬到 10000；导出走 ``allow_large_page``。
+    """
+    probe = orders(db, user_ctx, page=1, page_size=1, **kwargs)
+    total = probe["total"]
+    if total > EXPORT_MAX_ORDERS or total == 0:
+        return total, []
+    data = orders(db, user_ctx, page=1, page_size=total, allow_large_page=True, **kwargs)
+    return total, data["items"]
+
+
+def _board_query(db: Session, user_ctx, *, source_type: str, filters: dict):
+    """某一采购类型原文下的 PN 行级全集与 Top20。分类与其它筛选按行取交集。"""
+    po, pl, dp = FPurchaseOrder, FPurchaseLine, DimPart
+    narrowed = dict(filters)
+    narrowed["source_type"] = [source_type]
+    category = _norm_categories(narrowed.get("category"))
+    salesperson = narrowed.get("salesperson")
+    customer_id = narrowed.get("customer_id")
+    po_where = _base_where(
+        po, None, date_from=narrowed.get("date_from"), date_to=narrowed.get("date_to"),
+        source_type=[source_type], purchaser=narrowed.get("purchaser"),
+        salesperson=None, customer_id=None, supplier=narrowed.get("supplier"),
+        order_no=narrowed.get("order_no"),
+        linked_sales_order_no=narrowed.get("linked_sales_order_no"))
+    link = _sales_link_bounded(po_where) if (salesperson or customer_id) else None
+    where = _base_where(
+        po, link, date_from=narrowed.get("date_from"), date_to=narrowed.get("date_to"),
+        source_type=[source_type], purchaser=narrowed.get("purchaser"),
+        salesperson=salesperson, customer_id=customer_id, supplier=narrowed.get("supplier"),
+        order_no=narrowed.get("order_no"),
+        linked_sales_order_no=narrowed.get("linked_sales_order_no"))
+    cat = _category_match(category)
+    if cat is not None:
+        where.append(cat)
+    dim = _group_dim("pn", po, link, dp)
+    paid_e = pl.line_amount
+    cost_hidden = security.is_field_hidden(user_ctx, "amount_paid")
+    universe = db.execute(
+        _link_join(
+            select(
+                func.count(func.distinct(po.id)).label("orders"),
+                func.count(pl.id).label("lines"),
+                func.sum(paid_e).label("amount_paid"),
+            ).select_from(po).join(pl, _batch_line_join(po, pl)).join(dp, pl.part_id == dp.id),
+            po, link,
+        ).where(*where)
+    ).one()
+    order_by = (
+        (func.count(pl.id).desc(), dim.asc().nullslast())
+        if cost_hidden else
+        (func.sum(paid_e).desc().nullslast(), dim.asc().nullslast())
+    )
+    rows = db.execute(
+        _link_join(
+            select(
+                dim.label("key"),
+                func.count(func.distinct(po.id)).label("orders"),
+                func.count(pl.id).label("lines"),
+                func.sum(paid_e).label("amount_paid"),
+            ).select_from(po).join(pl, _batch_line_join(po, pl)).join(dp, pl.part_id == dp.id),
+            po, link,
+        ).where(*where).group_by(dim).order_by(*order_by).limit(PN_BOARD_TOP)
+    ).all()
+    items = [{
+        "key": row.key,
+        "orders": row.orders,
+        "lines": row.lines,
+        "amount_paid": None if cost_hidden else _f(_round2(row.amount_paid)),
+    } for row in rows]
+    return {
+        "items": items,
+        "empty_reason": None,
+        "empty_message": None,
+        "universe_orders": universe.orders or 0,
+        "universe_lines": universe.lines or 0,
+        "amount_paid": None if cost_hidden else _f(_round2(universe.amount_paid)),
+    }
+
+
+def pn_boards(db: Session, user_ctx=None, *, date_from=None, date_to=None,
+              source_type=None, purchaser=None, salesperson=None, customer_id=None,
+              category=None, supplier=None, order_no=None,
+              linked_sales_order_no=None) -> dict:
+    """采购 PN 紧凑双榜（D-0054）。不读分组、分页或排序；不调用维保分析。"""
+    _validate_common(date_from, date_to)
+    selected = set(source_type or [])
+    filters = {
+        "date_from": date_from, "date_to": date_to, "purchaser": purchaser,
+        "salesperson": salesperson, "customer_id": customer_id, "category": category,
+        "supplier": supplier, "order_no": order_no,
+        "linked_sales_order_no": linked_sales_order_no,
+    }
+    boards = []
+    for key, raw in PN_BOARD_TYPES:
+        if selected and raw not in selected:
+            boards.append({
+                "key": key,
+                "source_type": raw,
+                "items": [],
+                "empty_reason": "source_type_excluded",
+                "empty_message": f"当前采购类型筛选不含「{raw}」，本榜为空。",
+                "universe_orders": 0,
+                "universe_lines": 0,
+                "amount_paid": None,
+            })
+            continue
+        board = _board_query(db, user_ctx, source_type=raw, filters=filters)
+        board["key"] = key
+        board["source_type"] = raw
+        boards.append(board)
+    return {
+        "as_of": business_today().isoformat(),
+        "filters_echo": _filters_echo(
+            date_from=date_from, date_to=date_to, source_type=source_type,
+            purchaser=purchaser, salesperson=salesperson, customer_id=customer_id,
+            category=category, supplier=supplier, order_no=order_no,
+            linked_sales_order_no=linked_sales_order_no),
+        "boards": boards,
+    }

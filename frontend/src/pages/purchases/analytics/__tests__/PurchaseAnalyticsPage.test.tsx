@@ -26,6 +26,7 @@ const fetchPurchaseAnalyticsOptions = vi.fn();
 const fetchPurchaseAnalyticsSummary = vi.fn();
 const fetchPurchaseAnalyticsOrders = vi.fn();
 const fetchPurchaseAnalyticsOrderDetail = vi.fn();
+const fetchPurchasePnBoards = vi.fn();
 
 vi.mock("../../../../api/purchaseAnalytics", async () => {
   const actual = await vi.importActual<Record<string, unknown>>(
@@ -37,6 +38,8 @@ vi.mock("../../../../api/purchaseAnalytics", async () => {
     fetchPurchaseAnalyticsSummary: (...a: unknown[]) => fetchPurchaseAnalyticsSummary(...a),
     fetchPurchaseAnalyticsOrders: (...a: unknown[]) => fetchPurchaseAnalyticsOrders(...a),
     fetchPurchaseAnalyticsOrderDetail: (...a: unknown[]) => fetchPurchaseAnalyticsOrderDetail(...a),
+    fetchPurchasePnBoards: (...a: unknown[]) => fetchPurchasePnBoards(...a),
+    downloadPurchaseOrdersCsv: vi.fn(),
   };
 });
 // jsdom 无 canvas：mock 图表壳，只保留空态文案；带 onEvents.click 的图渲染一个
@@ -213,6 +216,7 @@ beforeEach(() => {
     Promise.resolve({ data: q.group_by === "customer" ? SUMMARY_BY_CUSTOMER : SUMMARY }));
   fetchPurchaseAnalyticsOrders.mockResolvedValue({ data: ordersResp() });
   fetchPurchaseAnalyticsOrderDetail.mockResolvedValue({ data: ORDER_DETAIL });
+  fetchPurchasePnBoards.mockResolvedValue({ data: { as_of: "2026-10-17", boards: [] } });
 });
 
 afterEach(() => {

@@ -58,6 +58,7 @@ export interface SalesAnalyticsFilters {
   salesperson_name?: string[];
   category?: string[];
   brand?: string[];
+  order_no?: string;
   amount_basis?: SalesAmountBasis;
   amount_min?: number;
   amount_max?: number;
@@ -134,7 +135,7 @@ export interface SalesAnalyticsOrderRow {
   gross_profit?: number | null;
   gross_margin?: number | null;
   reconciliation: SalesReconciliationBlock;
-  products?: { line_id: number; pn: string | null; unit_price: number | null }[];
+  products?: { line_id: number; pn: string | null; description?: string | null; unit_price: number | null }[];
 }
 
 export const SALES_ANALYTICS_SORT_KEYS = [
@@ -212,7 +213,7 @@ export interface SalesAnalyticsOrderDetail {
   lines?: SalesOrderLine[];
   as_of: string;
   reconciliation: SalesReconciliationBlock;
-  products?: { line_id: number; pn: string | null; unit_price: number | null }[];
+  products?: { line_id: number; pn: string | null; description?: string | null; unit_price: number | null }[];
   reconciliation_history: SalesReconciliationHistoryEntry[];
 }
 

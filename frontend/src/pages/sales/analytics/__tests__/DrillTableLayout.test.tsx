@@ -71,6 +71,38 @@ afterEach(() => {
   calls.length = 0;
 });
 
+it("有描述时与单价同高，空描述不占第二行", () => {
+  render(
+    <DrillTable
+      data={{
+        ...BASE_RESP,
+        items: [{
+          ...ROW,
+          products: [
+            { line_id: 1, pn: "PN-A", description: "硬盘", unit_price: 12.34 },
+            { line_id: 2, pn: "PN-B", description: "  ", unit_price: 56.78 },
+          ],
+        }],
+      }}
+      loading={false}
+      amounts={["ex", "inc", "revenue"]}
+      sort="order_date"
+      order="desc"
+      includeReturns={false}
+      costRestricted={false}
+      reconRestricted={false}
+      page={1}
+      pageSize={50}
+      onSortChange={() => {}}
+      onPageChange={() => {}}
+      onOpenOrder={() => {}}
+    />,
+  );
+  expect(screen.getAllByRole("row", { name: /XS-2026-201/ })).toHaveLength(1);
+  expect(screen.getByText("硬盘")).toBeInTheDocument();
+  expect(screen.queryByText("  ")).not.toBeInTheDocument();
+});
+
 it("产品与单价逐项对应，保留一张订单一行，精简列不再出现", () => {
   render(<Harness />);
   expect(screen.getAllByRole("row", { name: /XS-2026-201/ })).toHaveLength(1);

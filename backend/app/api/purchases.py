@@ -7,10 +7,15 @@
 采购分析（D-39，客户需求 Round1）挂在独立页面键 page_purchase_analytics（模板仅 boss，
 admin 由 page_permission_allowed 恒放行），与上面的采购记录页共用本路由前缀。
 """
+import csv
+import io
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+
+from app.services.sales_export_text import ExportTextTooLong, safe_formula_text
 
 from app.api.query_bounds import ANALYTICS_PAGE_MAX, ANALYTICS_PAGE_SIZE_MAX, PG_INT_MAX, DbId
 from app import config
@@ -100,7 +105,7 @@ def analysis_part(
 
 # ------------------------------------------------------------------ 采购分析（D-39）
 
-_GROUP_BY_PATTERN = "^(source_type|purchaser|salesperson|customer|category|month|day)$"
+_GROUP_BY_PATTERN = "^(source_type|purchaser|salesperson|customer|category|pn|month|day)$"
 
 
 def _analytics_common(
@@ -188,7 +193,9 @@ def analytics_options(
 def analytics_summary(
     filters: dict = Depends(_analytics_common),
     group_by: str = Query("source_type", pattern=_GROUP_BY_PATTERN,
-                          description="分组维度；category 为行级口径"),
+                          description="分组维度；category 与 pn 为行级口径"),
+    groups_page: int = Query(1, ge=1, le=ANALYTICS_PAGE_MAX),
+    groups_page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
     _page: None = Depends(require_page("page_purchase_analytics")),
@@ -198,7 +205,9 @@ def analytics_summary(
     _guard_scoped(ctx)
     _guard_customer_filter(filters, ctx, group_by=group_by)
     record_access_log(ctx, "analytics_summary", "purchases/analytics", dict(filters))
-    data = _run(lambda: purchase_analytics.summary(db, ctx, group_by=group_by, **filters))
+    data = _run(lambda: purchase_analytics.summary(
+        db, ctx, group_by=group_by, groups_page=groups_page,
+        groups_page_size=groups_page_size, **filters))
     return apply_field_visibility(data, ctx)
 
 
@@ -229,10 +238,123 @@ def analytics_orders(
     return apply_field_visibility(data, ctx)
 
 
+def _product_export_cell(products: list[dict]) -> str:
+    blocks = []
+    for product in products or []:
+        pn = product.get("pn_std") or "/"
+        description = (product.get("description") or "").strip()
+        blocks.append(f"{pn}\n{description}" if description else pn)
+    return "\n\n".join(blocks)
+
+
+def _purchase_csv(header: list, rows) -> StreamingResponse:
+    buf = io.StringIO(newline="")
+    writer = csv.writer(buf)
+    try:
+        buf.write("\ufeff")
+        writer.writerow(header)
+        for row in rows:
+            writer.writerow([safe_formula_text(v) for v in row])
+    except ExportTextTooLong as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    return StreamingResponse(
+        iter([buf.getvalue().encode("utf-8")]),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="purchase-orders.csv"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/analytics/orders/export")
+def analytics_orders_export(
+    filters: dict = Depends(_analytics_common),
+    group_by: str | None = Query(None, pattern=_GROUP_BY_PATTERN),
+    group_key: str | None = Query(None),
+    sort: str = Query("order_date", pattern="^(order_date|amount_inc|amount_ex|amount_paid)$"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchase_analytics")),
+    ctx: UserContext = Depends(get_current_user_context),
+):
+    """采购订单 CSV（D-0054）：与列表同筛选同有效排序；超限 413，不截断。"""
+    _guard_scoped(ctx)
+    _guard_customer_filter(filters, ctx, group_by=group_by)
+    record_access_log(ctx, "analytics_orders_export", "purchases/analytics", {
+        **filters, "group_by": group_by, "group_key": group_key, "sort": sort, "order": order,
+    })
+    total, items = _run(lambda: purchase_analytics.export_orders(
+        db, ctx, group_by=group_by, group_key=group_key, sort=sort, order=order, **filters))
+    if total > purchase_analytics.EXPORT_MAX_ORDERS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"共 {total} 单，超过导出上限 {purchase_analytics.EXPORT_MAX_ORDERS}，请收窄区间或筛选",
+        )
+    hide_cost = is_field_hidden(ctx, "amount_paid")
+    hide_customer = is_field_hidden(ctx, "customer")
+    hide_supplier = is_field_hidden(ctx, "supplier")
+    columns = [
+        ("order_date", "采购日期"),
+        ("order_no", "采购单号"),
+        ("linked_sales_order_no", "销售单号"),
+        ("source_type", "采购类型"),
+        ("purchaser", "采购员"),
+        ("salesperson", "销售人员"),
+    ]
+    if not hide_customer:
+        columns.append(("customer", "客户"))
+    if not hide_supplier:
+        columns.append(("supplier", "供应商"))
+    columns.append(("products", "采购产品"))
+    if not hide_customer:
+        columns.append(("project_names", "项目名称"))
+    columns.append(("lines", "明细行数"))
+    if not hide_cost:
+        columns.extend([
+            ("amount_inc", "含税金额"),
+            ("amount_ex", "不含税金额"),
+            ("amount_paid", "实付金额"),
+            ("nominal_side", "名义侧"),
+        ])
+
+    def cell(item, key):
+        if key == "products":
+            return _product_export_cell(item.get("products") or [])
+        if key == "project_names":
+            names = item.get("project_names") or []
+            return "\n".join(names) if names else "/"
+        if key == "linked_sales_order_no":
+            return item.get(key) or "/"
+        return item.get(key)
+
+    rows = ([cell(item, key) for key, _label in columns] for item in items)
+    return _purchase_csv([label for _key, label in columns], rows)
+
+
+@router.get("/analytics/pn-boards")
+def analytics_pn_boards(
+    filters: dict = Depends(_analytics_common),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchase_analytics")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """采购 PN 紧凑双榜（D-0054）。与表格分页无关。"""
+    _guard_scoped(ctx)
+    _guard_customer_filter(filters, ctx)
+    record_access_log(ctx, "analytics_pn_boards", "purchases/analytics", dict(filters))
+    data = _run(lambda: purchase_analytics.pn_boards(db, ctx, **filters))
+    return apply_field_visibility(data, ctx)
+
+
 @router.get("/analytics/orders/{order_id}")
 def analytics_order_detail(
     order_id: int = Path(..., ge=1, le=PG_INT_MAX),
     category: list[str] = Query([], description="传入时行按分类过滤并附 category_matched 汇总"),
+    pn: str | None = Query(None, max_length=200, description="PN 分组下钻键，与分组表达式同一真值"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
     _page: None = Depends(require_page("page_purchase_analytics")),
@@ -241,8 +363,8 @@ def analytics_order_detail(
     """订单明细（自有实现，不依赖 page_boss_board）：单头三口径 + 单头批次行。"""
     _guard_scoped(ctx)
     record_access_log(ctx, "analytics_order_detail", "purchases/analytics",
-                      {"order_id": order_id, "category": category})
-    data = purchase_analytics.order_detail(db, order_id, ctx, category=category)
+                      {"order_id": order_id, "category": category, "pn": pn})
+    data = purchase_analytics.order_detail(db, order_id, ctx, category=category, pn=pn)
     if data is None:
         raise HTTPException(status_code=404, detail="订单不存在或不是已生效采购单")
     return apply_field_visibility(data, ctx)

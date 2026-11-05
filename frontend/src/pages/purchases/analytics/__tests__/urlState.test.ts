@@ -37,6 +37,7 @@ describe("parseAnalyticsUrl：默认与容错", () => {
       pageSize: 50,
       basis: ["inc", "ex", "paid"],
       orderId: null,
+      groupsPage: 1,
     });
   });
 

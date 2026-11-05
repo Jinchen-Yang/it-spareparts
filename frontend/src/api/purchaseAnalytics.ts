@@ -79,8 +79,22 @@ export interface PurchaseAnalyticsSummary {
   as_of: string;
   kpi: PurchaseAnalyticsKpi;
   groups: PurchaseAnalyticsGroup[];
+  total_groups?: number;
+  groups_page?: number;
+  groups_page_size?: number;
   /** true = 金额被遮蔽，分组已按订单数排序（前端不要再按金额解释组序）。 */
   groups_ranking_restricted: boolean;
+}
+
+export interface PurchasePnBoard {
+  key: string;
+  source_type: string;
+  items: { key: string; orders: number; lines: number; amount_paid: number | null }[];
+  empty_reason: string | null;
+  empty_message: string | null;
+  universe_orders: number;
+  universe_lines: number;
+  amount_paid: number | null;
 }
 
 export interface PurchaseAnalyticsOrderRow {
@@ -218,8 +232,25 @@ export const fetchPurchaseAnalyticsOptions = (customerQuery = "", selectedIds: n
 
 export const fetchPurchaseAnalyticsSummary = (filters: PurchaseAnalyticsFilters & {
   group_by?: string;
+  groups_page?: number;
 }) => api.get<PurchaseAnalyticsSummary>("/purchases/analytics/summary", {
-  params: toAnalyticsParams(filters, filters.group_by ? { group_by: filters.group_by } : {}),
+  params: toAnalyticsParams(filters, {
+    ...(filters.group_by ? { group_by: filters.group_by } : {}),
+    ...(filters.groups_page && filters.groups_page > 1 ? { groups_page: filters.groups_page } : {}),
+  }),
+});
+
+export const fetchPurchasePnBoards = (filters: PurchaseAnalyticsFilters) =>
+  api.get<{ as_of: string; boards: PurchasePnBoard[] }>("/purchases/analytics/pn-boards", {
+    params: toAnalyticsParams(filters),
+  });
+
+export const downloadPurchaseOrdersCsv = (
+  filters: PurchaseAnalyticsFilters,
+  extra: Record<string, string | number>,
+) => api.get<Blob>("/purchases/analytics/orders/export", {
+  params: toAnalyticsParams(filters, extra),
+  responseType: "blob",
 });
 
 export const fetchPurchaseAnalyticsOrders = (query: PurchaseAnalyticsOrdersQuery) => {
@@ -238,11 +269,13 @@ export const fetchPurchaseAnalyticsOrders = (query: PurchaseAnalyticsOrdersQuery
 export const fetchPurchaseAnalyticsOrderDetail = (
   orderId: number,
   category: string[] = [],
+  pn?: string | null,
 ) => {
   const p = new URLSearchParams();
   for (const c of category) {
     if (c) p.append("category", c);
   }
+  if (pn) p.set("pn", pn);
   return api.get<PurchaseAnalyticsOrderDetail>(
     `/purchases/analytics/orders/${orderId}`,
     { params: p },

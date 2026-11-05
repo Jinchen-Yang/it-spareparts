@@ -35,6 +35,7 @@ export const GROUP_BY_OPTIONS = [
   { value: "salesperson", label: "销售人员" },
   { value: "customer", label: "客户" },
   { value: "category", label: "分类" },
+  { value: "pn", label: "PN" },
   { value: "month", label: "按月" },
   { value: "day", label: "按日" },
 ];
@@ -67,6 +68,8 @@ export interface AnalyticsUrlState {
   basis: AmountBasis[];
   /** 非空 = 订单明细抽屉打开。 */
   orderId: number | null;
+  /** PN 分组表页码（D-0054）。与订单列表 page 分开。 */
+  groupsPage: number;
 }
 
 // ---------------------------------------------------------------- 解析（URL → 状态）
@@ -100,6 +103,7 @@ export function parseAnalyticsUrl(sp: URLSearchParams): AnalyticsUrlState {
     pageSize: parseAnalyticsPageSize(sp.get("page_size")),
     basis: selected,
     orderId: parsePositiveId(sp.get("order_id")),
+    groupsPage: clampAnalyticsPage(sp.get("gpage")),
   };
 }
 
@@ -155,6 +159,10 @@ export function serializeAnalyticsState(
   }
   if (next.orderId !== undefined) {
     out.order_id = next.orderId != null ? String(next.orderId) : undefined;
+  }
+  if (next.groupsPage !== undefined) {
+    const groupsPage = clampAnalyticsPage(next.groupsPage);
+    out.gpage = groupsPage > 1 ? String(groupsPage) : undefined;
   }
   if (next.pageSize !== undefined) {
     const size = parseAnalyticsPageSize(next.pageSize);

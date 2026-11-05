@@ -165,6 +165,7 @@ def _order_query(
     include_empty: bool = True,
     categories: list[str] | None = None,
     brands: list[str] | None = None,
+    order_no: str | None = None,
     with_recon_sort: bool = False,
     recon_returns: bool = False,
 ):
@@ -236,6 +237,8 @@ def _order_query(
     else:
         inner = inner.join(sl, sl.order_id == so.id, isouter=True)
     inner = active_orders(inner, so)
+    if order_no and str(order_no).strip():
+        inner = inner.where(so.order_no.contains(str(order_no).strip(), autoescape=True))
     if date_from is not None:
         inner = inner.where(so.order_date >= date_from)
     if date_to is not None:
@@ -680,7 +683,9 @@ def _order_products(db: Session, order_ids: list[int], user_ctx=None, **filters)
     if not order_ids:
         return {}
     sl = FSalesLine
-    stmt = select(sl.order_id, sl.id, sl.pn_std, sl.pn_raw, sl.unit_price).where(sl.order_id.in_(order_ids))
+    stmt = select(
+        sl.order_id, sl.id, sl.pn_std, sl.pn_raw, sl.unit_price, sl.description,
+    ).where(sl.order_id.in_(order_ids))
     cats, brands = _clean_multi(filters.get("categories")), _clean_multi(filters.get("brands"))
     if cats:
         stmt = stmt.where(_category_match(sl, cats))
@@ -689,8 +694,10 @@ def _order_products(db: Session, order_ids: list[int], user_ctx=None, **filters)
     hidden = user_ctx is not None and security.is_field_hidden(user_ctx, "unit_price")
     result: dict[int, list] = {}
     for row in db.execute(stmt.order_by(sl.order_id, sl.line_no.asc().nulls_last(), sl.id)):
+        description = (row.description or "").strip() or None
         result.setdefault(row.order_id, []).append({
             "line_id": row.id, "pn": row.pn_std or row.pn_raw,
+            "description": description,
             "unit_price": None if hidden else _f(row.unit_price),
         })
     return result

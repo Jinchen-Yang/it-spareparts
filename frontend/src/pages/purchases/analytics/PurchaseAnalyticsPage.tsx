@@ -12,12 +12,15 @@ import PageHeader from "../../../components/PageHeader";
 import { businessToday } from "../../../utils/date";
 import { readSessionToken, SESSION_EXPIRED_MESSAGE, sessionStale, useSessionOwner } from "../../../utils/session";
 import {
+  downloadPurchaseOrdersCsv,
   fetchPurchaseAnalyticsOptions,
   fetchPurchaseAnalyticsOrders,
   fetchPurchaseAnalyticsSummary,
+  fetchPurchasePnBoards,
   type PurchaseAnalyticsOptions,
   type PurchaseAnalyticsOrdersResp,
   type PurchaseAnalyticsSummary,
+  type PurchasePnBoard,
 } from "../../../api/purchaseAnalytics";
 import {
   PurchaseRankBar,
@@ -144,6 +147,8 @@ export default function PurchaseAnalyticsPage() {
   const [summary, setSummary] = useState<PurchaseAnalyticsSummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [boards, setBoards] = useState<PurchasePnBoard[] | null>(null);
+  const [exporting, setExporting] = useState(false);
   const [orders, setOrders] = useState<PurchaseAnalyticsOrdersResp | null>(null);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersError, setOrdersError] = useState<string | null>(null);
@@ -215,11 +220,15 @@ export default function PurchaseAnalyticsPage() {
   );
   const filterKey = JSON.stringify(apiFilters);
 
-  const requestSummary = (groupBy: string) => {
-    const key = JSON.stringify([filterKey, groupBy, retryTick]);
+  const requestSummary = (groupBy: string, groupsPage: number) => {
+    const key = JSON.stringify([filterKey, groupBy, groupsPage, retryTick]);
     const existing = summaryRequests.current.get(key);
     if (existing) return existing;
-    const pending = fetchPurchaseAnalyticsSummary({ ...apiFilters, group_by: groupBy });
+    const pending = fetchPurchaseAnalyticsSummary({
+      ...apiFilters,
+      group_by: groupBy,
+      ...(groupBy === "pn" && groupsPage > 1 ? { groups_page: groupsPage } : {}),
+    });
     summaryRequests.current.set(key, pending);
     const clear = () => {
       if (summaryRequests.current.get(key) === pending) summaryRequests.current.delete(key);
@@ -234,7 +243,7 @@ export default function PurchaseAnalyticsPage() {
     const token = readSessionToken();
     setSummaryLoading(true);
     setSummaryError(null);
-    requestSummary(effectiveGroupBy)
+    requestSummary(effectiveGroupBy, effectiveState.groupsPage)
       .then(({ data }) => {
         if (seq !== summarySeq.current) return;
         if (sessionStale(token)) { notifyOwnerStale(); return; }
@@ -252,7 +261,24 @@ export default function PurchaseAnalyticsPage() {
         setSummaryLoading(false);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiFilters 以 filterKey 进入依赖
-  }, [filterKey, effectiveGroupBy, retryTick]);
+  }, [filterKey, effectiveGroupBy, effectiveState.groupsPage, retryTick]);
+
+  useEffect(() => {
+    if (sessionExpired() || effectiveState.groupKey != null) return;
+    let alive = true;
+    const token = readSessionToken();
+    fetchPurchasePnBoards(apiFilters)
+      .then(({ data }) => {
+        if (!alive || sessionStale(token)) return;
+        setBoards(data.boards);
+      })
+      .catch(() => {
+        if (alive && !sessionStale(token)) setBoards(null);
+      });
+    return () => { alive = false; };
+    // apiFilters 随 filterKey 变化
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKey, effectiveState.groupKey, retryTick]);
 
   // Q-A-01 趋势图数据：同一 summary 端点按 day / month 二次分组（不新增后端）；
   // 与主汇总同一筛选键 + 粒度 + 重试驱动，令牌比对同 DL-010。
@@ -262,7 +288,7 @@ export default function PurchaseAnalyticsPage() {
     const token = readSessionToken();
     setTrendLoading(true);
     setTrendError(null);
-    requestSummary(trendGran)
+    requestSummary(trendGran, 1)
       .then(({ data }) => {
         if (seq !== trendSeq.current) return;
         if (sessionStale(token)) { notifyOwnerStale(); return; }
@@ -333,6 +359,35 @@ export default function PurchaseAnalyticsPage() {
     "orders",
   ];
   const activeMetric = metricOptions.includes(chartMetric) ? chartMetric : metricOptions[0];
+  const lineMessage = effectiveGroupBy === "pn"
+    ? "PN 口径：订单已拆到明细行，只统计匹配 PN 的行；行级实付 = 匹配行金额之和，只计单头所属批次的明细行（与整单「采购金额」口径不同）。"
+    : "分类口径：订单已拆到明细行，只统计匹配分类的行；行级实付 = 匹配行金额之和，只计单头所属批次的明细行（与整单「采购金额」口径不同）。";
+  const onExport = () => {
+    if (sessionExpired()) return;
+    setExporting(true);
+    const token = readSessionToken();
+    const extra: Record<string, string | number> = {
+      sort: effectiveState.sort,
+      ...(effectiveState.dir !== "desc" ? { order: effectiveState.dir } : {}),
+      ...(effectiveState.groupKey ? { group_by: effectiveGroupBy, group_key: effectiveState.groupKey } : {}),
+    };
+    downloadPurchaseOrdersCsv(apiFilters, extra)
+      .then(({ data }) => {
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        const url = URL.createObjectURL(data);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `采购单-${today.format("YYYYMMDD")}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      })
+      .catch((err) => {
+        if (sessionStale(token)) { notifyOwnerStale(); return; }
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        message.error(status === 413 ? "超过导出上限 10,000 单，请收窄区间或筛选" : `导出失败：${apiErrorMessage(err)}`);
+      })
+      .finally(() => setExporting(false));
+  };
 
   // DL-025 局部控件主题（销售/采购分析共用常量）：不碰全站 theme.ts，只在本页树内
   // 覆盖 disabled/placeholder/hover 文字色；portal 下拉与触发器同 hashId 一并生效
@@ -341,6 +396,7 @@ export default function PurchaseAnalyticsPage() {
       <PageHeader
         title="采购分析"
         subtitle={summary ? `三口径采购金额（含税 / 不含税 / 实付），数据截至 ${summary.as_of}` : "三口径采购金额（含税 / 不含税 / 实付）"}
+        extra={<Button loading={exporting} onClick={onExport}>导出</Button>}
       />
       <Card>
         <FilterBar
@@ -387,7 +443,7 @@ export default function PurchaseAnalyticsPage() {
             type="info"
             showIcon
             style={{ marginBottom: 12 }}
-            message="分类口径：订单已拆到明细行，只统计匹配分类的行；行级实付 = 匹配行金额之和，只计单头所属批次的明细行（与整单「采购金额」口径不同）。"
+            message={lineMessage}
           />
         )}
         {summary?.groups_ranking_restricted && (
@@ -461,11 +517,35 @@ export default function PurchaseAnalyticsPage() {
                 </Card>
               )}
             </div>
+            {boards && effectiveState.groupKey == null && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+                {boards.map((board) => (
+                  <Card key={board.key} size="small" title={`${board.source_type} · PN Top 20`}>
+                    {board.empty_reason === "source_type_excluded" ? (
+                      <span>{board.empty_message}</span>
+                    ) : board.items.length === 0 ? (
+                      <span>当前筛选下没有该类型的单头批次行</span>
+                    ) : (
+                      <ol style={{ margin: 0, paddingLeft: 18 }}>
+                        {board.items.map((item) => (
+                          <li key={item.key}>
+                            {item.key} · {item.lines} 行
+                            {item.amount_paid != null ? ` · 实付 ${item.amount_paid}` : ""}
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                  </Card>
+                ))}
+              </div>
+            )}
             <SummaryView
               summary={summary}
               loading={summaryLoading}
               basis={basis}
               groupBy={effectiveGroupBy}
+              groupsPage={effectiveState.groupsPage}
+              onGroupsPageChange={(page) => patch({ groupsPage: page })}
               onDrill={(key) => patch({ groupKey: key, page: 1 }, { history: "push" })}
             />
           </>
@@ -504,6 +584,7 @@ export default function PurchaseAnalyticsPage() {
       <OrderDetailDrawer
         orderId={effectiveState.orderId}
         category={drawerCategory}
+        pn={effectiveGroupBy === "pn" ? effectiveState.groupKey : null}
         basis={basis}
         ownerToken={ownerToken}
         onOwnerStale={notifyOwnerStale}

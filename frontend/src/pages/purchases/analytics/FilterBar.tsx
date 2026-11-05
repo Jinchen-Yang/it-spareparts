@@ -135,7 +135,7 @@ export default function FilterBar({
           label: o.label,
           disabled: o.value === "customer" && customerRestricted,
         }))}
-        onChange={(v: string) => change({ groupBy: v, groupKey: null })}
+        onChange={(v: string) => change({ groupBy: v, groupKey: null, groupsPage: 1 })}
       />
       <AmountBasisSelect
         options={AMOUNT_BASIS_OPTIONS}

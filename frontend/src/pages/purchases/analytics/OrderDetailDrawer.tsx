@@ -16,6 +16,7 @@ import type { AmountBasis } from "./urlState";
 export interface OrderDetailDrawerProps {
   orderId: number | null;
   category: string[];
+  pn?: string | null;
   basis: AmountBasis[];
   /** 所属会话 owner（页级下传，DL-010 返工）：失效时请求前拒发；迟到响应落地 /
    * finally 前比对 localStorage token，换账号后不作废不作数。 */
@@ -69,7 +70,7 @@ function NominalAmountNote({ side, kind, amount }: {
   );
 }
 
-export default function OrderDetailDrawer({ orderId, category, basis, ownerToken, onOwnerStale, onClose }: OrderDetailDrawerProps) {
+export default function OrderDetailDrawer({ orderId, category, pn, basis, ownerToken, onOwnerStale, onClose }: OrderDetailDrawerProps) {
   const { message } = App.useApp();
   const [detail, setDetail] = useState<PurchaseAnalyticsOrderDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -98,7 +99,11 @@ export default function OrderDetailDrawer({ orderId, category, basis, ownerToken
     const token = readSessionToken();
     setLoading(true);
     setDetail(null);
-    fetchPurchaseAnalyticsOrderDetail(orderId, categoryKey ? categoryKey.split(",") : [])
+    const categories = categoryKey ? categoryKey.split(",") : [];
+    const request = pn
+      ? fetchPurchaseAnalyticsOrderDetail(orderId, categories, pn)
+      : fetchPurchaseAnalyticsOrderDetail(orderId, categories);
+    request
       .then(({ data }) => {
         if (seq !== seqRef.current) return;
         if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
@@ -116,7 +121,7 @@ export default function OrderDetailDrawer({ orderId, category, basis, ownerToken
         if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
         setLoading(false);
       });
-  }, [orderId, categoryKey, ownerToken]);
+  }, [orderId, categoryKey, pn, ownerToken]);
 
   // 行金额只有一列，按含税标记解释；不能复用可能已因单头缺列翻转的 nominal_side。
   // 金额为 null 时不显示标签（包含权限遮蔽），0 则仍是可展示的金额。
@@ -200,7 +205,9 @@ export default function OrderDetailDrawer({ orderId, category, basis, ownerToken
                 {" · "}不含税 {fmtMoney(matched.amount_ex)}
                 <NominalAmountNote side={lineNominalSide} kind="ex" amount={matched.amount_ex} />
               </>}
-              description="分类口径下实付 = 匹配明细行行金额之和；明细只计单头所属批次的行。"
+              description={pn
+                ? "PN 口径下实付 = 匹配该 PN 的单头批次行金额之和；单头金额仍是整单。"
+                : "分类口径下实付 = 匹配明细行行金额之和；明细只计单头所属批次的行。"}
             />
           )}
           <Table
