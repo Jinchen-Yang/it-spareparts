@@ -40,7 +40,8 @@ def _boss_flag_on():
 
 
 def _client(db, *, username: str, role: str = "readonly",
-            overrides: dict[str, bool] | None = None) -> TestClient:
+            overrides: dict[str, bool] | None = None,
+            raise_server_exceptions: bool = True) -> TestClient:
     base = permissions.effective(role, None)
     effective = permissions.effective_from_snapshot(base, overrides or {})
     db.add(SysUser(
@@ -50,7 +51,7 @@ def _client(db, *, username: str, role: str = "readonly",
         perm_overrides=overrides or {}, permissions=effective,
     ))
     db.commit()
-    client = TestClient(app)
+    client = TestClient(app, raise_server_exceptions=raise_server_exceptions)
     login = client.post("/api/auth/login",
                         json={"username": username, "password": _PASSWORD})
     assert login.status_code == 200, login.text
@@ -782,3 +783,36 @@ def test_non23514_dimension_write_failure_isolated_at_http(db, tmp_path, monkeyp
     assert "SYN-O001" in orders
     assert "SYN-O002" not in orders
     assert orders["SYN-O001"].order_no == "WBDD-20261105-0001"
+
+
+def test_non23514_dbapierror_outside_savepoint_is_422_without_residual_rows(
+    db, tmp_path, monkeypatch,
+):
+    """DL-051：保存点之外的非 23514 DBAPIError 必须是 422 row_write_failed。
+
+    成本重算发生在行级保存点提交之后、整笔事务提交之前。这里注入真实 23502。
+    若专用接口把该异常重新抛出，客户端看到的是 500，本测试变红。
+    """
+    def boom(session, **_kwargs):
+        _raise_not_null(session)
+
+    monkeypatch.setattr(wbdd.maintenance_cost, "recompute", boom)
+    path = _wbdd_file(tmp_path, "outside-savepoint.xlsx")
+    client = _client(
+        db,
+        username="dl-051",
+        overrides={"page_maintenance": True, "action_maintenance_wbdd_import": True},
+        raise_server_exceptions=False,
+    )
+    response = _upload(client, path)
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "row_write_failed"
+    assert detail["message"] == "需求单写入时发生数据错误，请按导入回执核对失败行"
+    lowered = response.text.casefold()
+    assert "psycopg" not in lowered
+    assert "traceback" not in lowered
+    assert "23502" not in response.text
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(FMaintenanceOrder)) == 0
+    assert db.scalar(select(func.count()).select_from(FMaintenanceLine)) == 0
