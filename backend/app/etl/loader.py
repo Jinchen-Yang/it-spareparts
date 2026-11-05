@@ -1478,26 +1478,21 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         lock_envelope.projects = {
             project.project_id: project for project in locked_projects
         }
-    # 1) 商品身份解析（别名/合并重定向 + 建档，非销售口径：不写品类）+ alias
-    resolution, new_parts = _resolve_line_parts(session, result.lines, is_sales=False)
-    _upsert_aliases(session, result.lines, resolution)
-
-    # 2) 客户维度（维保客户名实测混入联系人后缀，v1 原样入库，治理留二期）
+    # 商品、别名、客户与事实行放在同一张需求单的保存点里。某一行的 23502
+    # 只能回滚这一行，不能在保存点之前把整文件写死。
     orders = result.orders
-    cust_rows = [{
-        "name_raw": o["customer_name"], "name_normalized": o["customer_name"],
-        "customer_type": None, "customer_source": None, "city": None,
-    } for o in orders.values() if o.get("customer_name")]
-    cust_id = _upsert_named_dim(session, DimCustomer, cust_rows,
-                                ["name_normalized", "customer_type", "customer_source", "city"])
+    customer_by_order = {
+        o["raw_order_id"]: o.get("customer_name") for o in orders.values()
+    }
+    counted_parts: set[str] = set()
 
-    # 3) 维保单头
+    # 3) 维保单头（客户 id 在该单保存点内解析）
     order_rows = [{
         "raw_order_id": o["raw_order_id"], "order_no": o["order_no"],
         "order_date": o["order_date"],
         "linked_sales_order_no": o.get("linked_sales_order_no"),
         "project_raw": o.get("project_raw"), "project_std": o.get("project_std"),
-        "customer_id": cust_id.get(o.get("customer_name")),
+        "customer_id": None,
         "end_customer": o.get("end_customer"),
         "demand_type": o.get("demand_type"), "business_type": o.get("business_type"),
         "salesperson": o.get("salesperson"), "warehouse": o.get("warehouse"),
@@ -1541,14 +1536,22 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         _MAINT_LINE_UPD, present_fields.get("line"),
         _MAINT_LINE_SOURCE_DEPS, _MAINT_LINE_ALWAYS_UPD,
     )
-    line_stats = {
-        "inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set(),
-        "semantic_updated": 0, "unchanged": 0, "protected": 0,
-        "protected_field_counts": {}, "legacy_review": 0,
-    }
+    if upsert:
+        line_stats = {
+            "inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set(),
+            "semantic_updated": 0, "unchanged": 0, "protected": 0,
+            "protected_field_counts": {}, "legacy_review": 0,
+        }
+    else:
+        # skip 不评估人工保护；None 表示未评估，不能写成 0。
+        line_stats = {
+            "inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set(),
+            "semantic_updated": None, "unchanged": None, "protected": None,
+            "protected_field_counts": None, "legacy_review": None,
+        }
     successful_remounts: list[dict] = []
 
-    def _line_rows_for(raw_ids: list[str], oid_map: dict) -> list[dict]:
+    def _line_rows_for(raw_ids: list[str], oid_map: dict, resolution: dict) -> list[dict]:
         wanted = set(raw_ids)
         return [{
             "raw_line_id": ln["raw_line_id"], "order_id": oid_map[ln["_order_raw_id"]],
@@ -1563,6 +1566,8 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         } for ln in result.lines if ln.get("_order_raw_id") in wanted]
 
     def _merge_order_stats(stats: dict) -> None:
+        for pn in stats.pop("_touched_parts", ()):
+            counted_parts.add(pn)
         for key in ("inserted", "updated", "skipped"):
             order_stats[key] += stats[key]
         order_stats["changed_keys"].update(stats["changed_keys"])
@@ -1573,12 +1578,40 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
             if isinstance(stats.get(key), int):
                 line_stats[key] += stats[key]
         line_stats["changed_keys"].update(stats.get("changed_keys") or set())
-        for field, count in (stats.get("protected_field_counts") or {}).items():
-            line_stats["protected_field_counts"][field] = (
-                line_stats["protected_field_counts"].get(field, 0) + count
-            )
+        counts = stats.get("protected_field_counts")
+        if isinstance(counts, dict):
+            if line_stats["protected_field_counts"] is None:
+                line_stats["protected_field_counts"] = {}
+            for field, count in counts.items():
+                line_stats["protected_field_counts"][field] = (
+                    line_stats["protected_field_counts"].get(field, 0) + count
+                )
 
     def _write_order_group(rows: list[dict], *, update_cols: list[str] | None) -> list[dict]:
+        raw_ids = [row["raw_order_id"] for row in rows]
+        source_lines = [
+            ln for ln in result.lines if ln.get("_order_raw_id") in set(raw_ids)
+        ]
+        # 前置维度与事实行同一保存点：客户/商品/别名失败只回滚这批行。
+        resolution, _created = _resolve_line_parts(session, source_lines, is_sales=False)
+        _upsert_aliases(session, source_lines, resolution)
+        cust_rows = []
+        seen_names: set[str] = set()
+        for raw_id in raw_ids:
+            name = customer_by_order.get(raw_id)
+            if name and name not in seen_names:
+                seen_names.add(name)
+                cust_rows.append({
+                    "name_raw": name, "name_normalized": name,
+                    "customer_type": None, "customer_source": None, "city": None,
+                })
+        cust_id = _upsert_named_dim(
+            session, DimCustomer, cust_rows,
+            ["name_normalized", "customer_type", "customer_source", "city"],
+        )
+        for row in rows:
+            name = customer_by_order.get(row["raw_order_id"])
+            row["customer_id"] = cust_id.get(name) if name else None
         planned = [remount_by_id[row["raw_order_id"]] for row in rows
                    if row["raw_order_id"] in remount_by_id]
         for remount in planned:
@@ -1589,6 +1622,10 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
             session, FMaintenanceOrder, rows, FMaintenanceOrder.raw_order_id,
             update_cols, audit=audit, track_changed=True,
         )
+        stats = dict(stats)
+        stats["_touched_parts"] = sorted({
+            ln.get("pn_std") for ln in source_lines if ln.get("pn_std")
+        })
         if planned:
             _attach_remounted_orders(
                 session, [_public_remount(row) for row in planned],
@@ -1599,7 +1636,7 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
             select(FMaintenanceOrder.raw_order_id, FMaintenanceOrder.id)
             .where(FMaintenanceOrder.raw_order_id.in_(raw_ids))
         ).all()) if raw_ids else {}
-        group_lines = _line_rows_for(raw_ids, oid_map)
+        group_lines = _line_rows_for(raw_ids, oid_map, resolution)
         group_line_stats = _upsert_maintenance_lines(
             session, group_lines, FMaintenanceLine.raw_line_id,
             line_update_cols if upsert else None, audit=audit,
@@ -1607,60 +1644,36 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         )
         return [_public_remount(row) for row in planned], stats, group_line_stats
 
-    if upsert:
-        # 非 23514 的写入错误只回滚这一张需求单。23514 继续向外抛，走整文件中文拒绝。
-        for write_address in (True, False):
-            rows = [row for row in order_rows
-                    if (row["raw_order_id"] in address_write_ids) == write_address]
-            base_cols = (_MAINT_ORDER_UPD if write_address else
-                         [c for c in _MAINT_ORDER_UPD if c != "receiver_address"])
-            update_cols = _mask_maintenance_update_cols(
-                base_cols, present_head, _MAINT_ORDER_SOURCE_DEPS,
-                _MAINT_ORDER_ALWAYS_UPD,
-                keep=("receiver_address",) if write_address else (),
-            )
-
-            def _group(chunk: list[dict], cols: list[str] = update_cols):
-                return _write_order_group(chunk, update_cols=cols)
-
-            applied, failed, order_part, line_part = _isolated_maintenance_upsert(
-                session, rows, write_group=_group,
-            )
-            for part in _iter_stats(order_part):
-                _merge_order_stats(part)
-            for part in _iter_stats(line_part):
-                _merge_line_stats(part)
-            successful_remounts.extend(applied)
-            if failed:
-                blocked_orders.update(failed)
-                row_write_failures += _append_row_write_errors(result, failed)
-    else:
-        for write_address in (True, False):
-            rows = [row for row in order_rows
-                    if (row["raw_order_id"] in address_write_ids) == write_address]
-            base_cols = (_MAINT_ORDER_UPD if write_address else
-                         [c for c in _MAINT_ORDER_UPD if c != "receiver_address"])
-            update_cols = _mask_maintenance_update_cols(
-                base_cols, present_head, _MAINT_ORDER_SOURCE_DEPS,
-                _MAINT_ORDER_ALWAYS_UPD,
-                keep=("receiver_address",) if write_address else (),
-            )
-            stats = _upsert_facts(
-                session, FMaintenanceOrder, rows, FMaintenanceOrder.raw_order_id,
-                None, audit=audit, track_changed=True,
-            )
-            _merge_order_stats(stats)
-        raw_ids = [row["raw_order_id"] for row in order_rows]
-        oid_map = dict(session.execute(
-            select(FMaintenanceOrder.raw_order_id, FMaintenanceOrder.id)
-            .where(FMaintenanceOrder.raw_order_id.in_(raw_ids))
-        ).all()) if raw_ids else {}
-        line_stats = _upsert_maintenance_lines(
-            session, _line_rows_for(raw_ids, oid_map),
-            FMaintenanceLine.raw_line_id, None, audit=audit,
-            batch_id=batch_id, operated_by=operated_by,
+    # 非 23514 的写入错误（含客户/商品/别名）只回滚这一张需求单。
+    # 23514 继续向外抛，走整文件中文拒绝。跳过模式同样把维度写进保存点。
+    for write_address in (True, False):
+        rows = [row for row in order_rows
+                if (row["raw_order_id"] in address_write_ids) == write_address]
+        base_cols = (_MAINT_ORDER_UPD if write_address else
+                     [c for c in _MAINT_ORDER_UPD if c != "receiver_address"])
+        masked_cols = _mask_maintenance_update_cols(
+            base_cols, present_head, _MAINT_ORDER_SOURCE_DEPS,
+            _MAINT_ORDER_ALWAYS_UPD,
+            keep=("receiver_address",) if write_address else (),
         )
+        update_cols = masked_cols if upsert else None
+
+        def _group(chunk: list[dict], cols: list[str] | None = update_cols):
+            return _write_order_group(chunk, update_cols=cols)
+
+        applied, failed, order_part, line_part = _isolated_maintenance_upsert(
+            session, rows, write_group=_group,
+        )
+        for part in _iter_stats(order_part):
+            _merge_order_stats(part)
+        for part in _iter_stats(line_part):
+            _merge_line_stats(part)
+        successful_remounts.extend(applied)
+        if failed:
+            blocked_orders.update(failed)
+            row_write_failures += _append_row_write_errors(result, failed)
     remounts = successful_remounts
+    new_parts = len(counted_parts)
 
     # 5) 工作簿 revision 失效：写后复核（probe 外项目 → fail closed 整批回滚），
     #    再让「头或行确有业务字段变化」的单据归属项目各 bump 一次。
