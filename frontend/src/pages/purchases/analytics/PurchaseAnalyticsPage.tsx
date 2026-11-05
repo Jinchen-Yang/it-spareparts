@@ -7,7 +7,7 @@
 // （403 由本页错误态承接）——路由/菜单由 nav.tsx 统一登记。
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Button, App, Alert, Card, ConfigProvider, Radio, Space } from "antd";
+import { Button, App, Alert, Card, ConfigProvider, Radio, Space, Spin } from "antd";
 import PageHeader from "../../../components/PageHeader";
 import { businessToday } from "../../../utils/date";
 import { readSessionToken, SESSION_EXPIRED_MESSAGE, sessionStale, useSessionOwner } from "../../../utils/session";
@@ -148,6 +148,7 @@ export default function PurchaseAnalyticsPage() {
   const [summaryLoading, setSummaryLoading] = useState(true);
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const [boards, setBoards] = useState<PurchasePnBoard[] | null>(null);
+  const [boardsLoading, setBoardsLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [orders, setOrders] = useState<PurchaseAnalyticsOrdersResp | null>(null);
   const [ordersLoading, setOrdersLoading] = useState(false);
@@ -267,6 +268,8 @@ export default function PurchaseAnalyticsPage() {
     if (sessionExpired() || effectiveState.groupKey != null) return;
     let alive = true;
     const token = readSessionToken();
+    setBoards(null);
+    setBoardsLoading(true);
     fetchPurchasePnBoards(apiFilters)
       .then(({ data }) => {
         if (!alive || sessionStale(token)) return;
@@ -274,6 +277,9 @@ export default function PurchaseAnalyticsPage() {
       })
       .catch(() => {
         if (alive && !sessionStale(token)) setBoards(null);
+      })
+      .finally(() => {
+        if (alive && !sessionStale(token)) setBoardsLoading(false);
       });
     return () => { alive = false; };
     // apiFilters 随 filterKey 变化
@@ -368,8 +374,9 @@ export default function PurchaseAnalyticsPage() {
     const token = readSessionToken();
     const extra: Record<string, string | number> = {
       sort: effectiveState.sort,
+      group_by: effectiveGroupBy,
       ...(effectiveState.dir !== "desc" ? { order: effectiveState.dir } : {}),
-      ...(effectiveState.groupKey ? { group_by: effectiveGroupBy, group_key: effectiveState.groupKey } : {}),
+      ...(effectiveState.groupKey ? { group_key: effectiveState.groupKey } : {}),
     };
     downloadPurchaseOrdersCsv(apiFilters, extra)
       .then(({ data }) => {
@@ -517,9 +524,12 @@ export default function PurchaseAnalyticsPage() {
                 </Card>
               )}
             </div>
-            {boards && effectiveState.groupKey == null && (
+            {effectiveState.groupKey == null && (boardsLoading || boards) && (
+              boardsLoading ? (
+                <div style={{ marginBottom: 12 }}><Spin size="small" /> PN 双榜加载中</div>
+              ) : (
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
-                {boards.map((board) => (
+                {(boards ?? []).map((board) => (
                   <Card key={board.key} size="small" title={`${board.source_type} · PN Top 20`}>
                     {board.empty_reason === "source_type_excluded" ? (
                       <span>{board.empty_message}</span>
@@ -538,6 +548,7 @@ export default function PurchaseAnalyticsPage() {
                   </Card>
                 ))}
               </div>
+              )
             )}
             <SummaryView
               summary={summary}

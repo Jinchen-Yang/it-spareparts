@@ -178,7 +178,9 @@ export function useAnalyticsPatch(sp: URLSearchParams, setSp: SetURLSearchParams
     next: Partial<AnalyticsUrlState>,
     opts?: AnalyticsPatchOptions,
   ) => {
-    const patch = serializeAnalyticsState(opts?.resetPage ? { ...next, page: 1 } : next);
+    const patch = serializeAnalyticsState(
+      opts?.resetPage ? { ...next, page: 1, groupsPage: 1 } : next,
+    );
     writeAnalyticsUrlPatch(sp, setSp, patch, opts, ["source_type", "purchaser", "salesperson", "customer", "category", "basis"]);
   };
 }

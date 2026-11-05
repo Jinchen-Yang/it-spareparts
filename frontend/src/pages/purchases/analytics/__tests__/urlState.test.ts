@@ -116,6 +116,11 @@ describe("serializeAnalyticsState：默认值不落 URL", () => {
     expect(serializeAnalyticsState({ orderId: 88 })).toEqual({ order_id: "88" });
   });
 
+  it("PN 分组页回到第 1 页时删掉 gpage", () => {
+    expect(serializeAnalyticsState({ groupsPage: 1 })).toEqual({ gpage: undefined });
+    expect(serializeAnalyticsState({ groupsPage: 3 })).toEqual({ gpage: "3" });
+  });
+
   it("basis=三口径全选 → 删键（默认态）；子集才落键", () => {
     expect(serializeAnalyticsState({ basis: ["inc", "ex", "paid"] })).toEqual({ basis: undefined });
     expect(serializeAnalyticsState({ basis: ["paid"] })).toEqual({ basis: ["paid"], url_version: "2" });

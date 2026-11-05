@@ -198,7 +198,10 @@ export default function OrderDetailDrawer({ orderId, category, pn, basis, ownerT
               type="info"
               showIcon
               message={<>
-                匹配分类行合计（{category.join("、")}）：{matched.lines} 行
+                {pn
+                  ? `匹配 PN 行合计（${pn}）`
+                  : `匹配分类行合计（${category.join("、")}）`}
+                ：{matched.lines} 行
                 {" · "}实付 {fmtMoney(matched.amount_paid)}
                 {" · "}含税 {fmtMoney(matched.amount_inc)}
                 <NominalAmountNote side={lineNominalSide} kind="inc" amount={matched.amount_inc} />

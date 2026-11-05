@@ -60,7 +60,8 @@ export default function FilterBar({
   supplierRestricted = false,
   onReset,
 }: FilterBarProps) {
-  const change = (next: Partial<AnalyticsUrlState>) => patch(next, { resetPage: true });
+  const change = (next: Partial<AnalyticsUrlState>) =>
+    patch({ ...next, groupsPage: 1 }, { resetPage: true });
   const locate = (next: Partial<AnalyticsUrlState>) => change({ ...next, groupKey: null, orderId: null });
   const customerSelect = (
     <Select

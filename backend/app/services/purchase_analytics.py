@@ -620,14 +620,19 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
         _apply_from(select(dim.label("key"), *measures), group_link)
         .where(*where).group_by(dim)
     )
-    total_groups = db.scalar(select(func.count()).select_from(grp_base.subquery())) or 0
     grp_stmt = grp_base.order_by(*grp_order)
-    # 只有 PN 分组分页送达（D-0054）。其他维度仍一次返回全部分组，分组合计=KPI。
-    page_out, size_out = 1, total_groups
+    # 只有 PN 分组分页送达（D-0054）。其他维度仍一次返回全部分组，响应形状不变。
+    page_meta: dict | None = None
     if group_by == "pn":
         page_out = max(1, int(groups_page or 1))
         size_out = max(1, min(int(groups_page_size or 50), MAX_PAGE_SIZE))
+        total_groups = db.scalar(select(func.count()).select_from(grp_base.subquery())) or 0
         grp_stmt = grp_stmt.limit(size_out).offset((page_out - 1) * size_out)
+        page_meta = {
+            "total_groups": total_groups,
+            "groups_page": page_out,
+            "groups_page_size": size_out,
+        }
     grp_rows = db.execute(grp_stmt).all()
     lines_by_key: dict[str, int] = {}
     if not line_mode:
@@ -680,10 +685,8 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
             "nominal_ex_share": _share(kpi_row.nominal_ex, kpi_row.amount_ex),
         },
         "groups": groups,
-        "total_groups": total_groups,
-        "groups_page": page_out,
-        "groups_page_size": size_out,
         "groups_ranking_restricted": groups_ranking_restricted,
+        **(page_meta or {}),
     }
 
 
