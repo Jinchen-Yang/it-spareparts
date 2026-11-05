@@ -62,6 +62,27 @@ describe("原件上传聚合回执", () => {
     expect(screen.getByText("实际变更 0 行")).toBeInTheDocument();
   });
 
+  it("改挂回执写出原项目和新销售单，多项目冲突单独说明", () => {
+    render(<WbddUploadFeedback report={{
+      xsdd_reassignments: [{
+        order_no: "WBDD-20261002-0010",
+        raw_order_id: "order-1",
+        old_xsdd: "XSDD-20250421-0034",
+        old_project_name: "原项目",
+        new_xsdd: "XSDD-20260616-0013",
+        new_project_name: "新项目",
+      }],
+      xsdd_project_conflicts: 2,
+    }} />);
+
+    expect(screen.getByText("已按上传需求单改挂 1 张到销售单所属项目")).toBeInTheDocument();
+    expect(screen.getByText(
+      "WBDD-20261002-0010：销售单 XSDD-20250421-0034（原项目）改为 XSDD-20260616-0013（新项目）",
+    )).toBeInTheDocument();
+    expect(screen.getByText("2 行因销售单同时归属多个项目未导入，其余行已继续处理"))
+      .toBeInTheDocument();
+  });
+
   it("实际变更与保护独立展示，白名单外的身份和值不进入反馈", () => {
     const report = {
       import_mode: "upsert" as const, fact_rows_skipped: 0, fact_rows_semantic_updated: 0,

@@ -23,8 +23,12 @@ export default function WbddUploadFeedback({ report }: { report: Partial<WbddImp
     const count = report.protected_field_counts?.[field];
     return typeof count === "number" && count > 0 ? [`${label} ${count} 行`] : [];
   });
+  const remounts = report.xsdd_reassignments ?? [];
+  const remountConflicts = report.xsdd_project_conflicts ?? 0;
   const hasMissing = (report.snapshot_diff?.missing_orders ?? 0) > 0
-    || (report.snapshot_diff?.missing_lines ?? 0) > 0;
+    || (report.snapshot_diff?.missing_lines ?? 0) > 0
+    || remounts.length > 0
+    || remountConflicts > 0;
   return (
     <Alert
       showIcon
@@ -49,6 +53,28 @@ export default function WbddUploadFeedback({ report }: { report: Partial<WbddImp
                 ? <Text>缺失明细 {report.snapshot_diff.missing_lines} 行</Text> : null}
               <Text type="secondary">缺项需核对并确认，上传不会自动作废。</Text>
             </Space>
+          ) : null}
+          {remounts.length ? (
+            <Text>已按上传需求单改挂 {remounts.length} 张到销售单所属项目</Text>
+          ) : null}
+          {remounts.slice(0, 8).map((row) => (
+            <Text key={row.raw_order_id || row.order_no}>
+              {`${row.order_no || row.raw_order_id}：销售单 ${row.old_xsdd || "（空）"}`
+                + `（${row.old_project_name || row.old_project_id || "未挂项目"}）`
+                + `改为 ${row.new_xsdd || "（空）"}`
+                + `（${row.new_project_name || row.new_project_id || ""}）`}
+            </Text>
+          ))}
+          {remounts.length > 8 ? <Text>另有 {remounts.length - 8} 张，见导入结果</Text> : null}
+          {remountConflicts > 0 ? (
+            <Text type="danger">
+              {remountConflicts} 行因销售单同时归属多个项目未导入，其余行已继续处理
+            </Text>
+          ) : null}
+          {(report.row_write_failures ?? 0) > 0 ? (
+            <Text type="danger">
+              {report.row_write_failures} 行写入失败未导入，其余行已继续处理
+            </Text>
           ) : null}
           {protectedFields.length ? (
             <Space wrap><Text>受保护字段：</Text>{protectedFields.map((field) => <Text key={field}>{field}</Text>)}</Space>

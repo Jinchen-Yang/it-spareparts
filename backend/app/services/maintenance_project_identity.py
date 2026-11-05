@@ -46,6 +46,39 @@ class XsddProjectConflict(Exception):
     """One normalized XSDD already has evidence for another/multiple projects."""
 
 
+XSDD_SINGLE_OWNER_CONSTRAINT = "ck_maintenance_project_xsdd_single_owner"
+XSDD_SINGLE_OWNER_PUBLIC_MESSAGE = (
+    "销售单已归属其他项目，本次需求单与「一个销售单只归属一个项目」冲突，"
+    "该文件已整体回滚。请按需求单核对销售单后再导入"
+)
+
+
+def is_xsdd_single_owner_violation(exc: BaseException) -> bool:
+    """True when a database error is the single-owner XSDD guard (SQLSTATE 23514)."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        sqlstate = getattr(current, "sqlstate", None) or getattr(current, "pgcode", None)
+        diag = getattr(current, "diag", None)
+        constraint = getattr(diag, "constraint_name", None) if diag is not None else None
+        text_value = str(current)
+        if (
+            constraint == XSDD_SINGLE_OWNER_CONSTRAINT
+            or XSDD_SINGLE_OWNER_CONSTRAINT in text_value
+        ):
+            return True
+        if sqlstate == "23514" and (
+            "XSDD" in text_value or "already belongs to" in text_value
+        ):
+            return True
+        nxt = getattr(current, "orig", None)
+        if not isinstance(nxt, BaseException) or nxt is current:
+            nxt = current.__cause__
+        current = nxt if isinstance(nxt, BaseException) else None
+    return False
+
+
 class XsddExactDedupeConflict(Exception):
     """The locked facts no longer match a reviewed exact-duplicate plan."""
 

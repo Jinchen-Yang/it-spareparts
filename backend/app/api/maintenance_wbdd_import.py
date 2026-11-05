@@ -9,6 +9,7 @@ import logging
 import os
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Response, status
+from sqlalchemy.exc import DBAPIError
 from fastapi import UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
@@ -17,6 +18,10 @@ from app.api.imports import _save_upload_to_temp
 from app.auth import current_identity, current_role
 from app.db import get_db
 from app.etl import loader, pipeline
+from app.services.maintenance_project_identity import (
+    XSDD_SINGLE_OWNER_PUBLIC_MESSAGE,
+    is_xsdd_single_owner_violation,
+)
 from app.etl.reader import ReaderError
 from app.maintenance_boss import require_maintenance_boss
 from app.security import (
@@ -121,6 +126,26 @@ def upload_wbdd(
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 {"code": "reader_error", "message": str(exc)},
+            ) from exc
+        except DBAPIError as exc:
+            db.rollback()
+            if is_xsdd_single_owner_violation(exc):
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    {
+                        "code": "xsdd_single_owner",
+                        "message": XSDD_SINGLE_OWNER_PUBLIC_MESSAGE,
+                    },
+                ) from exc
+            # 客户/商品/别名等行级失败应在 loader 保存点内变成 row_write_failures
+            # 并随 200 回执返回。落到这里说明事务已经失败，不能再 500 裸异常。
+            _log.exception("wbdd import database error escaped row isolation")
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                {
+                    "code": "row_write_failed",
+                    "message": "需求单写入时发生数据错误，请按导入回执核对失败行",
+                },
             ) from exc
         return {**report, "replayed": replayed}
     finally:

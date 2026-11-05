@@ -13,15 +13,16 @@
 """
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
+from uuid import uuid4
 
 from sqlalchemy import and_, case, delete, func, or_, select, true, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.etl import expense_void, mapping
-from app.etl.transform import SOFT_ERROR_TYPES, TransformResult
+from app.etl.transform import SOFT_ERROR_TYPES, ErrorRec, TransformResult
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inventory import Inventory
 from app.models.maintenance import (
@@ -1036,6 +1037,380 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
     return counts
 
 
+def _maintenance_updates_xsdd(result: TransformResult) -> bool:
+    """修复模式是否会把销售单号写进 SET，从而触发认领。"""
+    present = None
+    if result.present_fields is not None:
+        present = result.present_fields.get("head")
+    return "linked_sales_order_no" in _mask_maintenance_update_cols(
+        _MAINT_ORDER_UPD, present, _MAINT_ORDER_SOURCE_DEPS, _MAINT_ORDER_ALWAYS_UPD,
+    )
+
+
+def _lock_import_data_change(session: Session) -> None:
+    from sqlalchemy import text
+
+    from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY
+
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(:k)"),
+        {"k": DATA_CHANGE_ADVISORY_LOCK_KEY},
+    )
+
+
+def _xsdd_owner_project_ids(session: Session, result: TransformResult) -> set[str]:
+    """D-0054：写销售单号之前，把可能改挂到的既有项目并进同一把 state 锁。"""
+    from app.models.maintenance_project import MaintenanceProjectXsdd
+    from app.services import maintenance_project_identity as identity
+
+    norms = sorted({
+        norm
+        for order in result.orders.values()
+        if (norm := identity.normalize_xsdd(order.get("linked_sales_order_no")))
+    })
+    if not norms:
+        return set()
+    _lock_import_data_change(session)
+    identity.lock_xsdd_identities(session, norms)
+    project_ids = set(session.scalars(
+        select(MaintenanceProjectXsdd.project_id).where(
+            MaintenanceProjectXsdd.xsdd_norm.in_(norms)
+        )
+    ))
+    for xsdd in norms:
+        project_ids.update(identity.evidence_project_ids(session, xsdd))
+    return project_ids
+
+
+def _assignment_snapshot(row: MaintenanceSourceOrderAssignment) -> dict:
+    return {
+        "assignment_id": row.assignment_id,
+        "source_order_id": row.source_order_id,
+        "project_id": row.project_id,
+        "is_active": row.is_active,
+        "version": row.version,
+    }
+
+
+def _import_operator(operated_by: str | None) -> str:
+    operator = (operated_by or "system").strip()[:64]
+    return operator or "system"
+
+
+def _append_xsdd_conflict_errors(result: TransformResult, blocked: set[str]) -> int:
+    """销售单落在多个项目上：按源行留下中文说明，调用方跳过这些需求单。"""
+    if not blocked:
+        return 0
+    rows_by_order: dict[str, list[int]] = {}
+    for line in result.lines:
+        raw_id = line.get("_order_raw_id")
+        if raw_id in blocked:
+            rows_by_order.setdefault(raw_id, []).append(int(line.get("_row_no") or 0))
+    count = 0
+    for raw_id in sorted(blocked):
+        order = result.orders.get(raw_id) or {}
+        order_no = order.get("order_no") or raw_id
+        xsdd = order.get("linked_sales_order_no") or ""
+        detail = (
+            f"需求单 {order_no} 的销售单 {xsdd or '（空）'} 同时归属多个项目，"
+            "无法确定应改挂到哪一个项目，本行未导入，同文件其余行继续处理"
+        )
+        row_nos = rows_by_order.get(raw_id) or [int(order.get("_source_row_no") or 0)]
+        raw = {
+            "raw_order_id": raw_id,
+            "order_no": order_no,
+            "linked_sales_order_no": xsdd or None,
+        }
+        for row_no in row_nos:
+            result.errors.append(ErrorRec(
+                row_no, "xsdd_project_conflict", detail, raw,
+            ))
+            count += 1
+    return count
+
+
+def _detach_orders_for_xsdd_remount(
+    session: Session,
+    result: TransformResult,
+    *,
+    prelocked: dict,
+    batch_id: int,
+    operated_by: str | None,
+) -> tuple[set[str], list[dict]]:
+    """只规划改挂，不在这里摘挂载。
+
+    多项目归属整单留在库内原样。真正摘下旧挂载发生在该单自己的写入保存点里，
+    这样某一行写入失败时旧项目上的其他需求单不会被一起归档。
+    返回（不导入的 raw_order_id，改挂计划）。
+    """
+    from app.models.maintenance_project import MaintenanceProject
+    from app.services import maintenance_project_identity as identity
+
+    incoming = {
+        str(order["raw_order_id"]): order
+        for order in result.orders.values()
+        if order.get("raw_order_id")
+    }
+    if not incoming:
+        return set(), []
+    raw_ids = sorted(incoming)
+    locked_orders = {
+        row.raw_order_id: row
+        for row in session.scalars(
+            select(FMaintenanceOrder)
+            .where(FMaintenanceOrder.raw_order_id.in_(raw_ids))
+            .order_by(FMaintenanceOrder.raw_order_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    }
+    locked_assignments = {
+        row.source_order_id: row
+        for row in session.scalars(
+            select(MaintenanceSourceOrderAssignment)
+            .where(
+                MaintenanceSourceOrderAssignment.source_order_id.in_(raw_ids),
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            )
+            .order_by(MaintenanceSourceOrderAssignment.source_order_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    }
+    blocked: set[str] = set()
+    pending: list[tuple] = []
+    for raw_id in raw_ids:
+        order_in = incoming[raw_id]
+        incoming_xsdd = order_in.get("linked_sales_order_no")
+        existing = locked_orders.get(raw_id)
+        try:
+            owner = identity.resolve_xsdd_project(session, incoming_xsdd)
+        except identity.XsddProjectConflict:
+            # 号码没变也要拦住：历史多归属不能借同号重导继续写入。
+            blocked.add(raw_id)
+            continue
+        if (
+            existing is not None
+            and identity.normalize_xsdd(existing.linked_sales_order_no)
+            == identity.normalize_xsdd(incoming_xsdd)
+        ):
+            continue
+        if existing is None or owner is None:
+            continue
+        assignment = locked_assignments.get(raw_id)
+        if assignment is None or owner == assignment.project_id:
+            continue
+        if owner not in prelocked:
+            raise WorkbookInvalidationConflictError(
+                "需求单改挂的目标项目不在导入预锁范围内，本次已整体回滚，请重试："
+                f"{owner}"
+            )
+        pending.append((existing, assignment, owner, incoming_xsdd))
+    if not pending:
+        return blocked, []
+
+    project_ids = {item[1].project_id for item in pending} | {item[2] for item in pending}
+    names = dict(session.execute(
+        select(MaintenanceProject.project_id, MaintenanceProject.display_name).where(
+            MaintenanceProject.project_id.in_(sorted(project_ids))
+        )
+    ).all())
+    public: list[dict] = []
+    for existing, assignment, _owner, incoming_xsdd in pending:
+        before = _assignment_snapshot(assignment)
+        public.append({
+            "order_no": existing.order_no,
+            "raw_order_id": existing.raw_order_id,
+            "old_xsdd": existing.linked_sales_order_no,
+            "old_project_id": before["project_id"],
+            "old_project_name": names.get(before["project_id"]),
+            "new_xsdd": incoming_xsdd,
+            "new_project_id": _owner,
+            "new_project_name": names.get(_owner),
+            "_assignment_id": assignment.assignment_id,
+        })
+    return blocked, public
+
+
+def _deactivate_planned_assignment(
+    session: Session,
+    remount: dict,
+    *,
+    batch_id: int,
+    operated_by: str | None,
+) -> None:
+    """摘下这一张需求单的旧挂载。旧项目上的其他需求单保持原挂载，项目本身不归档。"""
+    from app.models.maintenance_project import MaintenanceProjectAuditLog
+
+    assignment = session.get(
+        MaintenanceSourceOrderAssignment,
+        remount["_assignment_id"],
+        with_for_update=True,
+    )
+    if assignment is None or not assignment.is_active:
+        return
+    if assignment.project_id != remount["old_project_id"]:
+        raise WorkbookInvalidationConflictError(
+            "需求单原项目挂载在导入期间发生变化，本次已整体回滚，请重试"
+        )
+    operator = _import_operator(operated_by)
+    reason = f"需求单导入：上传文件把该单改挂到销售单已归属的项目（batch {batch_id}）"
+    before = _assignment_snapshot(assignment)
+    assignment.is_active = False
+    assignment.version += 1
+    assignment.archived_by = operator
+    assignment.archived_at = datetime.now(timezone.utc)
+    session.flush()
+    session.add(MaintenanceProjectAuditLog(
+        project_id=assignment.project_id,
+        entity_type="source_order_assignment",
+        entity_id=assignment.assignment_id,
+        action="reassign_out",
+        before_json=before,
+        after_json=_assignment_snapshot(assignment),
+        reason=reason,
+        operated_by=operator,
+    ))
+
+
+def _public_remount(remount: dict) -> dict:
+    return {key: value for key, value in remount.items() if not key.startswith("_")}
+
+
+def _append_row_write_errors(result: TransformResult, failed_ids: set[str]) -> int:
+    """非 23514 的写入失败只丢本单，不把数据库异常原文回给上传人。"""
+    count = 0
+    rows_by_order: dict[str, list[int]] = {}
+    for line in result.lines:
+        raw_id = line.get("_order_raw_id")
+        if raw_id in failed_ids:
+            rows_by_order.setdefault(raw_id, []).append(int(line.get("_row_no") or 0))
+    for raw_id in sorted(failed_ids):
+        order = result.orders.get(raw_id) or {}
+        order_no = order.get("order_no") or raw_id
+        detail = (
+            f"需求单 {order_no} 写入时发生数据错误，本行未导入，同文件其余行继续处理"
+        )
+        row_nos = rows_by_order.get(raw_id) or [int(order.get("_source_row_no") or 0)]
+        raw = {"raw_order_id": raw_id, "order_no": order_no}
+        for row_no in row_nos:
+            result.errors.append(ErrorRec(row_no, "row_write_failed", detail, raw))
+            count += 1
+    return count
+
+
+def _is_xsdd_single_owner_db_error(exc: BaseException) -> bool:
+    from app.services.maintenance_project_identity import is_xsdd_single_owner_violation
+
+    return is_xsdd_single_owner_violation(exc)
+
+
+def _isolated_maintenance_upsert(
+    session: Session,
+    rows: list[dict],
+    *,
+    write_group,
+) -> tuple[list[dict], set[str], dict | None, dict | None]:
+    """一批写入放进保存点。23514 仍整批抛出；其他数据库错误拆到行后继续。
+
+    统计只在保存点提交后返回，避免失败行把已回滚的写入算进回执。
+    """
+    from sqlalchemy.exc import DBAPIError
+
+    if not rows:
+        return [], set(), None, None
+    try:
+        with session.begin_nested():
+            applied, order_part, line_part = write_group(rows)
+        return applied, set(), order_part, line_part
+    except DBAPIError as exc:
+        if _is_xsdd_single_owner_db_error(exc):
+            raise
+        if len(rows) == 1:
+            _log.warning(
+                "maintenance order write isolated raw_order_id=%s",
+                rows[0].get("raw_order_id"),
+                exc_info=exc,
+            )
+            return [], {str(rows[0]["raw_order_id"])}, None, None
+        mid = max(1, len(rows) // 2)
+        left = _isolated_maintenance_upsert(
+            session, rows[:mid], write_group=write_group,
+        )
+        right = _isolated_maintenance_upsert(
+            session, rows[mid:], write_group=write_group,
+        )
+        return (
+            left[0] + right[0],
+            left[1] | right[1],
+            _prefer_stats(left[2], right[2]),
+            _prefer_stats(left[3], right[3]),
+        )
+
+
+def _prefer_stats(left: dict | None, right: dict | None) -> dict | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return {"_parts": [left, right]}
+
+
+def _iter_stats(stats: dict | None):
+    if not stats:
+        return
+    if "_parts" in stats:
+        for part in stats["_parts"]:
+            yield from _iter_stats(part)
+        return
+    yield stats
+
+
+def _attach_remounted_orders(
+    session: Session,
+    remounts: list[dict],
+    *,
+    batch_id: int,
+    operated_by: str | None,
+) -> None:
+    """销售单号已经写成新值后，把需求单挂到该销售单所属项目。"""
+    if not remounts:
+        return
+    from app.models.maintenance_project import MaintenanceProjectAuditLog
+    from app.services import maintenance_warehouse
+
+    operator = _import_operator(operated_by)
+    reason = f"需求单导入：上传文件把该单改挂到销售单已归属的项目（batch {batch_id}）"
+    for row in remounts:
+        assignment = MaintenanceSourceOrderAssignment(
+            assignment_id=str(uuid4()),
+            source_order_id=row["raw_order_id"],
+            project_id=row["new_project_id"],
+            is_active=True,
+            version=1,
+            created_by=operator,
+        )
+        session.add(assignment)
+        session.flush()
+        session.add(MaintenanceProjectAuditLog(
+            project_id=row["new_project_id"],
+            entity_type="source_order_assignment",
+            entity_id=assignment.assignment_id,
+            action="assign",
+            before_json=None,
+            after_json=_assignment_snapshot(assignment),
+            reason=reason,
+            operated_by=operator,
+        ))
+    session.flush()
+    maintenance_warehouse.reconcile_project_assignment_links(
+        session,
+        operated_by=operator,
+        reason=reason,
+        source_order_ids={row["raw_order_id"] for row in remounts},
+    )
+
+
 def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
                       mode: str = "skip", operated_by: str | None = None,
                       audit_overwrites: bool = False,
@@ -1073,9 +1448,12 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
     target_project_ids = set(
         lock_envelope.target_project_ids if lock_envelope is not None else ()
     )
+    # D-0054：新销售单的既有归属项目必须和当前挂载一起预锁，改挂后才能 bump。
+    write_xsdd = upsert and _maintenance_updates_xsdd(result)
+    remount_targets = _xsdd_owner_project_ids(session, result) if write_xsdd else set()
     prelocked_states = _project_ops.lock_workbook_states(
         session,
-        project_ids=current_project_ids | target_project_ids,
+        project_ids=current_project_ids | target_project_ids | remount_targets,
     )
     if lock_envelope is not None:
         # 自动归属的既有目标也必须在事实行之前按 canonical 顺序锁住。
@@ -1100,26 +1478,21 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         lock_envelope.projects = {
             project.project_id: project for project in locked_projects
         }
-    # 1) 商品身份解析（别名/合并重定向 + 建档，非销售口径：不写品类）+ alias
-    resolution, new_parts = _resolve_line_parts(session, result.lines, is_sales=False)
-    _upsert_aliases(session, result.lines, resolution)
-
-    # 2) 客户维度（维保客户名实测混入联系人后缀，v1 原样入库，治理留二期）
+    # 商品、别名、客户与事实行放在同一张需求单的保存点里。某一行的 23502
+    # 只能回滚这一行，不能在保存点之前把整文件写死。
     orders = result.orders
-    cust_rows = [{
-        "name_raw": o["customer_name"], "name_normalized": o["customer_name"],
-        "customer_type": None, "customer_source": None, "city": None,
-    } for o in orders.values() if o.get("customer_name")]
-    cust_id = _upsert_named_dim(session, DimCustomer, cust_rows,
-                                ["name_normalized", "customer_type", "customer_source", "city"])
+    customer_by_order = {
+        o["raw_order_id"]: o.get("customer_name") for o in orders.values()
+    }
+    counted_parts: set[str] = set()
 
-    # 3) 维保单头
+    # 3) 维保单头（客户 id 在该单保存点内解析）
     order_rows = [{
         "raw_order_id": o["raw_order_id"], "order_no": o["order_no"],
         "order_date": o["order_date"],
         "linked_sales_order_no": o.get("linked_sales_order_no"),
         "project_raw": o.get("project_raw"), "project_std": o.get("project_std"),
-        "customer_id": cust_id.get(o.get("customer_name")),
+        "customer_id": None,
         "end_customer": o.get("end_customer"),
         "demand_type": o.get("demand_type"), "business_type": o.get("business_type"),
         "salesperson": o.get("salesperson"), "warehouse": o.get("warehouse"),
@@ -1127,6 +1500,24 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         "data_status": o["data_status"], "import_batch_id": batch_id,
         **{f: o.get(f) for f in mapping.MAINTENANCE_HEAD_DISPLAY_FIELDS},
     } for o in orders.values()]
+    blocked_orders: set[str] = set()
+    remounts: list[dict] = []
+    xsdd_conflict_rows = 0
+    row_write_failures = 0
+    if write_xsdd:
+        blocked_orders, remounts = _detach_orders_for_xsdd_remount(
+            session,
+            result,
+            prelocked=prelocked_states,
+            batch_id=batch_id,
+            operated_by=operated_by,
+        )
+        xsdd_conflict_rows = _append_xsdd_conflict_errors(result, blocked_orders)
+        if blocked_orders:
+            order_rows = [
+                row for row in order_rows if row["raw_order_id"] not in blocked_orders
+            ]
+    remount_by_id = {row["raw_order_id"]: row for row in remounts}
     # D-26: a missing/blank/conflicting address is not a request to clear it.
     # Split only the order update whitelist; INSERT still permits a NULL address.
     # The existing shared upsert/audit/change detection and lock order stay intact.
@@ -1141,52 +1532,148 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
     order_stats = {"inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set()}
     present_fields = result.present_fields or {}
     present_head = present_fields.get("head")
+    line_update_cols = _mask_maintenance_update_cols(
+        _MAINT_LINE_UPD, present_fields.get("line"),
+        _MAINT_LINE_SOURCE_DEPS, _MAINT_LINE_ALWAYS_UPD,
+    )
+    if upsert:
+        line_stats = {
+            "inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set(),
+            "semantic_updated": 0, "unchanged": 0, "protected": 0,
+            "protected_field_counts": {}, "legacy_review": 0,
+        }
+    else:
+        # skip 不评估人工保护；None 表示未评估，不能写成 0。
+        line_stats = {
+            "inserted": 0, "updated": 0, "skipped": 0, "changed_keys": set(),
+            "semantic_updated": None, "unchanged": None, "protected": None,
+            "protected_field_counts": None, "legacy_review": None,
+        }
+    successful_remounts: list[dict] = []
+
+    def _line_rows_for(raw_ids: list[str], oid_map: dict, resolution: dict) -> list[dict]:
+        wanted = set(raw_ids)
+        return [{
+            "raw_line_id": ln["raw_line_id"], "order_id": oid_map[ln["_order_raw_id"]],
+            "line_no": ln["line_no"], "part_id": resolution[ln["pn_raw"]][0],
+            "pn_std": ln["pn_std"], "pn_raw": ln["pn_raw"],
+            "description": ln["description"],
+            "qty": ln["qty"], "return_qty": ln["return_qty"],
+            "serial_numbers": ln["serial_numbers"],
+            "anomaly_flags": ln["anomaly_flags"], "import_batch_id": batch_id,
+            "adjust_warehouse_raw": ln.get("adjust_warehouse_raw"),
+            **{f: ln.get(f) for f in mapping.MAINTENANCE_LINE_DISPLAY_FIELDS},
+        } for ln in result.lines if ln.get("_order_raw_id") in wanted]
+
+    def _merge_order_stats(stats: dict) -> None:
+        for pn in stats.pop("_touched_parts", ()):
+            counted_parts.add(pn)
+        for key in ("inserted", "updated", "skipped"):
+            order_stats[key] += stats[key]
+        order_stats["changed_keys"].update(stats["changed_keys"])
+
+    def _merge_line_stats(stats: dict) -> None:
+        for key in ("inserted", "updated", "skipped", "semantic_updated",
+                    "unchanged", "protected", "legacy_review"):
+            if isinstance(stats.get(key), int):
+                line_stats[key] += stats[key]
+        line_stats["changed_keys"].update(stats.get("changed_keys") or set())
+        counts = stats.get("protected_field_counts")
+        if isinstance(counts, dict):
+            if line_stats["protected_field_counts"] is None:
+                line_stats["protected_field_counts"] = {}
+            for field, count in counts.items():
+                line_stats["protected_field_counts"][field] = (
+                    line_stats["protected_field_counts"].get(field, 0) + count
+                )
+
+    def _write_order_group(rows: list[dict], *, update_cols: list[str] | None) -> list[dict]:
+        raw_ids = [row["raw_order_id"] for row in rows]
+        source_lines = [
+            ln for ln in result.lines if ln.get("_order_raw_id") in set(raw_ids)
+        ]
+        # 前置维度与事实行同一保存点：客户/商品/别名失败只回滚这批行。
+        resolution, _created = _resolve_line_parts(session, source_lines, is_sales=False)
+        _upsert_aliases(session, source_lines, resolution)
+        cust_rows = []
+        seen_names: set[str] = set()
+        for raw_id in raw_ids:
+            name = customer_by_order.get(raw_id)
+            if name and name not in seen_names:
+                seen_names.add(name)
+                cust_rows.append({
+                    "name_raw": name, "name_normalized": name,
+                    "customer_type": None, "customer_source": None, "city": None,
+                })
+        cust_id = _upsert_named_dim(
+            session, DimCustomer, cust_rows,
+            ["name_normalized", "customer_type", "customer_source", "city"],
+        )
+        for row in rows:
+            name = customer_by_order.get(row["raw_order_id"])
+            row["customer_id"] = cust_id.get(name) if name else None
+        planned = [remount_by_id[row["raw_order_id"]] for row in rows
+                   if row["raw_order_id"] in remount_by_id]
+        for remount in planned:
+            _deactivate_planned_assignment(
+                session, remount, batch_id=batch_id, operated_by=operated_by,
+            )
+        stats = _upsert_facts(
+            session, FMaintenanceOrder, rows, FMaintenanceOrder.raw_order_id,
+            update_cols, audit=audit, track_changed=True,
+        )
+        stats = dict(stats)
+        stats["_touched_parts"] = sorted({
+            ln.get("pn_std") for ln in source_lines if ln.get("pn_std")
+        })
+        if planned:
+            _attach_remounted_orders(
+                session, [_public_remount(row) for row in planned],
+                batch_id=batch_id, operated_by=operated_by,
+            )
+        raw_ids = [row["raw_order_id"] for row in rows]
+        oid_map = dict(session.execute(
+            select(FMaintenanceOrder.raw_order_id, FMaintenanceOrder.id)
+            .where(FMaintenanceOrder.raw_order_id.in_(raw_ids))
+        ).all()) if raw_ids else {}
+        group_lines = _line_rows_for(raw_ids, oid_map, resolution)
+        group_line_stats = _upsert_maintenance_lines(
+            session, group_lines, FMaintenanceLine.raw_line_id,
+            line_update_cols if upsert else None, audit=audit,
+            batch_id=batch_id, operated_by=operated_by,
+        )
+        return [_public_remount(row) for row in planned], stats, group_line_stats
+
+    # 非 23514 的写入错误（含客户/商品/别名）只回滚这一张需求单。
+    # 23514 继续向外抛，走整文件中文拒绝。跳过模式同样把维度写进保存点。
     for write_address in (True, False):
         rows = [row for row in order_rows
                 if (row["raw_order_id"] in address_write_ids) == write_address]
         base_cols = (_MAINT_ORDER_UPD if write_address else
                      [c for c in _MAINT_ORDER_UPD if c != "receiver_address"])
-        update_cols = _mask_maintenance_update_cols(
+        masked_cols = _mask_maintenance_update_cols(
             base_cols, present_head, _MAINT_ORDER_SOURCE_DEPS,
             _MAINT_ORDER_ALWAYS_UPD,
-            # D-26：地址设置/清空是显式动作，必须写入；缺列/空白仍被排除。
             keep=("receiver_address",) if write_address else (),
         )
-        stats = _upsert_facts(session, FMaintenanceOrder, rows,
-                              FMaintenanceOrder.raw_order_id,
-                              update_cols if upsert else None, audit=audit,
-                              track_changed=True)
-        for key in ("inserted", "updated", "skipped"):
-            order_stats[key] += stats[key]
-        order_stats["changed_keys"].update(stats["changed_keys"])
-    raw_ids = [o["raw_order_id"] for o in orders.values()]
-    oid_map = dict(session.execute(
-        select(FMaintenanceOrder.raw_order_id, FMaintenanceOrder.id)
-        .where(FMaintenanceOrder.raw_order_id.in_(raw_ids))
-    ).all())
+        update_cols = masked_cols if upsert else None
 
-    # 4) 出库明细行
-    line_rows = [{
-        "raw_line_id": ln["raw_line_id"], "order_id": oid_map[ln["_order_raw_id"]],
-        "line_no": ln["line_no"], "part_id": resolution[ln["pn_raw"]][0],
-        "pn_std": ln["pn_std"], "pn_raw": ln["pn_raw"],
-        "description": ln["description"],
-        "qty": ln["qty"], "return_qty": ln["return_qty"],
-        "serial_numbers": ln["serial_numbers"],
-        "anomaly_flags": ln["anomaly_flags"], "import_batch_id": batch_id,
-        "adjust_warehouse_raw": ln.get("adjust_warehouse_raw"),
-        **{f: ln.get(f) for f in mapping.MAINTENANCE_LINE_DISPLAY_FIELDS},
-    } for ln in result.lines]
-    line_update_cols = _mask_maintenance_update_cols(
-        _MAINT_LINE_UPD, present_fields.get("line"),
-        _MAINT_LINE_SOURCE_DEPS, _MAINT_LINE_ALWAYS_UPD,
-    )
-    line_stats = _upsert_maintenance_lines(
-        session, line_rows,
-        FMaintenanceLine.raw_line_id,
-        line_update_cols if upsert else None, audit=audit,
-        batch_id=batch_id, operated_by=operated_by,
-    )
+        def _group(chunk: list[dict], cols: list[str] | None = update_cols):
+            return _write_order_group(chunk, update_cols=cols)
+
+        applied, failed, order_part, line_part = _isolated_maintenance_upsert(
+            session, rows, write_group=_group,
+        )
+        for part in _iter_stats(order_part):
+            _merge_order_stats(part)
+        for part in _iter_stats(line_part):
+            _merge_line_stats(part)
+        successful_remounts.extend(applied)
+        if failed:
+            blocked_orders.update(failed)
+            row_write_failures += _append_row_write_errors(result, failed)
+    remounts = successful_remounts
+    new_parts = len(counted_parts)
 
     # 5) 工作簿 revision 失效：写后复核（probe 外项目 → fail closed 整批回滚），
     #    再让「头或行确有业务字段变化」的单据归属项目各 bump 一次。
@@ -1207,6 +1694,14 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         source_order_ids=source_order_ids,
         changed_source_order_ids=changed_orders,
     )
+    for project_id in sorted(
+        {row["old_project_id"] for row in remounts} - set(bumped_projects)
+    ):
+        state = prelocked_states.get(project_id)
+        if state is None:
+            continue
+        _project_ops.bump_locked_workbook_revision(session, state=state)
+        bumped_projects.append(project_id)
 
     return {
         "source_rows_total": result.rows_total,
@@ -1232,6 +1727,11 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         "rows_display_issue": result.rows_display_issue,
         # K3：本次语义写入导致 workbook revision 失效的项目数（仅归属项目各一次）
         "workbook_projects_bumped": len(bumped_projects),
+        # D-0054：改挂回执与无法唯一归属的行数。空结果也返回，供调用方省略对外字段。
+        "xsdd_reassignments": remounts,
+        "xsdd_project_conflicts": xsdd_conflict_rows,
+        "xsdd_blocked_order_ids": sorted(blocked_orders),
+        "row_write_failures": row_write_failures,
     }
 
 

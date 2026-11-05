@@ -40,7 +40,8 @@ def _boss_flag_on():
 
 
 def _client(db, *, username: str, role: str = "readonly",
-            overrides: dict[str, bool] | None = None) -> TestClient:
+            overrides: dict[str, bool] | None = None,
+            raise_server_exceptions: bool = True) -> TestClient:
     base = permissions.effective(role, None)
     effective = permissions.effective_from_snapshot(base, overrides or {})
     db.add(SysUser(
@@ -50,7 +51,7 @@ def _client(db, *, username: str, role: str = "readonly",
         perm_overrides=overrides or {}, permissions=effective,
     ))
     db.commit()
-    client = TestClient(app)
+    client = TestClient(app, raise_server_exceptions=raise_server_exceptions)
     login = client.post("/api/auth/login",
                         json={"username": username, "password": _PASSWORD})
     assert login.status_code == 200, login.text
@@ -713,3 +714,105 @@ def test_replay_does_not_rerun_recompute_when_already_done(db, tmp_path):
         assert calls["n"] == 0
     finally:
         wbdd.maintenance_cost.recompute = real
+
+
+def _raise_not_null(session) -> None:
+    """真实 23502：缺 NOT NULL 列，由驱动抛出而不是手造 SQLSTATE。"""
+    from sqlalchemy import text
+
+    session.execute(text(
+        "INSERT INTO dim_customer (name_normalized) VALUES ('缺客户名称')"
+    ))
+
+
+@pytest.mark.parametrize("kind", ["customer", "part", "alias"])
+def test_non23514_dimension_write_failure_isolated_at_http(db, tmp_path, monkeypatch, kind):
+    """M5：客户/商品/别名的 23502 只丢掉该需求单，HTTP 不 500，合法兄弟单已提交。"""
+    rows = make_rows(orders=2, lines_per_order=1)
+    rows[0]["客户名称"] = "好客户"
+    rows[0]["需求明细.需供货产品"] = "PN-GOOD-513"
+    rows[0]["需求单号"] = "WBDD-20261105-0001"
+    rows[1]["客户名称"] = "坏客户"
+    rows[1]["需求明细.需供货产品"] = "PN-BAD-513"
+    rows[1]["需求单号"] = "WBDD-20261105-0002"
+    path = write_workbook(str(tmp_path / f"{kind}.xlsx"), COLUMNS_91, rows)
+
+    if kind == "customer":
+        original = loader._upsert_named_dim
+
+        def wrapped(session, model, dim_rows, extra_cols):
+            if getattr(model, "__tablename__", "") == "dim_customer" and any(
+                row.get("name_raw") == "坏客户" for row in dim_rows
+            ):
+                _raise_not_null(session)
+            return original(session, model, dim_rows, extra_cols)
+
+        monkeypatch.setattr(loader, "_upsert_named_dim", wrapped)
+    elif kind == "part":
+        original = loader._upsert_parts
+
+        def wrapped(session, part_attrs, is_sales):
+            if "PN-BAD-513" in part_attrs:
+                _raise_not_null(session)
+            return original(session, part_attrs, is_sales)
+
+        monkeypatch.setattr(loader, "_upsert_parts", wrapped)
+    else:
+        original = loader._upsert_aliases
+
+        def wrapped(session, line_rows, resolution):
+            if any(row.get("pn_raw") == "PN-BAD-513" for row in line_rows):
+                _raise_not_null(session)
+            return original(session, line_rows, resolution)
+
+        monkeypatch.setattr(loader, "_upsert_aliases", wrapped)
+
+    client = _client(db, username=f"dim-{kind}", overrides={
+        "page_maintenance": True, "action_maintenance_wbdd_import": True,
+    })
+    response = _upload(client, path)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body.get("row_write_failures", 0) >= 1
+    assert "psycopg" not in response.text.casefold()
+    db.expire_all()
+    orders = {
+        order.raw_order_id: order
+        for order in db.scalars(select(FMaintenanceOrder))
+    }
+    assert "SYN-O001" in orders
+    assert "SYN-O002" not in orders
+    assert orders["SYN-O001"].order_no == "WBDD-20261105-0001"
+
+
+def test_non23514_dbapierror_outside_savepoint_is_422_without_residual_rows(
+    db, tmp_path, monkeypatch,
+):
+    """DL-051：保存点之外的非 23514 DBAPIError 必须是 422 row_write_failed。
+
+    成本重算发生在行级保存点提交之后、整笔事务提交之前。这里注入真实 23502。
+    若专用接口把该异常重新抛出，客户端看到的是 500，本测试变红。
+    """
+    def boom(session, **_kwargs):
+        _raise_not_null(session)
+
+    monkeypatch.setattr(wbdd.maintenance_cost, "recompute", boom)
+    path = _wbdd_file(tmp_path, "outside-savepoint.xlsx")
+    client = _client(
+        db,
+        username="dl-051",
+        overrides={"page_maintenance": True, "action_maintenance_wbdd_import": True},
+        raise_server_exceptions=False,
+    )
+    response = _upload(client, path)
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "row_write_failed"
+    assert detail["message"] == "需求单写入时发生数据错误，请按导入回执核对失败行"
+    lowered = response.text.casefold()
+    assert "psycopg" not in lowered
+    assert "traceback" not in lowered
+    assert "23502" not in response.text
+    db.expire_all()
+    assert db.scalar(select(func.count()).select_from(FMaintenanceOrder)) == 0
+    assert db.scalar(select(func.count()).select_from(FMaintenanceLine)) == 0

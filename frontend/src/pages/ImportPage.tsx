@@ -52,6 +52,7 @@ const STATUS_COLOR: Record<string, string> = { success: "green", failed: "red", 
 const REPORT_LABEL: Record<string, string> = {
   source_rows_total: "源文件行数", fact_rows_inserted: "新增入库",
   fact_rows_updated: "更新", fact_rows_skipped: "跳过", fact_rows_error: "错误行",
+  row_write_failures: "写入失败未导入行",
   rows_inactive: "非生效行", rows_skipped_no_data: "空行跳过",
   import_mode: "导入模式",
   orders_semantic_updated: "新增或变更单头",
@@ -697,7 +698,8 @@ export default function ImportPage() {
             )}
             <Descriptions bordered column={2} size="small" style={{ marginBottom: 12 }}>
               {Object.entries(detail.report || {})
-                .filter(([k, v]) => k !== "errors_preview" && k !== "missing_price_columns" && v != null
+                .filter(([k, v]) => k !== "errors_preview" && k !== "missing_price_columns"
+                  && k !== "xsdd_reassignments" && k !== "xsdd_project_conflicts" && v != null
                   && !(detail.file_type === "maintenance" && WBDD_FEEDBACK_KEYS.has(k)))
                 .map(([k, v]) => (
                   <Descriptions.Item key={k} label={REPORT_LABEL[k] ?? k}>{reportValue(k, v)}</Descriptions.Item>

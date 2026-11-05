@@ -1,5 +1,16 @@
 import { api } from "../api";
 
+export interface XsddReassignment {
+  order_no?: string | null;
+  raw_order_id?: string | null;
+  old_xsdd?: string | null;
+  old_project_id?: string | null;
+  old_project_name?: string | null;
+  new_xsdd?: string | null;
+  new_project_id?: string | null;
+  new_project_name?: string | null;
+}
+
 export interface WbddAddressReport {
   mode: "skip" | "upsert";
   /** 已解析单据的地址处理意图；并非数据库实际变更数。 */
@@ -32,6 +43,12 @@ export interface WbddImportReport {
   protected_field_counts?: Record<string, number> | null;
   fact_rows_legacy_review?: number | null;
   fact_rows_error?: number;
+  /** D-0054：修复导入把需求单改挂到新销售单所属项目的回执。 */
+  xsdd_reassignments?: XsddReassignment[];
+  /** 销售单同时归属多个项目、因而未导入的源行数。 */
+  xsdd_project_conflicts?: number;
+  /** 非单归属约束的写入失败行数。 */
+  row_write_failures?: number;
   headless_orders?: number;
   headless_order_ids_sample?: string[];
   rows_display_issue?: number;

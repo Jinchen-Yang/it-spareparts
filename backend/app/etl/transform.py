@@ -777,6 +777,7 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
 
         res.lines.append({
             "_order_raw_id": raw_order_id,
+            "_row_no": row_no,
             "raw_line_id": raw_line_id,
             "line_no": cleaner.parse_int(row.get(inv_line["line_no"])),
             "pn_std": pn_std, "pn_raw": pn_raw, "needs_review": needs_review,
@@ -863,6 +864,7 @@ def _register_wbdd_order(res: TransformResult, row, row_no: int,
         "warehouse": cleaner.clean_str(g("warehouse")),
         "maint_start": maint_start, "maint_end": maint_end,
         "data_status": cleaner.clean_str(g("data_status")),
+        "_source_row_no": row_no,
         "_future_date": bool(order_date and order_date > future_cutoff),
         **_wbdd_display_extras(row, inv_head, _WBDD_HEAD_DISPLAY_SPEC, res),
     }
