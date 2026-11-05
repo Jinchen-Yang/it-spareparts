@@ -159,7 +159,9 @@ def _ref_summary(db: Session, user_ctx=None, *, date_from: date | None = None,
                  date_to: date | None = None, source_type: list[str] | None = None,
                  purchaser: list[str] | None = None, salesperson: list[str] | None = None,
                  customer_id: list[int] | None = None, category: list[str] | None = None,
-                 group_by: str = "source_type") -> dict:
+                 group_by: str = "source_type", supplier: str | None = None,
+                 order_no: str | None = None, linked_sales_order_no: str | None = None,
+                 groups_page: int = 1, groups_page_size: int = 50) -> dict:
     """KPI + 分组汇总。分类筛选（或按分类分组）→ 行级口径（拆行只计匹配行）；
     其余 → 单头口径（实付取单头「采购金额」原值）。三套金额一次全部返回。
 
@@ -172,11 +174,13 @@ def _ref_summary(db: Session, user_ctx=None, *, date_from: date | None = None,
     po, pl, dp = FPurchaseOrder, FPurchaseLine, DimPart
     link = _ref_sales_link()
     category = _norm_categories(category)
-    line_mode = bool(category) or group_by == "category"
+    line_mode = bool(category) or group_by in ("category", "pn")
     cat = _category_match(category)
     where = _base_where(po, link, date_from=date_from, date_to=date_to,
                         source_type=source_type, purchaser=purchaser,
-                        salesperson=salesperson, customer_id=customer_id)
+                        salesperson=salesperson, customer_id=customer_id,
+                        supplier=supplier, order_no=order_no,
+                        linked_sales_order_no=linked_sales_order_no)
     if line_mode and cat is not None:
         where.append(cat)
 
@@ -234,10 +238,22 @@ def _ref_summary(db: Session, user_ctx=None, *, date_from: date | None = None,
         grp_order = (func.count(func.distinct(po.id)).desc(), dim.asc().nullslast())
     else:
         grp_order = (func.sum(paid_e).desc().nullslast(), dim)
-    grp_rows = db.execute(
+    grouped = (
         _apply_from(select(dim.label("key"), *measures)).where(*where).group_by(dim)
-        .order_by(*grp_order)
-    ).all()
+    )
+    grp_stmt = grouped.order_by(*grp_order)
+    page_meta = None
+    if group_by == "pn":
+        page_out = max(1, int(groups_page or 1))
+        size_out = max(1, min(int(groups_page_size or 50), purchase_analytics.MAX_PAGE_SIZE))
+        total_groups = db.scalar(select(func.count()).select_from(grouped.subquery())) or 0
+        grp_stmt = grp_stmt.limit(size_out).offset((page_out - 1) * size_out)
+        page_meta = {
+            "total_groups": total_groups,
+            "groups_page": page_out,
+            "groups_page_size": size_out,
+        }
+    grp_rows = db.execute(grp_stmt).all()
     lines_by_key: dict[str, int] = {}
     if not line_mode:
         lines_by_key = {r.key: r.lines for r in db.execute(_lines_stmt(dim)).all()}
@@ -289,6 +305,7 @@ def _ref_summary(db: Session, user_ctx=None, *, date_from: date | None = None,
         },
         "groups": groups,
         "groups_ranking_restricted": groups_ranking_restricted,
+        **(page_meta or {}),
     }
 
 
@@ -378,7 +395,7 @@ def _ref_orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     po, pl, dp = FPurchaseOrder, FPurchaseLine, DimPart
     link = _ref_sales_link()
     category = _norm_categories(category)
-    line_mode = bool(category) or group_by == "category"
+    line_mode = bool(category) or group_by in ("category", "pn")
     cat = _category_match(category)
     where = _base_where(po, link, date_from=date_from, date_to=date_to,
                         source_type=source_type, purchaser=purchaser,
