@@ -71,6 +71,11 @@ export default function WbddUploadFeedback({ report }: { report: Partial<WbddImp
               {remountConflicts} 行因销售单同时归属多个项目未导入，其余行已继续处理
             </Text>
           ) : null}
+          {(report.row_write_failures ?? 0) > 0 ? (
+            <Text type="danger">
+              {report.row_write_failures} 行写入失败未导入，其余行已继续处理
+            </Text>
+          ) : null}
           {protectedFields.length ? (
             <Space wrap><Text>受保护字段：</Text>{protectedFields.map((field) => <Text key={field}>{field}</Text>)}</Space>
           ) : null}

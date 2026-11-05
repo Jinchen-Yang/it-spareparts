@@ -47,6 +47,8 @@ export interface WbddImportReport {
   xsdd_reassignments?: XsddReassignment[];
   /** 销售单同时归属多个项目、因而未导入的源行数。 */
   xsdd_project_conflicts?: number;
+  /** 非单归属约束的写入失败行数。 */
+  row_write_failures?: number;
   headless_orders?: number;
   headless_order_ids_sample?: string[];
   rows_display_issue?: number;

@@ -893,10 +893,15 @@ def run_import(session: Session, file_path: str, original_name: str,
                 raise
         else:
             counts = _load()
+        blocked_order_ids = set(counts.pop("xsdd_blocked_order_ids", []) or [])
         if len(result.errors) > recorded_error_count:
-            _persist_import_errors(
-                session, batch.id, result.errors[recorded_error_count:],
-            )
+            new_errors = result.errors[recorded_error_count:]
+            _persist_import_errors(session, batch.id, new_errors)
+            # 装载期才拒绝的需求单不能再被当成“文件里有、库里缺”的作废候选。
+            if wbdd_source_snapshot is not None:
+                wbdd_source_snapshot = maintenance_wbdd_source_snapshot.block_snapshot_errors(
+                    wbdd_source_snapshot, new_errors,
+                )
 
         storage_path = _archive(file_path, file_hash)
         session.add(SysRawFile(batch_id=batch.id, filename=original_name,
@@ -936,7 +941,7 @@ def run_import(session: Session, file_path: str, original_name: str,
                 auto_assignment = assignment_service.auto_assign_imported_orders(
                     session,
                     operated_by=uploaded_by or "system",
-                    source_order_ids=set(result.orders),
+                    source_order_ids=set(result.orders) - blocked_order_ids,
                     prelocked_states=maintenance_lock_envelope.states,
                     prelocked_projects=maintenance_lock_envelope.projects,
                 )
@@ -985,6 +990,8 @@ def run_import(session: Session, file_path: str, original_name: str,
             report["xsdd_reassignments"] = counts["xsdd_reassignments"]
         if counts.get("xsdd_project_conflicts"):
             report["xsdd_project_conflicts"] = counts["xsdd_project_conflicts"]
+        if counts.get("row_write_failures"):
+            report["row_write_failures"] = counts["row_write_failures"]
         if sales_project_sync is not None:
             report["maintenance_sales_project_sync"] = sales_project_sync
         batch.rows_total = counts["source_rows_total"]

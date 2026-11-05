@@ -404,7 +404,8 @@ def _xsdd_mount_job_note(filename: str, report: dict | None) -> str | None:
     report = report or {}
     rows = list(report.get("xsdd_reassignments") or [])
     conflicts = int(report.get("xsdd_project_conflicts") or 0)
-    if not rows and not conflicts:
+    write_failures = int(report.get("row_write_failures") or 0)
+    if not rows and not conflicts and not write_failures:
         return None
     parts: list[str] = []
     if rows:
@@ -425,6 +426,8 @@ def _xsdd_mount_job_note(filename: str, report: dict | None) -> str | None:
         )
     if conflicts:
         parts.append(f"{conflicts} 行因销售单同时归属多个项目未导入，详见批次错误明细")
+    if write_failures:
+        parts.append(f"{write_failures} 行写入失败未导入，同文件其余行已继续处理，详见批次错误明细")
     return f"{filename}：" + "。".join(parts)
 
 
