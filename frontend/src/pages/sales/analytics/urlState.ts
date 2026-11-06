@@ -86,7 +86,7 @@ export interface SalesAnalyticsUrlState {
   salespeople: string[];
   categories: string[];
   brands: string[];
-  /** 订单号字面包含（D-0054）。空串 = 未筛。 */
+  /** 订单号字面包含（D-0055）。空串 = 未筛。 */
   orderNo: string;
   /** 金额区间（D-44 §7）：口径 + 闭区间两端（null = 不限）+ 负金额 / 无金额开关。 */
   amountBasis: SalesAmountBasis;

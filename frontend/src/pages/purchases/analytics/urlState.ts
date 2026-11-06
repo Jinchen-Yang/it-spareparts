@@ -68,7 +68,7 @@ export interface AnalyticsUrlState {
   basis: AmountBasis[];
   /** 非空 = 订单明细抽屉打开。 */
   orderId: number | null;
-  /** PN 分组表页码（D-0054）。与订单列表 page 分开。 */
+  /** PN 分组表页码（D-0055）。与订单列表 page 分开。 */
   groupsPage: number;
 }
 

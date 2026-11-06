@@ -124,7 +124,7 @@ def sales_filters(
     category: list[str] | None = Query(
         None, description="商品大类多选（D-44 §8 行级口径；「未分类」匹配空值）"),
     brand: list[str] | None = Query(None, description="品牌多选（D-44 §8 行级口径）；传 __empty__ 筛缺失"),
-    order_no: str | None = Query(None, max_length=64, description="订单号包含（字面值，D-0054）"),
+    order_no: str | None = Query(None, max_length=64, description="订单号包含（字面值，D-0055）"),
 ) -> SalesFilters:
     return SalesFilters(
         date_from=date_from, date_to=date_to, business_types=business_type,

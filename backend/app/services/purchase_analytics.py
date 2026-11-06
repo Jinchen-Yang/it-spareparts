@@ -22,7 +22,7 @@
   行级三口径、订单明细行）只计
   ``f_purchase_line.import_batch_id = f_purchase_order.import_batch_id`` 的行——库里 11 张
   已生效单残留旧批次明细行（D-39 补充决策 2026-10-17），全行求和会比单头多算。
-  PN 分组与双榜见 D-0054。
+  PN 分组与双榜见 D-0055。
 - 关联销售单按 ``order_no`` 先去重（同一 order_no 多张销售单取 id 最小一条，库中无唯一
   约束）再 LEFT JOIN，防一对多扩行；无关联销售单的采购单（如批量采购）在销售/客户维度
   归「（无关联销售单）」组，不丢。
@@ -332,7 +332,7 @@ def _group_dim(group_by: str, po=FPurchaseOrder, link=None, dp=DimPart):
 
 
 def _uses_line_mode(category, group_by) -> bool:
-    """分类筛选，或按分类 / PN 分组：行级口径（D-39 / D-0054）。"""
+    """分类筛选，或按分类 / PN 分组：行级口径（D-39 / D-0055）。"""
     return bool(category) or group_by in ("category", "pn")
 
 
@@ -621,7 +621,7 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
         .where(*where).group_by(dim)
     )
     grp_stmt = grp_base.order_by(*grp_order)
-    # 只有 PN 分组分页送达（D-0054）。其他维度仍一次返回全部分组，响应形状不变。
+    # 只有 PN 分组分页送达（D-0055）。其他维度仍一次返回全部分组，响应形状不变。
     page_meta: dict | None = None
     if group_by == "pn":
         page_out = max(1, int(groups_page or 1))
@@ -1132,7 +1132,7 @@ def pn_boards(db: Session, user_ctx=None, *, date_from=None, date_to=None,
               source_type=None, purchaser=None, salesperson=None, customer_id=None,
               category=None, supplier=None, order_no=None,
               linked_sales_order_no=None) -> dict:
-    """采购 PN 紧凑双榜（D-0054）。不读分组、分页或排序；不调用维保分析。"""
+    """采购 PN 紧凑双榜（D-0055）。不读分组、分页或排序；不调用维保分析。"""
     _validate_common(date_from, date_to)
     selected = set(source_type or [])
     filters = {

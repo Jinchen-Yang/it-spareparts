@@ -280,7 +280,7 @@ def analytics_orders_export(
     _page: None = Depends(require_page("page_purchase_analytics")),
     ctx: UserContext = Depends(get_current_user_context),
 ):
-    """采购订单 CSV（D-0054）：与列表同筛选同有效排序；超限 413，不截断。"""
+    """采购订单 CSV（D-0055）：与列表同筛选同有效排序；超限 413，不截断。"""
     _guard_scoped(ctx)
     _guard_customer_filter(filters, ctx, group_by=group_by)
     record_access_log(ctx, "analytics_orders_export", "purchases/analytics", {
@@ -342,7 +342,7 @@ def analytics_pn_boards(
     _page: None = Depends(require_page("page_purchase_analytics")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """采购 PN 紧凑双榜（D-0054）。与表格分页无关。"""
+    """采购 PN 紧凑双榜（D-0055）。与表格分页无关。"""
     _guard_scoped(ctx)
     _guard_customer_filter(filters, ctx)
     record_access_log(ctx, "analytics_pn_boards", "purchases/analytics", dict(filters))

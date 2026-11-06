@@ -1,7 +1,7 @@
-# 方案：销采经营读台对称（D-0054）
+# 方案：销采经营读台对称（D-0055）
 
 - 日期：2026-11-05。
-- 决策：D-0054（`docs/decisions/0034-销采经营读台对称.md`）。口径以决策为准，本文件只排实现。
+- 决策：D-0055（`docs/decisions/0035-销采经营读台对称.md`）。口径以决策为准，本文件只排实现。
 - 状态：审核通过，按本方案编码。
 
 ## 设计取舍（两路设计代理的冲突已收口）
@@ -51,8 +51,8 @@ R18 公式、R19 离职、R20 改名、维保工作簿、维保 analytics、`etl
 - `frontend/src/pages/purchases/analytics/__tests__/urlState.test.ts`
 - `frontend/src/pages/purchases/analytics/__tests__/PurchaseAnalyticsPage.test.tsx`
 
-断言与 D-0054「验证要求」一一对应。本地能跑则跑上述文件；跑不了要在 PR 写明原因。
+断言与 D-0055「验证要求」一一对应。本地能跑则跑上述文件；跑不了要在 PR 写明原因。
 
 ## 审核门
 
-两名独立审核代理都给出 PASS、且无 blocker，才按本方案改代码。任一 blocker 先改本方案与 D-0054，再审。连续 5 轮不过则停，交给用户把关。
+两名独立审核代理都给出 PASS、且无 blocker，才按本方案改代码。任一 blocker 先改本方案与 D-0055，再审。连续 5 轮不过则停，交给用户把关。
