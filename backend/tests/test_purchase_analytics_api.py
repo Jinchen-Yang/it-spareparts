@@ -1352,6 +1352,90 @@ def test_pn_detail_amount_matrix_matches_list_and_csv(boss, ds):
     ) == []
 
 
+def test_published_pn_group_key_round_trips_to_the_same_lines(boss, ds):
+    """列表发布的 PN 组键再交给详情、下钻和导出，必须命中同一 PN。
+
+    PostgreSQL btrim 只去掉普通空格。tab、NBSP 留在组键里；详情不能用更宽的 strip
+    把它们收成另一个型号。两端普通空格仍按 btrim 收掉。
+    """
+    pairs = (
+        ("PN452\t", D("452"), "EDGE-452"),
+        ("PN452", D("113"), "PLAIN-452"),
+        ("\u00a0PN678", D("678"), "EDGE-678"),
+        ("PN678", D("113"), "PLAIN-678"),
+        ("  PNSP  ", D("88"), "SPACE-88"),
+        ("\t", D("7"), "TAB-ONLY"),
+        ("", D("3"), "BLANK"),
+    )
+    parts = {raw: _part(ds.db, pn, "电器件") for pn, _amount, raw in pairs}
+    common = dict(on=date(2026, 6, 2), source_type="销售订单", purchaser="采购员甲",
+                  is_inc=True, rate=D("0.13"), amount_ex=D("1"), amount_inc=D("1"))
+    lines = {}
+    for pn, amount, raw in pairs:
+        order = _po(ds.db, raw, ds.nb, **common)
+        lines[raw] = _line(ds.db, f"L-{raw}", order, parts[raw], ds.nb, line_no=1, amount=amount)
+    ds.db.commit()
+
+    groups = {row["key"]: row for row in _summary(
+        boss, group_by="pn", groups_page_size=200)["groups"]}
+    published = {
+        "EDGE-452": "PN452\t",
+        "PLAIN-452": "PN452",
+        "EDGE-678": "\u00a0PN678",
+        "PLAIN-678": "PN678",
+        "SPACE-88": "PNSP",
+        "TAB-ONLY": "\t",
+        "BLANK": EMPTY_LABEL,
+    }
+    assert set(published.values()) <= set(groups)
+    assert groups["PN452\t"]["amount_paid"] == pytest.approx(452)
+    assert groups["PN452"]["amount_paid"] == pytest.approx(113)
+    assert groups["\u00a0PN678"]["amount_paid"] == pytest.approx(678)
+    assert groups["PN678"]["amount_paid"] == pytest.approx(113)
+    assert groups["PNSP"]["amount_paid"] == pytest.approx(88)
+    assert groups["\t"]["amount_paid"] == pytest.approx(7)
+    assert groups[EMPTY_LABEL]["amount_paid"] == pytest.approx(3)
+
+    def same_three(matched, group):
+        assert matched["lines"] == 1
+        assert matched["amount_paid"] == group["amount_paid"]
+        assert matched["amount_inc"] == group["amount_inc"]
+        assert matched["amount_ex"] == group["amount_ex"]
+
+    requests = (
+        ("EDGE-452", "PN452\t"),
+        ("EDGE-452", "  PN452\t  "),
+        ("PLAIN-452", "PN452"),
+        ("EDGE-678", "\u00a0PN678"),
+        ("EDGE-678", " \u00a0PN678 "),
+        ("PLAIN-678", "PN678"),
+        ("SPACE-88", "PNSP"),
+        ("SPACE-88", "  PNSP  "),
+        ("TAB-ONLY", "\t"),
+        ("BLANK", EMPTY_LABEL),
+        ("BLANK", "   "),
+        ("BLANK", ""),
+    )
+    for raw, key in requests:
+        published_key = published[raw]
+        listed = _orders(boss, group_by="pn", group_key=key, page_size=20)
+        assert [item["order_no"] for item in listed["items"]] == [f"CG-{raw}"], key
+        assert [product["line_id"] for product in listed["items"][0]["products"]] == [lines[raw].id]
+        assert listed["items"][0]["amount_paid"] == groups[published_key]["amount_paid"]
+        detail = boss.get(
+            f"/api/purchases/analytics/orders/{listed['items'][0]['order_id']}",
+            params={"pn": key},
+        )
+        assert detail.status_code == 200, detail.text
+        body = detail.json()
+        assert [row["line_id"] for row in body["lines"]] == [lines[raw].id], key
+        assert [row["line_id"] for row in body["products"]] == [lines[raw].id], key
+        same_three(body["category_matched"], groups[published_key])
+        assert _paid_cell(boss, group_by="pn", group_key=key) == [
+            (f"CG-{raw}", str(groups[published_key]["amount_paid"])),
+        ]
+
+
 def test_pn_boards_customer_and_supplier_filters_fail_closed(db, ds):
     """去掉 pn-boards 的客户/供应商门后，这四次请求会从 403 变成 200。"""
     no_customer = client_for(

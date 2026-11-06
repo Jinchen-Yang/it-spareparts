@@ -807,9 +807,13 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     if cat is not None:
         where.append(cat)
     # 下钻键与其余维度同一路径精确匹配（AND 交集）——不折进分类多选 OR 集合，
-    # 否则「筛选电器件+机械件后下钻电器件组」会混进机械件行（对抗复审确认项）
-    if group_key and group_by:
-        where.append(_group_dim(group_by, po, link, dp) == group_key)
+    # 否则「筛选电器件+机械件后下钻电器件组」会混进机械件行（对抗复审确认项）。
+    # PN 键只按 SQL btrim 去掉普通空格，保留 tab / NBSP，才能命中列表发布的组键。
+    drill_key = group_key
+    if group_by == "pn" and group_key is not None:
+        drill_key = _pn_detail_key(group_key)
+    if drill_key and group_by:
+        where.append(_group_dim(group_by, po, link, dp) == drill_key)
 
     po_cols = [po.id, po.order_no, po.order_date, po.source_type_raw, po.purchaser,
                po.supplier_id, po.linked_sales_order_no]
@@ -877,7 +881,7 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     context = _page_context(
         db, rows, user_ctx, category=category,
         group_category=group_key if group_by == "category" else None,
-        group_pn=group_key if group_by == "pn" else None)
+        group_pn=drill_key if group_by == "pn" else None)
     items = []
     for r in rows:
         if link is not None:
@@ -917,12 +921,20 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
 
 # ---------------------------------------------------------------- 订单明细
 
+def _btrim_space(value: str) -> str:
+    """与 PostgreSQL ``btrim`` 默认字符集一致：只去掉两端 U+0020。
+
+    列表分组键由 SQL ``btrim(pn_std)`` 发布。Python ``str.strip()`` 还会去掉
+    tab、NBSP 等空白，把含这些字符的组键收成另一个 PN。
+    """
+    return value.strip(" ")
+
+
 def _pn_detail_key(pn: str | None) -> str | None:
-    """详情里的 PN 键。省略表示不按 PN 收窄；空白与分组哨兵「(空)」是同一个空 PN。"""
+    """详情与下钻使用的 PN 键。省略表示不按 PN 收窄；只含普通空格时归入「(空)」。"""
     if pn is None:
         return None
-    text = pn.strip()
-    return text or EMPTY_LABEL
+    return _btrim_space(pn) or EMPTY_LABEL
 
 
 def order_detail(db: Session, order_id: int, user_ctx=None, *,
