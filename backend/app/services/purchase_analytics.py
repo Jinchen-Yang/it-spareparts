@@ -964,13 +964,20 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
     stmt = stmt.order_by(pl.line_no.asc().nullslast(), pl.id)
     lines = []
     matched_paid = matched_inc = matched_ex = Decimal(0)
+    # PN 详情是新增路径：没有任何非空金额时保持 null，不能把未知加成 0。
+    # 分类详情沿用既有「从 0 累加」；0 与 null 仍然分开。
+    pn_only = bool(pn_key) and cat is None
+    saw_paid = saw_inc = saw_ex = False
     for r in db.execute(stmt):
         l_ex, l_inc = line_amounts_reference(r.line_amount, po.tax_rate, po.is_tax_inclusive)
         if r.line_amount is not None:
+            saw_paid = True
             matched_paid += r.line_amount
             if l_inc is not None:
+                saw_inc = True
                 matched_inc += l_inc
             if l_ex is not None:
+                saw_ex = True
                 matched_ex += l_ex
         lines.append({
             "line_id": r.id, "line_no": r.line_no, "part_id": r.part_id,
@@ -1002,12 +1009,20 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
         "lines": lines,
     }
     if cat is not None or pn_key:
-        data["category_matched"] = {
-            "lines": len(lines),
-            "amount_inc": _f(_round2(matched_inc)),
-            "amount_ex": _f(_round2(matched_ex)),
-            "amount_paid": _f(_round2(matched_paid)),
-        }
+        if pn_only:
+            data["category_matched"] = {
+                "lines": len(lines),
+                "amount_inc": _f(_round2(matched_inc)) if saw_inc else None,
+                "amount_ex": _f(_round2(matched_ex)) if saw_ex else None,
+                "amount_paid": _f(_round2(matched_paid)) if saw_paid else None,
+            }
+        else:
+            data["category_matched"] = {
+                "lines": len(lines),
+                "amount_inc": _f(_round2(matched_inc)),
+                "amount_ex": _f(_round2(matched_ex)),
+                "amount_paid": _f(_round2(matched_paid)),
+            }
     return data
 
 

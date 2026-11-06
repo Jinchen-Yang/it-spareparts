@@ -1216,3 +1216,88 @@ def test_purchase_export_over_limit_413(boss, ds, monkeypatch):
     resp = boss.get("/api/purchases/analytics/orders/export")
     assert resp.status_code == 413
     assert b"PN-DQ" not in resp.content
+
+
+def _csv_table(resp):
+    import csv
+    import io
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/csv")
+    return list(csv.reader(io.StringIO(resp.content.decode("utf-8-sig"))))
+
+
+def test_pn_detail_keeps_unknown_amount_null_and_zero_as_zero(boss, ds):
+    """PN 详情是新增路径：匹配行金额全空保持 null；明确 0 仍是 0。"""
+    line = ds.db.query(FPurchaseLine).filter_by(raw_line_id="PA-L1").one()
+    line.line_amount = None
+    ds.db.commit()
+    missing = boss.get(
+        f"/api/purchases/analytics/orders/{ds.poa.id}", params={"pn": "PN-DQ"},
+    )
+    assert missing.status_code == 200, missing.text
+    matched = missing.json()["category_matched"]
+    assert matched["lines"] == 1
+    assert matched["amount_paid"] is None
+    assert matched["amount_inc"] is None
+    assert matched["amount_ex"] is None
+
+    line.line_amount = D("0")
+    ds.db.commit()
+    zeroed = boss.get(
+        f"/api/purchases/analytics/orders/{ds.poa.id}", params={"pn": "PN-DQ"},
+    ).json()["category_matched"]
+    assert zeroed["amount_paid"] == 0
+    assert zeroed["lines"] == 1
+
+
+def test_pn_boards_customer_and_supplier_filters_fail_closed(db, ds):
+    """去掉 pn-boards 的客户/供应商门后，这四次请求会从 403 变成 200。"""
+    no_customer = client_for(
+        db, username="boards-no-customer", role="boss", overrides={"data_customer": False},
+    )
+    no_supplier = client_for(
+        db, username="boards-no-supplier", role="boss", overrides={"data_supplier": False},
+    )
+    cases = [
+        (no_customer, {"customer_id": ds.c1.id}, "客户"),
+        (no_supplier, {"supplier": "等价供应商"}, "供应商"),
+        (no_customer, {"customer_id": ds.c1.id, "supplier": "等价供应商"}, "客户"),
+        (no_supplier, {"supplier": "  供%_应商  ", "customer_id": ds.c1.id}, "供应商"),
+    ]
+    for client, params, word in cases:
+        denied = client.get("/api/purchases/analytics/pn-boards", params=params)
+        assert denied.status_code == 403, (params, denied.status_code, denied.text)
+        assert word in denied.json()["detail"]
+        assert "boards" not in denied.json()
+
+
+def test_purchase_export_exact_limit_keeps_one_row_per_order(boss, ds, monkeypatch):
+    """上限等于单数时必须导出数据行。改成 >= 会 200 但只剩表头。明细行数可以大于单数。"""
+    listed = _orders(boss, page_size=50)
+    total = listed["total"]
+    line_count = sum(item["lines"] for item in listed["items"])
+    assert line_count > total
+    monkeypatch.setattr(purchase_analytics, "EXPORT_MAX_ORDERS", total)
+    rows = _csv_table(boss.get("/api/purchases/analytics/orders/export"))
+    assert rows[0][1] == "采购单号"
+    body = rows[1:]
+    assert len(body) == total
+    order_nos = [row[1] for row in body]
+    assert order_nos.count("CG-PA") == 1
+    pa = next(row for row in body if row[1] == "CG-PA")
+    assert "PN-DQ" in pa[rows[0].index("采购产品")]
+    assert "PN-FL" in pa[rows[0].index("采购产品")]
+    paid_at = rows[0].index("实付金额")
+    assert pa[paid_at] == "1130.0"
+    # 同一张单的两行产品没有拆成两行 CSV，单头金额只出现一次
+    assert body.count(pa) == 1
+
+
+def test_purchase_export_one_past_limit_has_no_csv(boss, ds, monkeypatch):
+    total = _orders(boss, page_size=1)["total"]
+    monkeypatch.setattr(purchase_analytics, "EXPORT_MAX_ORDERS", total - 1)
+    resp = boss.get("/api/purchases/analytics/orders/export")
+    assert resp.status_code == 413, resp.text
+    assert "text/csv" not in resp.headers.get("content-type", "")
+    assert "采购单号" not in resp.text
+    assert "CG-PA" not in resp.text

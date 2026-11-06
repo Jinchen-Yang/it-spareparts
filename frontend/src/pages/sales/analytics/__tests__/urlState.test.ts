@@ -257,6 +257,13 @@ describe("toSalesAnalyticsParams：URLSearchParams 序列化（FastAPI 重复键
     expect(p.has("date_to")).toBe(false);
   });
 
+  it("order_no 字面包含进入请求，纯空白不落键", () => {
+    const p = toSalesAnalyticsParams({ order_no: " SO-1 " });
+    expect(p.get("order_no")).toBe("SO-1");
+    expect(toSalesAnalyticsParams({ order_no: "  " }).has("order_no")).toBe(false);
+    expect(toSalesAnalyticsParams({ order_no: "SO_%" }).get("order_no")).toBe("SO_%");
+  });
+
   it("include_returns=false / 空串 / 空值不落键（脏值与缺省不进请求）", () => {
     const p = toSalesAnalyticsParams(
       { business_type: ["", "服务"] },

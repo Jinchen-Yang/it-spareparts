@@ -265,6 +265,9 @@ export function toSalesAnalyticsParams(
   if (filters.amount_max != null) p.set("amount_max", String(filters.amount_max));
   if (filters.include_negative === false) p.set("include_negative", "false");
   if (filters.include_empty === false) p.set("include_empty", "false");
+  // 订单号是单头字面包含。纯空白等于未筛，不能在序列化时丢掉已填写的单号。
+  const orderNo = filters.order_no?.trim();
+  if (orderNo) p.set("order_no", orderNo);
   for (const [k, v] of Object.entries(extra)) {
     // 空串/空值/0 不落参数（脏值不静默进请求；page=0 等无意义值不进 URL）；
     // include_returns=false 走缺省，不落键
