@@ -1487,3 +1487,110 @@ def test_purchase_export_one_past_limit_has_no_csv(boss, ds, monkeypatch):
     assert "text/csv" not in resp.headers.get("content-type", "")
     assert "采购单号" not in resp.text
     assert "CG-PA" not in resp.text
+
+
+def _csv_maps(client, **params):
+    rows = _csv_table(client.get("/api/purchases/analytics/orders/export", params=params))
+    header, body = rows[0], rows[1:]
+    return [{header[i]: row[i] for i in range(len(header))} for row in body]
+
+
+def test_csv_blank_pn_renders_slash_without_merging_tab_or_nbsp(boss, ds):
+    """普通空格收成同一空组后，CSV 产品格一律是 /。tab 与 NBSP 仍各自成组。"""
+    blanks = (("", 1), (" ", 2), ("   ", 3))
+    kept = (("\t", "TAB", D("11")), ("\u00a0", "NBSP", D("12")), ("PN\tX", "EDGE", D("13")))
+    common = dict(on=date(2026, 6, 3), source_type="销售订单", purchaser="采购员甲",
+                  is_inc=True, rate=D("0.13"), amount_ex=D("99"), amount_inc=D("99"))
+    blank_order = _po(ds.db, "CSV-BLANK", ds.nb, **common)
+    for index, (pn, line_no) in enumerate(blanks, start=1):
+        part = _part(ds.db, pn, "电器件")
+        _line(ds.db, f"CSV-B{index}", blank_order, part, ds.nb, line_no=line_no, amount=D("1"))
+    for pn, raw, amount in kept:
+        part = _part(ds.db, pn, "电器件")
+        order = _po(ds.db, f"CSV-{raw}", ds.nb, **common)
+        _line(ds.db, f"CSV-L-{raw}", order, part, ds.nb, line_no=1, amount=amount)
+    ds.db.commit()
+
+    listed = _orders(boss, group_by="pn", group_key=EMPTY_LABEL, page_size=20)
+    assert [item["order_no"] for item in listed["items"]] == ["CG-CSV-BLANK"]
+    assert [product["pn_std"] for product in listed["items"][0]["products"]] == ["", " ", "   "]
+
+    blank_row = _csv_maps(boss, group_by="pn", group_key=EMPTY_LABEL)
+    assert [row["采购单号"] for row in blank_row] == ["CG-CSV-BLANK"]
+    assert blank_row[0]["采购产品"] == "/\n\n/\n\n/"
+    assert blank_row[0]["实付金额"] == "3.0"
+
+    tab_row = _csv_maps(boss, group_by="pn", group_key="\t")
+    assert [row["采购单号"] for row in tab_row] == ["CG-CSV-TAB"]
+    assert tab_row[0]["采购产品"] == "'\t"
+    assert tab_row[0]["实付金额"] == "11.0"
+    nbsp_row = _csv_maps(boss, group_by="pn", group_key="\u00a0")
+    assert [row["采购单号"] for row in nbsp_row] == ["CG-CSV-NBSP"]
+    assert nbsp_row[0]["采购产品"] == "\u00a0"
+    edge_row = _csv_maps(boss, group_by="pn", group_key="PN\tX")
+    assert [row["采购单号"] for row in edge_row] == ["CG-CSV-EDGE"]
+    assert edge_row[0]["采购产品"] == "PN\tX"
+
+
+def test_export_group_by_locks_line_amounts_and_order_set(boss, ds):
+    """导出带 PN/分类分组时必须用行级金额和行级订单集。
+
+    退回单头后：无明细的 CG-PD 会混进来，CG-PB 实付变空，CG-PF 实付从 1000 变 1130，
+    CG-PG 实付从 1000 变 1006；分类或 PN 下钻会把 CG-PA 的 500 变回整单 1130。
+    """
+    full_line = {
+        "CG-PA": {"实付金额": "1130.0", "含税金额": "1130.0", "不含税金额": "1000.0", "明细行数": "2"},
+        "CG-PB": {"实付金额": "2000.0", "含税金额": "2260.0", "不含税金额": "2000.0", "明细行数": "2"},
+        "CG-PC": {"实付金额": "1060.0", "含税金额": "1060.0", "不含税金额": "1000.0", "明细行数": "1"},
+        "CG-PF": {"实付金额": "1000.0", "含税金额": "1130.0", "不含税金额": "1000.0", "明细行数": "1"},
+        "CG-PG": {"实付金额": "1000.0", "含税金额": "1006.0", "不含税金额": "1000.0", "明细行数": "1"},
+    }
+    for group_by in ("pn", "category"):
+        listed = _orders(boss, group_by=group_by, page_size=50)
+        assert listed["basis_mode"] == "line"
+        exported = {row["采购单号"]: row for row in _csv_maps(boss, group_by=group_by)}
+        assert set(exported) == set(full_line)
+        assert {item["order_no"] for item in listed["items"]} == set(exported)
+        assert "CG-PD" not in exported
+        assert "CG-PE" not in exported
+        for order_no, expect in full_line.items():
+            row = exported[order_no]
+            for column, value in expect.items():
+                assert row[column] == value, (group_by, order_no, column, row[column])
+            item = next(item for item in listed["items"] if item["order_no"] == order_no)
+            assert row["实付金额"] == str(item["amount_paid"])
+            assert row["含税金额"] == str(item["amount_inc"])
+            assert row["不含税金额"] == str(item["amount_ex"])
+            assert row["明细行数"] == str(item["lines"])
+
+    drilled = {
+        "CG-PA": {"实付金额": "500.0", "含税金额": "500.0", "不含税金额": "442.48", "明细行数": "1",
+                  "采购产品": "PN-DQ"},
+        "CG-PB": {"实付金额": "1200.0", "含税金额": "1356.0", "不含税金额": "1200.0", "明细行数": "1",
+                  "采购产品": "PN-DQ"},
+        "CG-PC": {"实付金额": "1060.0", "含税金额": "1060.0", "不含税金额": "1000.0", "明细行数": "1",
+                  "采购产品": "PN-DQ"},
+    }
+    drills = (
+        {"group_by": "category", "group_key": "电器件"},
+        {"group_by": "pn", "group_key": "PN-DQ"},
+    )
+    for params in drills:
+        exported = {row["采购单号"]: row for row in _csv_maps(boss, **params)}
+        listed = _orders(boss, page_size=50, **params)
+        assert listed["basis_mode"] == "line"
+        assert set(exported) == set(drilled)
+        assert {item["order_no"] for item in listed["items"]} == set(exported)
+        for order_no, expect in drilled.items():
+            row = exported[order_no]
+            for column, value in expect.items():
+                assert row[column] == value, (params, order_no, column, row[column])
+            assert "PN-FL" not in row["采购产品"]
+            assert "PN-JX" not in row["采购产品"]
+
+    header = {row["采购单号"]: row for row in _csv_maps(boss, group_by="source_type")}
+    assert set(header) == {"CG-PA", "CG-PB", "CG-PC", "CG-PD", "CG-PF", "CG-PG"}
+    assert header["CG-PB"]["实付金额"] == ""
+    assert header["CG-PF"]["实付金额"] == "1130.0"
+    assert header["CG-PG"]["实付金额"] == "1006.0"
+    assert header["CG-PD"]["实付金额"] == "500.0"

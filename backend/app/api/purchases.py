@@ -239,9 +239,14 @@ def analytics_orders(
 
 
 def _product_export_cell(products: list[dict]) -> str:
+    """产品格与 PN 分组键同一裁法：只去掉普通空格，空了显示 /。
+
+    ``''``、``' '``、``'   '`` 在 SQL 里都是「(空)」组，CSV 不能再各自输出原文。
+    tab 与 NBSP 不是这组，必须原样留下，不能收成 /。
+    """
     blocks = []
     for product in products or []:
-        pn = product.get("pn_std") or "/"
+        pn = purchase_analytics._btrim_space(product.get("pn_std") or "") or "/"
         description = (product.get("description") or "").strip()
         blocks.append(f"{pn}\n{description}" if description else pn)
     return "\n\n".join(blocks)
