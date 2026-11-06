@@ -1250,6 +1250,108 @@ def test_pn_detail_keeps_unknown_amount_null_and_zero_as_zero(boss, ds):
     assert zeroed["lines"] == 1
 
 
+def _matched(client, order_id, **params):
+    response = client.get(f"/api/purchases/analytics/orders/{order_id}", params=params)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    return body["category_matched"], body
+
+
+def _paid_cell(client, **params):
+    rows = _csv_table(client.get("/api/purchases/analytics/orders/export", params=params))
+    paid_at = rows[0].index("实付金额")
+    return [(row[1], row[paid_at]) for row in rows[1:]]
+
+
+def test_pn_detail_amount_matrix_matches_list_and_csv(boss, ds):
+    """PN 详情与列表、KPI、CSV：未知保持 null，明确 0 仍是 0。只按分类的旧详情仍从 0 累加。"""
+    p_null = _part(ds.db, "PN-NULLAMT", "电器件")
+    p_zero = _part(ds.db, "PN-ZERO", "电器件")
+    p_pos = _part(ds.db, "PN-POS", "电器件")
+    p_mix = _part(ds.db, "PN-MIX", "电器件")
+    p_blank = _part(ds.db, "", "电器件")
+    p_old = _part(ds.db, "PN-OLDNULL", "电器件")
+    common = dict(on=date(2026, 6, 1), source_type="销售订单", purchaser="采购员甲",
+                  is_inc=True, rate=D("0.13"), amount_ex=D("100"), amount_inc=D("113"))
+    order = _po(ds.db, "MX", ds.nb, **common)
+    old = _po(ds.db, "MY", ds.nb, **common)
+    _line(ds.db, "MX-NULL", order, p_null, ds.nb, line_no=1, amount=D("1"))
+    _line(ds.db, "MX-ZERO", order, p_zero, ds.nb, line_no=2, amount=D("0"))
+    _line(ds.db, "MX-POS1", order, p_pos, ds.nb, line_no=3, amount=D("10"))
+    _line(ds.db, "MX-POS2", order, p_pos, ds.nb, line_no=4, amount=D("20"))
+    _line(ds.db, "MX-MIX0", order, p_mix, ds.nb, line_no=5, amount=D("1"))
+    _line(ds.db, "MX-MIX1", order, p_mix, ds.nb, line_no=6, amount=D("5"))
+    _line(ds.db, "MX-BLANK", order, p_blank, ds.nb, line_no=7, amount=D("1"))
+    _line(ds.db, "MY-OLD", old, p_old, ds.nb, line_no=1, amount=D("1"))
+    for raw_id in ("MX-NULL", "MX-MIX0", "MX-BLANK", "MY-OLD"):
+        ds.db.query(FPurchaseLine).filter_by(raw_line_id=raw_id).one().line_amount = None
+    ds.db.commit()
+
+    def amounts(matched):
+        return matched["amount_paid"], matched["amount_inc"], matched["amount_ex"]
+
+    null_only, _ = _matched(boss, order.id, pn="PN-NULLAMT")
+    assert null_only["lines"] == 1
+    assert amounts(null_only) == (None, None, None)
+    zero_only, _ = _matched(boss, order.id, pn="PN-ZERO")
+    assert amounts(zero_only) == (0, 0, 0)
+    pos_only, _ = _matched(boss, order.id, pn="PN-POS")
+    assert pos_only["lines"] == 2
+    assert pos_only["amount_paid"] == pytest.approx(30)
+    mix_only, _ = _matched(boss, order.id, pn="PN-MIX")
+    assert mix_only["amount_paid"] == pytest.approx(5)
+
+    both_null, _ = _matched(boss, order.id, pn="PN-NULLAMT", category=["电器件"])
+    assert both_null["lines"] == 1
+    assert amounts(both_null) == (None, None, None)
+    both_pos, _ = _matched(boss, order.id, pn="PN-POS", category=["电器件"])
+    assert both_pos["amount_paid"] == pytest.approx(30)
+    empty, _ = _matched(boss, order.id, pn="PN-POS", category=[UNCATEGORIZED_LABEL])
+    assert empty["lines"] == 0
+    assert amounts(empty) == (None, None, None)
+    blank_cat, _ = _matched(boss, order.id, pn="(空)", category=["机械件"])
+    assert blank_cat["lines"] == 0
+    assert amounts(blank_cat) == (None, None, None)
+
+    for blank in ("", "   ", "(空)"):
+        matched, _ = _matched(boss, order.id, pn=blank)
+        assert matched["lines"] == 1, blank
+        assert amounts(matched) == (None, None, None), blank
+
+    old_detail, _ = _matched(boss, old.id, category=["电器件"])
+    assert old_detail["lines"] == 1
+    assert old_detail["amount_paid"] == 0
+    new_same_lines, _ = _matched(boss, old.id, pn="PN-OLDNULL", category=["电器件"])
+    assert new_same_lines["lines"] == 1
+    assert amounts(new_same_lines) == (None, None, None)
+
+    groups = {row["key"]: row for row in _summary(
+        boss, group_by="pn", groups_page_size=50)["groups"]}
+    assert groups["PN-NULLAMT"]["amount_paid"] is None
+    assert groups["PN-ZERO"]["amount_paid"] == 0
+    assert groups["PN-POS"]["amount_paid"] == pytest.approx(30)
+    assert groups["PN-MIX"]["amount_paid"] == pytest.approx(5)
+    assert groups[EMPTY_LABEL]["amount_paid"] is None
+
+    listed = _orders(boss, group_by="pn", group_key="PN-NULLAMT", page_size=50)
+    assert listed["basis_mode"] == "line"
+    assert [item["order_id"] for item in listed["items"]] == [order.id]
+    assert listed["items"][0]["amount_paid"] is None
+    listed_zero = _orders(boss, group_by="pn", group_key="PN-ZERO", page_size=50)
+    assert listed_zero["items"][0]["amount_paid"] == 0
+    listed_empty = _orders(
+        boss, group_by="pn", group_key="PN-POS", category=[UNCATEGORIZED_LABEL], page_size=50,
+    )
+    assert listed_empty["total"] == 0
+
+    assert _paid_cell(boss, group_by="pn", group_key="PN-NULLAMT") == [("CG-MX", "")]
+    assert _paid_cell(boss, group_by="pn", group_key="PN-ZERO") == [("CG-MX", "0.0")]
+    assert _paid_cell(boss, group_by="pn", group_key="(空)") == [("CG-MX", "")]
+    assert _paid_cell(
+        boss, group_by="pn", group_key="PN-POS", category=[UNCATEGORIZED_LABEL],
+    ) == []
+
+
 def test_pn_boards_customer_and_supplier_filters_fail_closed(db, ds):
     """去掉 pn-boards 的客户/供应商门后，这四次请求会从 403 变成 200。"""
     no_customer = client_for(

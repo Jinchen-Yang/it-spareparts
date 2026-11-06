@@ -917,6 +917,14 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
 
 # ---------------------------------------------------------------- 订单明细
 
+def _pn_detail_key(pn: str | None) -> str | None:
+    """详情里的 PN 键。省略表示不按 PN 收窄；空白与分组哨兵「(空)」是同一个空 PN。"""
+    if pn is None:
+        return None
+    text = pn.strip()
+    return text or EMPTY_LABEL
+
+
 def order_detail(db: Session, order_id: int, user_ctx=None, *,
                  category: list[str] | None = None, pn: str | None = None) -> dict | None:
     """采购模块自己的订单明细（不依赖 page_boss_board）：单头三口径 + **单头批次行**。
@@ -929,7 +937,7 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
     if po is None or po.data_status != config.ACTIVE_STATUS:
         return None
     category = _norm_categories(category)
-    pn_key = pn.strip() if isinstance(pn, str) and pn.strip() else None
+    pn_key = _pn_detail_key(pn)
     ex, inc = order_amounts_reference(
         po.amount_ex_tax, po.amount_inc_tax, po.tax_rate, po.is_tax_inclusive)
 
@@ -964,9 +972,9 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
     stmt = stmt.order_by(pl.line_no.asc().nullslast(), pl.id)
     lines = []
     matched_paid = matched_inc = matched_ex = Decimal(0)
-    # PN 详情是新增路径：没有任何非空金额时保持 null，不能把未知加成 0。
-    # 分类详情沿用既有「从 0 累加」；0 与 null 仍然分开。
-    pn_only = bool(pn_key) and cat is None
+    # 只要带了 PN 键（含空白 PN 归一成「(空)」，以及 PN 再叠加分类），匹配金额与列表同一套：
+    # 没有任何非空金额、或筛选后没有行，保持 null。只按分类打开的旧详情仍从 0 累加。
+    pn_scoped = pn_key is not None
     saw_paid = saw_inc = saw_ex = False
     for r in db.execute(stmt):
         l_ex, l_inc = line_amounts_reference(r.line_amount, po.tax_rate, po.is_tax_inclusive)
@@ -1009,7 +1017,7 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
         "lines": lines,
     }
     if cat is not None or pn_key:
-        if pn_only:
+        if pn_scoped:
             data["category_matched"] = {
                 "lines": len(lines),
                 "amount_inc": _f(_round2(matched_inc)) if saw_inc else None,
