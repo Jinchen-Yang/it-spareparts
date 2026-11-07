@@ -4,12 +4,15 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 import textwrap
+import time
 import unittest
+import urllib.request
 from unittest.mock import Mock, patch
 
 DEPLOY = Path(__file__).resolve().parents[1]
@@ -54,13 +57,29 @@ def version_source(version="1.46.0", newline="\n"):
     return ('export const APP_VERSION = "%s";' % version).encode() + newline.encode()
 
 
-def tar_bytes(comment, files):
+def tar_bytes(comment, files, modes=None, kinds=None):
+    modes, kinds = modes or {}, kinds or {}
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz", format=tarfile.PAX_FORMAT, pax_headers={"comment": comment}) as archive:
         for name, payload in files.items():
             info = tarfile.TarInfo(name)
-            info.size = len(payload)
-            archive.addfile(info, io.BytesIO(payload))
+            kind = kinds.get(name, "file")
+            info.mode = modes.get(name, 0o644)
+            if kind == "symlink":
+                info.type = tarfile.SYMTYPE
+                info.linkname = payload.decode()
+            elif kind == "hardlink":
+                info.type = tarfile.LNKTYPE
+                info.linkname = payload.decode()
+            elif kind == "dir":
+                info.type = tarfile.DIRTYPE
+            elif kind == "fifo":
+                info.type = tarfile.FIFOTYPE
+            else:
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+                continue
+            archive.addfile(info)
     return buffer.getvalue()
 
 
@@ -77,8 +96,14 @@ class PinTests(unittest.TestCase):
         self.assertIs(ops.Release.writers_exact, ops.vis.pool.Release.writers_exact)
         self.assertIs(ops.Release.freeze, ops.vis.Release.freeze)
         self.assertIs(ops.Release.backup, ops.vis.Release.backup)
-        self.assertIs(ops.Release.cutover, ops.vis.Release.cutover)
+        self.assertIsNot(ops.Release.cutover, ops.vis.Release.cutover)
+        self.assertIsNot(ops.Release.load_active, ops.hf.Hotfix.load_active)
         self.assertIs(ops.Release.protected, ops.vis.Release.protected)
+        successor_cutover = inspect_source(ops.Release.cutover)
+        self.assertNotIn("/load", successor_cutover)
+        self.assertNotIn("load_active(", successor_cutover)
+        self.assertLess(successor_cutover.index("exposure-started.json"), successor_cutover.index("conditional_dial_patch"))
+        self.assertIn("load_active(desired)", inspect_source(ops.vis.Release.cutover))
         self.assertIsNot(ops.Release.migrate, ops.vis.Release.migrate)
         self.assertIsNot(ops.Release.verify, ops.vis.Release.verify)
         self.assertIsNot(ops.Release.rollback, ops.vis.Release.rollback)
@@ -107,11 +132,57 @@ class PinTests(unittest.TestCase):
                 ops.validate(manifest(**{key: value}))
 
     def test_private_manifest_check_is_live(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "manifest.json"
-            path.write_text("{}\n")
-            with self.assertRaisesRegex(RuntimeError, "private manifest required"):
-                ops.Release(str(path))
+        previous = os.umask(0o022)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "manifest.json"
+                path.write_text("{}\n")
+                os.chmod(path, 0o644)
+                with self.assertRaisesRegex(RuntimeError, "private manifest required"):
+                    ops.Release(str(path))
+            before = os.umask(0o022)
+            os.umask(before)
+            with patch.object(ops.os, "geteuid", return_value=1000), \
+                    patch.object(ops, "production_locks", side_effect=AssertionError("locked")), \
+                    self.assertRaisesRegex(RuntimeError, "usage"):
+                ops.main(["controller", "/tmp/manifest.json", "preflight"])
+            after = os.umask(0o022)
+            os.umask(after)
+            self.assertEqual(before, after)
+        finally:
+            os.umask(previous)
+
+    def test_root_rejects_loose_manifest_and_directory(self):
+        script = """
+import importlib.util, os, tempfile
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("succ", %r)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+assert os.geteuid() == 0, os.geteuid()
+directory = tempfile.mkdtemp()
+manifest = Path(directory) / "manifest.json"
+manifest.write_text("{}\\n")
+os.chmod(manifest, 0o644)
+try:
+    mod.Release(str(manifest))
+except RuntimeError as exc:
+    assert "private manifest required" in str(exc), exc
+else:
+    raise SystemExit("manifest mode was accepted")
+os.chmod(manifest, 0o600)
+os.chmod(directory, 0o755)
+try:
+    mod.Release(str(manifest))
+except RuntimeError as exc:
+    assert "private release directory required" in str(exc), exc
+else:
+    raise SystemExit("directory mode was accepted")
+print("root-denials-ok")
+""" % str(DEPLOY / "requirements_successor_ops.py")
+        result = subprocess.run(["sudo", "-n", sys.executable, "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("root-denials-ok", result.stdout)
 
     def test_upgrade_and_downgrade_never_reach_the_historical_runner(self):
         release = object.__new__(ops.Release)
@@ -505,10 +576,7 @@ class PhaseTests(unittest.TestCase):
 class ArchiveTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        probe = subprocess.run(["git", "-C", str(REPO), "cat-file", "-e", ops.APP_SHA + "^{commit}"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if probe.returncode != 0:
-            subprocess.run(["git", "-C", str(REPO), "fetch", "--no-tags", "--depth=50", "origin", "main"], check=True)
+        ops.ensure_frozen_commit(REPO)
         cls.archive = ops.canonical_archive(REPO, ops.APP_SHA)
 
     def test_pinned_merge_matches_parents_tree_and_git_blobs(self):
@@ -571,6 +639,223 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(report["migration_performed"], False)
         self.assertEqual(report["controller_in_archive"], False)
         self.assertNotIn("rollback_invoked", report)
+
+
+class MemberContractTests(unittest.TestCase):
+    def test_type_mode_and_path_mutations_are_rejected_without_extracting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@example.com"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+            source = repo / "frontend" / "src"
+            source.mkdir(parents=True)
+            (source / "version.ts").write_bytes(version_source("0.0.1"))
+            script = repo / "run.sh"
+            script.write_bytes(b"echo ok\n")
+            os.chmod(script, 0o755)
+            os.symlink("run.sh", repo / "link")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "hold"], check=True, capture_output=True)
+            sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+            good = ops.canonical_archive(repo, sha)
+            self.assertEqual(ops.compare_archive_to_commit(repo, sha, good)["modes"]["link"], "120000")
+            samples = {
+                "symlink": (tar_bytes(sha, {
+                    "frontend/src/version.ts": version_source("0.0.1"), "run.sh": b"echo ok\n", "link": b"run.sh",
+                }, kinds={"run.sh": "symlink", "link": "symlink"}), "archive member type refused"),
+                "hardlink": (tar_bytes(sha, {
+                    "frontend/src/version.ts": version_source("0.0.1"), "run.sh": b"echo ok\n", "alias": b"run.sh",
+                }, kinds={"alias": "hardlink"}), "special archive member refused"),
+                "mode": (tar_bytes(sha, {
+                    "frontend/src/version.ts": version_source("0.0.1"), "run.sh": b"echo ok\n", "link": b"run.sh",
+                }, modes={"run.sh": 0o7777}, kinds={"link": "symlink"}), "archive mode refused"),
+                "directory": (tar_bytes(sha, {"../out": b"", "frontend/src/version.ts": version_source("0.0.1")},
+                                        kinds={"../out": "dir"}), "archive path refused"),
+                "pax": (tar_bytes(sha, {"foo/PaxHeader": b"extra", "frontend/src/version.ts": version_source("0.0.1")}),
+                        "archive path refused"),
+                "fifo": (tar_bytes(sha, {"frontend/src/version.ts": version_source("0.0.1"), "run.sh": b""},
+                                   kinds={"run.sh": "fifo"}), "special archive member refused"),
+            }
+            for name, (blob, message) in samples.items():
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        ops.compare_archive_to_commit(repo, sha, blob)
+
+
+class FetchContractTests(unittest.TestCase):
+    def test_fetch_exit_zero_without_frozen_objects_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(["git", "-C", directory, "init"], check=True, capture_output=True)
+
+            def fetch(_repo):
+                return None
+
+            with self.assertRaisesRegex(RuntimeError, "frozen commit objects missing after fetch"):
+                ops.ensure_frozen_commit(directory, fetch=fetch)
+        source = inspect_source(ops.fetch_exact_frozen_commit)
+        self.assertIn("APP_SHA", source)
+        self.assertNotIn('"main"', source)
+        self.assertNotIn("--depth=50", source)
+
+
+class GuardMutationTests(unittest.TestCase):
+    def test_deleting_predecessor_guard_accepts_mid_flight_change(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        base = Path(folder.name)
+        root = base / ("requirements-successor-" + ops.APP_SHA)
+        root.mkdir()
+        manifest_path = root / "manifest.json"
+        manifest_path.write_text("{}\n")
+        predecessor = base / ops.PREDECESSOR_OWNER
+        predecessor.write_bytes(b'{"release":"held"}\n')
+        release = object.__new__(ops.Release)
+        release.path = manifest_path
+        release.manifest_bytes = manifest_path.read_bytes()
+        release.root = root
+        release.sha = ops.APP_SHA
+        release.m = {"controller_sha256": "ab" * 32}
+
+        def rewrite():
+            predecessor.write_bytes(b'{"release":"changed"}\n')
+
+        release.evidence = Mock(side_effect=rewrite)
+        release.preflight = Mock(return_value={"ok": True})
+        with patch.object(ops, "file_mode", return_value=True), patch.object(ops.h, "BASE", base), \
+                self.assertRaisesRegex(RuntimeError, "predecessor owner changed"):
+            ops.Release.execute(release, "preflight")
+        release.preflight.assert_not_called()
+        with patch.object(ops, "require_same_bytes", lambda *_args: None), \
+                patch.object(ops, "file_mode", return_value=True), patch.object(ops.h, "BASE", base), \
+                patch("sys.stdout", io.StringIO()):
+            ops.Release.execute(release, "preflight")
+        release.preflight.assert_called_once()
+        self.assertEqual(inspect_source(ops.Release.execute).count("require_same_bytes"), 3)
+
+
+def caddy_config(port):
+    return {
+        "admin": {"listen": "127.0.0.1:%s" % port},
+        "apps": {"http": {"servers": {
+            "main": {
+                "listen": ["127.0.0.1:%s" % (port + 1)],
+                "automatic_https": {"disable": True},
+                "routes": [{"match": [{"host": ["www.ybwznt.com", "ybwznt.com"]}],
+                            "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "old-front:80"}]}]}],
+            },
+            "other": {
+                "listen": ["127.0.0.1:%s" % (port + 2)],
+                "automatic_https": {"disable": True},
+                "routes": [{"match": [{"host": ["files.example"]}],
+                            "handle": [{"handler": "static_response", "body": "other-old"}]}],
+            },
+        }}},
+    }
+
+
+class CaddyConditionalTests(unittest.TestCase):
+    def setUp(self):
+        self.port = 20219
+        self.process = None
+        self.container = None
+        binary = os.environ.get("ITSP_CADDY_BIN") or shutil.which("caddy")
+        if binary:
+            config = Path("/tmp/itsp-successor-caddy-m2.json")
+            config.write_text(json.dumps(caddy_config(self.port)))
+            self.process = subprocess.Popen([binary, "run", "--config", str(config)],
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.request = self.local_request
+        elif shutil.which("docker"):
+            self.container = "itsp-successor-caddy-m2-" + os.urandom(4).hex()
+            image = os.environ.get("ITSP_CADDY_CONTRACT_IMAGE", "caddy:2.11.4")
+            config = Path("/tmp") / (self.container + ".json")
+            config.write_text(json.dumps(caddy_config(2019)))
+            created = subprocess.run(["docker", "create", "--network", "none", "--name", self.container, image,
+                                      "caddy", "run", "--config", "/etc/caddy/itsp.json"], capture_output=True, text=True)
+            self.assertEqual(created.returncode, 0, created.stderr)
+            copied = subprocess.run(["docker", "cp", str(config), self.container + ":/etc/caddy/itsp.json"],
+                                    capture_output=True, text=True)
+            self.assertEqual(copied.returncode, 0, copied.stderr)
+            started = subprocess.run(["docker", "start", self.container], capture_output=True, text=True)
+            self.assertEqual(started.returncode, 0, started.stderr)
+            self.request = lambda method, path, body=None, headers=None: self.docker_request(method, path, body, headers)
+        else:
+            self.fail("real Caddy binary or docker is required")
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                status, _headers, _body = self.request("GET", "/config/")
+                if status == 200:
+                    return
+            except Exception:
+                time.sleep(0.1)
+        self.fail("caddy admin did not become ready")
+
+    def tearDown(self):
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+
+    def local_request(self, method, path, body=None, headers=None):
+        command = ["curl", "-sS", "--max-time", "5", "-D", "-", "-o", "-", "-w", "\n__STATUS__%{http_code}",
+                   "-X", method]
+        for key, value in (headers or {}).items():
+            command.extend(["-H", key + ": " + value])
+        if body is not None:
+            command.extend(["--data-binary", "@-"])
+        command.append("http://127.0.0.1:%s%s" % (self.port, path))
+        result = subprocess.run(command, input=body, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError("caddy admin transport failed")
+        return ops.parse_curl_exchange(result.stdout)
+
+    def docker_request(self, method, path, body=None, headers=None):
+        command = ["docker", "exec", "-i", self.container, "curl", "-sS", "--max-time", "5", "-D", "-", "-o", "-",
+                   "-w", "\n__STATUS__%{http_code}", "-X", method]
+        for key, value in (headers or {}).items():
+            command.extend(["-H", key + ": " + value])
+        if body is not None:
+            command.extend(["--data-binary", "@-"])
+        command.append("http://127.0.0.1:2019" + path)
+        raw = subprocess.check_output(command, input=body)
+        return ops.parse_curl_exchange(raw)
+
+    def other_body(self):
+        _status, _headers, body = self.request("GET", "/config/apps/http/servers/other/routes/0/handle/0/body")
+        return json.loads(body)
+
+    def test_conditional_patch_preserves_concurrent_site_and_full_load_does_not(self):
+        calls = []
+
+        def request(method, path, body=None, headers=None):
+            calls.append((method, path))
+            return self.request(method, path, body, headers)
+
+        def mutate():
+            status, headers, _body = self.request("GET", "/config/apps/http/servers/other/routes/0/handle/0/body")
+            self.assertEqual(status, 200)
+            updated = self.request(
+                "PATCH", "/config/apps/http/servers/other/routes/0/handle/0/body",
+                json.dumps("other-concurrent").encode(),
+                {"If-Match": ops.header_etag(headers), "Content-Type": "application/json"})
+            self.assertIn(updated[0], (200, 204))
+
+        ops.conditional_dial_patch(request, "old-front:80", "new-front:80", mutate=mutate)
+        self.assertEqual(self.other_body(), "other-concurrent")
+        self.assertNotIn(("POST", "/load"), calls)
+        status, _headers, body = self.request("GET", "/config/")
+        stale = json.loads(body)
+        # The rejected mutation installs the pre-change snapshot with /load.
+        stale["apps"]["http"]["servers"]["other"]["routes"][0]["handle"][0]["body"] = "other-old"
+        stale["apps"]["http"]["servers"]["main"]["routes"][0]["handle"][0]["upstreams"][0]["dial"] = "new-front:80"
+        loaded = self.request("POST", "/load", json.dumps(stale).encode(), {"Content-Type": "application/json"})
+        self.assertIn(loaded[0], (200, 204))
+        self.assertEqual(self.other_body(), "other-old")
 
 
 def inspect_source(function):
