@@ -130,17 +130,23 @@ def _seed_project_facts(db):
     db.commit()
 
 
+_WAREHOUSE_THROUGH_UNSET = object()
+
+
 def _build(
     db,
     *,
     historical_mode="approved_cost_baseline",
     warehouse_ready=True,
-    warehouse_ready_through=business_today(),
+    warehouse_ready_through=_WAREHOUSE_THROUGH_UNSET,
     warehouse_ambiguities=(),
     as_of=None,
     legacy_business_as_of=None,
 ):
     frozen_as_of = as_of or migration_source.business_today()
+    # 未传才在调用时取业务日。显式 None 表示水位未签，不能在导入时绑死，也不能改写成当天。
+    if warehouse_ready_through is _WAREHOUSE_THROUGH_UNSET:
+        warehouse_ready_through = frozen_as_of
     baseline = {
         "amount_ex_tax": "100",
         "amount_inc_tax": "113",
@@ -619,7 +625,8 @@ def test_archived_project_and_stale_part_identity_fail_closed(db):
 
 def test_named_approval_state_does_not_masquerade_as_source_data_change(db):
     _seed_project_facts(db)
-    pending = _build(db)
+    as_of = business_today()
+    pending = _build(db, as_of=as_of, warehouse_ready_through=as_of)
     pending["historical_baseline"]["approved"] = False
     pending["opening_balances"][0]["approved"] = False
 
@@ -632,7 +639,8 @@ def test_named_approval_state_does_not_masquerade_as_source_data_change(db):
         opening_balances=pending["opening_balances"],
         inventory_movements=pending["inventory_movements"],
         warehouse_source_ready=True,
-        warehouse_ready_through=business_today(),
+        warehouse_ready_through=as_of,
+        as_of=as_of,
         legacy_truth={
             "cost_lines": pending["legacy_cost_lines"],
             "expenses": pending["legacy_expenses"],
@@ -642,7 +650,7 @@ def test_named_approval_state_does_not_masquerade_as_source_data_change(db):
             "blockers": [],
         },
     )
-    approved = _build(db)
+    approved = _build(db, as_of=as_of, warehouse_ready_through=as_of)
 
     assert rebuilt_pending["source_snapshot_hash"] == approved["source_snapshot_hash"]
     assert (

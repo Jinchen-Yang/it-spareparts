@@ -14,6 +14,8 @@ export interface SummaryViewProps {
   loading: boolean;
   basis: AmountBasis[];
   groupBy: string;
+  groupsPage: number;
+  onGroupsPageChange: (page: number) => void;
   onDrill: (key: string) => void;
 }
 
@@ -58,7 +60,9 @@ function NominalShareNote({ side, share }: { side: "inc" | "ex"; share: number |
   );
 }
 
-export default function SummaryView({ summary, loading, basis, groupBy, onDrill }: SummaryViewProps) {
+export default function SummaryView({
+  summary, loading, basis, groupBy, groupsPage, onGroupsPageChange, onDrill,
+}: SummaryViewProps) {
   const kpi = summary?.kpi;
   const columns: ColumnsType<PurchaseAnalyticsGroup> = [
     {
@@ -104,7 +108,11 @@ export default function SummaryView({ summary, loading, basis, groupBy, onDrill 
           />
         )}
         {basis.includes("paid") && (
-          <KpiCard label="实付金额" value={fmtMoney(kpi?.amount_paid ?? null)} sub="原列「采购金额」" />
+          <KpiCard
+            label="实付金额"
+            value={fmtMoney(kpi?.amount_paid ?? null)}
+            sub={summary?.basis_mode === "line" ? "匹配行金额之和" : "原列「采购金额」"}
+          />
         )}
       </div>
       <Table<PurchaseAnalyticsGroup>
@@ -113,7 +121,13 @@ export default function SummaryView({ summary, loading, basis, groupBy, onDrill 
         loading={loading}
         dataSource={summary?.groups ?? []}
         columns={columns}
-        pagination={false}
+        pagination={groupBy === "pn" ? {
+          current: groupsPage,
+          pageSize: summary?.groups_page_size ?? 50,
+          total: summary?.total_groups ?? summary?.groups.length ?? 0,
+          showSizeChanger: false,
+          onChange: (page) => onGroupsPageChange(page),
+        } : false}
         locale={{ emptyText: "当前筛选下没有采购数据" }}
         onRow={(r) => ({
           style: { cursor: "pointer" },

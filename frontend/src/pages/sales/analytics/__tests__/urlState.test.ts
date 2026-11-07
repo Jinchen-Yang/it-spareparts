@@ -35,6 +35,7 @@ describe("parseSalesAnalyticsUrl：默认与容错", () => {
       orderId: null,
       // D-44 新键默认
       customers: [], customerTypes: [], salespeople: [], categories: [], brands: [],
+      orderNo: "",
       amountBasis: "amount_ex_tax", amountMin: null, amountMax: null,
       includeNegative: true, includeEmpty: true, order: "desc", tab: "orders",
       groupBy: "customer", groupSort: "amount_ex_tax", groupOrder: "desc", groupTop: 20,
@@ -254,6 +255,13 @@ describe("toSalesAnalyticsParams：URLSearchParams 序列化（FastAPI 重复键
     expect(p.toString()).toBe("");
     expect(p.has("date_from")).toBe(false);
     expect(p.has("date_to")).toBe(false);
+  });
+
+  it("order_no 字面包含进入请求，纯空白不落键", () => {
+    const p = toSalesAnalyticsParams({ order_no: " SO-1 " });
+    expect(p.get("order_no")).toBe("SO-1");
+    expect(toSalesAnalyticsParams({ order_no: "  " }).has("order_no")).toBe(false);
+    expect(toSalesAnalyticsParams({ order_no: "SO_%" }).get("order_no")).toBe("SO_%");
   });
 
   it("include_returns=false / 空串 / 空值不落键（脏值与缺省不进请求）", () => {

@@ -6,7 +6,7 @@
 // 模糊条件（customer / salesperson）只作为可关闭标签展示，不再提供输入。
 // 控件主题（A3/DL-025 返工）由页面根的 ConfigProvider 统一提供，本组件不再自带。
 import { useEffect, useRef, useState } from "react";
-import { Button, Select, Switch, Tag, Tooltip } from "antd";
+import { Button, Input, Select, Switch, Tag, Tooltip } from "antd";
 import DateRangePresets from "../../../components/DateRangePresets";
 import AmountBasisSelect from "../../../components/AmountBasisSelect";
 import { readSessionToken, sessionStale } from "../../../utils/session";
@@ -244,6 +244,16 @@ export default function FilterBar({
             ...valueOptions(options?.brands),
           ]}
           onChange={(v: string[]) => change({ brands: v })}
+        />
+        <Input.Search
+          aria-label="订单号"
+          placeholder="订单号（包含）"
+          allowClear
+          maxLength={64}
+          style={{ width: 180 }}
+          defaultValue={state.orderNo}
+          key={state.orderNo}
+          onSearch={(value) => change({ orderNo: value.trim() })}
         />
       </div>
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>

@@ -135,9 +135,24 @@ export default function DrillTable({
       ...sortableCol("customer", !customerRestricted),
     },
     { title: "PN", key: "products", width: 210, render: (_, row) => row.products?.length
-      ? row.products.map(product => <div key={product.line_id} style={{ height: 24, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={product.pn || undefined}>{product.pn || "/"}</div>) : "/" },
+      ? row.products.map(product => {
+          const description = product.description?.trim();
+          return (
+            <div key={product.line_id}>
+              <div style={{ height: 24, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={product.pn || undefined}>{product.pn || "/"}</div>
+              {description ? (
+                <div style={{ height: 24, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--mb-text-3)" }} title={description}>{description}</div>
+              ) : null}
+            </div>
+          );
+        }) : "/" },
     { title: "含税单价", key: "unit_prices", width: 120, align: "right", render: (_, row) => row.products?.length
-      ? row.products.map(product => <div key={product.line_id} style={{ height: 24, whiteSpace: "nowrap" }}>{costRestricted ? "—" : fmtMoney(product.unit_price)}</div>) : "—" },
+      ? row.products.map(product => (
+          <div key={product.line_id}>
+            <div style={{ height: 24, whiteSpace: "nowrap" }}>{costRestricted ? "—" : fmtMoney(product.unit_price)}</div>
+            {product.description?.trim() ? <div style={{ height: 24 }} /> : null}
+          </div>
+        )) : "—" },
     amountColumn("inc", "含税订单金额"),
     {
       title: (

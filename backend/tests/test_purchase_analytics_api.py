@@ -893,7 +893,8 @@ def test_options_customers_default_cap_is_200(db):
 # ---------------------------------------------------------------- 权限矩阵
 
 ENDPOINTS = ("/api/purchases/analytics/options", "/api/purchases/analytics/summary",
-             "/api/purchases/analytics/orders", "/api/purchases/analytics/orders/1")
+             "/api/purchases/analytics/orders", "/api/purchases/analytics/orders/export",
+             "/api/purchases/analytics/pn-boards", "/api/purchases/analytics/orders/1")
 
 
 @pytest.mark.parametrize("role,expected", [
@@ -1143,3 +1144,453 @@ def test_order_detail_id_out_of_bounds_422(boss, ds, oid):
 def test_order_detail_id_at_upper_bound_404(boss, ds):
     r = boss.get(f"/api/purchases/analytics/orders/{PG_INT_MAX}")
     assert r.status_code == 404, r.text
+
+
+def test_group_by_pn_pages_sum_to_line_kpi(boss, ds):
+    first = _summary(boss, group_by="pn", groups_page_size=1, groups_page=1)
+    assert first["basis_mode"] == "line"
+    assert first["total_groups"] == 3
+    assert len(first["groups"]) == 1
+    paid = lines = 0
+    keys = []
+    for page in (1, 2, 3):
+        part = _summary(boss, group_by="pn", groups_page_size=1, groups_page=page)
+        group = part["groups"][0]
+        keys.append(group["key"])
+        paid += group["amount_paid"]
+        lines += group["lines"]
+    assert set(keys) == {"PN-DQ", "PN-FL", "PN-JX"}
+    assert lines == first["kpi"]["lines"]
+    assert paid == pytest.approx(first["kpi"]["amount_paid"])
+    full = {g["key"]: g for g in _summary(boss, group_by="pn", groups_page_size=50)["groups"]}
+    assert full["PN-DQ"]["amount_paid"] == pytest.approx(2760.0)
+    assert "PN-RES" not in full
+
+
+def test_pn_drill_keeps_header_amount_and_filters_lines(boss, ds):
+    listed = _orders(boss, group_by="pn", group_key="PN-DQ")
+    assert listed["basis_mode"] == "line"
+    assert listed["items"]
+    for item in listed["items"]:
+        assert item["products"]
+        assert {p["pn_std"] for p in item["products"]} == {"PN-DQ"}
+    detail = boss.get(f"/api/purchases/analytics/orders/{ds.poa.id}", params={"pn": "PN-DQ"})
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert [ln["pn_std"] for ln in body["lines"]] == ["PN-DQ"]
+    assert body["category_matched"]["amount_paid"] == pytest.approx(500.0)
+    assert body["amount_paid"] == pytest.approx(1130.0)
+
+
+def test_pn_boards_only_two_source_types(boss, ds):
+    data = boss.get("/api/purchases/analytics/pn-boards").json()
+    by_type = {board["source_type"]: board for board in data["boards"]}
+    assert set(by_type) == {"维保需求", "销售订单"}
+    sales = {item["key"]: item for item in by_type["销售订单"]["items"]}
+    assert sales["PN-FL"]["amount_paid"] == pytest.approx(1630.0)
+    assert sales["PN-DQ"]["amount_paid"] == pytest.approx(1560.0)
+    assert by_type["维保需求"]["empty_reason"] is None
+    assert by_type["维保需求"]["items"] == []
+    excluded = boss.get(
+        "/api/purchases/analytics/pn-boards", params={"source_type": ["指定采购"]},
+    ).json()
+    assert all(board["empty_reason"] == "source_type_excluded" for board in excluded["boards"])
+    assert all(board["items"] == [] for board in excluded["boards"])
+
+
+def test_purchase_export_places_sales_order_beside_purchase_order(boss, ds):
+    import csv
+    import io
+    ds.poa.order_no = "=1+1"
+    ds.db.commit()
+    resp = boss.get("/api/purchases/analytics/orders/export", params={"order_no": "=1+1"})
+    assert resp.status_code == 200, resp.text
+    rows = list(csv.reader(io.StringIO(resp.content.decode("utf-8-sig"))))
+    assert rows[0][:3] == ["采购日期", "采购单号", "销售单号"]
+    assert rows[0][rows[0].index("采购类型")] == "采购类型"
+    assert "'=1+1" in rows[1][1]
+
+
+def test_purchase_export_over_limit_413(boss, ds, monkeypatch):
+    monkeypatch.setattr(purchase_analytics, "EXPORT_MAX_ORDERS", 1)
+    resp = boss.get("/api/purchases/analytics/orders/export")
+    assert resp.status_code == 413
+    assert b"PN-DQ" not in resp.content
+
+
+def _csv_table(resp):
+    import csv
+    import io
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("text/csv")
+    return list(csv.reader(io.StringIO(resp.content.decode("utf-8-sig"))))
+
+
+def test_pn_detail_keeps_unknown_amount_null_and_zero_as_zero(boss, ds):
+    """PN 详情是新增路径：匹配行金额全空保持 null；明确 0 仍是 0。"""
+    line = ds.db.query(FPurchaseLine).filter_by(raw_line_id="PA-L1").one()
+    line.line_amount = None
+    ds.db.commit()
+    missing = boss.get(
+        f"/api/purchases/analytics/orders/{ds.poa.id}", params={"pn": "PN-DQ"},
+    )
+    assert missing.status_code == 200, missing.text
+    matched = missing.json()["category_matched"]
+    assert matched["lines"] == 1
+    assert matched["amount_paid"] is None
+    assert matched["amount_inc"] is None
+    assert matched["amount_ex"] is None
+
+    line.line_amount = D("0")
+    ds.db.commit()
+    zeroed = boss.get(
+        f"/api/purchases/analytics/orders/{ds.poa.id}", params={"pn": "PN-DQ"},
+    ).json()["category_matched"]
+    assert zeroed["amount_paid"] == 0
+    assert zeroed["lines"] == 1
+
+
+def _matched(client, order_id, **params):
+    response = client.get(f"/api/purchases/analytics/orders/{order_id}", params=params)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    return body["category_matched"], body
+
+
+def _paid_cell(client, **params):
+    rows = _csv_table(client.get("/api/purchases/analytics/orders/export", params=params))
+    paid_at = rows[0].index("实付金额")
+    return [(row[1], row[paid_at]) for row in rows[1:]]
+
+
+def test_pn_detail_amount_matrix_matches_list_and_csv(boss, ds):
+    """PN 详情与列表、KPI、CSV：未知保持 null，明确 0 仍是 0。只按分类的旧详情仍从 0 累加。"""
+    p_null = _part(ds.db, "PN-NULLAMT", "电器件")
+    p_zero = _part(ds.db, "PN-ZERO", "电器件")
+    p_pos = _part(ds.db, "PN-POS", "电器件")
+    p_mix = _part(ds.db, "PN-MIX", "电器件")
+    p_blank = _part(ds.db, "", "电器件")
+    p_old = _part(ds.db, "PN-OLDNULL", "电器件")
+    common = dict(on=date(2026, 6, 1), source_type="销售订单", purchaser="采购员甲",
+                  is_inc=True, rate=D("0.13"), amount_ex=D("100"), amount_inc=D("113"))
+    order = _po(ds.db, "MX", ds.nb, **common)
+    old = _po(ds.db, "MY", ds.nb, **common)
+    _line(ds.db, "MX-NULL", order, p_null, ds.nb, line_no=1, amount=D("1"))
+    _line(ds.db, "MX-ZERO", order, p_zero, ds.nb, line_no=2, amount=D("0"))
+    _line(ds.db, "MX-POS1", order, p_pos, ds.nb, line_no=3, amount=D("10"))
+    _line(ds.db, "MX-POS2", order, p_pos, ds.nb, line_no=4, amount=D("20"))
+    _line(ds.db, "MX-MIX0", order, p_mix, ds.nb, line_no=5, amount=D("1"))
+    _line(ds.db, "MX-MIX1", order, p_mix, ds.nb, line_no=6, amount=D("5"))
+    _line(ds.db, "MX-BLANK", order, p_blank, ds.nb, line_no=7, amount=D("1"))
+    _line(ds.db, "MY-OLD", old, p_old, ds.nb, line_no=1, amount=D("1"))
+    for raw_id in ("MX-NULL", "MX-MIX0", "MX-BLANK", "MY-OLD"):
+        ds.db.query(FPurchaseLine).filter_by(raw_line_id=raw_id).one().line_amount = None
+    ds.db.commit()
+
+    def amounts(matched):
+        return matched["amount_paid"], matched["amount_inc"], matched["amount_ex"]
+
+    null_only, _ = _matched(boss, order.id, pn="PN-NULLAMT")
+    assert null_only["lines"] == 1
+    assert amounts(null_only) == (None, None, None)
+    zero_only, _ = _matched(boss, order.id, pn="PN-ZERO")
+    assert amounts(zero_only) == (0, 0, 0)
+    pos_only, _ = _matched(boss, order.id, pn="PN-POS")
+    assert pos_only["lines"] == 2
+    assert pos_only["amount_paid"] == pytest.approx(30)
+    mix_only, _ = _matched(boss, order.id, pn="PN-MIX")
+    assert mix_only["amount_paid"] == pytest.approx(5)
+
+    both_null, _ = _matched(boss, order.id, pn="PN-NULLAMT", category=["电器件"])
+    assert both_null["lines"] == 1
+    assert amounts(both_null) == (None, None, None)
+    both_pos, _ = _matched(boss, order.id, pn="PN-POS", category=["电器件"])
+    assert both_pos["amount_paid"] == pytest.approx(30)
+    empty, _ = _matched(boss, order.id, pn="PN-POS", category=[UNCATEGORIZED_LABEL])
+    assert empty["lines"] == 0
+    assert amounts(empty) == (None, None, None)
+    blank_cat, _ = _matched(boss, order.id, pn="(空)", category=["机械件"])
+    assert blank_cat["lines"] == 0
+    assert amounts(blank_cat) == (None, None, None)
+
+    for blank in ("", "   ", "(空)"):
+        matched, _ = _matched(boss, order.id, pn=blank)
+        assert matched["lines"] == 1, blank
+        assert amounts(matched) == (None, None, None), blank
+
+    old_detail, _ = _matched(boss, old.id, category=["电器件"])
+    assert old_detail["lines"] == 1
+    assert old_detail["amount_paid"] == 0
+    new_same_lines, _ = _matched(boss, old.id, pn="PN-OLDNULL", category=["电器件"])
+    assert new_same_lines["lines"] == 1
+    assert amounts(new_same_lines) == (None, None, None)
+
+    groups = {row["key"]: row for row in _summary(
+        boss, group_by="pn", groups_page_size=50)["groups"]}
+    assert groups["PN-NULLAMT"]["amount_paid"] is None
+    assert groups["PN-ZERO"]["amount_paid"] == 0
+    assert groups["PN-POS"]["amount_paid"] == pytest.approx(30)
+    assert groups["PN-MIX"]["amount_paid"] == pytest.approx(5)
+    assert groups[EMPTY_LABEL]["amount_paid"] is None
+
+    listed = _orders(boss, group_by="pn", group_key="PN-NULLAMT", page_size=50)
+    assert listed["basis_mode"] == "line"
+    assert [item["order_id"] for item in listed["items"]] == [order.id]
+    assert listed["items"][0]["amount_paid"] is None
+    listed_zero = _orders(boss, group_by="pn", group_key="PN-ZERO", page_size=50)
+    assert listed_zero["items"][0]["amount_paid"] == 0
+    listed_empty = _orders(
+        boss, group_by="pn", group_key="PN-POS", category=[UNCATEGORIZED_LABEL], page_size=50,
+    )
+    assert listed_empty["total"] == 0
+
+    assert _paid_cell(boss, group_by="pn", group_key="PN-NULLAMT") == [("CG-MX", "")]
+    assert _paid_cell(boss, group_by="pn", group_key="PN-ZERO") == [("CG-MX", "0.0")]
+    assert _paid_cell(boss, group_by="pn", group_key="(空)") == [("CG-MX", "")]
+    assert _paid_cell(
+        boss, group_by="pn", group_key="PN-POS", category=[UNCATEGORIZED_LABEL],
+    ) == []
+
+
+def test_published_pn_group_key_round_trips_to_the_same_lines(boss, ds):
+    """列表发布的 PN 组键再交给详情、下钻和导出，必须命中同一 PN。
+
+    PostgreSQL btrim 只去掉普通空格。tab、NBSP 留在组键里；详情不能用更宽的 strip
+    把它们收成另一个型号。两端普通空格仍按 btrim 收掉。
+    """
+    pairs = (
+        ("PN452\t", D("452"), "EDGE-452"),
+        ("PN452", D("113"), "PLAIN-452"),
+        ("\u00a0PN678", D("678"), "EDGE-678"),
+        ("PN678", D("113"), "PLAIN-678"),
+        ("  PNSP  ", D("88"), "SPACE-88"),
+        ("\t", D("7"), "TAB-ONLY"),
+        ("", D("3"), "BLANK"),
+    )
+    parts = {raw: _part(ds.db, pn, "电器件") for pn, _amount, raw in pairs}
+    common = dict(on=date(2026, 6, 2), source_type="销售订单", purchaser="采购员甲",
+                  is_inc=True, rate=D("0.13"), amount_ex=D("1"), amount_inc=D("1"))
+    lines = {}
+    for pn, amount, raw in pairs:
+        order = _po(ds.db, raw, ds.nb, **common)
+        lines[raw] = _line(ds.db, f"L-{raw}", order, parts[raw], ds.nb, line_no=1, amount=amount)
+    ds.db.commit()
+
+    groups = {row["key"]: row for row in _summary(
+        boss, group_by="pn", groups_page_size=200)["groups"]}
+    published = {
+        "EDGE-452": "PN452\t",
+        "PLAIN-452": "PN452",
+        "EDGE-678": "\u00a0PN678",
+        "PLAIN-678": "PN678",
+        "SPACE-88": "PNSP",
+        "TAB-ONLY": "\t",
+        "BLANK": EMPTY_LABEL,
+    }
+    assert set(published.values()) <= set(groups)
+    assert groups["PN452\t"]["amount_paid"] == pytest.approx(452)
+    assert groups["PN452"]["amount_paid"] == pytest.approx(113)
+    assert groups["\u00a0PN678"]["amount_paid"] == pytest.approx(678)
+    assert groups["PN678"]["amount_paid"] == pytest.approx(113)
+    assert groups["PNSP"]["amount_paid"] == pytest.approx(88)
+    assert groups["\t"]["amount_paid"] == pytest.approx(7)
+    assert groups[EMPTY_LABEL]["amount_paid"] == pytest.approx(3)
+
+    def same_three(matched, group):
+        assert matched["lines"] == 1
+        assert matched["amount_paid"] == group["amount_paid"]
+        assert matched["amount_inc"] == group["amount_inc"]
+        assert matched["amount_ex"] == group["amount_ex"]
+
+    requests = (
+        ("EDGE-452", "PN452\t"),
+        ("EDGE-452", "  PN452\t  "),
+        ("PLAIN-452", "PN452"),
+        ("EDGE-678", "\u00a0PN678"),
+        ("EDGE-678", " \u00a0PN678 "),
+        ("PLAIN-678", "PN678"),
+        ("SPACE-88", "PNSP"),
+        ("SPACE-88", "  PNSP  "),
+        ("TAB-ONLY", "\t"),
+        ("BLANK", EMPTY_LABEL),
+        ("BLANK", "   "),
+        ("BLANK", ""),
+    )
+    for raw, key in requests:
+        published_key = published[raw]
+        listed = _orders(boss, group_by="pn", group_key=key, page_size=20)
+        assert [item["order_no"] for item in listed["items"]] == [f"CG-{raw}"], key
+        assert [product["line_id"] for product in listed["items"][0]["products"]] == [lines[raw].id]
+        assert listed["items"][0]["amount_paid"] == groups[published_key]["amount_paid"]
+        detail = boss.get(
+            f"/api/purchases/analytics/orders/{listed['items'][0]['order_id']}",
+            params={"pn": key},
+        )
+        assert detail.status_code == 200, detail.text
+        body = detail.json()
+        assert [row["line_id"] for row in body["lines"]] == [lines[raw].id], key
+        assert [row["line_id"] for row in body["products"]] == [lines[raw].id], key
+        same_three(body["category_matched"], groups[published_key])
+        assert _paid_cell(boss, group_by="pn", group_key=key) == [
+            (f"CG-{raw}", str(groups[published_key]["amount_paid"])),
+        ]
+
+
+def test_pn_boards_customer_and_supplier_filters_fail_closed(db, ds):
+    """去掉 pn-boards 的客户/供应商门后，这四次请求会从 403 变成 200。"""
+    no_customer = client_for(
+        db, username="boards-no-customer", role="boss", overrides={"data_customer": False},
+    )
+    no_supplier = client_for(
+        db, username="boards-no-supplier", role="boss", overrides={"data_supplier": False},
+    )
+    cases = [
+        (no_customer, {"customer_id": ds.c1.id}, "客户"),
+        (no_supplier, {"supplier": "等价供应商"}, "供应商"),
+        (no_customer, {"customer_id": ds.c1.id, "supplier": "等价供应商"}, "客户"),
+        (no_supplier, {"supplier": "  供%_应商  ", "customer_id": ds.c1.id}, "供应商"),
+    ]
+    for client, params, word in cases:
+        denied = client.get("/api/purchases/analytics/pn-boards", params=params)
+        assert denied.status_code == 403, (params, denied.status_code, denied.text)
+        assert word in denied.json()["detail"]
+        assert "boards" not in denied.json()
+
+
+def test_purchase_export_exact_limit_keeps_one_row_per_order(boss, ds, monkeypatch):
+    """上限等于单数时必须导出数据行。改成 >= 会 200 但只剩表头。明细行数可以大于单数。"""
+    listed = _orders(boss, page_size=50)
+    total = listed["total"]
+    line_count = sum(item["lines"] for item in listed["items"])
+    assert line_count > total
+    monkeypatch.setattr(purchase_analytics, "EXPORT_MAX_ORDERS", total)
+    rows = _csv_table(boss.get("/api/purchases/analytics/orders/export"))
+    assert rows[0][1] == "采购单号"
+    body = rows[1:]
+    assert len(body) == total
+    order_nos = [row[1] for row in body]
+    assert order_nos.count("CG-PA") == 1
+    pa = next(row for row in body if row[1] == "CG-PA")
+    assert "PN-DQ" in pa[rows[0].index("采购产品")]
+    assert "PN-FL" in pa[rows[0].index("采购产品")]
+    paid_at = rows[0].index("实付金额")
+    assert pa[paid_at] == "1130.0"
+    # 同一张单的两行产品没有拆成两行 CSV，单头金额只出现一次
+    assert body.count(pa) == 1
+
+
+def test_purchase_export_one_past_limit_has_no_csv(boss, ds, monkeypatch):
+    total = _orders(boss, page_size=1)["total"]
+    monkeypatch.setattr(purchase_analytics, "EXPORT_MAX_ORDERS", total - 1)
+    resp = boss.get("/api/purchases/analytics/orders/export")
+    assert resp.status_code == 413, resp.text
+    assert "text/csv" not in resp.headers.get("content-type", "")
+    assert "采购单号" not in resp.text
+    assert "CG-PA" not in resp.text
+
+
+def _csv_maps(client, **params):
+    rows = _csv_table(client.get("/api/purchases/analytics/orders/export", params=params))
+    header, body = rows[0], rows[1:]
+    return [{header[i]: row[i] for i in range(len(header))} for row in body]
+
+
+def test_csv_blank_pn_renders_slash_without_merging_tab_or_nbsp(boss, ds):
+    """普通空格收成同一空组后，CSV 产品格一律是 /。tab 与 NBSP 仍各自成组。"""
+    blanks = (("", 1), (" ", 2), ("   ", 3))
+    kept = (("\t", "TAB", D("11")), ("\u00a0", "NBSP", D("12")), ("PN\tX", "EDGE", D("13")))
+    common = dict(on=date(2026, 6, 3), source_type="销售订单", purchaser="采购员甲",
+                  is_inc=True, rate=D("0.13"), amount_ex=D("99"), amount_inc=D("99"))
+    blank_order = _po(ds.db, "CSV-BLANK", ds.nb, **common)
+    for index, (pn, line_no) in enumerate(blanks, start=1):
+        part = _part(ds.db, pn, "电器件")
+        _line(ds.db, f"CSV-B{index}", blank_order, part, ds.nb, line_no=line_no, amount=D("1"))
+    for pn, raw, amount in kept:
+        part = _part(ds.db, pn, "电器件")
+        order = _po(ds.db, f"CSV-{raw}", ds.nb, **common)
+        _line(ds.db, f"CSV-L-{raw}", order, part, ds.nb, line_no=1, amount=amount)
+    ds.db.commit()
+
+    listed = _orders(boss, group_by="pn", group_key=EMPTY_LABEL, page_size=20)
+    assert [item["order_no"] for item in listed["items"]] == ["CG-CSV-BLANK"]
+    assert [product["pn_std"] for product in listed["items"][0]["products"]] == ["", " ", "   "]
+
+    blank_row = _csv_maps(boss, group_by="pn", group_key=EMPTY_LABEL)
+    assert [row["采购单号"] for row in blank_row] == ["CG-CSV-BLANK"]
+    assert blank_row[0]["采购产品"] == "/\n\n/\n\n/"
+    assert blank_row[0]["实付金额"] == "3.0"
+
+    tab_row = _csv_maps(boss, group_by="pn", group_key="\t")
+    assert [row["采购单号"] for row in tab_row] == ["CG-CSV-TAB"]
+    assert tab_row[0]["采购产品"] == "'\t"
+    assert tab_row[0]["实付金额"] == "11.0"
+    nbsp_row = _csv_maps(boss, group_by="pn", group_key="\u00a0")
+    assert [row["采购单号"] for row in nbsp_row] == ["CG-CSV-NBSP"]
+    assert nbsp_row[0]["采购产品"] == "\u00a0"
+    edge_row = _csv_maps(boss, group_by="pn", group_key="PN\tX")
+    assert [row["采购单号"] for row in edge_row] == ["CG-CSV-EDGE"]
+    assert edge_row[0]["采购产品"] == "PN\tX"
+
+
+def test_export_group_by_locks_line_amounts_and_order_set(boss, ds):
+    """导出带 PN/分类分组时必须用行级金额和行级订单集。
+
+    退回单头后：无明细的 CG-PD 会混进来，CG-PB 实付变空，CG-PF 实付从 1000 变 1130，
+    CG-PG 实付从 1000 变 1006；分类或 PN 下钻会把 CG-PA 的 500 变回整单 1130。
+    """
+    full_line = {
+        "CG-PA": {"实付金额": "1130.0", "含税金额": "1130.0", "不含税金额": "1000.0", "明细行数": "2"},
+        "CG-PB": {"实付金额": "2000.0", "含税金额": "2260.0", "不含税金额": "2000.0", "明细行数": "2"},
+        "CG-PC": {"实付金额": "1060.0", "含税金额": "1060.0", "不含税金额": "1000.0", "明细行数": "1"},
+        "CG-PF": {"实付金额": "1000.0", "含税金额": "1130.0", "不含税金额": "1000.0", "明细行数": "1"},
+        "CG-PG": {"实付金额": "1000.0", "含税金额": "1006.0", "不含税金额": "1000.0", "明细行数": "1"},
+    }
+    for group_by in ("pn", "category"):
+        listed = _orders(boss, group_by=group_by, page_size=50)
+        assert listed["basis_mode"] == "line"
+        exported = {row["采购单号"]: row for row in _csv_maps(boss, group_by=group_by)}
+        assert set(exported) == set(full_line)
+        assert {item["order_no"] for item in listed["items"]} == set(exported)
+        assert "CG-PD" not in exported
+        assert "CG-PE" not in exported
+        for order_no, expect in full_line.items():
+            row = exported[order_no]
+            for column, value in expect.items():
+                assert row[column] == value, (group_by, order_no, column, row[column])
+            item = next(item for item in listed["items"] if item["order_no"] == order_no)
+            assert row["实付金额"] == str(item["amount_paid"])
+            assert row["含税金额"] == str(item["amount_inc"])
+            assert row["不含税金额"] == str(item["amount_ex"])
+            assert row["明细行数"] == str(item["lines"])
+
+    drilled = {
+        "CG-PA": {"实付金额": "500.0", "含税金额": "500.0", "不含税金额": "442.48", "明细行数": "1",
+                  "采购产品": "PN-DQ"},
+        "CG-PB": {"实付金额": "1200.0", "含税金额": "1356.0", "不含税金额": "1200.0", "明细行数": "1",
+                  "采购产品": "PN-DQ"},
+        "CG-PC": {"实付金额": "1060.0", "含税金额": "1060.0", "不含税金额": "1000.0", "明细行数": "1",
+                  "采购产品": "PN-DQ"},
+    }
+    drills = (
+        {"group_by": "category", "group_key": "电器件"},
+        {"group_by": "pn", "group_key": "PN-DQ"},
+    )
+    for params in drills:
+        exported = {row["采购单号"]: row for row in _csv_maps(boss, **params)}
+        listed = _orders(boss, page_size=50, **params)
+        assert listed["basis_mode"] == "line"
+        assert set(exported) == set(drilled)
+        assert {item["order_no"] for item in listed["items"]} == set(exported)
+        for order_no, expect in drilled.items():
+            row = exported[order_no]
+            for column, value in expect.items():
+                assert row[column] == value, (params, order_no, column, row[column])
+            assert "PN-FL" not in row["采购产品"]
+            assert "PN-JX" not in row["采购产品"]
+
+    header = {row["采购单号"]: row for row in _csv_maps(boss, group_by="source_type")}
+    assert set(header) == {"CG-PA", "CG-PB", "CG-PC", "CG-PD", "CG-PF", "CG-PG"}
+    assert header["CG-PB"]["实付金额"] == ""
+    assert header["CG-PF"]["实付金额"] == "1130.0"
+    assert header["CG-PG"]["实付金额"] == "1006.0"
+    assert header["CG-PD"]["实付金额"] == "500.0"

@@ -37,6 +37,7 @@ describe("parseAnalyticsUrl：默认与容错", () => {
       pageSize: 50,
       basis: ["inc", "ex", "paid"],
       orderId: null,
+      groupsPage: 1,
     });
   });
 
@@ -113,6 +114,11 @@ describe("serializeAnalyticsState：默认值不落 URL", () => {
     expect(serializeAnalyticsState({ groupKey: "备件采购" })).toEqual({ group_key: "备件采购" });
     expect(serializeAnalyticsState({ orderId: null })).toEqual({ order_id: undefined });
     expect(serializeAnalyticsState({ orderId: 88 })).toEqual({ order_id: "88" });
+  });
+
+  it("PN 分组页回到第 1 页时删掉 gpage", () => {
+    expect(serializeAnalyticsState({ groupsPage: 1 })).toEqual({ gpage: undefined });
+    expect(serializeAnalyticsState({ groupsPage: 3 })).toEqual({ gpage: "3" });
   });
 
   it("basis=三口径全选 → 删键（默认态）；子集才落键", () => {

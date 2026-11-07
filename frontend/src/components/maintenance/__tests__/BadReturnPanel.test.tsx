@@ -230,6 +230,7 @@ describe("BadReturnPanel", () => {
     expect(within(panel).getByTestId("return-pending")).toHaveTextContent("品类待判定2.000");
     expect(within(panel).getByText("返还率暂不可判定")).toBeInTheDocument();
     expect(panel).not.toHaveTextContent("%");
+    await within(panel).findByText("PN-DISK");
     expect(within(panel).getAllByText("硬盘免返")).toHaveLength(2);
     expect(within(panel).getAllByText("品类待判定")).toHaveLength(2);
     expect(panel).toHaveTextContent("管理员关联标准品类后才能判定是否应返");

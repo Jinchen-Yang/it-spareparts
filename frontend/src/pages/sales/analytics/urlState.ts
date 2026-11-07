@@ -86,6 +86,8 @@ export interface SalesAnalyticsUrlState {
   salespeople: string[];
   categories: string[];
   brands: string[];
+  /** 订单号字面包含（D-0055）。空串 = 未筛。 */
+  orderNo: string;
   /** 金额区间（D-44 §7）：口径 + 闭区间两端（null = 不限）+ 负金额 / 无金额开关。 */
   amountBasis: SalesAmountBasis;
   amountMin: number | null;
@@ -135,6 +137,7 @@ export function parseSalesAnalyticsUrl(sp: URLSearchParams): SalesAnalyticsUrlSt
     salespeople: parseUrlList(sp, "salesperson_name"),
     categories: parseUrlList(sp, "category"),
     brands: parseUrlList(sp, "brand"),
+    orderNo: sp.get("order_no") || "",
     amountBasis: oneOf(sp.get("amount_basis"), AMOUNT_BASES, "amount_ex_tax"),
     amountMin: parseAmount(sp.get("amin")),
     amountMax: parseAmount(sp.get("amax")),
@@ -203,6 +206,7 @@ export function serializeSalesAnalyticsState(
   if (next.salespeople !== undefined) out.salesperson_name = serializeUrlList(next.salespeople);
   if (next.categories !== undefined) out.category = serializeUrlList(next.categories);
   if (next.brands !== undefined) out.brand = serializeUrlList(next.brands);
+  if (next.orderNo !== undefined) out.order_no = next.orderNo.trim() || undefined;
   if (next.amountBasis !== undefined) {
     out.amount_basis = next.amountBasis === "amount_ex_tax" ? undefined : next.amountBasis;
   }
@@ -305,6 +309,7 @@ export function toSalesApiFilters(
     ...(state.salespeople.length ? { salesperson_name: state.salespeople } : {}),
     ...(state.categories.length ? { category: state.categories } : {}),
     ...(state.brands.length ? { brand: state.brands } : {}),
+    ...(state.orderNo.trim() ? { order_no: state.orderNo.trim() } : {}),
     ...(state.amountBasis !== "amount_ex_tax" ? { amount_basis: state.amountBasis } : {}),
     ...(state.amountMin != null ? { amount_min: state.amountMin } : {}),
     ...(state.amountMax != null ? { amount_max: state.amountMax } : {}),

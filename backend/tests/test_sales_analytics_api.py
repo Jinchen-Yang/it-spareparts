@@ -710,3 +710,21 @@ def test_order_detail_id_at_upper_bound_404(db, seeded):
     client = _client(db, "sa-id-max", role="boss")
     r = client.get(f"{ORDERS}/{PG_INT_MAX}")
     assert r.status_code == 404, r.text
+
+
+def test_order_no_contains_and_list_description(db, seeded):
+    line = db.query(FSalesLine).filter_by(raw_line_id="L1").one()
+    line.description = "  硬盘描述  "
+    db.commit()
+    client = _client(db, "sa-order-no", role="boss")
+    listed = client.get(ORDERS, params={"order_no": "SO-1"})
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert body["total"] == 1
+    assert body["items"][0]["order_no"] == "SO-1"
+    assert body["items"][0]["products"][0]["description"] == "硬盘描述"
+    assert client.get(ORDERS, params={"order_no": "SO-%"}).json()["total"] == 0
+    assert client.get(ORDERS, params={"order_no": "   "}).json()["total"] == client.get(ORDERS).json()["total"]
+    exported = client.get(ORDERS + "/export", params={"order_no": "SO-1"})
+    assert exported.status_code == 200
+    assert "硬盘描述" not in exported.content.decode("utf-8")

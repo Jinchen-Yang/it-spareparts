@@ -58,6 +58,7 @@ export interface SalesAnalyticsFilters {
   salesperson_name?: string[];
   category?: string[];
   brand?: string[];
+  order_no?: string;
   amount_basis?: SalesAmountBasis;
   amount_min?: number;
   amount_max?: number;
@@ -134,7 +135,7 @@ export interface SalesAnalyticsOrderRow {
   gross_profit?: number | null;
   gross_margin?: number | null;
   reconciliation: SalesReconciliationBlock;
-  products?: { line_id: number; pn: string | null; unit_price: number | null }[];
+  products?: { line_id: number; pn: string | null; description?: string | null; unit_price: number | null }[];
 }
 
 export const SALES_ANALYTICS_SORT_KEYS = [
@@ -212,7 +213,7 @@ export interface SalesAnalyticsOrderDetail {
   lines?: SalesOrderLine[];
   as_of: string;
   reconciliation: SalesReconciliationBlock;
-  products?: { line_id: number; pn: string | null; unit_price: number | null }[];
+  products?: { line_id: number; pn: string | null; description?: string | null; unit_price: number | null }[];
   reconciliation_history: SalesReconciliationHistoryEntry[];
 }
 
@@ -264,6 +265,9 @@ export function toSalesAnalyticsParams(
   if (filters.amount_max != null) p.set("amount_max", String(filters.amount_max));
   if (filters.include_negative === false) p.set("include_negative", "false");
   if (filters.include_empty === false) p.set("include_empty", "false");
+  // 订单号是单头字面包含。纯空白等于未筛，不能在序列化时丢掉已填写的单号。
+  const orderNo = filters.order_no?.trim();
+  if (orderNo) p.set("order_no", orderNo);
   for (const [k, v] of Object.entries(extra)) {
     // 空串/空值/0 不落参数（脏值不静默进请求；page=0 等无意义值不进 URL）；
     // include_returns=false 走缺省，不落键

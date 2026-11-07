@@ -60,7 +60,8 @@ export default function FilterBar({
   supplierRestricted = false,
   onReset,
 }: FilterBarProps) {
-  const change = (next: Partial<AnalyticsUrlState>) => patch(next, { resetPage: true });
+  const change = (next: Partial<AnalyticsUrlState>) =>
+    patch({ ...next, groupsPage: 1 }, { resetPage: true });
   const locate = (next: Partial<AnalyticsUrlState>) => change({ ...next, groupKey: null, orderId: null });
   const customerSelect = (
     <Select
@@ -135,7 +136,7 @@ export default function FilterBar({
           label: o.label,
           disabled: o.value === "customer" && customerRestricted,
         }))}
-        onChange={(v: string) => change({ groupBy: v, groupKey: null })}
+        onChange={(v: string) => change({ groupBy: v, groupKey: null, groupsPage: 1 })}
       />
       <AmountBasisSelect
         options={AMOUNT_BASIS_OPTIONS}

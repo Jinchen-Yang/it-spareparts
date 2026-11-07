@@ -107,6 +107,25 @@ describe("D-39 抽屉：单头缺列翻转与行级结构性名义侧分别展�
     expectNote(within(dialog).getByRole("row", { name: /PN-GAP/ }), "ex");
   });
 
+  it("PN 下钻的匹配行横幅使用 PN 口径，不写分类合计", async () => {
+    fetchDetail.mockResolvedValue({ data: GAP_DETAIL });
+    render(
+      <OrderDetailDrawer
+        orderId={101}
+        category={["硬盘"]}
+        pn="PN-DQ"
+        basis={["paid"]}
+        ownerToken={null}
+        onOwnerStale={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/匹配 PN 行合计（PN-DQ）/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/匹配分类行合计/)).toBeNull();
+    expect(within(dialog).getByText(/PN 口径下实付/)).toBeInTheDocument();
+  });
+
   it("只选择实付时不渲染行税基列；分类合计仍按其展示金额标注", async () => {
     const dialog = await openDrawer(GAP_DETAIL, ["paid"]);
     expect(within(dialog).queryByRole("columnheader", { name: "行含税" })).toBeNull();
