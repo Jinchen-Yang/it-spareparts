@@ -40,7 +40,7 @@
 
 ## 控制器
 
-入口是 `.deploy/requirements_successor_ops.py`。本次审核时的字节摘要是 `e1820913d99c8e1826734e7426733c25fcaf896924e896360830126c9fb5f576`。只读 smoke 是 `.deploy/requirements_successor_smoke.py`，摘要 `f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f`。这两个摘要属于控制器身份；应用镜像身份仍是 `e62cd60`。
+入口是 `.deploy/requirements_successor_ops.py`。本次审核时的字节摘要是 `939e7505f102b7900374c306ab651076de30d54c9d4d060baca27727fd6992ff`。只读 smoke 是 `.deploy/requirements_successor_smoke.py`，摘要 `f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f`。这两个摘要属于控制器身份；应用镜像身份仍是 `e62cd60`。
 
 发布目录是 `/data/spareparts/releases/requirements-successor-e62cd60cdbcc3fef896c5289388250057c4ce513`，root、0700，制品 0600。新 owner 是 `.requirements-successor-active-owner.json`。新容器前缀是 `itsp-successor-e62cd60cdbcc`。旧容器、旧目录和旧 owner 保留。
 
@@ -53,7 +53,7 @@ git -C REPO -c core.autocrlf=false -c core.eol=lf archive --format=tar.gz e62cd6
 python3 .deploy/requirements_successor_ops.py --check-archive REPO source.tar.gz
 ```
 
-该命令核对 pax comment、两个父提交、tree、1940 个 Git 对象的类型、mode 和 blob，并确认控制器文件不在归档内。普通文件、可执行文件和目录必须能由同一个 `tar.umask` 解释；符号链接必须是 120000 且目标字节等于 blob。硬链接、fifo、设备、07777、`..`、绝对路径和 `PaxHeader` 成员都拒绝，而且拒绝发生在读取成员正文之前。对象缺失时按精确提交 `git fetch --depth=1 origin e62cd60…` 获取，fetch 退出码 0 本身不算成功。不要改跟 `origin/main` 的浅历史。CRLF 或另一个提交的 comment 也会拒绝。服务器阶段再核对归档摘要、comment 和版本行；完整对象对照必须在复制到发布目录之前完成。不要把某次 gzip 字节摘要写成跨 Git 版本的常量。
+该命令核对 pax comment、两个父提交、tree、1940 个 Git 对象的类型、mode 和 blob，并确认控制器文件不在归档内。普通文件、可执行文件和目录必须能由同一个 `tar.umask` 解释；符号链接必须是 120000 且目标字节等于 blob。硬链接、fifo、设备、07777、`..`、绝对路径和 `PaxHeader` 成员都拒绝，而且拒绝发生在读取成员正文之前。对象缺失时用 `git fetch --depth=2 origin e62cd60…`。depth 1 会把合并提交标成浅边界，`rev-parse` 看不到两个父提交；depth 2 才同时拿到该提交、两个父提交、父 tree，以及该提交的全部 blob。fetch 退出码 0 本身不算成功，必须再核对这些对象。不要改跟 `origin/main` 的浅历史。CRLF 或另一个提交的 comment 也会拒绝。服务器阶段再核对归档摘要、comment 和版本行；完整对象对照必须在复制到发布目录之前完成。不要把某次 gzip 字节摘要写成跨 Git 版本的常量。
 
 在本机 Git 2.43.0、Python 3.12.3 上，这次只读对照的结果是 `status=passed`、1940 个文件、`controller_in_archive=false`、归档 sha256 `5f6921c7f40994cdf50757193f19f8ad4076564c8ff931daf50f630dad2e356e`。这是开发机观察，不是生产制品回执。
 
@@ -76,7 +76,7 @@ python3 .deploy/requirements_successor_ops.py --check-archive REPO source.tar.gz
 5. `migrate` 不调用 `upgrade` 或 `downgrade`。它要求上一步的无网络恢复、上传对照、写者清空和 TCP 0，然后只运行 `heads`、`current`、`check`。两端 head 都必须仍是 `98afc0d2157b (head)`，行数和冻结列摘要不变。多头或新 head 在 `check` 之前拒绝。
 6. `backup-new` 在停写窗口再做一次当前 head 的全库备份和无网络恢复。没有这一次恢复回执不能继续。
 7. `bluegreen` 沿用原克隆：保留环境，只换镜像、名称、专属网络、loopback 端口和 nginx 上游字节。
-8. `cutover` 仍先用原 `plan_caddy_change` 证明 Caddyfile 文本只改一个上游。暴露标记先落盘。随后只在**当前** Caddyfile 里替换那一个 dial 字节，并用 Caddy 文档中的 `GET` `ETag` + `PATCH /config/...` `If-Match` 改运行配置里的同一个 dial。禁止 `POST /load` 整份旧快照。两把部署锁只约束合作的控制器，不证明没有其他 Caddy 写者。若 `If-Match` 返回 412 且 dial 已不再是旧值，失败关闭，不退回整份加载。暴露之后仍然不能自动回滚。
+8. `cutover` 先落暴露标记。持久文件在同一 inode 的锁内重新读取后再替换唯一 dial，不能把更早的缓冲区写回去。运行配置不用 dial 标量的 ETag：先读取包含 host match 的整条主站 route，确认身份后用这条 route 自己的 `ETag` 做 `If-Match` `PATCH`。412 不写，也不退回 `POST /load`。回执里的 `active` 是更新后的整份运行配置，供原来的 verify 读取。两把部署锁不证明没有其他 Caddy 写者。暴露之后仍然不能自动回滚。本机 Caddy 2.11.4 只说明这套 API 行为，不表示已经核对现场 Caddy 版本或拓扑。
 9. `verify` 可重复。它检查公开静态字节、`1.46.0` 资源、运行镜像 revision 和 schema。按现场节奏记录 0/5/15/30 分钟，不造业务数据。
 
 ## 恢复边界
@@ -93,7 +93,7 @@ python3 .deploy/requirements_successor_ops.py --check-archive REPO source.tar.gz
 Python 3.12.3
 git version 2.43.0
 ITSP_CADDY_BIN=/tmp/caddy-2.11.4 python3 -m unittest discover -s .deploy/tests -p 'test_requirements_*ops.py'
-Ran 35 tests in 5.332s
+Ran 40 tests in 9.141s
 OK
 python3 -m unittest discover -s .deploy/tests -p test_presales_pool_ops.py
 Ran 25 tests in 0.026s
@@ -102,7 +102,7 @@ OK (skipped=1)
 
 共享池仍是 24 项通过。跳过的 1 项是原来的 Caddy 合同镜像测试，本机没有 `ITSP_CADDY_CONTRACT_IMAGE`，不是本次豁免。
 
-35 项里有接续合同，也有原来的 5 项可见性合同。新增负行为包括：归档类型/mode/越界成员拒绝、删除前序字节守卫后中途改写会被接受而真实守卫拒绝、fetch 退出码 0 但对象缺失被拒绝、root 下 0644 manifest 与 0755 目录都被拒绝，以及 Caddy 2.11.4 上 `If-Match` PATCH 保持 `other-concurrent`、同一进程里 `POST /load` 把它写回 `other-old`。本机没有 docker，所以这次 Caddy 证明不是 `--network none` 容器；测试代码在有 docker 时走 `docker create/start --network none`，不调用 `docker rm`。CI 仍在原来的「售前发布控制器与 Caddy 切流契约」步骤里运行这些测试，没有新增按 PR 号跳过的路径。
+40 项里有接续合同，也有原来的 5 项可见性合同。本轮持久反例包括：缺 `active` 的切流回执在真实 `Hotfix.verify` 上 `KeyError`，补上后贯穿 verify；同 inode 上先改其他站点再提交，重启 Caddy 2.11.4 后修改仍在，删掉重新读取则丢失；标量 dial ETag 在交换 host 后 `PATCH 200` 改错站点，route ETag 不改错站点；全新 bare 仓库 depth 1 看不到父提交，depth 2 后 1940 个 blob 与归档对照通过；删除 `execute` / `cas_file` / `rollback` 里的守卫后错误操作成功，原方法仍拒绝。本机没有 docker，Caddy 证明不是 `--network none` 容器，也不声称现场 Caddy 版本。CI 仍跑这些测试，没有新增按 PR 号跳过的路径。
 
 这些测试覆盖：历史常量和 Caddy / 写者 / 冻结 / 备份 / 切流函数身份不变；只接受 `e62cd60` 而拒绝两个父提交和 `782c`；禁止 upgrade、downgrade 和旧 import allowlist；无网络 PG15 恢复标志缺失时不调用 alembic；暴露或 schema 变化时不调用 Docker；失败路径不回滚且不改前序 owner；两把锁跨进程互斥；真实 Git blob 对照和 CRLF 拒绝。它们不代替现场备份、真实恢复、镜像构建、认证冒烟或用户点按。
 

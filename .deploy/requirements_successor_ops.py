@@ -200,7 +200,8 @@ def object_exists(repo, spec):
 def frozen_objects_ready(repo):
     if not object_exists(repo, APP_SHA + "^{commit}") or not object_exists(repo, APP_SHA + "^{tree}"):
         return False
-    if any(not object_exists(repo, parent + "^{commit}") for parent in PARENTS):
+    if any(not object_exists(repo, parent + "^{commit}") or not object_exists(repo, parent + "^{tree}")
+           for parent in PARENTS):
         return False
     identity = git_commit_identity(repo, APP_SHA)
     if identity["parents"] != PARENTS or identity["tree"] != TREE:
@@ -211,9 +212,9 @@ def frozen_objects_ready(repo):
 
 
 def fetch_exact_frozen_commit(repo):
-    """Fetch APP_SHA itself. A green fetch of origin/main is not this commit."""
+    """Depth 2 keeps both merge parents. Depth 1 grafts them out of rev-parse."""
     result = subprocess.run(
-        ["git", "-C", str(repo), "fetch", "--no-tags", "--depth=1", "origin", APP_SHA],
+        ["git", "-C", str(repo), "fetch", "--no-tags", "--depth=2", "origin", APP_SHA],
         capture_output=True)
     h.need(result.returncode == 0, "frozen commit fetch failed")
 
@@ -318,31 +319,60 @@ def parse_curl_exchange(raw):
     return int(status_raw.strip()), headers, body
 
 
-def find_main_dial(config, old_dial):
+def collect_dials(node, found):
+    if isinstance(node, dict):
+        if "dial" in node and "handler" not in node:
+            found.append(node.get("dial"))
+        for value in node.values():
+            collect_dials(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            collect_dials(item, found)
+
+
+def route_hosts(route):
+    return {host for match in (route.get("match") or []) for host in (match.get("host") or [])}
+
+
+def route_is_main(route, dial):
+    if not isinstance(route, dict) or route_hosts(route) != h.HOSTS:
+        return False
+    dials = []
+    collect_dials(route, dials)
+    return dials == [dial]
+
+
+def replace_one_dial(node, old, new):
+    count = 0
+    if isinstance(node, dict):
+        if "dial" in node and "handler" not in node and node.get("dial") == old:
+            node["dial"] = new
+            count += 1
+        for value in node.values():
+            count += replace_one_dial(value, old, new)
+    elif isinstance(node, list):
+        for item in node:
+            count += replace_one_dial(item, old, new)
+    return count
+
+
+def find_main_route_path(config, dial):
     found = []
-
-    def walk(handles, prefix):
-        for index, handler in enumerate(handles or []):
-            if not isinstance(handler, dict):
-                continue
-            if handler.get("handler") == "reverse_proxy":
-                for upstream_index, upstream in enumerate(handler.get("upstreams") or []):
-                    if isinstance(upstream, dict) and upstream.get("dial") == old_dial:
-                        found.append("%s/handle/%s/upstreams/%s/dial" % (prefix, index, upstream_index))
-            for route_index, route in enumerate(handler.get("routes") or []):
-                if isinstance(route, dict):
-                    walk(route.get("handle"), "%s/handle/%s/routes/%s" % (prefix, index, route_index))
-
-    for server_name, server in (config.get("apps", {}).get("http", {}).get("servers", {}) or {}).items():
-        h.need(re.fullmatch(r"[A-Za-z0-9_.-]+", str(server_name)), "caddy server name refused")
-        for route_index, route in enumerate((server or {}).get("routes") or []):
-            hosts = {host for match in (route.get("match") or []) for host in (match.get("host") or [])}
-            if not (hosts & h.HOSTS):
-                continue
-            h.need(hosts == h.HOSTS, "unexpected main-site host grouping")
-            walk(route.get("handle"), "/config/apps/http/servers/%s/routes/%s" % (server_name, route_index))
-    h.need(len(found) == 1, "main dial is not singular")
+    servers = ((config.get("apps") or {}).get("http") or {}).get("servers") or {}
+    for name, server in servers.items():
+        h.need(re.fullmatch(r"[A-Za-z0-9_.-]+", str(name)), "caddy server name refused")
+        for index, route in enumerate((server or {}).get("routes") or []):
+            if route_is_main(route, dial):
+                found.append("/config/apps/http/servers/%s/routes/%s" % (name, index))
+    h.need(len(found) == 1, "main route is not singular")
     return found[0]
+
+
+def config_at(config, pointer):
+    node = config
+    for part in pointer[len("/config/"):].split("/"):
+        node = node[int(part)] if isinstance(node, list) else node[part]
+    return node
 
 
 def set_config_pointer(config, pointer, value):
@@ -364,34 +394,33 @@ def only_dial_changed(before, after, pointer, new_dial):
     return expected == after
 
 
-def conditional_dial_patch(request, old_dial, new_dial, mutate=None):
-    """PATCH one dial with Caddy's documented If-Match. Never POST /load."""
-    def export():
+def conditional_dial_patch(request, old_dial, new_dial):
+    """PATCH the whole main route under its ETag. A dial-only ETag does not bind the host match."""
+    for _attempt in range(4):
         status, _headers, body = request("GET", "/config/")
         h.need(status == 200, "caddy config export failed")
-        return json.loads(body)
-
-    if mutate is not None:
-        mutate()
-    before = export()
-    path = find_main_dial(before, old_dial)
-    status, headers, body = request("GET", path)
-    h.need(status == 200 and json.loads(body) == old_dial, "dial drifted before conditional patch")
-    etag = header_etag(headers)
-    status, _headers, body = request(
-        "PATCH", path, json.dumps(new_dial).encode(),
-        {"If-Match": etag, "Content-Type": "application/json"})
-    if status == 412:
+        before = json.loads(body)
+        path = find_main_route_path(before, old_dial)
         status, headers, body = request("GET", path)
-        h.need(status == 200 and json.loads(body) == old_dial, "dial etag conflict is not the old upstream; full load refused")
-        status, _headers, body = request(
-            "PATCH", path, json.dumps(new_dial).encode(),
+        route = json.loads(body)
+        h.need(status == 200 and route_is_main(route, old_dial), "route identity drifted before patch")
+        updated = copy.deepcopy(route)
+        h.need(replace_one_dial(updated, old_dial, new_dial) == 1, "main dial is not singular")
+        status, _headers, _body = request(
+            "PATCH", path, json.dumps(updated).encode(),
             {"If-Match": header_etag(headers), "Content-Type": "application/json"})
-    h.need(status in {200, 204}, "conditional dial patch failed")
-    after = export()
-    h.need(only_dial_changed(before, after, path, new_dial), "caddy patch changed other sites")
-    h.need(find_main_dial(after, new_dial) == path, "main dial was not replaced")
-    return after
+        if status == 412:
+            continue
+        h.need(status in {200, 204}, "conditional route patch failed")
+        status, _headers, body = request("GET", "/config/")
+        h.need(status == 200, "caddy config export failed")
+        after = json.loads(body)
+        h.need(route_is_main(config_at(after, path), new_dial), "patched route lost main identity")
+        restored = copy.deepcopy(after)
+        h.need(replace_one_dial(config_at(restored, path), new_dial, old_dial) == 1, "patched dial missing")
+        h.need(restored == before, "caddy patch changed other sites")
+        return after
+    raise RuntimeError("could not bind main route; full load refused")
 
 
 def validate(m):
@@ -548,6 +577,49 @@ class Release(vis.Release):
         command.append("http://127.0.0.1:2019" + path)
         return parse_curl_exchange(self.run(command, input=body))
 
+    def read_fd(self, fd):
+        os.lseek(fd, 0, os.SEEK_SET)
+        chunks = []
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            chunks.append(block)
+        return b"".join(chunks)
+
+    def commit_caddyfile_dial(self, old_bytes, new_bytes, inode):
+        """Replace one dial on the open inode. Re-read under the lock before writing."""
+        fd = os.open(self.caddyfile, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            descriptor = os.fstat(fd)
+            h.need([descriptor.st_dev, descriptor.st_ino] == inode and stat.S_ISREG(descriptor.st_mode),
+                   "Caddy inode drift")
+            stale = self.read_fd(fd)
+            hook = getattr(self, "caddyfile_before_commit", None)
+            if hook is not None:
+                hook()
+            current = self.read_fd(fd)
+            h.need(current.count(old_bytes) == 1, "live Caddyfile upstream is not singular")
+            prefix, matched, suffix = current.partition(old_bytes)
+            h.need(matched == old_bytes and old_bytes not in suffix, "live Caddyfile upstream is not singular")
+            updated = prefix + new_bytes + suffix
+            os.lseek(fd, 0, os.SEEK_SET)
+            view = memoryview(updated)
+            while view:
+                count = os.write(fd, view)
+                h.need(count > 0, "short Caddy write")
+                view = view[count:]
+            os.ftruncate(fd, len(updated))
+            os.fsync(fd)
+            seen = self.read_fd(fd)
+            h.need(seen == updated, "caddyfile lost a concurrent write")
+            h.need(seen.startswith(prefix) and seen.endswith(suffix), "caddyfile other bytes drifted")
+            return updated
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
     def cas_file(self, data, inode):
         descriptor = self.caddyfile.stat()
         h.need([descriptor.st_dev, descriptor.st_ino] == inode and not self.caddyfile.is_symlink(), "Caddy inode drift")
@@ -556,7 +628,7 @@ class Release(vis.Release):
         h.need(inside == h.digest(data), "Caddy bind bytes drift")
 
     def cutover(self):
-        """Patch the one live dial. The deploy locks do not prove exclusive access to Caddy."""
+        """Keep the live file's other bytes and patch the identified main route. Never POST /load."""
         self.writers_exact({self.app})
         h.need(self.schema() == SCHEMA, "schema drift before cutover")
         blue = self.marker("bluegreen")
@@ -565,19 +637,14 @@ class Release(vis.Release):
                h.fingerprint(self.inspect(self.front)) == blue["frontend"], "candidate changed")
         pre = self.marker("preflight")
         old_dial, new_dial = self.old_front + ":80", self.front + ":80"
-        after, _desired = self.plan_caddy_change(pre)
-        h.write_new(self.root / "Caddyfile.candidate", after)
-        h.save(self.root / "exposure-started.json",
-               {"release": self.sha, "full_load": False, "after_sha256": h.digest(after)})
-        live = self.caddyfile.read_bytes()
-        old_bytes, new_bytes = old_dial.encode(), new_dial.encode()
-        h.need(live.count(old_bytes) == 1, "live Caddyfile upstream is not singular")
-        updated = live.replace(old_bytes, new_bytes, 1)
-        self.write_caddy(updated, pre["inode"])
+        self.plan_caddy_change(pre)
+        h.save(self.root / "exposure-started.json", {"release": self.sha, "full_load": False})
+        updated = self.commit_caddyfile_dial(old_dial.encode(), new_dial.encode(), pre["inode"])
+        h.write_new(self.root / "Caddyfile.candidate", updated)
         self.cas_file(updated, pre["inode"])
         applied = conditional_dial_patch(self.admin_request, old_dial, new_dial)
-        return {"active_dial": new_dial, "full_load": False, "forward_only_after_exposure": True,
-                "other_sites_preserved": True, "config_sha256": h.digest(json.dumps(applied, sort_keys=True).encode())}
+        return {"active": applied, "active_dial": new_dial, "full_load": False,
+                "forward_only_after_exposure": True}
 
     def verify(self):
         self.writers_exact({self.app})

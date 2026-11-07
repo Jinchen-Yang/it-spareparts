@@ -100,7 +100,7 @@ class PinTests(unittest.TestCase):
         self.assertIsNot(ops.Release.load_active, ops.hf.Hotfix.load_active)
         self.assertIs(ops.Release.protected, ops.vis.Release.protected)
         successor_cutover = inspect_source(ops.Release.cutover)
-        self.assertNotIn("/load", successor_cutover)
+        self.assertNotIn('"/load"', successor_cutover)
         self.assertNotIn("load_active(", successor_cutover)
         self.assertLess(successor_cutover.index("exposure-started.json"), successor_cutover.index("conditional_dial_patch"))
         self.assertIn("load_active(desired)", inspect_source(ops.vis.Release.cutover))
@@ -695,12 +695,45 @@ class FetchContractTests(unittest.TestCase):
                 ops.ensure_frozen_commit(directory, fetch=fetch)
         source = inspect_source(ops.fetch_exact_frozen_commit)
         self.assertIn("APP_SHA", source)
+        self.assertIn("--depth=2", source)
         self.assertNotIn('"main"', source)
+        self.assertNotIn("--depth=1", source)
         self.assertNotIn("--depth=50", source)
+
+    def test_fresh_bare_fetch_includes_parents_trees_and_blobs(self):
+        origin = subprocess.check_output(["git", "-C", str(REPO), "remote", "get-url", "origin"], text=True).strip()
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(["git", "init", "--bare", directory], check=True, capture_output=True)
+            subprocess.run(["git", "-C", directory, "remote", "add", "origin", origin], check=True)
+            shallow = subprocess.run(
+                ["git", "-C", directory, "fetch", "--no-tags", "--depth=1", "origin", ops.APP_SHA],
+                capture_output=True, text=True)
+            self.assertEqual(shallow.returncode, 0, shallow.stderr)
+            self.assertFalse(ops.object_exists(directory, ops.PARENTS[0] + "^{commit}"))
+            self.assertFalse(ops.frozen_objects_ready(directory))
+            ops.ensure_frozen_commit(directory)
+            self.assertTrue(ops.frozen_objects_ready(directory))
+            identity = ops.git_commit_identity(directory, ops.APP_SHA)
+            self.assertEqual(identity["parents"], ops.PARENTS)
+            self.assertEqual(identity["tree"], ops.TREE)
+            archive = ops.canonical_archive(directory, ops.APP_SHA)
+            checked = ops.assert_release_archive(directory, archive)
+            self.assertEqual(len(checked["blobs"]), 1940)
+
+
+def compile_without(method, drops):
+    source = textwrap.dedent(inspect_source(method))
+    for drop in drops:
+        if drop not in source:
+            raise AssertionError("guard not found: " + drop)
+        source = source.replace(drop, "pass")
+    namespace = {}
+    exec(source, ops.__dict__, namespace)
+    return namespace[method.__name__]
 
 
 class GuardMutationTests(unittest.TestCase):
-    def test_deleting_predecessor_guard_accepts_mid_flight_change(self):
+    def owner_release(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         base = Path(folder.name)
@@ -716,22 +749,75 @@ class GuardMutationTests(unittest.TestCase):
         release.root = root
         release.sha = ops.APP_SHA
         release.m = {"controller_sha256": "ab" * 32}
-
-        def rewrite():
-            predecessor.write_bytes(b'{"release":"changed"}\n')
-
-        release.evidence = Mock(side_effect=rewrite)
+        release.evidence = Mock(side_effect=lambda: predecessor.write_bytes(b'{"release":"changed"}\n'))
         release.preflight = Mock(return_value={"ok": True})
+        return base, release
+
+    def test_owner_guard_deletion_accepts_then_real_method_rejects(self):
+        guard = 'require_same_bytes(before, predecessor.read_bytes(), "predecessor owner changed")'
+        mutated = compile_without(ops.Release.execute, [guard])
+        base, release = self.owner_release()
         with patch.object(ops, "file_mode", return_value=True), patch.object(ops.h, "BASE", base), \
                 self.assertRaisesRegex(RuntimeError, "predecessor owner changed"):
             ops.Release.execute(release, "preflight")
         release.preflight.assert_not_called()
-        with patch.object(ops, "require_same_bytes", lambda *_args: None), \
-                patch.object(ops, "file_mode", return_value=True), patch.object(ops.h, "BASE", base), \
+        with patch.object(ops, "file_mode", return_value=True), patch.object(ops.h, "BASE", base), \
                 patch("sys.stdout", io.StringIO()):
-            ops.Release.execute(release, "preflight")
+            mutated(release, "preflight")
         release.preflight.assert_called_once()
-        self.assertEqual(inspect_source(ops.Release.execute).count("require_same_bytes"), 3)
+        base, release = self.owner_release()
+        with patch.object(ops, "file_mode", return_value=True), patch.object(ops.h, "BASE", base), \
+                self.assertRaisesRegex(RuntimeError, "predecessor owner changed"):
+            ops.Release.execute(release, "preflight")
+        self.assertIn(guard, inspect_source(ops.Release.execute))
+
+    def test_file_cas_guard_deletion_accepts_drift(self):
+        guard = 'h.need(self.caddyfile.read_bytes() == data, "Caddy file drift")'
+        mutated = compile_without(ops.Release.cas_file, [guard])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "Caddyfile"
+            path.write_bytes(b"changed-by-someone-else")
+            inode = [path.stat().st_dev, path.stat().st_ino]
+            release = object.__new__(ops.Release)
+            release.caddyfile = path
+            release.run = Mock(return_value=(ops.h.digest(b"expected") + "  x\n").encode())
+            release.caddy_destination = Mock(return_value="/etc/caddy/Caddyfile")
+            with self.assertRaisesRegex(RuntimeError, "Caddy file drift"):
+                ops.Release.cas_file(release, b"expected", inode)
+            mutated(release, b"expected", inode)
+            with self.assertRaisesRegex(RuntimeError, "Caddy file drift"):
+                ops.Release.cas_file(release, b"expected", inode)
+        self.assertIn(guard, inspect_source(ops.Release.cas_file))
+
+    def test_rollback_cas_guard_deletion_accepts_drift(self):
+        guard = 'self.cas((self.root / "Caddyfile.baseline").read_bytes(), pre["active"], pre["inode"])'
+        mutated = compile_without(ops.Release.rollback, [guard])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            live = root / "Caddyfile"
+            live.write_bytes(b"concurrent-edit")
+            (root / "Caddyfile.baseline").write_bytes(b"baseline")
+            inode = [live.stat().st_dev, live.stat().st_ino]
+            release = object.__new__(ops.Release)
+            release.root = root
+            release.caddyfile = live
+            release.sha = ops.APP_SHA
+            release.old_app, release.app, release.front = "old-app", "new-app", "new-front"
+            release.m = {"old_app_id": "ab" * 32, "old_app_image": "sha256:" + "c" * 64,
+                         "app_image": "sha256:" + "d" * 64, "frontend_image": "sha256:" + "e" * 64}
+            release.marker = Mock(return_value={"active": {"same": True}, "inode": inode})
+            release.active = lambda: {"same": True}
+            release.schema = Mock(return_value=ops.SCHEMA)
+            release.run = Mock(return_value=b"")
+            release.inspect = Mock(return_value={"Id": release.m["old_app_id"], "Image": release.m["old_app_image"],
+                                                 "State": {"Running": True}})
+            release.wait_http = Mock()
+            with self.assertRaisesRegex(RuntimeError, "Caddy state drift"):
+                ops.Release.rollback(release)
+            self.assertEqual(mutated(release)["schema_preserved"], True)
+            with self.assertRaisesRegex(RuntimeError, "Caddy state drift"):
+                ops.Release.rollback(release)
+        self.assertIn(guard, inspect_source(ops.Release.rollback))
 
 
 def caddy_config(port):
@@ -829,33 +915,179 @@ class CaddyConditionalTests(unittest.TestCase):
         _status, _headers, body = self.request("GET", "/config/apps/http/servers/other/routes/0/handle/0/body")
         return json.loads(body)
 
-    def test_conditional_patch_preserves_concurrent_site_and_full_load_does_not(self):
+    def dial_at(self, route):
+        status, _headers, body = self.request(
+            "GET", "/config/apps/http/servers/main/routes/%s/handle/0/upstreams/0/dial" % route)
+        self.assertEqual(status, 200)
+        return json.loads(body)
+
+    def test_route_etag_rejects_swapped_match_before_writing(self):
+        config = caddy_config(self.port)
+        config["apps"]["http"]["servers"]["main"]["routes"] = [
+            {"match": [{"host": ["ybwznt.com", "www.ybwznt.com"]}],
+             "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "old-front:80"}]}]},
+            {"match": [{"host": ["files.example"]}],
+             "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "old-front:80"}]}]},
+        ]
+        loaded = self.request("POST", "/load", json.dumps(config).encode(), {"Content-Type": "application/json"})
+        self.assertIn(loaded[0], (200, 204))
+        status, headers, _body = self.request(
+            "GET", "/config/apps/http/servers/main/routes/0/handle/0/upstreams/0/dial")
+        self.assertEqual(status, 200)
+        self.swap_matches()
+        scalar = self.request(
+            "PATCH", "/config/apps/http/servers/main/routes/0/handle/0/upstreams/0/dial",
+            json.dumps("wrong-front:80").encode(),
+            {"If-Match": ops.header_etag(headers), "Content-Type": "application/json"})
+        self.assertEqual(scalar[0], 200)
+        self.assertEqual(self.dial_at(0), "wrong-front:80")
+        reloaded = self.request("POST", "/load", json.dumps(config).encode(), {"Content-Type": "application/json"})
+        self.assertIn(reloaded[0], (200, 204))
+        swapped = {"done": False}
         calls = []
 
         def request(method, path, body=None, headers=None):
             calls.append((method, path))
-            return self.request(method, path, body, headers)
+            result = self.request(method, path, body, headers)
+            if method == "GET" and path.endswith("/routes/0") and not swapped["done"]:
+                swapped["done"] = True
+                self.swap_matches()
+            return result
 
-        def mutate():
-            status, headers, _body = self.request("GET", "/config/apps/http/servers/other/routes/0/handle/0/body")
-            self.assertEqual(status, 200)
-            updated = self.request(
-                "PATCH", "/config/apps/http/servers/other/routes/0/handle/0/body",
-                json.dumps("other-concurrent").encode(),
-                {"If-Match": ops.header_etag(headers), "Content-Type": "application/json"})
-            self.assertIn(updated[0], (200, 204))
-
-        ops.conditional_dial_patch(request, "old-front:80", "new-front:80", mutate=mutate)
-        self.assertEqual(self.other_body(), "other-concurrent")
+        ops.conditional_dial_patch(request, "old-front:80", "new-front:80")
         self.assertNotIn(("POST", "/load"), calls)
-        status, _headers, body = self.request("GET", "/config/")
-        stale = json.loads(body)
-        # The rejected mutation installs the pre-change snapshot with /load.
-        stale["apps"]["http"]["servers"]["other"]["routes"][0]["handle"][0]["body"] = "other-old"
-        stale["apps"]["http"]["servers"]["main"]["routes"][0]["handle"][0]["upstreams"][0]["dial"] = "new-front:80"
-        loaded = self.request("POST", "/load", json.dumps(stale).encode(), {"Content-Type": "application/json"})
-        self.assertIn(loaded[0], (200, 204))
-        self.assertEqual(self.other_body(), "other-old")
+        self.assertEqual(self.dial_at(0), "old-front:80")
+        self.assertEqual(self.dial_at(1), "new-front:80")
+
+    def swap_matches(self):
+        self.request("PATCH", "/config/apps/http/servers/main/routes/0/match/0/host",
+                     json.dumps(["files.example"]).encode(), {"Content-Type": "application/json"})
+        self.request("PATCH", "/config/apps/http/servers/main/routes/1/match/0/host",
+                     json.dumps(["ybwznt.com", "www.ybwznt.com"]).encode(), {"Content-Type": "application/json"})
+
+
+class FileRestartTests(unittest.TestCase):
+    def test_reread_preserves_same_inode_edit_across_caddy_restart(self):
+        binary = os.environ.get("ITSP_CADDY_BIN") or shutil.which("caddy") or "/tmp/caddy-2.11.4"
+        self.assertTrue(Path(binary).is_file() or shutil.which("docker"), "real Caddy is required")
+        port = 20319
+        config = caddy_config(port)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "caddy.json"
+        path.write_bytes(json.dumps(config).encode())
+        inode = [path.stat().st_dev, path.stat().st_ino]
+        release = object.__new__(ops.Release)
+        release.caddyfile = path
+
+        def hook():
+            current = path.read_bytes()
+            path.write_bytes(current.replace(b'"body": "other-old"', b'"body": "other-concurrent"'))
+
+        release.caddyfile_before_commit = hook
+        updated = ops.Release.commit_caddyfile_dial(release, b"old-front:80", b"new-front:80", inode)
+        self.assertIn(b"other-concurrent", updated)
+        self.assertIn(b"new-front:80", updated)
+        self.assertEqual([path.stat().st_dev, path.stat().st_ino], inode)
+        if Path(binary).is_file():
+            process = subprocess.Popen([binary, "run", "--config", str(path)],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.addCleanup(lambda: process.poll() is not None or process.terminate())
+            self.wait_admin(port)
+            body = json.loads(urllib.request.urlopen(
+                "http://127.0.0.1:%s/config/apps/http/servers/other/routes/0/handle/0/body" % port).read())
+            dial = json.loads(urllib.request.urlopen(
+                "http://127.0.0.1:%s/config/apps/http/servers/main/routes/0/handle/0/upstreams/0/dial" % port).read())
+            self.assertEqual(body, "other-concurrent")
+            self.assertEqual(dial, "new-front:80")
+            process.terminate()
+            process.wait(timeout=5)
+        mutated_source = textwrap.dedent(inspect_source(ops.Release.commit_caddyfile_dial)).replace(
+            "current = self.read_fd(fd)", "current = stale", 1)
+        namespace = {}
+        exec(mutated_source, dict(ops.__dict__), namespace)
+        path.write_bytes(json.dumps(config).encode())
+        lost = namespace["commit_caddyfile_dial"](release, b"old-front:80", b"new-front:80", inode)
+        self.assertNotIn(b"other-concurrent", lost)
+        path.write_bytes(json.dumps(config).encode())
+        restored = ops.Release.commit_caddyfile_dial(release, b"old-front:80", b"new-front:80", inode)
+        self.assertIn(b"other-concurrent", restored)
+
+    def wait_admin(self, port):
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                urllib.request.urlopen("http://127.0.0.1:%s/config/" % port, timeout=0.2).read()
+                return
+            except Exception:
+                time.sleep(0.1)
+        self.fail("caddy did not restart")
+
+
+class VerifyTraversalTests(unittest.TestCase):
+    def test_hotfix_verify_reads_cutover_active(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        live = root / "Caddyfile"
+        live.write_bytes(b"candidate-bytes")
+        (root / "Caddyfile.candidate").write_bytes(b"candidate-bytes")
+        active = {"apps": {"http": {"servers": {"other": {"keep": "other-concurrent"}}}}}
+        inode = [live.stat().st_dev, live.stat().st_ino]
+        manifest = b"{}\n"
+        release = object.__new__(ops.Release)
+        release.root = root
+        release.caddyfile = live
+        release.sha = ops.APP_SHA
+        release.manifest_bytes = manifest
+        release.m = {"target_head": ops.SCHEMA, "port": 18080, "additional_writers": [],
+                     "old_app_id": "ab" * 32, "old_app_image": "sha256:" + "c" * 64}
+        release.old_app, release.app, release.front = "old-app", "new-app", "new-front"
+        release.active = lambda: active
+        release.schema = lambda: ops.SCHEMA
+        release.caddy_destination = lambda: "/etc/caddy/Caddyfile"
+        container = {"Id": "a" * 64, "Image": "sha256:" + "b" * 64, "RestartCount": 0,
+                     "State": {"Running": True, "StartedAt": "2026-11-07T00:00:00Z", "OOMKilled": False}}
+        release.inspect = Mock(side_effect=lambda name, image=False: (
+            {"Config": {"Labels": {"org.opencontainers.image.revision": ops.APP_SHA}}} if image else container))
+        bundle = b"asset " + ops.APP_VERSION.encode()
+        digest = ops.h.digest(bundle)
+
+        def run(argv, input=None, **kwargs):
+            if "sha256sum" in argv:
+                return (digest + "  file\n").encode() if False else (ops.h.digest(b"candidate-bytes") + "  file\n").encode()
+            if "grep" in argv:
+                return b"/usr/share/nginx/html/assets/app.js\n"
+            if "cat" in argv and argv[-1].endswith("index.html"):
+                return b'<script src="/assets/app.js"></script>'
+            if argv[-1].endswith("app.js"):
+                return bundle
+            if argv[1] == "logs":
+                return b"ready\n"
+            if argv[:2] == ["docker", "ps"]:
+                return b""
+            raise AssertionError(argv)
+
+        release.run = run
+        release.http = Mock(return_value={"sha256": digest})
+        release.smoke = lambda base: {"ok": True}
+        release.writers_exact = Mock()
+        identity = {"release": ops.APP_SHA, "manifest_sha256": ops.h.digest(manifest), "status": "PASS"}
+        ops.h.save(root / "preflight.json", {**identity, "phase": "preflight", "inode": inode, "containers": {},
+                                              "protected_configs": {}, "active": active})
+        ops.h.save(root / "cutover.json", {**identity, "phase": "cutover", "time": "2026-11-07T00:00:00Z"})
+        with self.assertRaises(KeyError):
+            ops.hf.Hotfix.verify(release)
+        ops.h.save(root / "bluegreen.json", {**identity, "phase": "bluegreen",
+                                              "app": ops.h.fingerprint(container), "frontend": ops.h.fingerprint(container)})
+        (root / "cutover.json").unlink()
+        ops.h.save(root / "cutover.json", {**identity, "phase": "cutover", "time": "2026-11-07T00:00:00Z",
+                                           "active": active})
+        result = ops.Release.verify(release)
+        self.assertEqual(result["schema"], ops.SCHEMA)
+        self.assertEqual(result["migration_performed"], False)
+        self.assertEqual(result["published_version"]["version"], ops.APP_VERSION)
+        release.writers_exact.assert_called_once_with({"new-app"})
 
 
 def inspect_source(function):
