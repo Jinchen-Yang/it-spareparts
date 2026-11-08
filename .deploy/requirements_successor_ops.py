@@ -617,12 +617,14 @@ class Release(vis.Release):
             chunks.append(block)
         return b"".join(chunks)
 
-    def commit_caddyfile_dial(self, old_bytes, new_bytes, inode, desired=None):
+    def commit_caddyfile_dial(self, old_bytes, new_bytes, inode):
         """Replace one dial on the open inode. Re-read under the lock before writing.
 
-        F2（独立复审）：重读到写入之间必须把**当前持久字节**重新交给现场 Caddy adapter 校验，
-        要求其 adaptation 精确等于本阶段计划中的运行配置（desired，仅主站 dial 变化）；
-        否则另一个写者已改变站点归属时，文件与运行配置会分别"成功"却指向不同站点。
+        F2（独立复审）：重读到写入之间必须重新验证**语义**，但比较必须同源：
+        这里只用 stdin 适配（`--config -`）对 current/updated 两份字节各做一次，再要求
+        `replace_active(adapt(current)) == adapt(updated)`；不得把 stdin 适配结果与来自
+        live `GET /config/` 的 `desired` 直接比较（file_server 的 hide 等字段会随输入来源不同，
+        见 PR #519 cursor 复审线程）。该相对比较仍能发现并发写者改变站点归属/主站 host。
         """
         fd = os.open(self.caddyfile, os.O_RDWR | os.O_NOFOLLOW)
         try:
@@ -639,11 +641,10 @@ class Release(vis.Release):
             prefix, matched, suffix = current.partition(old_bytes)
             h.need(matched == old_bytes and old_bytes not in suffix, "live Caddyfile upstream is not singular")
             updated = prefix + new_bytes + suffix
-            if desired is not None:
-                # 比较**即将写入的字节**的 adaptation 与计划运行配置；拿替换前的 current 比较会在
-                # 正常切流必错（独立复审 R-01），也无法发现站点归属被并发交换（F2）。
-                h.need(self.adapt_caddyfile_bytes(updated) == desired,
-                       "persisted Caddyfile adaptation differs from intended configuration")
+            baseline_adapted = self.adapt_caddyfile_bytes(current)
+            expected = h.replace_active(baseline_adapted, old_bytes.decode(), new_bytes.decode())
+            h.need(self.adapt_caddyfile_bytes(updated) == expected,
+                   "persisted Caddyfile adaptation differs from intended configuration")
             os.lseek(fd, 0, os.SEEK_SET)
             view = memoryview(updated)
             while view:
@@ -684,13 +685,16 @@ class Release(vis.Release):
                h.fingerprint(self.inspect(self.front)) == blue["frontend"], "candidate changed")
         pre = self.marker("preflight")
         old_dial, new_dial = self.old_front + ":80", self.front + ":80"
-        _after_bytes, desired = self.plan_caddy_change(pre)
+        self.plan_caddy_change(pre)
         # R-07/R-08：所有可能因并发写者/route 形状而失败的校验必须在 exposure 之前完成，
         # 否则一次拒绝会留下 exposure-started.json，把可恢复失败锁成前向修复。
+        # F2 同源比较：两次都是 stdin 适配；不得与 live GET /config/（desired）混比。
         current = self.caddyfile.read_bytes()
         h.need(current.count(old_dial.encode()) == 1, "live Caddyfile upstream is not singular")
         preview = current.replace(old_dial.encode(), new_dial.encode())
-        h.need(self.adapt_caddyfile_bytes(preview) == desired,
+        baseline_adapted = self.adapt_caddyfile_bytes(current)
+        expected = h.replace_active(baseline_adapted, old_dial, new_dial)
+        h.need(self.adapt_caddyfile_bytes(preview) == expected,
                "persisted Caddyfile adaptation differs from intended configuration")
         status, _headers, body = self.admin_request("GET", "/config/")
         h.need(status == 200, "caddy config export failed")
@@ -702,12 +706,12 @@ class Release(vis.Release):
         h.need(replace_one_dial(copy.deepcopy(route), old_dial, new_dial) == 1, "main dial is not singular")
         h.save(self.root / "exposure-started.json",
                {"release": self.sha, "full_load": False, "route_path": route_path})
-        updated = self.commit_caddyfile_dial(old_dial.encode(), new_dial.encode(), pre["inode"], desired)
+        updated = self.commit_caddyfile_dial(old_dial.encode(), new_dial.encode(), pre["inode"])
         h.write_new(self.root / "Caddyfile.candidate", updated)
         self.cas_file(updated, pre["inode"])
         applied = conditional_dial_patch(self.admin_request, old_dial, new_dial)
-        # F2：切流后持久文件与运行配置必须语义一致（同一 adapter 结果），否则现场重载会改变行为。
-        h.need(self.adapt_caddyfile_bytes(updated) == applied,
+        # F2 切流后：持久文件与运行配置必须语义一致；两边同源 real-path adapt vs live runtime。
+        h.need(self.mounted_caddy() == applied,
                "persisted Caddyfile differs from running configuration after cutover")
         return {"active": applied, "active_dial": new_dial, "full_load": False,
                 "forward_only_after_exposure": True}

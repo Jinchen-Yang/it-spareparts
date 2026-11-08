@@ -1133,6 +1133,14 @@ class VerifyTraversalTests(unittest.TestCase):
         release.writers_exact.assert_called_once_with({"new-app"})
 
 
+def caddy_runtime_config(dial, hosts=("ybwznt.com", "www.ybwznt.com")):
+    """最小 Caddy 运行配置 fixture（供 F2 同源比较测试）。"""
+    return {"apps": {"http": {"servers": {"main": {"routes": [{
+        "match": [{"host": list(hosts)}],
+        "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": dial}]}],
+    }]}}}}}
+
+
 class SuccessorManifestAndTestContractTests(unittest.TestCase):
     """P2-1 / P2-4：manifest 继承链字段、docker 端口自洽与容器清理的 hermetic 契约（不依赖 docker）。"""
 
@@ -1210,7 +1218,7 @@ class SuccessorManifestAndTestContractTests(unittest.TestCase):
         self.assertEqual(release.run.call_args.kwargs.get("input"), data)
 
     def test_commit_rejects_persisted_config_that_adapts_to_other_sites(self):
-        """F2：写入字节的 adaptation 与计划运行配置不一致时，必须在写入前拒绝。"""
+        """F2：写入字节的同源 adaptation 与 replace_active(current) 不一致时必须拒绝。"""
         release = object.__new__(ops.Release)
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -1219,19 +1227,18 @@ class SuccessorManifestAndTestContractTests(unittest.TestCase):
         caddyfile.write_bytes(b"ybwznt.com { reverse_proxy old-front:80 }\n")
         release.caddyfile = caddyfile
         release.read_fd = lambda _fd: caddyfile.read_bytes()
-        release.adapt_caddyfile_bytes = Mock(return_value={"sites": {"files.example": {}}})
+        baseline = caddy_runtime_config("old-front:80")
+        tampered = caddy_runtime_config("new-front:80", hosts=("files.example",))
+        release.adapt_caddyfile_bytes = Mock(side_effect=[baseline, tampered])
         inode = [os.stat(caddyfile).st_dev, os.stat(caddyfile).st_ino]
         with self.assertRaisesRegex(RuntimeError, "persisted Caddyfile adaptation differs"):
-            ops.Release.commit_caddyfile_dial(
-                release, b"old-front:80", b"new-front:80", inode,
-                {"sites": {"ybwznt.com": {}}})
+            ops.Release.commit_caddyfile_dial(release, b"old-front:80", b"new-front:80", inode)
         self.assertEqual(caddyfile.read_bytes(),
                          b"ybwznt.com { reverse_proxy old-front:80 }\n")
-        release.adapt_caddyfile_bytes.assert_called_once_with(
-            b"ybwznt.com { reverse_proxy new-front:80 }\n")
+        self.assertEqual(release.adapt_caddyfile_bytes.call_count, 2)
 
     def test_commit_writes_updated_dial_when_adaptation_matches_plan(self):
-        """R-01 成功路径：替换后字节 adaptation == desired 时正常写入并返回 updated。"""
+        """R-01 成功路径：updated 的同源 adaptation == replace_active(current) 时正常写入。"""
         release = object.__new__(ops.Release)
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -1240,15 +1247,26 @@ class SuccessorManifestAndTestContractTests(unittest.TestCase):
         caddyfile.write_bytes(b"ybwznt.com { reverse_proxy old-front:80 }\n")
         release.caddyfile = caddyfile
         release.read_fd = lambda _fd: caddyfile.read_bytes()
-        desired = {"sites": {"ybwznt.com": {"dial": "new-front:80"}}}
-        release.adapt_caddyfile_bytes = Mock(return_value=desired)
+        baseline = caddy_runtime_config("old-front:80")
+        expected_adapted = caddy_runtime_config("new-front:80")
+        release.adapt_caddyfile_bytes = Mock(side_effect=[baseline, expected_adapted])
         inode = [os.stat(caddyfile).st_dev, os.stat(caddyfile).st_ino]
         updated = ops.Release.commit_caddyfile_dial(
-            release, b"old-front:80", b"new-front:80", inode, desired)
-        expected = b"ybwznt.com { reverse_proxy new-front:80 }\n"
-        self.assertEqual(updated, expected)
-        self.assertEqual(caddyfile.read_bytes(), expected)
-        release.adapt_caddyfile_bytes.assert_called_once_with(expected)
+            release, b"old-front:80", b"new-front:80", inode)
+        expected_bytes = b"ybwznt.com { reverse_proxy new-front:80 }\n"
+        self.assertEqual(updated, expected_bytes)
+        self.assertEqual(caddyfile.read_bytes(), expected_bytes)
+        self.assertEqual(release.adapt_caddyfile_bytes.call_count, 2)
+
+    def test_cutover_adapt_checks_use_matching_origins(self):
+        """PR #519 cursor 复审线程：F2 比较不得混用 stdin adapt 与 live GET /config/ 来源。"""
+        cutover = inspect_source(ops.Release.cutover)
+        self.assertIn("replace_active(baseline_adapted, old_dial, new_dial)", cutover)
+        self.assertIn("mounted_caddy() == applied", cutover)
+        self.assertNotIn("adapt_caddyfile_bytes(updated) == applied", cutover)
+        commit = inspect_source(ops.Release.commit_caddyfile_dial)
+        self.assertIn("replace_active(baseline_adapted, old_bytes.decode(), new_bytes.decode())", commit)
+        self.assertNotIn("desired", commit)
 
     def test_run_locked_lock_failure_writes_private_log(self):
         """R-04：锁获取失败也要写私有日志并输出结构化失败。"""
