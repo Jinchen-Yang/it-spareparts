@@ -22,7 +22,10 @@ if [ "${RESTORE_DRILL_TEST_MODE:-0}" = 1 ]; then
   export PATH="$COMMAND_DIR:$BASE_PATH"
 fi
 
-readonly EXPECTED_DB_HEAD=c6f2a8e9d4b1
+# 已审核的当前 schema head：生产 v1.45.0（782c858a）发布后升级到的唯一 head（D-0050 merge）。
+# 任何 schema 发布升级 head 后，必须同步更新此常量与 backend/tests/test_deploy_backup.py
+# 的断言；未更新时本门禁会以 fail closed 拒绝执行（不得以动态自比替代已审核 head）。
+readonly EXPECTED_DB_HEAD=98afc0d2157b
 readonly RESTORE_CONTAINER="itdata-restore-${EXPECTED_DB_HEAD}"
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
