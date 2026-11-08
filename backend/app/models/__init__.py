@@ -116,6 +116,11 @@ from app.models.maintenance_acceptance_checklist import (
     MaintenanceAcceptanceChecklistItem,
 )
 from app.models.maintenance_bad_salvage import MaintenanceBadSalvage
+from app.models.maintenance_cycle import (
+    MaintenanceCycleEvent,
+    MaintenanceCycleSellIntent,
+    MaintenanceCycleUnit,
+)
 from app.models.maintenance_collection_evidence import (
     MaintenanceCollectionEvidence,
 )

@@ -28,6 +28,7 @@ from app.api import (
     maintenance_ai_fallback,
     maintenance_bad_returns,
     maintenance_bad_salvage,
+    maintenance_cycle,
     maintenance_boss_board,
     maintenance_ckd_import,
     maintenance_collection_plan_imports,
@@ -314,6 +315,8 @@ app.include_router(
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )
+# D-0056 坏件循环池：独立页键，不挂维保 Beta 总闸。
+app.include_router(maintenance_cycle.router, prefix=settings.api_prefix)
 app.include_router(
     maintenance_ckd_import.router,
     prefix=settings.api_prefix,

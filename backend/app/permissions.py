@@ -49,6 +49,12 @@ PAGE_KEYS: list[str] = [
     # page_permission_allowed 恒放行）；sales/purchaser/readonly 显式 False。
     "page_purchase_analytics",
     "page_presales",
+    # D-0056 坏件循环池：与维保 page_maintenance 脱钩的工位页键。
+    "page_cycle_recycle",
+    "page_cycle_test",
+    "page_cycle_repair",
+    "page_cycle_manage",
+    "page_cycle_wip",
 ]
 # 这两个页面不是角色能力，而是生产灰度名单。即使 role=admin，也必须从实名账号
 # template_perms ⊕ perm_overrides 得到 True；旧 token/共享口令/缺失账号快照一律失败关闭。
@@ -180,6 +186,11 @@ LABELS: dict[str, str] = {
     "page_sales_analysis": "销售分析（大单追踪）",
     "data_reconciliation": "销售单对账数据（已对账/待对账/退货已对账）",
     "page_presales": "售前询价与报价库",
+    "page_cycle_recycle": "坏件循环·回收池",
+    "page_cycle_test": "坏件循环·检测队列",
+    "page_cycle_repair": "坏件循环·维修队列",
+    "page_cycle_manage": "坏件循环·主管全览",
+    "page_cycle_wip": "坏件循环·在制只读",
     "action_presales_inquire": "销售询价管理",
     "action_presales_quote": "询价回复报价",
     "action_presales_offer": "主动报价管理",
@@ -257,7 +268,13 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
              "action_maintenance_expense_collection_upload": False,
              "page_replenishment_beta": False,
              "action_replenishment_create": False,
-             "action_replenishment_review": False},
+             "action_replenishment_review": False,
+             # 坏件循环（D-56）：boss 默认不开，按账号显式授予工位页
+             "page_cycle_recycle": False,
+             "page_cycle_test": False,
+             "page_cycle_repair": False,
+             "page_cycle_manage": False,
+             "page_cycle_wip": False},
     # boss 的 page_purchase_analytics 由 _full() 自动 True（D-39：模板仅老板开，admin 恒放行）。
     # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance/page_boss_board 必须显式关，
     # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）。
@@ -303,7 +320,13 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "page_sales_analysis": False,
                  "data_reconciliation": False,
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
-                 "page_accounts": False, "action_account_manage": False},
+                 "page_accounts": False, "action_account_manage": False,
+                 # 坏件循环（D-56）：guest/readonly 兜底必须显式关，防 _full() 继承 True
+                 "page_cycle_recycle": False,
+                 "page_cycle_test": False,
+                 "page_cycle_repair": False,
+                 "page_cycle_manage": False,
+                 "page_cycle_wip": False},
     "sales": {
         "page_presales": True,
         "action_presales_inquire": True,
@@ -970,6 +993,51 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "已授权的项目经理"],
         "sensitivity": "critical",
         "risk": "直接接触同一生产数据库中的新业务流程，必须逐账号白名单开放，并保留稳定版回退入口。",
+    },
+    "page_cycle_recycle": {
+        "label": "坏件循环·回收池",
+        "summary": "可打开坏件循环回收池，接收外部坏件或自返还单入池，并派发至检测/维修。",
+        "can": "查看回收池工位列表；新建外部件；从返还单交接入池；派发与改派工位。",
+        "cannot": "不自动获得检测/维修写动作或主管全览；供应商等敏感字段仅主管可见。",
+        "typical": ["回收仓管", "显式授权的维保人员"],
+        "sensitivity": "medium",
+        "risk": "入池即进入循环闭环，误入会污染后续检测维修与上架意图。",
+    },
+    "page_cycle_test": {
+        "label": "坏件循环·检测队列",
+        "summary": "可打开坏件循环检测工位，登记检测结果并决定进入维修或成色出池。",
+        "can": "查看检测中单体；提交检测结果（含可选再测）；将合格件标成色并进入待上架。",
+        "cannot": "不能改委外商名等主管字段；不能直接从返还单入池。",
+        "typical": ["检测员"],
+        "sensitivity": "medium",
+        "risk": "成色桶决定一类一贴的上架意图聚合，错标会影响闲鱼 listing 合并。",
+    },
+    "page_cycle_repair": {
+        "label": "坏件循环·维修队列",
+        "summary": "可打开坏件循环维修工位，登记维修结果、委外往返与修后去向。",
+        "can": "查看维修/委外中单体；提交维修结果；标记委外发出/收回；选再测或直达成色出池。",
+        "cannot": "不能入池或主管关单；供应商字段仅主管可见。",
+        "typical": ["维修员"],
+        "sensitivity": "medium",
+        "risk": "委外与修后去向写错会卡住工位或错误触发上架意图。",
+    },
+    "page_cycle_manage": {
+        "label": "坏件循环·主管全览",
+        "summary": "可全工位查看坏件循环单体，含供应商与来源返还单等敏感字段，并可关单。",
+        "can": "查看全部工位；看到供应商/SN/来源单；关闭报废或回流公司件；读上架意图。",
+        "cannot": "不替代各工位写动作授权；氚云与前置库库存仍不可由此改写。",
+        "typical": ["维保主管", "管理员"],
+        "sensitivity": "high",
+        "risk": "暴露供应商与来源链路；关单不可逆进入 closed。",
+    },
+    "page_cycle_wip": {
+        "label": "坏件循环·在制只读",
+        "summary": "可只读查看坏件循环在制清单（工位与 PN），用于进度协同。",
+        "can": "查看非 closed 单体的公开字段。",
+        "cannot": "任何写动作；看不到供应商等主管字段。",
+        "typical": ["需要进度可视的协同角色"],
+        "sensitivity": "low",
+        "risk": "只读口径，误授影响较小。",
     },
     # ---- 操作能力 ----
     "action_pool_manage": {
