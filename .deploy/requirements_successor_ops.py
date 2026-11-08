@@ -35,6 +35,11 @@ OLD_SHA = "782c858a75d1f38991aa7151e9eb54f0474fb031"
 OLD_PREFIX = "itsp-requirements-" + OLD_SHA[:12]
 VISIBILITY_DIGEST = "6b2fe7287242ff6ce5dfcd785613877ef49dd80f13fb8ea15c4d244e93d37e9d"
 SMOKE_DIGEST = "f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f"
+# 继承自 feedback_release_ops.Hotfix.preflight 的历史 helper（presales3_ops.py）字节摘要。
+# 该 helper 由历史控制器在运行时按 manifest["helper_sha256"] 校验；后继入口必须在
+# manifest 中显式携带该字段并通过本常量锁定，否则继承链会在 preflight 才 KeyError。
+HELPER_DIGEST = "054e67d143a808e5672eea716573ac23a4ecf47ae6cd9a762a89901acfff5f16"
+HELPER_NAME = "presales3_ops.py"
 PREDECESSOR_OWNER = ".requirements-visibility-active-owner.json"
 OWNER_NAME = ".requirements-successor-active-owner.json"
 LOCKS = (".catalog-source-handoff.lock", ".itsp-production-deploy.lock")
@@ -437,9 +442,11 @@ def validate(m):
     h.need(network is not None and network.version == 4 and network.is_private and 24 <= network.prefixlen <= 28,
            "private subnet required")
     for key in ("old_app_id", "old_front_id", "source_sha256", "controller_sha256", "smoke_sha256", "nginx_sha256",
-                "predecessor_owner_sha256", "evidence_sha256", "db_id", "visibility_sha256", "pool_sha256"):
+                "predecessor_owner_sha256", "evidence_sha256", "db_id", "visibility_sha256", "pool_sha256",
+                "helper_sha256"):
         h.need(re.fullmatch(r"[a-f0-9]{64}", str(m.get(key, ""))), "invalid identity: " + key)
     h.need(m["visibility_sha256"] == VISIBILITY_DIGEST and m["pool_sha256"] == vis.POOL_DIGEST, "helper chain")
+    h.need(m["helper_sha256"] == HELPER_DIGEST, "historical helper digest differs")
     h.need(m["smoke_sha256"] == SMOKE_DIGEST, "smoke is not the reviewed projection")
     for key in ("old_app_image", "old_front_image", "app_image", "frontend_image", "db_image"):
         h.need(re.fullmatch(r"sha256:[a-f0-9]{64}", str(m.get(key, ""))), "invalid image: " + key)
@@ -660,9 +667,14 @@ class Release(vis.Release):
         return result
 
     def rollback(self):
-        """Before exposure only. Keep schema 98af, restart the exact previous writer, restore no dump."""
-        h.need(not (self.root / "cutover.intent.json").exists(), "cutover may have begun; forward repair required")
-        h.need(not (self.root / "exposure-started.json").exists(), "exposure may have begun; forward repair required")
+        """Before exposure only. Keep schema 98af, restart the exact previous writer, restore no dump.
+
+        暴露判据唯一以 exposure-started.json 为准（cutover() 先把该标记落盘，再做文件/Caddy 变更）。
+        cutover.intent.json 只表示"曾进入切流阶段"；若切流在写暴露标记之前失败（写者/身份/CAS
+        前置检查），生产入口尚未改变，recover 仍允许，避免把可恢复的失败锁成前向修复。
+        """
+        h.need(not (self.root / "exposure-started.json").exists(),
+               "exposure may have begun; forward repair required")
         pre = self.marker("preflight")
         self.cas((self.root / "Caddyfile.baseline").read_bytes(), pre["active"], pre["inode"])
         head = self.schema()

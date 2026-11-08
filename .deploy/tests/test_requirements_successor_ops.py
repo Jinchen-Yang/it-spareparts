@@ -1,4 +1,5 @@
 """Synthetic contracts for the no-migration successor. No production access."""
+import hashlib
 import importlib.util
 import io
 import json
@@ -21,6 +22,9 @@ spec = importlib.util.spec_from_file_location("requirements_successor_ops", DEPL
 ops = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ops)
 
+# docker 分支容器内 Caddy admin 的唯一端口来源：setUp 与 docker_request 必须共用。
+DOCKER_ADMIN_PORT = 2019
+
 
 def manifest(**overrides):
     result = {
@@ -29,6 +33,7 @@ def manifest(**overrides):
         "caddyfile": "/opt/it-spareparts/Caddyfile", "port": 18107, "subnet": "10.44.0.0/28",
         "additional_writers": [], "nginx_upstream_count": 1,
         "visibility_sha256": ops.VISIBILITY_DIGEST, "pool_sha256": ops.vis.POOL_DIGEST, "smoke_sha256": ops.SMOKE_DIGEST,
+        "helper_sha256": ops.HELPER_DIGEST,
     }
     for key in ("old_app_id", "old_front_id", "source_sha256", "controller_sha256", "nginx_sha256",
                 "predecessor_owner_sha256", "evidence_sha256", "db_id"):
@@ -296,19 +301,34 @@ class RecoveryTests(unittest.TestCase):
         return release
 
     def test_exposure_and_schema_change_stop_before_docker(self):
-        for name in ("cutover.intent.json", "exposure-started.json"):
-            release = self.release()
-            (release.root / name).write_text("{}\n")
-            with self.assertRaisesRegex(RuntimeError, "forward repair"):
-                ops.Release.rollback(release)
-            release.run.assert_not_called()
-            release.cas.assert_not_called()
+        release = self.release()
+        (release.root / "exposure-started.json").write_text("{}\n")
+        with self.assertRaisesRegex(RuntimeError, "forward repair"):
+            ops.Release.rollback(release)
+        release.run.assert_not_called()
+        release.cas.assert_not_called()
         release = self.release()
         release.schema.return_value = "e5a7c9d1f3b6"
         with patch.object(ops.h.Release, "alembic", side_effect=AssertionError("downgrade")), \
                 self.assertRaisesRegex(RuntimeError, "schema changed"):
             ops.Release.rollback(release)
         release.run.assert_not_called()
+
+    def test_pre_exposure_cutover_intent_does_not_block_recovery(self):
+        """P2-2：cutover.intent 只表示进入切流阶段；暴露标记写入前失败仍允许 recover。"""
+        release = self.release()
+        (release.root / "cutover.intent.json").write_text("{}\n")
+        release.run.side_effect = [b"new-app\nold-app\n", b"", b""]
+        release.inspect.side_effect = [
+            {"Image": release.m["app_image"], "Id": "cd" * 32, "Config": {"Labels": {"bg.release": ops.APP_SHA}}},
+            {"Id": release.m["old_app_id"], "Image": release.m["old_app_image"], "State": {"Running": False}},
+        ]
+        with patch.object(ops.h.Release, "alembic", side_effect=AssertionError("downgrade")), \
+                patch.object(ops.vis.Release, "rollback", side_effect=AssertionError("historical rollback")):
+            result = ops.Release.rollback(release)
+        self.assertEqual(result["schema"], ops.SCHEMA)
+        self.assertEqual(result["restored_dump_into_production"], False)
+        self.assertEqual(result["downgrade_invoked"], False)
 
     def test_pre_exposure_restart_stops_only_the_candidate_and_starts_the_old_writer(self):
         release = self.release()
@@ -857,7 +877,7 @@ class CaddyConditionalTests(unittest.TestCase):
             # 测试方法会用 caddy_config(self.port) 做 POST /load；若 self.port 仍是 local 分支的
             # 20219，/load 会把 admin 迁到 20219，随后 docker_request 仍 curl 2019 必然失败
             # （CI 确定性红，run 42375262184）。容器名前缀可用环境变量覆盖（共享主机要求 itst-team-*）。
-            self.port = 2019
+            self.port = DOCKER_ADMIN_PORT
             prefix = os.environ.get("ITSP_CADDY_CONTRACT_NAME_PREFIX", "itsp-successor-caddy-m2-")
             self.container = prefix + os.urandom(4).hex()
             self.addCleanup(self._remove_container)
@@ -920,7 +940,7 @@ class CaddyConditionalTests(unittest.TestCase):
             command.extend(["-H", key + ": " + value])
         if body is not None:
             command.extend(["--data-binary", "@-"])
-        command.append("http://127.0.0.1:2019" + path)
+        command.append("http://127.0.0.1:%d%s" % (DOCKER_ADMIN_PORT, path))
         raw = subprocess.check_output(command, input=body)
         return ops.parse_curl_exchange(raw)
 
@@ -1101,6 +1121,55 @@ class VerifyTraversalTests(unittest.TestCase):
         self.assertEqual(result["migration_performed"], False)
         self.assertEqual(result["published_version"]["version"], ops.APP_VERSION)
         release.writers_exact.assert_called_once_with({"new-app"})
+
+
+class SuccessorManifestAndTestContractTests(unittest.TestCase):
+    """P2-1 / P2-4：manifest 继承链字段、docker 端口自洽与容器清理的 hermetic 契约（不依赖 docker）。"""
+
+    def test_manifest_requires_reviewed_inherited_helper_digest(self):
+        helper = DEPLOY / "presales3_ops.py"
+        self.assertEqual(ops.HELPER_DIGEST, hashlib.sha256(helper.read_bytes()).hexdigest())
+        cases = [
+            (lambda: {key: value for key, value in manifest().items() if key != "helper_sha256"},
+             "invalid identity: helper_sha256"),
+            (lambda: manifest(helper_sha256="not-a-digest"), "invalid identity: helper_sha256"),
+            (lambda: manifest(helper_sha256="0" * 64), "historical helper digest differs"),
+        ]
+        for build, message in cases:
+            with self.assertRaisesRegex(RuntimeError, message):
+                ops.validate(build())
+        ops.validate(manifest())
+
+    def test_manifest_required_identity_keys_are_validated(self):
+        for key in ("old_app_id", "old_front_id", "source_sha256", "controller_sha256", "smoke_sha256",
+                    "nginx_sha256", "predecessor_owner_sha256", "evidence_sha256", "db_id",
+                    "visibility_sha256", "pool_sha256", "helper_sha256"):
+            value = manifest()
+            value.pop(key, None)
+            with self.assertRaisesRegex(RuntimeError, "invalid identity: " + key):
+                ops.validate(value)
+
+    def test_docker_admin_port_is_single_source(self):
+        self.assertEqual(DOCKER_ADMIN_PORT, 2019)
+        self.assertEqual(caddy_config(DOCKER_ADMIN_PORT)["admin"]["listen"],
+                         "127.0.0.1:%d" % DOCKER_ADMIN_PORT)
+        instance = object.__new__(CaddyConditionalTests)
+        instance.container = "itsp-test-container"
+        with patch.object(subprocess, "check_output",
+                          return_value=b"HTTP/1.1 200 OK\r\nETag: x\r\n\r\n{}\n__STATUS__200") as call:
+            instance.docker_request("GET", "/config/")
+        self.assertIn("http://127.0.0.1:%d/config/" % DOCKER_ADMIN_PORT, call.call_args[0][0])
+        source = Path(__file__).read_text(encoding="utf-8")
+        self.assertIn("self.port = DOCKER_ADMIN_PORT", source)
+        docker_branch = source.split('elif shutil.which("docker"):')[1].split("else:")[0]
+        self.assertNotIn("self.port = 20219", docker_branch)
+
+    def test_docker_branch_registers_container_cleanup(self):
+        source = Path(__file__).read_text(encoding="utf-8")
+        docker_branch = source.split('elif shutil.which("docker"):')[1].split("else:")[0]
+        self.assertIn("self.addCleanup(self._remove_container)", docker_branch)
+        self.assertIn("def _remove_container(self)", source)
+        self.assertIn('"docker", "rm", "-f", self.container', source)
 
 
 def inspect_source(function):

@@ -61,7 +61,7 @@ python3 .deploy/requirements_successor_ops.py --check-archive REPO source.tar.gz
 
 `manifest.json` 固定 `release=e62cd60cdbcc3fef896c5289388250057c4ce513`、`old_revision=782c858a75d1f38991aa7151e9eb54f0474fb031`、`old_schema=target_head=98afc0d2157b`。旧容器名必须是上面的 `itsp-requirements-782c858a75d1` 一对。`additional_writers` 只能是空数组。`source_handoff`、`catalog_sync`、`import_gate_allowlist` 都拒绝。Caddy 路径只接受 `/opt/it-spareparts/Caddyfile`。端口是 1024 与 65536 之间的整数。子网是严格的私有 IPv4 `/24` 到 `/28`。
 
-还要有旧容器 ID、DB 容器 ID、新旧镜像 `sha256:` ID、nginx 全文摘要和上游次数、三个代理的 ID 与镜像，以及 `visibility_sha256`、`pool_sha256`、`smoke_sha256`、`controller_sha256`、`source_sha256`、`evidence_sha256`、`predecessor_owner_sha256`。smoke 摘要必须等于上面的已审文件。前序 owner 的原始字节摘要必须对上现场文件，且其 manifest 摘要指向仍为 `782c` / `98af` 的可见性 manifest。
+还要有旧容器 ID、DB 容器 ID、新旧镜像 `sha256:` ID、nginx 全文摘要和上游次数、三个代理的 ID 与镜像，以及 `visibility_sha256`、`pool_sha256`、`smoke_sha256`、`controller_sha256`、`source_sha256`、`evidence_sha256`、`predecessor_owner_sha256`、`helper_sha256`。`helper_sha256` 必须等于历史继承链 `feedback_release_ops.Hotfix.preflight` 使用的 helper（`.deploy/presales3_ops.py`）的已审字节摘要 `054e67d143a808e5672eea716573ac23a4ecf47ae6cd9a762a89901acfff5f16`；控制器 `validate()` 会在任何阶段动作前拒绝缺失/错误值，避免继承链在 preflight 才 `KeyError`。smoke 摘要必须等于上面的已审文件。前序 owner 的原始字节摘要必须对上现场文件，且其 manifest 摘要指向仍为 `782c` / `98af` 的可见性 manifest。
 
 `release-evidence.json` 要绑定同一发布提交、两个父提交、tree、`1.46.0`、旧提交、两端 schema 都是 `98afc0d2157b`、`migration_performed=false`，以及名称里包含该 40 位提交的 `release-` 标签。六项证据都必须是 `passed`，并且引用文字包含该提交：`required_ci`、`independent_review`、`candidate_regression`、`scope_review`、`no_new_migration`、`git_byte_archive`。旧的 `old_app_on_expanded_schema` 不能代替 `no_new_migration`。这些字段只能在对应记录真实完成后填写。
 
@@ -81,7 +81,7 @@ python3 .deploy/requirements_successor_ops.py --check-archive REPO source.tar.gz
 
 ## 恢复边界
 
-`recover` 只在没有 `cutover.intent.json` 和 `exposure-started.json` 时可用。schema 必须仍是 `98afc0d2157b`；出现其他 head 时停止并前向处理。它只停止本候选容器，再启动原来的 `782c` 应用，不执行 downgrade，也不把 dump 覆盖回生产。冻结后的业务列摘要必须不变。
+`recover` 在 `exposure-started.json` 不存在时可用——这是唯一暴露判据：`cutover` 先落该标记再改持久文件/运行配置。仅存在 `cutover.intent.json`（切流阶段在写暴露标记之前失败，例如写者/身份/CAS 前置检查未过）时，生产入口尚未改变，`recover` 仍允许，不能把可恢复的失败锁成前向修复；一旦 `exposure-started.json` 存在，只能前向处理。schema 必须仍是 `98afc0d2157b`；出现其他 head 时停止并前向处理。它只停止本候选容器，再启动原来的 `782c` 应用，不执行 downgrade，也不把 dump 覆盖回生产。冻结后的业务列摘要必须不变。
 
 这里没有沿用历史需求复核里 `sys_access_log` 的水位例外。只读 smoke 如果经应用自己的连接追加了访问审计，切流前恢复会失败关闭，现场改为前向修复。暴露一旦开始，控制器不自动回滚。
 
