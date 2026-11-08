@@ -40,7 +40,7 @@
 
 ## 控制器
 
-入口是 `.deploy/requirements_successor_ops.py`。**接管修复后的已审字节摘要（LF）是 `50e33a688448ea96e83c722c6fd1c11ac287660def0fd681841fa95c77cf68f7`**（原候选 `225e4cc5` 时为 `939e7505f102b7900374c306ab651076de30d54c9d4d060baca27727fd6992ff`）。只读 smoke 是 `.deploy/requirements_successor_smoke.py`，摘要 `f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f`。这两个摘要属于控制器身份；应用镜像身份仍是 `e62cd60`。
+入口是 `.deploy/requirements_successor_ops.py`。**接管修复后的已审字节摘要（LF）是 `4d7387305a4029548af95eb8d9b57641d47de98cc447c72a35087a6e2f91b43b`**（原候选 `225e4cc5` 时为 `939e7505f102b7900374c306ab651076de30d54c9d4d060baca27727fd6992ff`）。只读 smoke 是 `.deploy/requirements_successor_smoke.py`，摘要 `f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f`。这两个摘要属于控制器身份；应用镜像身份仍是 `e62cd60`。
 
 发布目录是 `/data/spareparts/releases/requirements-successor-e62cd60cdbcc3fef896c5289388250057c4ce513`，root、0700，制品 0600。新 owner 是 `.requirements-successor-active-owner.json`。新容器前缀是 `itsp-successor-e62cd60cdbcc`。旧容器、旧目录和旧 owner 保留。
 
@@ -110,7 +110,7 @@ OK (skipped=1)
 
 - 共享池合同 `test_presales_pool_ops.py`：**25 项通过 / 1 项按既有条件跳过**（设置 `ITSP_CADDY_CONTRACT_IMAGE=caddy:2.11.4`，与 CI 一致）；
 - 可见性合同 `test_requirements_visibility_ops.py`：**5 项通过**；
-- 接续合同 `test_requirements_successor_ops.py`（除 `ArchiveTests`/`FetchContractTests`——这两类需要完整 Git 对象与远端网络，由 CI 覆盖）：**42 项通过**；
+- 接续合同 `test_requirements_successor_ops.py`（除 `ArchiveTests`/`FetchContractTests`——这两类需要完整 Git 对象与远端网络，由 CI 覆盖）：**43 项通过**；
 - Caddy docker 分支真实容器：`CaddyConditionalTests` 通过；运行后 `docker ps -a --filter name=itst-team-caddytest-` 与 `itsp-successor-caddy` **均无残留容器**；
 - 控制器字节摘要（LF）：见「控制器」节；smoke 摘要仍为 `f44594c3…196f`；visibility/pool 继承链摘要不变。
 
@@ -126,6 +126,7 @@ OK (skipped=1)
   - **F3（显式接受项）**：advisory `flock` 无法阻止不取锁的其他配置写者，二次读→写仍有理论丢写窗口。本控制器**接受该残余风险**，并以执行前置条件约束：发布窗口必须冻结 Caddy 配置的其他写入者（含人工/其他代理），由操作员在 `freeze` 前用只读方式核对无并发 Admin 写者并留证；该残余风险不因本接受声明而消除，见「执行前人工核验清单」第 3、5 条。
   - **F4**（route CAS 作用域与全配置比较不一致，合法并发修改可能被误判）：遇到 412/异常/回执丢失时按 intent + 现场显式 reconcile（人工），不自动回滚。
   - **F6**（后续阶段未重绑备份制品字节）：启用候选/切流前由操作员复核 dump/uploads 摘要与恢复回执一致；代码加固另立任务。
+  - **F8（运行时发现，已修）**：生产 Docker 29.1.3 的 `docker inspect ... .Mounts` 返回顺序为 map 迭代顺序，同一容器连续调用会随机变化；继承自可见性控制器的 `protected()` 直接比较 `{Config,HostConfig,Mounts}` 原始数组，会在**无真实变更**时误报 `protected configuration drift`（首次发布尝试因此在 `images` 阶段 fail-closed）。修复：本入口覆盖 `config()`，仅把 `Mounts` 按 `(Destination,Type,Source)` 排序后再比较（不忽略任何字段；真实配置漂移仍拒绝），并补乱序等价/真实漂移测试。
   - **F7**（Docker-only 环境下 `FileRestartTests` 缺少启动/查询分支）：测试缺口记录；CI 若未安装 caddy 二进制，该用例只做字节替换断言，不能当作"重启后保持其他站点"的证明。
   - **R-05（已知 P2，接受）**：intent 为独占创建，阶段失败后重跑同一阶段会 `O_EXCL` 失败；不接受自动清理，须由操作员按私有诊断与现场状态决定前向修复/人工清理（runbook 执行前确认项）。
   - **P3 后续加固（记录，不阻断）**：归档目录条目集合校验（当前只比 blob）、部署期归档仅摘要+comment+version（完整 Git 对照以 `--check-archive` 为发布前置）、recover 后候选容器/网络保留供取证、restore 容器名冲突处理、CI checkout `fetch-depth` 加固（Archive/Fetch 网络依赖）。
@@ -134,6 +135,10 @@ OK (skipped=1)
 
 这些边界不改变"禁止自动回滚 / 暴露后前向处理"的既有安全方向，但意味着本控制器**合并后仍不是可直接执行生产阶段的授权**：执行前必须 用户授权 + 现场重读 + 上述边界由执行方逐项确认或完成后续加固。
 
+## 发布尝试记录（2026-11-08）
+
+- **尝试 #1（aborted，未 freeze/cutover）**：2026-11-08T07:36:38Z `preflight` PASS；07:37:14Z `images` FAIL（`protected configuration drift: it-shop-prod-backend-1`）。根因 = F8（生产 Docker 29.1.3 `Mounts` 顺序随机；与本轮操作无关）。处置：fail-closed 停止，未执行 freeze/cutover，生产运行态未改变；本版 cleanup 已按授权执行且不回滚（有 before/after 快照）；旧 release 目录改名保留审计，旧 owner 归档。
+- **尝试 #2（当前）**：使用 F8 修复后的控制器（LF sha256 `4d738730…b43b`）新建 release 目录重跑；preflight 起全部重新取证，不复用尝试 #1 的 marker/intent。
 ## 执行前人工核验清单（每次生产执行必做，不替代代码门禁）
 
 1. **用户明确授权**：`lead` 转达、精确候选 SHA/tag 意图、发布窗口与写冻结时段；

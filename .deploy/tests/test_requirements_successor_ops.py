@@ -1,4 +1,5 @@
 """Synthetic contracts for the no-migration successor. No production access."""
+import copy
 import hashlib
 import importlib.util
 import io
@@ -1260,6 +1261,27 @@ class SuccessorManifestAndTestContractTests(unittest.TestCase):
         self.assertEqual(updated, expected_bytes)
         self.assertEqual(caddyfile.read_bytes(), expected_bytes)
         self.assertEqual(release.adapt_caddyfile_bytes.call_count, 2)
+
+    def test_protected_config_normalizes_mount_order(self):
+        """Docker 29 的 Mounts 顺序随机，config() 必须规范化顺序但保留字段语义。"""
+        base = {
+            "Config": {"Image": "sha256:abc"},
+            "HostConfig": {"NetworkMode": "it-spareparts_default"},
+            "Mounts": [
+                {"Destination": "/data/files", "Type": "volume", "Source": "/vol", "RW": True},
+                {"Destination": "/run/secrets/db", "Type": "bind", "Source": "/sec", "RW": False},
+            ],
+        }
+        permuted = copy.deepcopy(base)
+        permuted["Mounts"].reverse()
+        self.assertEqual(ops.Release.config(base), ops.Release.config(permuted))
+        self.assertIsNot(ops.Release.config, ops.vis.Release.config)
+        drifted = copy.deepcopy(base)
+        drifted["Mounts"][1]["Source"] = "/evil"
+        self.assertNotEqual(ops.Release.config(base), ops.Release.config(drifted))
+        added = copy.deepcopy(base)
+        added["Mounts"].append({"Destination": "/new", "Type": "bind", "Source": "/new"})
+        self.assertNotEqual(ops.Release.config(base), ops.Release.config(added))
 
     def test_cutover_adapt_checks_use_matching_origins(self):
         """PR #519 cursor 复审线程：F2 比较不得混用 stdin adapt 与 live GET /config/ 来源。"""
