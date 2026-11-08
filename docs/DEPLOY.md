@@ -380,6 +380,10 @@ find "$BACKUP_DIR" -maxdepth 1 -type f \
 "$APP_DIR/.deploy/restore_drill.sh"
 ```
 
+当前门禁"已审核 head"钉在 `.deploy/restore_drill.sh` 的 `EXPECTED_DB_HEAD=98afc0d2157b`
+（生产 v1.45.0 升级后的唯一 head）。**每次 schema 发布升级 head 后，必须同步更新该常量与
+`backend/tests/test_deploy_backup.py` 的同名断言**；未同步时门禁会 fail closed，不得用"动态自比"
+（把源库当前 head 当期望值）替代已审核 head。
 恢复命令(灾难时):
 ```bash
 sha256sum -c /var/backups/spareparts/db-<日期>.dump.sha256

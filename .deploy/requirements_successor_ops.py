@@ -1,0 +1,881 @@
+#!/usr/bin/env python3
+"""No-migration successor of the requirements-visibility production owner.
+
+The application archive, tag and image revision are the verified merge
+e62cd60cdbcc3fef896c5289388250057c4ce513. This file is a separate audited
+controller: it must not be baked into that archive. Historical visibility
+constants stay in requirements_visibility_ops.py and are pinned below.
+"""
+import copy
+import datetime as dt
+import fcntl
+import hashlib
+import importlib.util
+import io
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tarfile
+import traceback
+import uuid
+
+APP_SHA = "e62cd60cdbcc3fef896c5289388250057c4ce513"
+PARENTS = (
+    "ffbf783d346f051d91c6474652be8ce1fa323e09",
+    "d37384cdd276adbef6e5ce0a56263108922e3730",
+)
+TREE = "5b22aee2545bc5ebb31abe0ce19a626516560048"
+APP_VERSION = "1.46.0"
+OLD_SHA = "782c858a75d1f38991aa7151e9eb54f0474fb031"
+OLD_PREFIX = "itsp-requirements-" + OLD_SHA[:12]
+VISIBILITY_DIGEST = "6b2fe7287242ff6ce5dfcd785613877ef49dd80f13fb8ea15c4d244e93d37e9d"
+SMOKE_DIGEST = "f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f"
+# 历史控制器在同一个 presales3_ops.py 上使用名为 helper_sha256 的摘要字段。本入口继承链中的
+# Hotfix.preflight 不读取本 manifest，因此这是**纵深防御的额外固定字段**：manifest 必须携带并
+# 锁定同一 helper 摘要，供审计与前序控制器交叉核对；删除它不改变本入口的门禁语义。
+HELPER_DIGEST = "054e67d143a808e5672eea716573ac23a4ecf47ae6cd9a762a89901acfff5f16"
+PREDECESSOR_OWNER = ".requirements-visibility-active-owner.json"
+OWNER_NAME = ".requirements-successor-active-owner.json"
+LOCKS = (".catalog-source-handoff.lock", ".itsp-production-deploy.lock")
+GATES = (
+    "required_ci", "independent_review", "candidate_regression", "scope_review",
+    "no_new_migration", "git_byte_archive",
+)
+PHASES = ("preflight", "images", "freeze", "backup-old", "migrate", "backup-new", "bluegreen", "cutover", "verify")
+FORBIDDEN = {"source_handoff", "catalog_sync", "import_gate_allowlist"}
+ALLOWED_ALEMBIC = {"heads", "current", "check"}
+
+VISIBILITY_PATH = Path(__file__).with_name("requirements_visibility_ops.py")
+SMOKE_PATH = Path(__file__).with_name("requirements_successor_smoke.py")
+_visibility_bytes = VISIBILITY_PATH.read_bytes()
+_smoke_bytes = SMOKE_PATH.read_bytes()
+if (VISIBILITY_PATH.is_symlink() or SMOKE_PATH.is_symlink()
+        or hashlib.sha256(_visibility_bytes).hexdigest() != VISIBILITY_DIGEST
+        or hashlib.sha256(_smoke_bytes).hexdigest() != SMOKE_DIGEST):
+    raise RuntimeError("reviewed visibility controller or smoke differs")
+_spec = importlib.util.spec_from_loader("requirements_visibility_reviewed", loader=None)
+vis = importlib.util.module_from_spec(_spec)
+vis.__file__ = str(VISIBILITY_PATH)
+exec(compile(_visibility_bytes, str(VISIBILITY_PATH), "exec"), vis.__dict__)
+if (vis.OLD_SHA != "559489e6ef548ef84be8112ada1c74117e6839ca" or vis.OLD_HEAD != "e5a7c9d1f3b6"
+        or vis.TARGET != "98afc0d2157b"
+        or vis.POOL_DIGEST != "47b141a4127c349c2bb2d785ede3c11645de9d44c4ebd4accc308f9a76e54a39"):
+    raise RuntimeError("historical visibility constants changed")
+SCHEMA = vis.TARGET
+h = vis.h
+hf = vis.pool.hf
+file_mode = vis.pool.file_mode
+
+
+def git_blob_sha1(payload):
+    return hashlib.sha1(b"blob %d\0" % len(payload) + payload, usedforsecurity=False).hexdigest()
+
+
+def archive_path_refused(name):
+    if not isinstance(name, str) or name in {"", ".", "/"}:
+        return True
+    if name.startswith("/") or name.startswith("./") or "\\" in name or "\x00" in name:
+        return True
+    parts = Path(name.rstrip("/")).parts
+    if ".." in parts:
+        return True
+    for part in parts:
+        if part in {"PaxHeader", "@PaxHeader", "pax_global_header"} or "PaxHeader" in part:
+            return True
+    return False
+
+
+def read_archive(data):
+    """Header-check every member before reading a regular file. Never extract to disk."""
+    h.need(isinstance(data, bytes) and data.startswith(b"\x1f\x8b"), "source archive is not gzip")
+    members, blobs, version = {}, {}, None
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            for member in archive:
+                name = member.name.rstrip("/")
+                h.need(not archive_path_refused(name), "archive path refused")
+                if member.islnk() or member.ischr() or member.isblk() or member.isfifo() or member.isdev():
+                    raise RuntimeError("special archive member refused")
+                mode = stat.S_IMODE(member.mode)
+                h.need(mode & ~0o777 == 0, "archive mode refused")
+                if member.issym():
+                    kind, payload = "symlink", member.linkname.encode()
+                elif member.isdir():
+                    kind, payload = "dir", None
+                elif member.isfile():
+                    kind = "file"
+                    stream = archive.extractfile(member)
+                    h.need(stream is not None, "missing archive member")
+                    payload = stream.read()
+                else:
+                    raise RuntimeError("special archive member refused")
+                h.need(name not in members, "duplicate archive member")
+                members[name] = {"kind": kind, "mode": mode, "payload": payload}
+                if kind != "dir":
+                    blobs[name] = git_blob_sha1(payload)
+                    if name == "frontend/src/version.ts":
+                        version = payload
+            comment = archive.pax_headers.get("comment", "")
+    except (tarfile.TarError, OSError):
+        raise RuntimeError("source archive is not a git tar.gz") from None
+    h.need(re.fullmatch(r"[0-9a-f]{40}", comment or ""), "git archive comment missing")
+    return {"comment": comment, "members": members, "blobs": blobs, "version_ts": version}
+
+
+def legal_directories(paths):
+    found = set()
+    for path in paths:
+        parent = path
+        while "/" in parent:
+            parent = parent.rsplit("/", 1)[0]
+            found.add(parent)
+    return found
+
+
+def require_single_tar_umask(pairs):
+    """Git archive stores 0666/0777 masked by one tar.umask. Symlinks stay 0777."""
+    umask_bits = None
+    for git_mode, tar_mode in pairs:
+        tar_mode = stat.S_IMODE(tar_mode)
+        if git_mode == "120000":
+            h.need(tar_mode == 0o777, "archive mode refused")
+            continue
+        base = 0o666 if git_mode == "100644" else 0o777
+        h.need(git_mode in {"100644", "100755", "dir"}, "archive mode refused")
+        h.need(tar_mode & ~base == 0, "archive mode refused")
+        implied = base & ~tar_mode
+        if umask_bits is None:
+            umask_bits = implied
+        else:
+            h.need((umask_bits & base) == implied, "archive mode is not one tar.umask")
+    if umask_bits is None:
+        umask_bits = 0
+    for git_mode, tar_mode in pairs:
+        if git_mode == "120000":
+            continue
+        base = 0o666 if git_mode == "100644" else 0o777
+        h.need(stat.S_IMODE(tar_mode) == (base & ~umask_bits), "archive mode refused")
+    return umask_bits
+
+
+def app_version_from_source(text):
+    h.need(isinstance(text, bytes), "version source missing")
+    found = re.findall(br'(?m)^export const APP_VERSION = "([0-9]+\.[0-9]+\.[0-9]+)";$', text)
+    h.need(len(found) == 1, "APP_VERSION is not singular")
+    return found[0].decode()
+
+
+def git_commit_identity(repo, sha):
+    h.need(re.fullmatch(r"[0-9a-f]{40}", sha), "commit sha")
+
+    def git(*args):
+        result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True)
+        h.need(result.returncode == 0, "git identity failed")
+        return result.stdout
+
+    commit = git("rev-parse", "--verify", sha + "^{commit}").decode().strip()
+    h.need(commit == sha, "resolved commit differs")
+    parents = tuple(git("rev-parse", sha + "^@").decode().split())
+    tree = git("rev-parse", sha + "^{tree}").decode().strip()
+    blobs, modes = {}, {}
+    for row in git("ls-tree", "-r", "-z", sha).split(b"\0"):
+        if not row:
+            continue
+        meta, path = row.split(b"\t", 1)
+        mode, kind, oid = meta.decode().split(" ")
+        h.need(kind == "blob" and mode in {"100644", "100755", "120000"}, "tree contains a non-blob")
+        name = path.decode()
+        h.need(name not in blobs and not archive_path_refused(name), "duplicate tree path")
+        blobs[name] = oid
+        modes[name] = mode
+    return {"commit": commit, "parents": parents, "tree": tree, "blobs": blobs, "modes": modes}
+
+
+def object_exists(repo, spec):
+    return subprocess.run(["git", "-C", str(repo), "cat-file", "-e", spec],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def frozen_objects_ready(repo):
+    if not object_exists(repo, APP_SHA + "^{commit}") or not object_exists(repo, APP_SHA + "^{tree}"):
+        return False
+    if any(not object_exists(repo, parent + "^{commit}") or not object_exists(repo, parent + "^{tree}")
+           for parent in PARENTS):
+        return False
+    identity = git_commit_identity(repo, APP_SHA)
+    if identity["parents"] != PARENTS or identity["tree"] != TREE:
+        return False
+    payload = b"".join(oid.encode() + b"\n" for oid in identity["blobs"].values())
+    checked = subprocess.run(["git", "-C", str(repo), "cat-file", "--batch-check"], input=payload, capture_output=True)
+    return checked.returncode == 0 and b" missing" not in checked.stdout
+
+
+def fetch_exact_frozen_commit(repo):
+    """Depth 2 keeps both merge parents. Depth 1 grafts them out of rev-parse."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "fetch", "--no-tags", "--depth=2", "origin", APP_SHA],
+        capture_output=True)
+    h.need(result.returncode == 0, "frozen commit fetch failed")
+
+
+def ensure_frozen_commit(repo, fetch=None):
+    if not frozen_objects_ready(repo):
+        (fetch or fetch_exact_frozen_commit)(repo)
+        h.need(frozen_objects_ready(repo), "frozen commit objects missing after fetch")
+    return git_commit_identity(repo, APP_SHA)
+
+
+def canonical_archive(repo, sha):
+    """Bytes of `git -c core.autocrlf=false -c core.eol=lf archive` for one commit."""
+    h.need(re.fullmatch(r"[0-9a-f]{40}", sha), "archive commit")
+    result = subprocess.run(
+        ["git", "-C", str(repo), "-c", "core.autocrlf=false", "-c", "core.eol=lf", "archive", "--format=tar.gz", sha],
+        capture_output=True)
+    h.need(result.returncode == 0, "canonical git archive failed")
+    return result.stdout
+
+
+def compare_archive_to_commit(repo, sha, data):
+    identity = git_commit_identity(repo, sha)
+    archive = read_archive(data)
+    h.need(archive["comment"] == sha, "archive comment is not the requested commit")
+    directories = legal_directories(identity["modes"])
+    pairs = []
+    seen = set()
+    for name, member in archive["members"].items():
+        if member["kind"] == "dir":
+            h.need(name in directories, "archive path refused")
+            pairs.append(("dir", member["mode"]))
+            continue
+        git_mode = identity["modes"].get(name)
+        h.need(git_mode is not None, "archive member not in commit")
+        if git_mode == "120000":
+            h.need(member["kind"] == "symlink", "archive member type refused")
+        else:
+            h.need(member["kind"] == "file", "archive member type refused")
+        pairs.append((git_mode, member["mode"]))
+        seen.add(name)
+    h.need(seen == set(identity["modes"]), "archive member set differs from commit")
+    require_single_tar_umask(pairs)
+    if archive["blobs"] != identity["blobs"]:
+        missing = len(set(identity["blobs"]) - set(archive["blobs"]))
+        extra = len(set(archive["blobs"]) - set(identity["blobs"]))
+        changed = len([p for p in set(archive["blobs"]) & set(identity["blobs"]) if archive["blobs"][p] != identity["blobs"][p]])
+        h.need(False, "archive bytes differ from git blobs missing=%s extra=%s changed=%s" % (missing, extra, changed))
+    identity["app_version"] = app_version_from_source(archive["version_ts"])
+    return identity
+
+
+def assert_release_archive(repo, data):
+    identity = compare_archive_to_commit(repo, APP_SHA, data)
+    h.need(identity["parents"] == PARENTS, "merge parents differ")
+    h.need(identity["tree"] == TREE, "merge tree differs")
+    h.need(identity["app_version"] == APP_VERSION, "pinned application version differs")
+    h.need(".deploy/requirements_successor_ops.py" not in identity["blobs"], "controller leaked into application archive")
+    h.need(".deploy/requirements_successor_smoke.py" not in identity["blobs"], "controller smoke leaked into application archive")
+    return identity
+
+
+def check_archive(repo, archive):
+    path = Path(archive)
+    h.need(path.is_file() and not path.is_symlink(), "archive path")
+    data = path.read_bytes()
+    identity = assert_release_archive(Path(repo), data)
+    return {
+        "status": "passed", "release": APP_SHA, "parents": list(identity["parents"]), "tree": identity["tree"],
+        "app_version": identity["app_version"], "files": len(identity["blobs"]), "bytes": len(data),
+        "sha256": h.digest(data), "migration_performed": False, "controller_in_archive": False,
+    }
+
+
+def require_same_bytes(before, current, message):
+    h.need(current == before, message)
+
+
+def header_etag(headers):
+    etag = None
+    for key, value in headers.items():
+        if key.lower() == "etag":
+            etag = value
+    h.need(isinstance(etag, str) and etag.strip(), "caddy etag missing")
+    return etag.strip()
+
+
+def parse_curl_exchange(raw):
+    """Split `curl -D - -w '\\n__STATUS__%{http_code}'` output. Do not treat 412 as transport failure."""
+    h.need(isinstance(raw, bytes) and b"\n__STATUS__" in raw, "caddy admin response incomplete")
+    message, _, status_raw = raw.rpartition(b"\n__STATUS__")
+    h.need(re.fullmatch(rb"[0-9]{3}", status_raw.strip()), "caddy admin status missing")
+    separator = b"\r\n\r\n" if b"\r\n\r\n" in message else b"\n\n"
+    h.need(separator in message, "caddy admin headers missing")
+    header_blob, body = message.split(separator, 1)
+    headers = {}
+    for line in header_blob.splitlines()[1:]:
+        if b":" not in line:
+            continue
+        key, value = line.split(b":", 1)
+        headers[key.decode().lower()] = value.decode().strip()
+    return int(status_raw.strip()), headers, body
+
+
+def collect_dials(node, found):
+    if isinstance(node, dict):
+        if "dial" in node and "handler" not in node:
+            found.append(node.get("dial"))
+        for value in node.values():
+            collect_dials(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            collect_dials(item, found)
+
+
+def main_matcher_hosts(route):
+    """Caddy 的多个 matcher set 是 OR；每个分支都必须只由 host 组成且受限主站域名。
+
+    只取所有分支 host 的并集会把"主站 host 分支 + 无 host 的 path 分支"误判为仅主站，
+    使切流同时影响其他域名（独立复审 F1）。因此这里要求：
+    - match 是非空列表；每个 matcher 是仅含 "host" 的 dict（未知结构一律拒绝）；
+    - 每个分支 host 非空、全部为主站域名；所有分支并集恰为两个主站域名。
+    """
+    match = route.get("match")
+    if not isinstance(match, list) or not match:
+        return None
+    hosts = set()
+    for matcher in match:
+        if not isinstance(matcher, dict) or set(matcher) != {"host"}:
+            return None
+        values = matcher.get("host")
+        if not isinstance(values, list) or not values:
+            return None
+        for host in values:
+            if not isinstance(host, str) or host not in h.HOSTS:
+                return None
+            hosts.add(host)
+    return hosts if hosts == set(h.HOSTS) else None
+
+
+def route_is_main(route, dial):
+    # 只接受已知的 route 形状；出现 group/terminal 等额外键时 fail closed（宁可拒绝也不误判）。
+    if not isinstance(route, dict) or set(route) != {"match", "handle"}:
+        return False
+    if main_matcher_hosts(route) is None:
+        return False
+    dials = []
+    collect_dials(route, dials)
+    return dials == [dial]
+
+
+def replace_one_dial(node, old, new):
+    count = 0
+    if isinstance(node, dict):
+        if "dial" in node and "handler" not in node and node.get("dial") == old:
+            node["dial"] = new
+            count += 1
+        for value in node.values():
+            count += replace_one_dial(value, old, new)
+    elif isinstance(node, list):
+        for item in node:
+            count += replace_one_dial(item, old, new)
+    return count
+
+
+def find_main_route_path(config, dial):
+    found = []
+    servers = ((config.get("apps") or {}).get("http") or {}).get("servers") or {}
+    for name, server in servers.items():
+        h.need(re.fullmatch(r"[A-Za-z0-9_.-]+", str(name)), "caddy server name refused")
+        for index, route in enumerate((server or {}).get("routes") or []):
+            if route_is_main(route, dial):
+                found.append("/config/apps/http/servers/%s/routes/%s" % (name, index))
+    h.need(len(found) == 1, "main route is not singular")
+    return found[0]
+
+
+def config_at(config, pointer):
+    node = config
+    for part in pointer[len("/config/"):].split("/"):
+        node = node[int(part)] if isinstance(node, list) else node[part]
+    return node
+
+
+def set_config_pointer(config, pointer, value):
+    h.need(pointer.startswith("/config/"), "caddy dial path refused")
+    node = config
+    parts = pointer[len("/config/"):].split("/")
+    for part in parts[:-1]:
+        node = node[int(part)] if isinstance(node, list) else node[part]
+    last = parts[-1]
+    if isinstance(node, list):
+        node[int(last)] = value
+    else:
+        node[last] = value
+
+
+def only_dial_changed(before, after, pointer, new_dial):
+    expected = copy.deepcopy(before)
+    set_config_pointer(expected, pointer, new_dial)
+    return expected == after
+
+
+def conditional_dial_patch(request, old_dial, new_dial):
+    """PATCH the whole main route under its ETag. A dial-only ETag does not bind the host match."""
+    for _attempt in range(4):
+        status, _headers, body = request("GET", "/config/")
+        h.need(status == 200, "caddy config export failed")
+        before = json.loads(body)
+        path = find_main_route_path(before, old_dial)
+        status, headers, body = request("GET", path)
+        route = json.loads(body)
+        h.need(status == 200 and route_is_main(route, old_dial), "route identity drifted before patch")
+        updated = copy.deepcopy(route)
+        h.need(replace_one_dial(updated, old_dial, new_dial) == 1, "main dial is not singular")
+        status, _headers, _body = request(
+            "PATCH", path, json.dumps(updated).encode(),
+            {"If-Match": header_etag(headers), "Content-Type": "application/json"})
+        if status == 412:
+            continue
+        h.need(status in {200, 204}, "conditional route patch failed")
+        status, _headers, body = request("GET", "/config/")
+        h.need(status == 200, "caddy config export failed")
+        after = json.loads(body)
+        h.need(route_is_main(config_at(after, path), new_dial), "patched route lost main identity")
+        restored = copy.deepcopy(after)
+        h.need(replace_one_dial(config_at(restored, path), new_dial, old_dial) == 1, "patched dial missing")
+        h.need(restored == before, "caddy patch changed other sites")
+        return after
+    raise RuntimeError("could not bind main route; full load refused")
+
+
+def validate(m):
+    h.need(m.get("release") == APP_SHA and m.get("old_revision") == OLD_SHA, "release identity")
+    h.need(m.get("old_schema") == m.get("target_head") == SCHEMA, "schema must stay held")
+    h.need((m.get("old_app"), m.get("old_front")) == (OLD_PREFIX + "-app", OLD_PREFIX + "-frontend"), "production pair")
+    h.need(m.get("additional_writers") == [] and not (FORBIDDEN & set(m)), "writer/environment/waiver changes")
+    h.need(m.get("caddyfile") == "/opt/it-spareparts/Caddyfile" and type(m.get("port")) is int and 1024 < m["port"] < 65536,
+           "endpoint")
+    try:
+        network = ipaddress.ip_network(m.get("subnet"), strict=True)
+    except (TypeError, ValueError):
+        network = None
+    h.need(network is not None and network.version == 4 and network.is_private and 24 <= network.prefixlen <= 28,
+           "private subnet required")
+    for key in ("old_app_id", "old_front_id", "source_sha256", "controller_sha256", "smoke_sha256", "nginx_sha256",
+                "predecessor_owner_sha256", "evidence_sha256", "db_id", "visibility_sha256", "pool_sha256",
+                "helper_sha256"):
+        h.need(re.fullmatch(r"[a-f0-9]{64}", str(m.get(key, ""))), "invalid identity: " + key)
+    h.need(m["visibility_sha256"] == VISIBILITY_DIGEST and m["pool_sha256"] == vis.POOL_DIGEST, "helper chain")
+    h.need(m["helper_sha256"] == HELPER_DIGEST, "historical helper digest differs")
+    h.need(m["smoke_sha256"] == SMOKE_DIGEST, "smoke is not the reviewed projection")
+    for key in ("old_app_image", "old_front_image", "app_image", "frontend_image", "db_image"):
+        h.need(re.fullmatch(r"sha256:[a-f0-9]{64}", str(m.get(key, ""))), "invalid image: " + key)
+    h.need(type(m.get("nginx_upstream_count")) is int and m["nginx_upstream_count"] > 0, "nginx upstream count")
+    proxies = m.get("proxy_identities")
+    h.need(isinstance(proxies, dict) and sorted(p.get("process") for p in proxies.values()) == ["caddy", "cloudflared", "nginx"]
+           and all(re.fullmatch(r"[0-9a-f]{64}", str(p.get("id", ""))) and re.fullmatch(r"sha256:[0-9a-f]{64}", str(p.get("image", "")))
+                   for p in proxies.values()), "reviewed proxies required")
+
+
+class Release(vis.Release):
+    def __init__(self, manifest):
+        self.path = Path(manifest)
+        self.root = self.path.parent
+        h.need(self.path.name == "manifest.json" and file_mode(self.path, 0o600), "private manifest required")
+        h.need(self.root.resolve() == self.root and self.root.is_dir() and self.root.stat().st_uid == 0
+               and stat.S_IMODE(self.root.stat().st_mode) == 0o700, "private release directory required")
+        self.manifest_bytes = self.path.read_bytes()
+        self.m = json.loads(self.manifest_bytes)
+        validate(self.m)
+        self.sha = self.m["release"]
+        h.need(self.root == h.BASE / ("requirements-successor-" + self.sha), "release directory mismatch")
+        for path, key in ((Path(__file__), "controller_sha256"), (self.root / "readonly-smoke.py", "smoke_sha256"),
+                          (self.root / "release-evidence.json", "evidence_sha256")):
+            h.need(file_mode(path, 0o600) and h.artifact(path)["sha256"] == self.m[key], "artifact drift")
+        h.need(self.m["smoke_sha256"] == SMOKE_DIGEST, "smoke is not the reviewed projection")
+        self.old_app, self.old_front = self.m["old_app"], self.m["old_front"]
+        self.prefix = "itsp-successor-" + self.sha[:12]
+        self.app, self.front, self.net = self.prefix + "-app", self.prefix + "-frontend", self.prefix + "-net"
+        self.caddyfile = Path(self.m["caddyfile"])
+
+    def alembic(self, args):
+        h.need(isinstance(args, list) and bool(args) and args[0] in ALLOWED_ALEMBIC
+               and "upgrade" not in args and "downgrade" not in args, "migration command refused")
+        return super().alembic(args)
+
+    def require_source_archive(self):
+        path = self.root / "source.tar.gz"
+        h.need(file_mode(path, 0o600) and h.artifact(path)["sha256"] == self.m["source_sha256"], "source archive drift")
+        archive = read_archive(path.read_bytes())
+        h.need(archive["comment"] == self.sha == APP_SHA, "source archive is not the pinned release commit")
+        h.need(app_version_from_source(archive["version_ts"]) == APP_VERSION, "source archive version differs")
+        return archive
+
+    def predecessor(self):
+        path = h.BASE / PREDECESSOR_OWNER
+        h.need(file_mode(path, 0o600) and h.artifact(path)["sha256"] == self.m["predecessor_owner_sha256"],
+               "predecessor owner drift")
+        body = json.loads(path.read_bytes())
+        h.need(isinstance(body, dict) and set(body) == {"release", "manifest_sha256"} and body["release"] == OLD_SHA
+               and re.fullmatch(r"[a-f0-9]{64}", body["manifest_sha256"]), "predecessor owner identity")
+        manifest = h.BASE / ("requirements-visibility-" + OLD_SHA) / "manifest.json"
+        h.need(file_mode(manifest, 0o600) and h.artifact(manifest)["sha256"] == body["manifest_sha256"],
+               "predecessor manifest drift")
+        payload = json.loads(manifest.read_bytes())
+        h.need(payload.get("release") == OLD_SHA and payload.get("target_head") == SCHEMA,
+               "predecessor manifest does not hold production")
+        return body
+
+    def evidence(self):
+        path = self.root / "release-evidence.json"
+        h.need(file_mode(path, 0o600) and h.artifact(path)["sha256"] == self.m["evidence_sha256"], "release evidence drift")
+        evidence = json.loads(path.read_bytes())
+        h.need(evidence.get("release") == evidence.get("release_tag_sha") == self.sha == APP_SHA, "evidence identity")
+        h.need(evidence.get("parents") == list(PARENTS), "evidence parents")
+        h.need(evidence.get("tree") == TREE, "evidence tree")
+        h.need(evidence.get("app_version") == APP_VERSION, "evidence version")
+        h.need(evidence.get("old_revision") == OLD_SHA and evidence.get("old_schema") == evidence.get("target_head") == SCHEMA,
+               "evidence range")
+        tag = evidence.get("release_tag")
+        h.need(isinstance(tag, str) and tag.startswith("release-") and APP_SHA in tag, "release tag")
+        h.need(evidence.get("migration_performed") is False, "evidence claims a migration")
+        references = evidence.get("references")
+        h.need(isinstance(references, dict), "missing evidence: references")
+        for gate in GATES:
+            ref = references.get(gate)
+            h.need(evidence.get(gate) == "passed" and isinstance(ref, str) and APP_SHA in ref, "missing evidence: " + gate)
+        self.require_source_archive()
+        self.predecessor()
+        return evidence
+
+    def preflight(self):
+        result = super().preflight()
+        h.need(result.get("schema") == SCHEMA, "production schema is not the held head")
+        gate = result.get("import_gate") or {}
+        h.need(gate.get("mode") == "all_zero" and gate.get("batches") == [] and gate.get("jobs") == []
+               and gate.get("active_return_receipts") == 0, "processing must be empty; old waiver refused")
+        return result
+
+    def migrate(self):
+        backup = self.marker("backup-old")
+        restore = backup.get("restore") or {}
+        h.need(restore.get("actual_restore_performed") is True and restore.get("schema") == SCHEMA
+               and restore.get("network") == "none" and restore.get("published_ports") == [],
+               "verified network-none 98af restore required")
+        h.need(backup.get("uploads_content_compared") is True, "uploads content compare required")
+        self.frozen()
+        self.writers_exact(set())
+        self.source_tcp_zero()
+        h.need(self.schema() == SCHEMA == self.marker("preflight")["schema"] == self.marker("freeze")["schema"],
+               "schema drifted before the no-migration gate")
+        self.unchanged_business()
+        h.need(self.alembic(["heads"]) == SCHEMA + " (head)", "candidate migration head")
+        h.need(self.alembic(["current"]) == SCHEMA + " (head)", "database is not already at the held head")
+        self.alembic(["check"])
+        self.unchanged_business()
+        h.need(self.schema() == SCHEMA and self.counts() == self.marker("freeze")["counts"], "no-migration gate changed data")
+        return {"schema": SCHEMA, "migration_performed": False, "upgrade_invoked": False, "downgrade_invoked": False}
+
+    def require_public_version(self):
+        root = "/usr/share/nginx/html"
+        paths = self.run(["docker", "exec", self.front, "grep", "-rlF", APP_VERSION, root + "/assets"]).decode().splitlines()
+        for path in paths:
+            h.need(re.fullmatch(re.escape(root) + r"/assets/[A-Za-z0-9_.-]+", path), "unexpected asset path")
+            bundle = self.run(["docker", "exec", self.front, "cat", path])
+            if APP_VERSION.encode() not in bundle:
+                continue
+            digest = h.digest(bundle)
+            for host in sorted(h.HOSTS):
+                h.need(self.http("https://" + host + path[len(root):])["sha256"] == digest, "public version asset differs")
+            return {"version": APP_VERSION, "asset_sha256": digest}
+        raise RuntimeError("pinned version asset missing")
+
+    def load_active(self, active):
+        raise RuntimeError("unconditional config load refused")
+
+    def admin_request(self, method, path, body=None, headers=None):
+        command = ["docker", "exec", "-i", h.CADDY, "curl", "-sS", "--max-time", "15", "-D", "-", "-o", "-",
+                   "-w", "\n__STATUS__%{http_code}", "-X", method]
+        for key, value in (headers or {}).items():
+            command.extend(["-H", key + ": " + value])
+        if body is not None:
+            command.append("--data-binary")
+            command.append("@-")
+        command.append("http://127.0.0.1:2019" + path)
+        return parse_curl_exchange(self.run(command, input=body))
+
+    def read_fd(self, fd):
+        os.lseek(fd, 0, os.SEEK_SET)
+        chunks = []
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            chunks.append(block)
+        return b"".join(chunks)
+
+    def commit_caddyfile_dial(self, old_bytes, new_bytes, inode):
+        """Replace one dial on the open inode. Re-read under the lock before writing.
+
+        F2（独立复审）：重读到写入之间必须重新验证**语义**，但比较必须同源：
+        这里只用 stdin 适配（`--config -`）对 current/updated 两份字节各做一次，再要求
+        `replace_active(adapt(current)) == adapt(updated)`；不得把 stdin 适配结果与来自
+        live `GET /config/` 的 `desired` 直接比较（file_server 的 hide 等字段会随输入来源不同，
+        见 PR #519 cursor 复审线程）。该相对比较仍能发现并发写者改变站点归属/主站 host。
+        """
+        fd = os.open(self.caddyfile, os.O_RDWR | os.O_NOFOLLOW)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            descriptor = os.fstat(fd)
+            h.need([descriptor.st_dev, descriptor.st_ino] == inode and stat.S_ISREG(descriptor.st_mode),
+                   "Caddy inode drift")
+            stale = self.read_fd(fd)
+            hook = getattr(self, "caddyfile_before_commit", None)
+            if hook is not None:
+                hook()
+            current = self.read_fd(fd)
+            h.need(current.count(old_bytes) == 1, "live Caddyfile upstream is not singular")
+            prefix, matched, suffix = current.partition(old_bytes)
+            h.need(matched == old_bytes and old_bytes not in suffix, "live Caddyfile upstream is not singular")
+            updated = prefix + new_bytes + suffix
+            baseline_adapted = self.adapt_caddyfile_bytes(current)
+            expected = h.replace_active(baseline_adapted, old_bytes.decode(), new_bytes.decode())
+            h.need(self.adapt_caddyfile_bytes(updated) == expected,
+                   "persisted Caddyfile adaptation differs from intended configuration")
+            os.lseek(fd, 0, os.SEEK_SET)
+            view = memoryview(updated)
+            while view:
+                count = os.write(fd, view)
+                h.need(count > 0, "short Caddy write")
+                view = view[count:]
+            os.ftruncate(fd, len(updated))
+            os.fsync(fd)
+            seen = self.read_fd(fd)
+            h.need(seen == updated, "caddyfile lost a concurrent write")
+            h.need(seen.startswith(prefix) and seen.endswith(suffix), "caddyfile other bytes drifted")
+            return updated
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def cas_file(self, data, inode):
+        descriptor = self.caddyfile.stat()
+        h.need([descriptor.st_dev, descriptor.st_ino] == inode and not self.caddyfile.is_symlink(), "Caddy inode drift")
+        h.need(self.caddyfile.read_bytes() == data, "Caddy file drift")
+        inside = self.run(["docker", "exec", h.CADDY, "sha256sum", self.caddy_destination()]).decode().split()[0]
+        h.need(inside == h.digest(data), "Caddy bind bytes drift")
+
+    def adapt_caddyfile_bytes(self, data):
+        """用现场 Caddy 二进制离线 adapt 一段 Caddyfile 字节（--config - 走 stdin，不 load）。"""
+        cwd = str(Path(self.caddy_destination()).parent)
+        return json.loads(self.run(
+            ["docker", "exec", "-i", "-w", cwd, h.CADDY, "caddy", "adapt",
+             "--config", "-", "--adapter", "caddyfile"], input=data))
+
+    def cutover(self):
+        """Keep the live file's other bytes and patch the identified main route. Never POST /load."""
+        self.writers_exact({self.app})
+        h.need(self.schema() == SCHEMA, "schema drift before cutover")
+        blue = self.marker("bluegreen")
+        self.frozen()
+        h.need(h.fingerprint(self.inspect(self.app)) == blue["app"] and
+               h.fingerprint(self.inspect(self.front)) == blue["frontend"], "candidate changed")
+        pre = self.marker("preflight")
+        old_dial, new_dial = self.old_front + ":80", self.front + ":80"
+        self.plan_caddy_change(pre)
+        # R-07/R-08：所有可能因并发写者/route 形状而失败的校验必须在 exposure 之前完成，
+        # 否则一次拒绝会留下 exposure-started.json，把可恢复失败锁成前向修复。
+        # F2 同源比较：两次都是 stdin 适配；不得与 live GET /config/（desired）混比。
+        current = self.caddyfile.read_bytes()
+        h.need(current.count(old_dial.encode()) == 1, "live Caddyfile upstream is not singular")
+        preview = current.replace(old_dial.encode(), new_dial.encode())
+        baseline_adapted = self.adapt_caddyfile_bytes(current)
+        expected = h.replace_active(baseline_adapted, old_dial, new_dial)
+        h.need(self.adapt_caddyfile_bytes(preview) == expected,
+               "persisted Caddyfile adaptation differs from intended configuration")
+        status, _headers, body = self.admin_request("GET", "/config/")
+        h.need(status == 200, "caddy config export failed")
+        running = json.loads(body)
+        route_path = find_main_route_path(running, old_dial)
+        status, _headers, body = self.admin_request("GET", route_path)
+        route = json.loads(body)
+        h.need(status == 200 and route_is_main(route, old_dial), "route identity drifted before exposure")
+        h.need(replace_one_dial(copy.deepcopy(route), old_dial, new_dial) == 1, "main dial is not singular")
+        h.save(self.root / "exposure-started.json",
+               {"release": self.sha, "full_load": False, "route_path": route_path})
+        updated = self.commit_caddyfile_dial(old_dial.encode(), new_dial.encode(), pre["inode"])
+        h.write_new(self.root / "Caddyfile.candidate", updated)
+        self.cas_file(updated, pre["inode"])
+        applied = conditional_dial_patch(self.admin_request, old_dial, new_dial)
+        # F2 切流后：持久文件与运行配置必须语义一致；两边同源 real-path adapt vs live runtime。
+        h.need(self.mounted_caddy() == applied,
+               "persisted Caddyfile differs from running configuration after cutover")
+        return {"active": applied, "active_dial": new_dial, "full_load": False,
+                "forward_only_after_exposure": True}
+
+    def verify(self):
+        self.writers_exact({self.app})
+        result = hf.Hotfix.verify(self)
+        result["published_version"] = self.require_public_version()
+        h.need(self.schema() == SCHEMA, "live schema changed")
+        for name in (self.app, self.front):
+            image = self.inspect(self.inspect(name)["Image"], True)
+            h.need(image["Config"]["Labels"].get("org.opencontainers.image.revision") == self.sha == APP_SHA,
+                   "running image is not the pinned release")
+        result["schema"] = SCHEMA
+        result["migration_performed"] = False
+        return result
+
+    def rollback(self):
+        """Before exposure only. Keep schema 98af, restart the exact previous writer, restore no dump.
+
+        暴露判据唯一以 exposure-started.json 为准（cutover() 先把该标记落盘，再做文件/Caddy 变更）。
+        cutover.intent.json 只表示"曾进入切流阶段"；若切流在写暴露标记之前失败（写者/身份/CAS
+        前置检查），生产入口尚未改变，recover 仍允许，避免把可恢复的失败锁成前向修复。
+        """
+        h.need(not (self.root / "exposure-started.json").exists(),
+               "exposure may have begun; forward repair required")
+        pre = self.marker("preflight")
+        self.cas((self.root / "Caddyfile.baseline").read_bytes(), pre["active"], pre["inode"])
+        head = self.schema()
+        h.need(head == SCHEMA, "schema changed; forward repair required")
+        names = self.run(["docker", "ps", "-a", "--format", "{{.Names}}"]).decode().splitlines()
+        for name, key in ((self.app, "app"), (self.front, "frontend")):
+            if name in names:
+                row = self.inspect(name)
+                h.need(row["Image"] == self.m[key + "_image"] and row["Config"]["Labels"].get("bg.release") == self.sha,
+                       "candidate identity drift")
+                self.run(["docker", "stop", "--time", "60", row["Id"]])
+        old = self.inspect(self.old_app)
+        h.need(old["Id"] == self.m["old_app_id"] and old["Image"] == self.m["old_app_image"], "old writer identity drift")
+        if not old["State"]["Running"]:
+            self.writers_exact(set())
+            self.source_tcp_zero()
+            if (self.root / "freeze.json").exists():
+                self.unchanged_business()
+            else:
+                h.need(not (self.root / "migrate.intent.json").exists(), "partial migration attempt")
+            self.run(["docker", "start", old["Id"]])
+        h.need(self.schema() == SCHEMA, "recovery changed schema")
+        self.wait_http("https://ybwznt.com/health/db")
+        return {"schema": SCHEMA, "schema_preserved": True, "migration_performed": False,
+                "restored_dump_into_production": False, "downgrade_invoked": False}
+
+    def recover_gate(self):
+        """recover 的非变更前置资格检查；必须在写 recover intent 之前调用。
+
+        否则一次被拒绝的 recover（已暴露/schema 变化）也会留下 recover-*.intent.json，
+        使正常阶段永久终止、连 verify 都无法继续（独立复审 F5）。
+        """
+        h.need(not (self.root / "exposure-started.json").exists(),
+               "exposure may have begun; forward repair required")
+        h.need(self.schema() == SCHEMA, "schema changed; forward repair required")
+
+    def execute(self, phase):
+        h.need(phase in {*PHASES, "recover"}, "unknown phase")
+        h.need(self.path.read_bytes() == self.manifest_bytes, "manifest changed")
+        if phase == "recover":
+            self.recover_gate()
+        if phase != "recover":
+            h.need(not list(self.root.glob("recover-*.intent.json")), "recovered release is terminal")
+        predecessor = h.BASE / PREDECESSOR_OWNER
+        before = predecessor.read_bytes()
+        self.evidence()
+        require_same_bytes(before, predecessor.read_bytes(), "predecessor owner changed")
+        owner = h.BASE / OWNER_NAME
+        identity = {"release": self.sha, "manifest_sha256": h.digest(self.manifest_bytes),
+                    "controller_sha256": self.m["controller_sha256"]}
+        if not owner.exists():
+            h.need(phase == "preflight", "missing preparation")
+            h.save(owner, identity)
+        h.need(file_mode(owner, 0o600) and json.loads(owner.read_bytes()) == identity, "release ownership mismatch")
+        require_same_bytes(before, predecessor.read_bytes(), "predecessor owner changed")
+        if phase != "recover" and phase != "preflight":
+            self.marker(PHASES[PHASES.index(phase) - 1])
+        suffix = phase + ("-" + h.stamp() + "-" + uuid.uuid4().hex if phase in {"verify", "recover"} else "")
+        h.save(self.root / (suffix + ".intent.json"), {**identity, "phase": phase, "time": h.stamp()})
+        if phase.startswith("backup-"):
+            result = self.backup(phase.split("-")[1])
+        else:
+            result = self.rollback() if phase == "recover" else getattr(self, phase)()
+        h.need(isinstance(result, dict), "phase result")
+        if phase == "migrate":
+            h.need(result.get("migration_performed") is False and result.get("upgrade_invoked") is False
+                   and result.get("downgrade_invoked") is False, "migration result")
+        # R-06：最终前序 owner 守卫必须在写 PASS receipt 之前；否则并发漂移会留下误导性 PASS 证据。
+        require_same_bytes(before, predecessor.read_bytes(), "predecessor owner changed")
+        receipt = self.root / (suffix + ".json")
+        h.save(receipt, {**identity, "phase": phase, "status": "PASS",
+                         "time": dt.datetime.now(dt.timezone.utc).isoformat(), **result})
+        print(json.dumps({"phase": phase, "status": "PASS", "receipt": str(receipt), "sha256": h.artifact(receipt)["sha256"]}))
+
+
+def production_locks():
+    locks = []
+    try:
+        for name in LOCKS:
+            fd = os.open(h.BASE / name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            locks.append(fd)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return locks
+    except Exception:
+        for fd in reversed(locks):
+            os.close(fd)
+        raise
+
+
+def _record_failure(root):
+    """把失败 traceback 写入私有日志并输出结构化失败行（R-04：锁/构造失败也要留诊断）。"""
+    diagnostic = None
+    try:
+        path = Path(root)
+        if path.is_dir() and not path.is_symlink() and path.resolve() == path:
+            diagnostic = path / ("failure-" + h.stamp() + ".private.log")
+            h.write_new(diagnostic, traceback.format_exc())
+    except Exception:
+        diagnostic = None
+    print(json.dumps({"status": "FAILED",
+                      "diagnostic": None if diagnostic is None else str(diagnostic),
+                      "rollback_invoked": False}))
+    raise SystemExit(1) from None
+
+
+def run_locked(release, phase):
+    locks = []
+    try:
+        try:
+            locks = production_locks()
+            release.execute(phase)
+        except Exception:
+            _record_failure(release.root)
+    finally:
+        for fd in reversed(locks):
+            os.close(fd)
+
+
+def main(argv=None):
+    argv = list(sys.argv if argv is None else argv)
+    if len(argv) == 4 and argv[1] == "--check-archive":
+        print(json.dumps(check_archive(argv[2], argv[3]), ensure_ascii=False, sort_keys=True))
+        return 0
+    h.need(os.geteuid() == 0 and len(argv) == 3, "usage: requirements_successor_ops.py MANIFEST PHASE (root)")
+    previous_umask = os.umask(0o077)
+    try:
+        try:
+            release = Release(argv[1])
+        except Exception:
+            _record_failure(Path(argv[1]).parent)
+        run_locked(release, argv[2])
+        return 0
+    finally:
+        os.umask(previous_umask)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except BrokenPipeError:
+        raise SystemExit(1) from None
