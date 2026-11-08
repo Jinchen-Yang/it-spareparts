@@ -40,7 +40,7 @@
 
 ## 控制器
 
-入口是 `.deploy/requirements_successor_ops.py`。**接管修复后的已审字节摘要（LF）是 `4c039152b2917e89bfc4fe8c43d1ddfa4e66b6f17d29786b5c42ab4fdc591e3b`**（原候选 `225e4cc5` 时为 `939e7505f102b7900374c306ab651076de30d54c9d4d060baca27727fd6992ff`）。只读 smoke 是 `.deploy/requirements_successor_smoke.py`，摘要 `f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f`。这两个摘要属于控制器身份；应用镜像身份仍是 `e62cd60`。
+入口是 `.deploy/requirements_successor_ops.py`。**接管修复后的已审字节摘要（LF）是 `9228b10936d54b38190f5d7ae4ff7b5c4bc7f39f742715420aa5d254fb2fd2ae`**（原候选 `225e4cc5` 时为 `939e7505f102b7900374c306ab651076de30d54c9d4d060baca27727fd6992ff`）。只读 smoke 是 `.deploy/requirements_successor_smoke.py`，摘要 `f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f`。这两个摘要属于控制器身份；应用镜像身份仍是 `e62cd60`。
 
 发布目录是 `/data/spareparts/releases/requirements-successor-e62cd60cdbcc3fef896c5289388250057c4ce513`，root、0700，制品 0600。新 owner 是 `.requirements-successor-active-owner.json`。新容器前缀是 `itsp-successor-e62cd60cdbcc`。旧容器、旧目录和旧 owner 保留。
 
@@ -110,20 +110,19 @@ OK (skipped=1)
 
 - 共享池合同 `test_presales_pool_ops.py`：**25 项通过 / 1 项按既有条件跳过**（设置 `ITSP_CADDY_CONTRACT_IMAGE=caddy:2.11.4`，与 CI 一致）；
 - 可见性合同 `test_requirements_visibility_ops.py`：**5 项通过**；
-- 接续合同 `test_requirements_successor_ops.py`（除 `ArchiveTests`/`FetchContractTests`——这两类需要完整 Git 对象与远端网络，由 CI 覆盖）：**36 项通过**；
+- 接续合同 `test_requirements_successor_ops.py`（除 `ArchiveTests`/`FetchContractTests`——这两类需要完整 Git 对象与远端网络，由 CI 覆盖）：**37 项通过**；
 - Caddy docker 分支真实容器：`CaddyConditionalTests` 通过；运行后 `docker ps -a --filter name=itst-team-caddytest-` 与 `itsp-successor-caddy` **均无残留容器**；
 - 控制器字节摘要（LF）：见「控制器」节；smoke 摘要仍为 `f44594c3…196f`；visibility/pool 继承链摘要不变。
 
-本轮修复覆盖：Caddy docker 分支 admin 端口统一（P1，CI run `42375262184` 根因）、测试容器清理、manifest `helper_sha256` 继承链校验（P2-1）、recover 暴露判据与前置门（P2-2 / F5）、切流主站 matcher OR 语义（F1）与对应 hermetic 反例（P2-4）。仍未覆盖：真实 Git 对照（Archive/Fetch 类，CI 覆盖）、真实 Linux 多进程 flock 竞争、真实 Caddy 重载与生产恢复。
+本轮修复覆盖：Caddy docker 分支 admin 端口统一（P1，CI run `42375262184` 根因）、测试容器清理、manifest `helper_sha256` 继承链校验（P2-1）、recover 暴露判据与前置门（P2-2 / F5）、切流主站 matcher OR 语义（F1）、**切流前后持久 Caddyfile 的语义再校验（F2）**与对应 hermetic 反例（P2-4）。仍未覆盖：真实 Git 对照（Archive/Fetch 类，CI 覆盖）、真实 Linux 多进程 flock 竞争、真实 Caddy 重载与生产恢复。
 
 ## 独立复审与已知边界
 
 接管方在修复前后做了两次独立复审（报告落盘在团队目录、非本仓库，供执行授权方查阅）：
 
 - `team/reports/tech/review/2026-11-08-516独立复审-qa.md`：P0=0、P1=1（Caddy 端口，已修）、P2=4（helper_sha256 / recover 边界 / 容器清理 / 测试覆盖，已按建议修复或补测）、P3=8（文档/措辞）。
-- `team/reports/tech/review/2026-11-08-516独立复审-codex.md`（**Codex 后端独立复审**）：P0=0、P1=3、P2=4。已修 **F1**（matcher OR 语义）与 **F5**（被拒绝的 recover 污染发布状态）；以下为**已知边界/后续加固项**：
-  - **F2**（重读后的 Caddyfile 未再做语义校验）：执行前必须由操作员确认 Caddyfile 唯一写者，并在切流前复核 mounted 与 running 配置；代码加固另立任务。
-  - **F3**（advisory flock 无法阻止不取锁的写者）：发布窗口必须冻结其他配置写者（runbook 明确列出并核对）；应用层无法完全消除。
+- `team/reports/tech/review/2026-11-08-516独立复审-codex.md`（**Codex 后端独立复审**）：P0=0、P1=3、P2=4。已修 **F1**（matcher OR 语义）、**F2**（重读后未语义校验）、**F5**（被拒绝的 recover 污染发布状态）；以下为**已知边界/后续加固项**：
+  - **F3（显式接受项）**：advisory `flock` 无法阻止不取锁的其他配置写者，二次读→写仍有理论丢写窗口。本控制器**接受该残余风险**，并以执行前置条件约束：发布窗口必须冻结 Caddy 配置的其他写入者（含人工/其他代理），由操作员在 `freeze` 前用只读方式核对无并发 Admin 写者并留证；该残余风险不因本接受声明而消除，见「执行前人工核验清单」第 3、5 条。
   - **F4**（route CAS 作用域与全配置比较不一致，合法并发修改可能被误判）：遇到 412/异常/回执丢失时按 intent + 现场显式 reconcile（人工），不自动回滚。
   - **F6**（后续阶段未重绑备份制品字节）：启用候选/切流前由操作员复核 dump/uploads 摘要与恢复回执一致；代码加固另立任务。
   - **F7**（Docker-only 环境下 `FileRestartTests` 缺少启动/查询分支）：测试缺口记录；CI 若未安装 caddy 二进制，该用例只做字节替换断言，不能当作"重启后保持其他站点"的证明。
@@ -131,6 +130,18 @@ OK (skipped=1)
 跨模型复审现状：上述 Codex 后端复审为独立模型通道尝试；本文件不把同模型复审冒充为跨模型复审。最终合并与执行结论仍需 `lead`/用户与执行授权方确认。
 
 这些边界不改变"禁止自动回滚 / 暴露后前向处理"的既有安全方向，但意味着本控制器**合并后仍不是可直接执行生产阶段的授权**：执行前必须 用户授权 + 现场重读 + 上述边界由执行方逐项确认或完成后续加固。
+
+## 执行前人工核验清单（每次生产执行必做，不替代代码门禁）
+
+1. **用户明确授权**：`lead` 转达、精确候选 SHA/tag 意图、发布窗口与写冻结时段；
+2. **现场重读**：生产容器/镜像 ID、DB head、Caddy 运行配置与挂载字节、前序 owner 摘要，全部与 manifest 一致（不得只抄文档）；
+3. **Caddy 唯一写者（F3 接受项）**：发布窗口内确认无其他 Caddy Admin 写者/人工改配置/并发发布锁占用，并留证；
+4. **冻结前置**：旧应用已停、本库 TCP 客户端=0、业务写者为空（freeze/backup 回执核对）；
+5. **F3 残余风险记录**：advisory flock 不能检测不取锁的外部写者；操作员按 runbook 冻结其他配置写者并记录——本控制器不声称能替代该人工核验；
+6. **备份制品（F6）**：dump/uploads/globals 的路径、权限、大小、SHA256 与恢复回执一致；
+7. **恢复演练**：备份在隔离 PG15 无网络实例真实恢复并核对 head/关键表；`.deploy/restore_drill.sh` 的已审核 head 必须先随 schema 发布更新（见 release-prep PR）；
+8. **失败处理**：切流前失败按 `recover` 前向修复；`exposure-started.json` 出现后不自动回滚，按 runbook 前向处理；
+9. **执行后复核**：两域名静态/版本/API/角色/DB 健康/镜像 revision 复核，保存私有不可覆盖回执与 0/5/15/30 分钟验证记录。
 
 ## 执行限制
 
