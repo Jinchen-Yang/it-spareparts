@@ -1262,6 +1262,52 @@ class SuccessorManifestAndTestContractTests(unittest.TestCase):
         self.assertEqual(caddyfile.read_bytes(), expected_bytes)
         self.assertEqual(release.adapt_caddyfile_bytes.call_count, 2)
 
+    def test_head_revision_accepts_single_head_and_rejects_multiplicity(self):
+        """alembic heads 容错：单 head（含合法 mergepoint 后缀）通过，多 head/漂移拒绝。"""
+        release = object.__new__(ops.Release)
+        release.alembic = Mock(side_effect=[
+            "98afc0d2157b (head)",
+            "98afc0d2157b (head) (mergepoint)",
+        ])
+        self.assertEqual(ops.Release.head_revision(release), "98afc0d2157b (head)")
+        self.assertEqual(ops.Release.head_revision(release), "98afc0d2157b (head) (mergepoint)")
+        release.alembic = Mock(return_value="98afc0d2157b (head)\ne5a7c9d1f3b6 (head)")
+        with self.assertRaisesRegex(RuntimeError, "exactly one migration head"):
+            ops.Release.head_revision(release)
+        release.alembic = Mock(return_value="e5a7c9d1f3b6 (head)")
+        with self.assertRaisesRegex(RuntimeError, "candidate migration head"):
+            ops.Release.head_revision(release)
+
+    def test_current_revision_accepts_mergepoint_suffix(self):
+        """98af 是合并修订：alembic current 输出带 (mergepoint) 也必须被接受。"""
+        release = object.__new__(ops.Release)
+        release.alembic = Mock(side_effect=[
+            "98afc0d2157b (head) (mergepoint)",
+            "98afc0d2157b (head)",
+        ])
+        self.assertEqual(ops.Release.current_revision(release), "98afc0d2157b (head) (mergepoint)")
+        self.assertEqual(ops.Release.current_revision(release), "98afc0d2157b (head)")
+
+    def test_current_revision_rejects_multiplicity_or_drift(self):
+        release = object.__new__(ops.Release)
+        release.alembic = Mock(return_value="98afc0d2157b (head)\nother (head)")
+        with self.assertRaisesRegex(RuntimeError, "exactly one current revision"):
+            ops.Release.current_revision(release)
+        release.alembic = Mock(return_value="e5a7c9d1f3b6 (head)")
+        with self.assertRaisesRegex(RuntimeError, "not already at the held head"):
+            ops.Release.current_revision(release)
+        for malformed in (
+            "98afc0d2157b (head) (mergepoint) extra",
+            "98af (mergepoint)c0d2157b (head)",
+            "98afc0d2157b (head) (mergepoint) (mergepoint)",
+            "98afc0d2157b (head)  extra",
+        ):
+            release.alembic = Mock(return_value=malformed)
+            with self.assertRaisesRegex(RuntimeError, "not already at the held head"):
+                ops.Release.current_revision(release)
+        release.alembic = Mock(return_value="98afc0d2157b (head)")
+        self.assertEqual(ops.Release.current_revision(release), "98afc0d2157b (head)")
+
     def test_protected_config_normalizes_mount_order(self):
         """Docker 29 的 Mounts 顺序随机，config() 必须规范化顺序但保留字段语义。"""
         base = {
