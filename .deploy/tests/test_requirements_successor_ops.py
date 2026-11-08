@@ -853,10 +853,17 @@ class CaddyConditionalTests(unittest.TestCase):
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.request = self.local_request
         elif shutil.which("docker"):
-            self.container = "itsp-successor-caddy-m2-" + os.urandom(4).hex()
+            # Docker 分支：容器内 Caddy admin 固定监听 2019。self.port 必须与 admin 端口一致：
+            # 测试方法会用 caddy_config(self.port) 做 POST /load；若 self.port 仍是 local 分支的
+            # 20219，/load 会把 admin 迁到 20219，随后 docker_request 仍 curl 2019 必然失败
+            # （CI 确定性红，run 42375262184）。容器名前缀可用环境变量覆盖（共享主机要求 itst-team-*）。
+            self.port = 2019
+            prefix = os.environ.get("ITSP_CADDY_CONTRACT_NAME_PREFIX", "itsp-successor-caddy-m2-")
+            self.container = prefix + os.urandom(4).hex()
+            self.addCleanup(self._remove_container)
             image = os.environ.get("ITSP_CADDY_CONTRACT_IMAGE", "caddy:2.11.4")
             config = Path("/tmp") / (self.container + ".json")
-            config.write_text(json.dumps(caddy_config(2019)))
+            config.write_text(json.dumps(caddy_config(self.port)))
             created = subprocess.run(["docker", "create", "--network", "none", "--name", self.container, image,
                                       "caddy", "run", "--config", "/etc/caddy/itsp.json"], capture_output=True, text=True)
             self.assertEqual(created.returncode, 0, created.stderr)
@@ -886,6 +893,12 @@ class CaddyConditionalTests(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=5)
+
+    def _remove_container(self):
+        """docker 分支的清理：tearDown 只处理 local caddy 进程，容器必须在 addCleanup 中删除。"""
+        if self.container:
+            subprocess.run(["docker", "rm", "-f", self.container],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def local_request(self, method, path, body=None, headers=None):
         command = ["curl", "-sS", "--max-time", "5", "-D", "-", "-o", "-", "-w", "\n__STATUS__%{http_code}",
