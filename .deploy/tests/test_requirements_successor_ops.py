@@ -348,6 +348,16 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result["restored_dump_into_production"], False)
         self.assertEqual(result["schema"], ops.SCHEMA)
 
+    def test_recover_gate_blocks_before_intent_creation(self):
+        """F5：recover 资格检查必须在写 intent 之前执行（拒绝操作不得污染发布状态）。"""
+        release = self.release()
+        (release.root / "exposure-started.json").write_text("{}\n")
+        with self.assertRaisesRegex(RuntimeError, "forward repair"):
+            ops.Release.recover_gate(release)
+        release.run.assert_not_called()
+        clean = self.release()
+        self.assertIsNone(ops.Release.recover_gate(clean))
+
 
 class EvidenceTests(unittest.TestCase):
     def test_missing_gate_fails_before_predecessor_or_archive(self):
