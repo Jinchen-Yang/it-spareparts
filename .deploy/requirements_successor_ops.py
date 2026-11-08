@@ -35,11 +35,10 @@ OLD_SHA = "782c858a75d1f38991aa7151e9eb54f0474fb031"
 OLD_PREFIX = "itsp-requirements-" + OLD_SHA[:12]
 VISIBILITY_DIGEST = "6b2fe7287242ff6ce5dfcd785613877ef49dd80f13fb8ea15c4d244e93d37e9d"
 SMOKE_DIGEST = "f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f"
-# 继承自 feedback_release_ops.Hotfix.preflight 的历史 helper（presales3_ops.py）字节摘要。
-# 该 helper 由历史控制器在运行时按 manifest["helper_sha256"] 校验；后继入口必须在
-# manifest 中显式携带该字段并通过本常量锁定，否则继承链会在 preflight 才 KeyError。
+# 历史控制器在同一个 presales3_ops.py 上使用名为 helper_sha256 的摘要字段。本入口继承链中的
+# Hotfix.preflight 不读取本 manifest，因此这是**纵深防御的额外固定字段**：manifest 必须携带并
+# 锁定同一 helper 摘要，供审计与前序控制器交叉核对；删除它不改变本入口的门禁语义。
 HELPER_DIGEST = "054e67d143a808e5672eea716573ac23a4ecf47ae6cd9a762a89901acfff5f16"
-HELPER_NAME = "presales3_ops.py"
 PREDECESSOR_OWNER = ".requirements-visibility-active-owner.json"
 OWNER_NAME = ".requirements-successor-active-owner.json"
 LOCKS = (".catalog-source-handoff.lock", ".itsp-production-deploy.lock")
@@ -333,10 +332,6 @@ def collect_dials(node, found):
     elif isinstance(node, list):
         for item in node:
             collect_dials(item, found)
-
-
-def route_hosts(route):
-    return {host for match in (route.get("match") or []) for host in (match.get("host") or [])}
 
 
 def main_matcher_hosts(route):
@@ -641,12 +636,14 @@ class Release(vis.Release):
                 hook()
             current = self.read_fd(fd)
             h.need(current.count(old_bytes) == 1, "live Caddyfile upstream is not singular")
-            if desired is not None:
-                h.need(self.adapt_caddyfile_bytes(current) == desired,
-                       "persisted Caddyfile adaptation differs from intended configuration")
             prefix, matched, suffix = current.partition(old_bytes)
             h.need(matched == old_bytes and old_bytes not in suffix, "live Caddyfile upstream is not singular")
             updated = prefix + new_bytes + suffix
+            if desired is not None:
+                # 比较**即将写入的字节**的 adaptation 与计划运行配置；拿替换前的 current 比较会在
+                # 正常切流必错（独立复审 R-01），也无法发现站点归属被并发交换（F2）。
+                h.need(self.adapt_caddyfile_bytes(updated) == desired,
+                       "persisted Caddyfile adaptation differs from intended configuration")
             os.lseek(fd, 0, os.SEEK_SET)
             view = memoryview(updated)
             while view:
@@ -688,7 +685,23 @@ class Release(vis.Release):
         pre = self.marker("preflight")
         old_dial, new_dial = self.old_front + ":80", self.front + ":80"
         _after_bytes, desired = self.plan_caddy_change(pre)
-        h.save(self.root / "exposure-started.json", {"release": self.sha, "full_load": False})
+        # R-07/R-08：所有可能因并发写者/route 形状而失败的校验必须在 exposure 之前完成，
+        # 否则一次拒绝会留下 exposure-started.json，把可恢复失败锁成前向修复。
+        current = self.caddyfile.read_bytes()
+        h.need(current.count(old_dial.encode()) == 1, "live Caddyfile upstream is not singular")
+        preview = current.replace(old_dial.encode(), new_dial.encode())
+        h.need(self.adapt_caddyfile_bytes(preview) == desired,
+               "persisted Caddyfile adaptation differs from intended configuration")
+        status, _headers, body = self.admin_request("GET", "/config/")
+        h.need(status == 200, "caddy config export failed")
+        running = json.loads(body)
+        route_path = find_main_route_path(running, old_dial)
+        status, _headers, body = self.admin_request("GET", route_path)
+        route = json.loads(body)
+        h.need(status == 200 and route_is_main(route, old_dial), "route identity drifted before exposure")
+        h.need(replace_one_dial(copy.deepcopy(route), old_dial, new_dial) == 1, "main dial is not singular")
+        h.save(self.root / "exposure-started.json",
+               {"release": self.sha, "full_load": False, "route_path": route_path})
         updated = self.commit_caddyfile_dial(old_dial.encode(), new_dial.encode(), pre["inode"], desired)
         h.write_new(self.root / "Caddyfile.candidate", updated)
         self.cas_file(updated, pre["inode"])
@@ -788,10 +801,11 @@ class Release(vis.Release):
         if phase == "migrate":
             h.need(result.get("migration_performed") is False and result.get("upgrade_invoked") is False
                    and result.get("downgrade_invoked") is False, "migration result")
+        # R-06：最终前序 owner 守卫必须在写 PASS receipt 之前；否则并发漂移会留下误导性 PASS 证据。
+        require_same_bytes(before, predecessor.read_bytes(), "predecessor owner changed")
         receipt = self.root / (suffix + ".json")
         h.save(receipt, {**identity, "phase": phase, "status": "PASS",
                          "time": dt.datetime.now(dt.timezone.utc).isoformat(), **result})
-        require_same_bytes(before, predecessor.read_bytes(), "predecessor owner changed")
         print(json.dumps({"phase": phase, "status": "PASS", "receipt": str(receipt), "sha256": h.artifact(receipt)["sha256"]}))
 
 
@@ -809,16 +823,30 @@ def production_locks():
         raise
 
 
+def _record_failure(root):
+    """把失败 traceback 写入私有日志并输出结构化失败行（R-04：锁/构造失败也要留诊断）。"""
+    diagnostic = None
+    try:
+        path = Path(root)
+        if path.is_dir() and not path.is_symlink() and path.resolve() == path:
+            diagnostic = path / ("failure-" + h.stamp() + ".private.log")
+            h.write_new(diagnostic, traceback.format_exc())
+    except Exception:
+        diagnostic = None
+    print(json.dumps({"status": "FAILED",
+                      "diagnostic": None if diagnostic is None else str(diagnostic),
+                      "rollback_invoked": False}))
+    raise SystemExit(1) from None
+
+
 def run_locked(release, phase):
-    locks = production_locks()
+    locks = []
     try:
         try:
+            locks = production_locks()
             release.execute(phase)
         except Exception:
-            log = release.root / ("failure-" + h.stamp() + ".private.log")
-            h.write_new(log, traceback.format_exc())
-            print(json.dumps({"status": "FAILED", "diagnostic": str(log), "rollback_invoked": False}))
-            raise SystemExit(1) from None
+            _record_failure(release.root)
     finally:
         for fd in reversed(locks):
             os.close(fd)
@@ -832,7 +860,11 @@ def main(argv=None):
     h.need(os.geteuid() == 0 and len(argv) == 3, "usage: requirements_successor_ops.py MANIFEST PHASE (root)")
     previous_umask = os.umask(0o077)
     try:
-        run_locked(Release(argv[1]), argv[2])
+        try:
+            release = Release(argv[1])
+        except Exception:
+            _record_failure(Path(argv[1]).parent)
+        run_locked(release, argv[2])
         return 0
     finally:
         os.umask(previous_umask)

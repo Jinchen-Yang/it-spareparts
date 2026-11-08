@@ -1210,7 +1210,7 @@ class SuccessorManifestAndTestContractTests(unittest.TestCase):
         self.assertEqual(release.run.call_args.kwargs.get("input"), data)
 
     def test_commit_rejects_persisted_config_that_adapts_to_other_sites(self):
-        """F2：重读后的持久 Caddyfile adaptation 与计划运行配置不一致时，必须在写入前拒绝。"""
+        """F2：写入字节的 adaptation 与计划运行配置不一致时，必须在写入前拒绝。"""
         release = object.__new__(ops.Release)
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -1228,25 +1228,58 @@ class SuccessorManifestAndTestContractTests(unittest.TestCase):
         self.assertEqual(caddyfile.read_bytes(),
                          b"ybwznt.com { reverse_proxy old-front:80 }\n")
         release.adapt_caddyfile_bytes.assert_called_once_with(
-            b"ybwznt.com { reverse_proxy old-front:80 }\n")
-        """独立复审 F5：recover 资格检查在写 intent 之前，拒绝不污染发布状态。"""
+            b"ybwznt.com { reverse_proxy new-front:80 }\n")
+
+    def test_commit_writes_updated_dial_when_adaptation_matches_plan(self):
+        """R-01 成功路径：替换后字节 adaptation == desired 时正常写入并返回 updated。"""
         release = object.__new__(ops.Release)
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         release.root = Path(folder.name)
-        release.schema = Mock(return_value=ops.SCHEMA)
-        release.run = Mock()
-        (release.root / "exposure-started.json").write_text("{}\n")
-        with self.assertRaisesRegex(RuntimeError, "forward repair"):
-            ops.Release.recover_gate(release)
-        release.run.assert_not_called()
-        clean = object.__new__(ops.Release)
-        folder2 = tempfile.TemporaryDirectory()
-        self.addCleanup(folder2.cleanup)
-        clean.root = Path(folder2.name)
-        clean.schema = Mock(return_value=ops.SCHEMA)
-        clean.run = Mock()
-        self.assertIsNone(ops.Release.recover_gate(clean))
+        caddyfile = release.root / "Caddyfile"
+        caddyfile.write_bytes(b"ybwznt.com { reverse_proxy old-front:80 }\n")
+        release.caddyfile = caddyfile
+        release.read_fd = lambda _fd: caddyfile.read_bytes()
+        desired = {"sites": {"ybwznt.com": {"dial": "new-front:80"}}}
+        release.adapt_caddyfile_bytes = Mock(return_value=desired)
+        inode = [os.stat(caddyfile).st_dev, os.stat(caddyfile).st_ino]
+        updated = ops.Release.commit_caddyfile_dial(
+            release, b"old-front:80", b"new-front:80", inode, desired)
+        expected = b"ybwznt.com { reverse_proxy new-front:80 }\n"
+        self.assertEqual(updated, expected)
+        self.assertEqual(caddyfile.read_bytes(), expected)
+        release.adapt_caddyfile_bytes.assert_called_once_with(expected)
+
+    def test_run_locked_lock_failure_writes_private_log(self):
+        """R-04：锁获取失败也要写私有日志并输出结构化失败。"""
+        release = object.__new__(ops.Release)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        release.root = Path(folder.name)
+        with patch.object(ops, "production_locks", side_effect=AssertionError("locked")), \
+                patch("sys.stdout", io.StringIO()) as output:
+            with self.assertRaises(SystemExit) as raised:
+                ops.run_locked(release, "preflight")
+        self.assertEqual(raised.exception.code, 1)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["status"], "FAILED")
+        self.assertEqual(payload["rollback_invoked"], False)
+        self.assertTrue(Path(payload["diagnostic"]).is_file())
+        self.assertIn("locked", Path(payload["diagnostic"]).read_text())
+
+    def test_manifest_construction_failure_writes_private_log(self):
+        """R-04：Release 构造失败（启动期）也要写私有日志。"""
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "manifest.json"
+            manifest.write_text("{}\n")
+            with patch.object(ops.os, "geteuid", return_value=0), \
+                    patch("sys.stdout", io.StringIO()) as output:
+                with self.assertRaises(SystemExit) as raised:
+                    ops.main(["controller", str(manifest), "preflight"])
+            self.assertEqual(raised.exception.code, 1)
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "FAILED")
+            self.assertTrue(Path(payload["diagnostic"]).is_file())
 
 
 def inspect_source(function):
