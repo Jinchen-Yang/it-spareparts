@@ -501,6 +501,23 @@ class Release(vis.Release):
         self.app, self.front, self.net = self.prefix + "-app", self.prefix + "-frontend", self.prefix + "-net"
         self.caddyfile = Path(self.m["caddyfile"])
 
+    @staticmethod
+    def config(row):
+        """保护配置比较：仅规范化 `Mounts` 数组顺序，不忽略任何字段。
+
+        生产 Docker 29.1.3 的 `docker inspect ... .Mounts` 返回顺序是 map 迭代顺序，
+        同一容器连续调用会随机变化（实测 6 个 mount 出现多种顺序）；继承自可见性控制器
+        的 `protected()` 直接比较原始数组，会在**没有任何真实变更**时 fail-closed。
+        这里按 (Destination, Type, Source) 稳定排序后再交给父类；源/目标/类型等人为
+        变更仍会改变比较结果并被拒绝。
+        """
+        normalized = dict(row)
+        normalized["Mounts"] = sorted(
+            row.get("Mounts") or [],
+            key=lambda mount: (mount.get("Destination", ""), mount.get("Type", ""), mount.get("Source", "")),
+        )
+        return vis.Release.config(normalized)
+
     def alembic(self, args):
         h.need(isinstance(args, list) and bool(args) and args[0] in ALLOWED_ALEMBIC
                and "upgrade" not in args and "downgrade" not in args, "migration command refused")
