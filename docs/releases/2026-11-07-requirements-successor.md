@@ -127,7 +127,8 @@ OK (skipped=1)
   - **F4**（route CAS 作用域与全配置比较不一致，合法并发修改可能被误判）：遇到 412/异常/回执丢失时按 intent + 现场显式 reconcile（人工），不自动回滚。
   - **F6**（后续阶段未重绑备份制品字节）：启用候选/切流前由操作员复核 dump/uploads 摘要与恢复回执一致；代码加固另立任务。
   - **F8（运行时发现，已修）**：生产 Docker 29.1.3 的 `docker inspect ... .Mounts` 返回顺序为 map 迭代顺序，同一容器连续调用会随机变化；继承自可见性控制器的 `protected()` 直接比较 `{Config,HostConfig,Mounts}` 原始数组，会在**无真实变更**时误报 `protected configuration drift`（首次发布尝试因此在 `images` 阶段 fail-closed）。修复：本入口覆盖 `config()`，仅把 `Mounts` 按 `(Destination,Type,Source)` 排序后再比较（不忽略任何字段；真实配置漂移仍拒绝），并补乱序等价/真实漂移测试。
-  - **F11（运行时发现，已修）**：Caddy `/config/` 导出的顶层 route 附带 `"terminal": true`；`route_is_main` 原严格键集 `{match,handle}` 把它判为未知结构 → attempt3 `cutover` 在写 exposure 标记前 fail-closed（`main route is not singular`），随后 pre-exposure `recover` 恢复旧应用。修复：允许已核实的 `terminal` 键（必须为 true），其他未知键仍 fail-closed；补接受/拒绝测试；并以真实快照 dry-run 回放验证（15/15 PASS）。  - **F9（运行时发现，已修）**：`alembic current` 对合并修订会输出 `98afc0d2157b (head) (mergepoint)`（98af 即 mergepoint）；no-op migrate 首版断言精确等于 `98afc0d2157b (head)`，导致 attempt2 在 migrate 阶段 fail-closed（随后 pre-exposure `recover` 恢复旧应用，未暴露）。修复：`current_revision()`/`head_revision()` 只接受两种合法输出（held head 或 held head + `(mergepoint)`），仍要求唯一 head/current 行；其余畸形输出一律拒绝。
+  - **F9（运行时发现，已修）**：`alembic current` 对合并修订会输出 `98afc0d2157b (head) (mergepoint)`（98af 即 mergepoint）；no-op migrate 首版断言精确等于 `98afc0d2157b (head)`，导致 attempt2 在 migrate 阶段 fail-closed（随后 pre-exposure `recover` 恢复旧应用，未暴露）。修复：`current_revision()`/`head_revision()` 只接受两种合法输出（held head 或 held head + `(mergepoint)`），仍要求唯一 head/current 行；其余畸形输出一律拒绝。
+  - **F11（运行时发现，已修）**：Caddy `/config/` 导出的顶层 route 附带 `"terminal": true`；`route_is_main` 原严格键集 `{match,handle}` 把它判为未知结构 → attempt3 `cutover` 在写 exposure 标记前 fail-closed（`main route is not singular`），随后 pre-exposure `recover` 恢复旧应用。修复：允许已核实的 `terminal` 键（必须为 true），其他未知键仍 fail-closed；补接受/拒绝测试；并以真实快照 dry-run 回放验证（19/19 PASS + 16 负例）。
   - **F10（审计结论，仅记录）**：继承自 `requirements_visibility_ops.py` 的 `preflight` 内 `alembic heads == "98afc0d2157b (head)"` 为精确匹配，但该文件字节被摘要锁定且实测 `alembic heads` 单 head 输出不含 `mergepoint` 后缀（attempt2 preflight 已通过），保留现状并在审计报告中登记。
   - **F7**（Docker-only 环境下 `FileRestartTests` 缺少启动/查询分支）：测试缺口记录；CI 若未安装 caddy 二进制，该用例只做字节替换断言，不能当作"重启后保持其他站点"的证明。
   - **R-05（已知 P2，接受）**：intent 为独占创建，阶段失败后重跑同一阶段会 `O_EXCL` 失败；不接受自动清理，须由操作员按私有诊断与现场状态决定前向修复/人工清理（runbook 执行前确认项）。
@@ -147,8 +148,8 @@ OK (skipped=1)
 
 ## 全阶段 dry-run 门禁（freeze 前强制）
 
-- 每次 attempt 在 `freeze` 前，采集当次生产 live 只读快照（`capture_snapshots.sh`，含采集身份/新鲜度/逐文件 sha256）并用 `team/tools/g7/dry_run.py` 离线回放 18 项断言（快照元数据 fail-closed、控制器/manifest 摘要钉定、route 形状/terminal/未知键、条件 PATCH+412+If-Match、adapt 同源与来源差异、curl exchange/ETag、Mounts 规范化、alembic 输出、nginx 摘要、7 类回执身份链与关键值）；**status=PASS 且控制器摘要=已审值并落私有 evidence 后才允许 freeze**。
-- 首次执行结果：18/18 PASS + 11 项负例变异全部 fail-closed（快照 2026-11-08T10:53:31Z；详见 `team/reports/tech/2026-11-08-G7-dry-run报告.md`，其中明确列出未覆盖项与负例日志 `dry-run-negative-tests.log`）。
+- 每次 attempt 在 `freeze` 前，采集当次生产 live 只读快照（`capture_snapshots.sh`，含采集身份/新鲜度/逐文件 sha256）并用 `team/tools/g7/dry_run.py` 离线回放 19 项断言（快照元数据 fail-closed、控制器摘要钉定 + manifest 经控制器 `validate` 校验、route 形状/terminal/未知键、条件 PATCH+412+If-Match、adapt 同源与来源差异、curl exchange/ETag、Mounts 规范化、alembic stdout+exit code、nginx 摘要、7 类回执身份链与严格结构/关键值）；**status=PASS 且控制器摘要=已审值、负例回归 ALL_OK 并落私有 evidence 后才允许 freeze**。
+- 首次执行结果：19/19 PASS + 16 项负例变异全部按目标检查项 fail-closed（快照 2026-11-08T11:22:29Z，候选镜像 alembic 输出含 exit code；详见 `team/reports/tech/2026-11-08-G7-dry-run报告.md`，其中明确列出未覆盖项与负例日志 `dry-run-negative-tests.log`）。
 
 ## 执行前人工核验清单（每次生产执行必做，不替代代码门禁）
 
