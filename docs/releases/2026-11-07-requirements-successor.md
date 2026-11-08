@@ -147,8 +147,8 @@ OK (skipped=1)
 
 ## 全阶段 dry-run 门禁（freeze 前强制）
 
-- 每次 attempt 在 `freeze` 前，采集当次生产 live 只读快照（`capture_snapshots.sh`，含采集身份/新鲜度/逐文件 sha256）并用 `team/tools/g7/dry_run.py` 离线回放 17 项断言（route 形状/terminal/未知键、条件 PATCH+412+If-Match、adapt 同源与来源差异、curl exchange/ETag、Mounts 规范化、alembic 输出、nginx 摘要、回执身份链与关键值）；**status=PASS 并落私有 evidence 后才允许 freeze**。
-- 首次执行结果：17/17 PASS（快照 2026-11-08T10:53:31Z，回放时年龄 1.5 分钟；详见 `team/reports/tech/2026-11-08-G7-dry-run报告.md`，其中明确列出未覆盖项）。
+- 每次 attempt 在 `freeze` 前，采集当次生产 live 只读快照（`capture_snapshots.sh`，含采集身份/新鲜度/逐文件 sha256）并用 `team/tools/g7/dry_run.py` 离线回放 18 项断言（快照元数据 fail-closed、控制器/manifest 摘要钉定、route 形状/terminal/未知键、条件 PATCH+412+If-Match、adapt 同源与来源差异、curl exchange/ETag、Mounts 规范化、alembic 输出、nginx 摘要、7 类回执身份链与关键值）；**status=PASS 且控制器摘要=已审值并落私有 evidence 后才允许 freeze**。
+- 首次执行结果：18/18 PASS + 11 项负例变异全部 fail-closed（快照 2026-11-08T10:53:31Z；详见 `team/reports/tech/2026-11-08-G7-dry-run报告.md`，其中明确列出未覆盖项与负例日志 `dry-run-negative-tests.log`）。
 
 ## 执行前人工核验清单（每次生产执行必做，不替代代码门禁）
 
