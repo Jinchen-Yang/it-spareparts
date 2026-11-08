@@ -40,7 +40,7 @@
 
 ## 控制器
 
-入口是 `.deploy/requirements_successor_ops.py`。**接管修复后的已审字节摘要（LF）是 `1879e3b059f3676a14aa8013c8f96804f00bf50329e7d6a749f960fa45470add`**（原候选 `225e4cc5` 时为 `939e7505f102b7900374c306ab651076de30d54c9d4d060baca27727fd6992ff`）。只读 smoke 是 `.deploy/requirements_successor_smoke.py`，摘要 `f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f`。这两个摘要属于控制器身份；应用镜像身份仍是 `e62cd60`。
+入口是 `.deploy/requirements_successor_ops.py`。**接管修复后的已审字节摘要（LF）是 `50e33a688448ea96e83c722c6fd1c11ac287660def0fd681841fa95c77cf68f7`**（原候选 `225e4cc5` 时为 `939e7505f102b7900374c306ab651076de30d54c9d4d060baca27727fd6992ff`）。只读 smoke 是 `.deploy/requirements_successor_smoke.py`，摘要 `f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f`。这两个摘要属于控制器身份；应用镜像身份仍是 `e62cd60`。
 
 发布目录是 `/data/spareparts/releases/requirements-successor-e62cd60cdbcc3fef896c5289388250057c4ce513`，root、0700，制品 0600。新 owner 是 `.requirements-successor-active-owner.json`。新容器前缀是 `itsp-successor-e62cd60cdbcc`。旧容器、旧目录和旧 owner 保留。
 
@@ -110,7 +110,7 @@ OK (skipped=1)
 
 - 共享池合同 `test_presales_pool_ops.py`：**25 项通过 / 1 项按既有条件跳过**（设置 `ITSP_CADDY_CONTRACT_IMAGE=caddy:2.11.4`，与 CI 一致）；
 - 可见性合同 `test_requirements_visibility_ops.py`：**5 项通过**；
-- 接续合同 `test_requirements_successor_ops.py`（除 `ArchiveTests`/`FetchContractTests`——这两类需要完整 Git 对象与远端网络，由 CI 覆盖）：**41 项通过**；
+- 接续合同 `test_requirements_successor_ops.py`（除 `ArchiveTests`/`FetchContractTests`——这两类需要完整 Git 对象与远端网络，由 CI 覆盖）：**42 项通过**；
 - Caddy docker 分支真实容器：`CaddyConditionalTests` 通过；运行后 `docker ps -a --filter name=itst-team-caddytest-` 与 `itsp-successor-caddy` **均无残留容器**；
 - 控制器字节摘要（LF）：见「控制器」节；smoke 摘要仍为 `f44594c3…196f`；visibility/pool 继承链摘要不变。
 
@@ -122,7 +122,7 @@ OK (skipped=1)
 
 - `team/reports/tech/review/2026-11-08-516独立复审-qa.md`：P0=0、P1=1（Caddy 端口，已修）、P2=4（helper_sha256 / recover 边界 / 容器清理 / 测试覆盖，已按建议修复或补测）、P3=8（文档/措辞）。
 - `team/reports/tech/review/2026-11-08-516独立复审-subagent.md`（**同模型 fresh context 第三复审**，被审快照 `753468ae`）：指出 F2 修复的**比较方向错误（R-01，P1：替换前 adapt(current) 与已换新 dial 的 desired 比较，正常切流必错）** 与 R-04/R-06/R-07/R-08 等。处置：R-01 已修正（改为比较即将写入的 updated 字节的 adaptation，补成功路径测试）；R-04（锁/构造失败写私有日志）、R-06（PASS receipt 移至最终守卫后）、R-07/R-08（F2 与 route 身份/形状预检前移到 exposure 之前）均已修；R-05（intent O_EXCL 阻断重试）与 P3 项见下。
-- `team/reports/tech/review/2026-11-08-516独立复审-codex.md`（**Codex 后端独立复审**）：P0=0、P1=3、P2=4。已修 **F1**（matcher OR 语义）、**F2**（重读后未语义校验）、**F5**（被拒绝的 recover 污染发布状态）；以下为**已知边界/后续加固项**：
+- `team/reports/tech/review/2026-11-08-516独立复审-codex.md`（**Codex 后端独立复审**）：P0=0、P1=3、P2=4。已修 **F1**（matcher OR 语义）、**F2**（重读后未语义校验；并按 PR #519 cursor 复审线程改为**同源比较**：stdin bytes→bytes 相对校验 + 切流后 real-path adapt vs live runtime）、**F5**（被拒绝的 recover 污染发布状态）；以下为**已知边界/后续加固项**：
   - **F3（显式接受项）**：advisory `flock` 无法阻止不取锁的其他配置写者，二次读→写仍有理论丢写窗口。本控制器**接受该残余风险**，并以执行前置条件约束：发布窗口必须冻结 Caddy 配置的其他写入者（含人工/其他代理），由操作员在 `freeze` 前用只读方式核对无并发 Admin 写者并留证；该残余风险不因本接受声明而消除，见「执行前人工核验清单」第 3、5 条。
   - **F4**（route CAS 作用域与全配置比较不一致，合法并发修改可能被误判）：遇到 412/异常/回执丢失时按 intent + 现场显式 reconcile（人工），不自动回滚。
   - **F6**（后续阶段未重绑备份制品字节）：启用候选/切流前由操作员复核 dump/uploads 摘要与恢复回执一致；代码加固另立任务。
