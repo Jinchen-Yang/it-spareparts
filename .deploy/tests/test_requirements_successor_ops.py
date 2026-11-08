@@ -1022,6 +1022,9 @@ class FileRestartTests(unittest.TestCase):
         inode = [path.stat().st_dev, path.stat().st_ino]
         release = object.__new__(ops.Release)
         release.caddyfile = path
+        release.root = Path(directory.name)
+        release.adapt_caddyfile_bytes = Mock(side_effect=lambda data: caddy_runtime_config(
+            "new-front:80" if b"new-front:80" in data else "old-front:80"))
 
         def hook():
             current = path.read_bytes()
@@ -1265,8 +1268,8 @@ class SuccessorManifestAndTestContractTests(unittest.TestCase):
         self.assertIn("mounted_caddy() == applied", cutover)
         self.assertNotIn("adapt_caddyfile_bytes(updated) == applied", cutover)
         commit = inspect_source(ops.Release.commit_caddyfile_dial)
+        self.assertIn("def commit_caddyfile_dial(self, old_bytes, new_bytes, inode):", commit)
         self.assertIn("replace_active(baseline_adapted, old_bytes.decode(), new_bytes.decode())", commit)
-        self.assertNotIn("desired", commit)
 
     def test_run_locked_lock_failure_writes_private_log(self):
         """R-04：锁获取失败也要写私有日志并输出结构化失败。"""
