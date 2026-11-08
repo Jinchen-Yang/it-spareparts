@@ -1185,7 +1185,40 @@ class SuccessorManifestAndTestContractTests(unittest.TestCase):
         ):
             self.assertFalse(ops.route_is_main(bad, "old-front:80"))
 
-    def test_recover_gate_blocks_before_intent_creation(self):
+    def test_adapt_uses_live_caddy_offline_stdin(self):
+        """F2：持久字节必须用现场 Caddy 离线 adapt，且走 stdin（不 load、不依赖宿主机二进制）。"""
+        release = object.__new__(ops.Release)
+        release.caddyfile = Path("/tmp/unused")
+        release.caddy_destination = Mock(return_value="/opt/it-spareparts/Caddyfile")
+        release.run = Mock(return_value=b'{"apps": {}}')
+        data = b"ybwznt.com { reverse_proxy old-front:80 }"
+        self.assertEqual(ops.Release.adapt_caddyfile_bytes(release, data), {"apps": {}})
+        argv = release.run.call_args.args[0]
+        self.assertIn("adapt", argv)
+        self.assertIn("--config", argv)
+        self.assertIn("-", argv)
+        self.assertEqual(release.run.call_args.kwargs.get("input"), data)
+
+    def test_commit_rejects_persisted_config_that_adapts_to_other_sites(self):
+        """F2：重读后的持久 Caddyfile adaptation 与计划运行配置不一致时，必须在写入前拒绝。"""
+        release = object.__new__(ops.Release)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        release.root = Path(folder.name)
+        caddyfile = release.root / "Caddyfile"
+        caddyfile.write_bytes(b"ybwznt.com { reverse_proxy old-front:80 }\n")
+        release.caddyfile = caddyfile
+        release.read_fd = lambda _fd: caddyfile.read_bytes()
+        release.adapt_caddyfile_bytes = Mock(return_value={"sites": {"files.example": {}}})
+        inode = [os.stat(caddyfile).st_dev, os.stat(caddyfile).st_ino]
+        with self.assertRaisesRegex(RuntimeError, "persisted Caddyfile adaptation differs"):
+            ops.Release.commit_caddyfile_dial(
+                release, b"old-front:80", b"new-front:80", inode,
+                {"sites": {"ybwznt.com": {}}})
+        self.assertEqual(caddyfile.read_bytes(),
+                         b"ybwznt.com { reverse_proxy old-front:80 }\n")
+        release.adapt_caddyfile_bytes.assert_called_once_with(
+            b"ybwznt.com { reverse_proxy old-front:80 }\n")
         """独立复审 F5：recover 资格检查在写 intent 之前，拒绝不污染发布状态。"""
         release = object.__new__(ops.Release)
         folder = tempfile.TemporaryDirectory()

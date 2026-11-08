@@ -622,8 +622,13 @@ class Release(vis.Release):
             chunks.append(block)
         return b"".join(chunks)
 
-    def commit_caddyfile_dial(self, old_bytes, new_bytes, inode):
-        """Replace one dial on the open inode. Re-read under the lock before writing."""
+    def commit_caddyfile_dial(self, old_bytes, new_bytes, inode, desired=None):
+        """Replace one dial on the open inode. Re-read under the lock before writing.
+
+        F2（独立复审）：重读到写入之间必须把**当前持久字节**重新交给现场 Caddy adapter 校验，
+        要求其 adaptation 精确等于本阶段计划中的运行配置（desired，仅主站 dial 变化）；
+        否则另一个写者已改变站点归属时，文件与运行配置会分别"成功"却指向不同站点。
+        """
         fd = os.open(self.caddyfile, os.O_RDWR | os.O_NOFOLLOW)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -636,6 +641,9 @@ class Release(vis.Release):
                 hook()
             current = self.read_fd(fd)
             h.need(current.count(old_bytes) == 1, "live Caddyfile upstream is not singular")
+            if desired is not None:
+                h.need(self.adapt_caddyfile_bytes(current) == desired,
+                       "persisted Caddyfile adaptation differs from intended configuration")
             prefix, matched, suffix = current.partition(old_bytes)
             h.need(matched == old_bytes and old_bytes not in suffix, "live Caddyfile upstream is not singular")
             updated = prefix + new_bytes + suffix
@@ -662,6 +670,13 @@ class Release(vis.Release):
         inside = self.run(["docker", "exec", h.CADDY, "sha256sum", self.caddy_destination()]).decode().split()[0]
         h.need(inside == h.digest(data), "Caddy bind bytes drift")
 
+    def adapt_caddyfile_bytes(self, data):
+        """用现场 Caddy 二进制离线 adapt 一段 Caddyfile 字节（--config - 走 stdin，不 load）。"""
+        cwd = str(Path(self.caddy_destination()).parent)
+        return json.loads(self.run(
+            ["docker", "exec", "-i", "-w", cwd, h.CADDY, "caddy", "adapt",
+             "--config", "-", "--adapter", "caddyfile"], input=data))
+
     def cutover(self):
         """Keep the live file's other bytes and patch the identified main route. Never POST /load."""
         self.writers_exact({self.app})
@@ -672,12 +687,15 @@ class Release(vis.Release):
                h.fingerprint(self.inspect(self.front)) == blue["frontend"], "candidate changed")
         pre = self.marker("preflight")
         old_dial, new_dial = self.old_front + ":80", self.front + ":80"
-        self.plan_caddy_change(pre)
+        _after_bytes, desired = self.plan_caddy_change(pre)
         h.save(self.root / "exposure-started.json", {"release": self.sha, "full_load": False})
-        updated = self.commit_caddyfile_dial(old_dial.encode(), new_dial.encode(), pre["inode"])
+        updated = self.commit_caddyfile_dial(old_dial.encode(), new_dial.encode(), pre["inode"], desired)
         h.write_new(self.root / "Caddyfile.candidate", updated)
         self.cas_file(updated, pre["inode"])
         applied = conditional_dial_patch(self.admin_request, old_dial, new_dial)
+        # F2：切流后持久文件与运行配置必须语义一致（同一 adapter 结果），否则现场重载会改变行为。
+        h.need(self.adapt_caddyfile_bytes(updated) == applied,
+               "persisted Caddyfile differs from running configuration after cutover")
         return {"active": applied, "active_dial": new_dial, "full_load": False,
                 "forward_only_after_exposure": True}
 
