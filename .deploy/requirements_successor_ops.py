@@ -360,8 +360,14 @@ def main_matcher_hosts(route):
 
 
 def route_is_main(route, dial):
-    # 只接受已知的 route 形状；出现 group/terminal 等额外键时 fail closed（宁可拒绝也不误判）。
-    if not isinstance(route, dict) or set(route) != {"match", "handle"}:
+    # 只接受已知的 route 形状；出现未知键时 fail closed（宁可拒绝也不误判）。
+    # Caddy `/config/` 导出会对顶层 route 附带 `terminal`（实际生产实测），它不改变
+    # "唯一主站 route" 的语义；除该已核实键外，出现未知键一律拒绝。
+    if not isinstance(route, dict) or not {"match", "handle"} <= set(route):
+        return False
+    if set(route) - {"match", "handle", "terminal"}:
+        return False
+    if "terminal" in route and route["terminal"] is not True:
         return False
     if main_matcher_hosts(route) is None:
         return False

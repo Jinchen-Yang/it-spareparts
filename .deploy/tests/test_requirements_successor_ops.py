@@ -1194,9 +1194,13 @@ class SuccessorManifestAndTestContractTests(unittest.TestCase):
         self.assertIn('"docker", "rm", "-f", self.container', source)
 
     def test_route_identity_rejects_or_branches_without_host(self):
-        """独立复审 F1：matcher set 为 OR；无 host 的并行分支不得被判为主站。"""
+        """独立复审 F1 + F11：matcher set 为 OR；无 host 的并行分支不得被判为主站；
+        Caddy 导出的顶层 `terminal:true` 是已核实结构键，不改变主站身份。"""
         route = caddy_config(20219)["apps"]["http"]["servers"]["main"]["routes"][0]
         self.assertTrue(ops.route_is_main(route, "old-front:80"))
+        with_terminal = dict(route)
+        with_terminal["terminal"] = True
+        self.assertTrue(ops.route_is_main(with_terminal, "old-front:80"))
         handle = route["handle"]
         for bad in (
             {"match": [{"host": ["ybwznt.com", "www.ybwznt.com"]}, {"path": ["/"]}], "handle": handle},
@@ -1204,6 +1208,8 @@ class SuccessorManifestAndTestContractTests(unittest.TestCase):
             {"match": [], "handle": handle},
             {"match": [{"host": ["ybwznt.com", "www.ybwznt.com"]}, {"host": ["files.example"]}], "handle": handle},
             {"match": [{"host": ["ybwznt.com", "www.ybwznt.com"]}], "handle": handle, "extra": 1},
+            {"match": [{"host": ["ybwznt.com", "www.ybwznt.com"]}], "handle": handle, "terminal": False},
+            {"match": [{"host": ["ybwznt.com", "www.ybwznt.com"]}], "handle": handle, "group": "g1"},
         ):
             self.assertFalse(ops.route_is_main(bad, "old-front:80"))
 
