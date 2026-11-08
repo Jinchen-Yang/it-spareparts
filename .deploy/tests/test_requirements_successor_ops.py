@@ -1187,12 +1187,22 @@ class SuccessorManifestAndTestContractTests(unittest.TestCase):
 
     def test_recover_gate_blocks_before_intent_creation(self):
         """独立复审 F5：recover 资格检查在写 intent 之前，拒绝不污染发布状态。"""
-        release = self.release()
+        release = object.__new__(ops.Release)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        release.root = Path(folder.name)
+        release.schema = Mock(return_value=ops.SCHEMA)
+        release.run = Mock()
         (release.root / "exposure-started.json").write_text("{}\n")
         with self.assertRaisesRegex(RuntimeError, "forward repair"):
             ops.Release.recover_gate(release)
         release.run.assert_not_called()
-        clean = self.release()
+        clean = object.__new__(ops.Release)
+        folder2 = tempfile.TemporaryDirectory()
+        self.addCleanup(folder2.cleanup)
+        clean.root = Path(folder2.name)
+        clean.schema = Mock(return_value=ops.SCHEMA)
+        clean.run = Mock()
         self.assertIsNone(ops.Release.recover_gate(clean))
 
 

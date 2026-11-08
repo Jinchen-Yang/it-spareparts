@@ -365,7 +365,10 @@ def main_matcher_hosts(route):
 
 
 def route_is_main(route, dial):
-    if not isinstance(route, dict) or main_matcher_hosts(route) is None:
+    # 只接受已知的 route 形状；出现 group/terminal 等额外键时 fail closed（宁可拒绝也不误判）。
+    if not isinstance(route, dict) or set(route) != {"match", "handle"}:
+        return False
+    if main_matcher_hosts(route) is None:
         return False
     dials = []
     collect_dials(route, dials)
