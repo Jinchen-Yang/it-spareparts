@@ -40,7 +40,7 @@
 
 ## 控制器
 
-入口是 `.deploy/requirements_successor_ops.py`。**接管修复后的已审字节摘要（LF）是 `92c802bcc4ad8d2046e4a64b01dc6ef0c1819aaaf46a23c4ee20ee43faa63cba`**（原候选 `225e4cc5` 时为 `939e7505f102b7900374c306ab651076de30d54c9d4d060baca27727fd6992ff`）。只读 smoke 是 `.deploy/requirements_successor_smoke.py`，摘要 `f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f`。这两个摘要属于控制器身份；应用镜像身份仍是 `e62cd60`。
+入口是 `.deploy/requirements_successor_ops.py`。**接管修复后的已审字节摘要（LF）是 `2b2aa5ca2ca305b9f42574b50f505199169919323eea9d7c80ed90e3f19e2d1e`**（原候选 `225e4cc5` 时为 `939e7505f102b7900374c306ab651076de30d54c9d4d060baca27727fd6992ff`）。只读 smoke 是 `.deploy/requirements_successor_smoke.py`，摘要 `f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f`。这两个摘要属于控制器身份；应用镜像身份仍是 `e62cd60`。
 
 发布目录是 `/data/spareparts/releases/requirements-successor-e62cd60cdbcc3fef896c5289388250057c4ce513`，root、0700，制品 0600。新 owner 是 `.requirements-successor-active-owner.json`。新容器前缀是 `itsp-successor-e62cd60cdbcc`。旧容器、旧目录和旧 owner 保留。
 
@@ -128,6 +128,7 @@ OK (skipped=1)
   - **F6**（后续阶段未重绑备份制品字节）：启用候选/切流前由操作员复核 dump/uploads 摘要与恢复回执一致；代码加固另立任务。
   - **F8（运行时发现，已修）**：生产 Docker 29.1.3 的 `docker inspect ... .Mounts` 返回顺序为 map 迭代顺序，同一容器连续调用会随机变化；继承自可见性控制器的 `protected()` 直接比较 `{Config,HostConfig,Mounts}` 原始数组，会在**无真实变更**时误报 `protected configuration drift`（首次发布尝试因此在 `images` 阶段 fail-closed）。修复：本入口覆盖 `config()`，仅把 `Mounts` 按 `(Destination,Type,Source)` 排序后再比较（不忽略任何字段；真实配置漂移仍拒绝），并补乱序等价/真实漂移测试。
   - **F9（运行时发现，已修）**：`alembic current` 对合并修订会输出 `98afc0d2157b (head) (mergepoint)`（98af 即 mergepoint）；no-op migrate 首版断言精确等于 `98afc0d2157b (head)`，导致 attempt2 在 migrate 阶段 fail-closed（随后 pre-exposure `recover` 恢复旧应用，未暴露）。修复：`current_revision()`/`head_revision()` 只接受两种合法输出（held head 或 held head + `(mergepoint)`），仍要求唯一 head/current 行；其余畸形输出一律拒绝。
+  - **F11（运行时发现，已修）**：Caddy `/config/` 导出的顶层 route 附带 `"terminal": true`；`route_is_main` 原严格键集 `{match,handle}` 把它判为未知结构 → attempt3 `cutover` 在写 exposure 标记前 fail-closed（`main route is not singular`），随后 pre-exposure `recover` 恢复旧应用。修复：允许已核实的 `terminal` 键（必须为 true），其他未知键仍 fail-closed；补接受/拒绝测试；并以真实快照 dry-run 回放验证（19/19 PASS + 16 负例）。
   - **F10（审计结论，仅记录）**：继承自 `requirements_visibility_ops.py` 的 `preflight` 内 `alembic heads == "98afc0d2157b (head)"` 为精确匹配，但该文件字节被摘要锁定且实测 `alembic heads` 单 head 输出不含 `mergepoint` 后缀（attempt2 preflight 已通过），保留现状并在审计报告中登记。
   - **F7**（Docker-only 环境下 `FileRestartTests` 缺少启动/查询分支）：测试缺口记录；CI 若未安装 caddy 二进制，该用例只做字节替换断言，不能当作"重启后保持其他站点"的证明。
   - **R-05（已知 P2，接受）**：intent 为独占创建，阶段失败后重跑同一阶段会 `O_EXCL` 失败；不接受自动清理，须由操作员按私有诊断与现场状态决定前向修复/人工清理（runbook 执行前确认项）。
@@ -141,7 +142,14 @@ OK (skipped=1)
 
 - **尝试 #1（aborted，未 freeze/cutover）**：2026-11-08T07:36:38Z `preflight` PASS；07:37:14Z `images` FAIL（`protected configuration drift: it-shop-prod-backend-1`）。根因 = F8（生产 Docker 29.1.3 `Mounts` 顺序随机；与本轮操作无关）。处置：fail-closed 停止，未执行 freeze/cutover，生产运行态未改变；本版 cleanup 已按授权执行且不回滚（有 before/after 快照）；旧 release 目录改名保留审计，旧 owner 归档。
 - **尝试 #2（aborted，已 pre-exposure recover）**：F8 修复后控制器（`4d738730…b43b`）新建目录重跑：preflight/images/freeze/backup-old PASS；08:51:32Z `migrate` FAIL（F9：`alembic current` 带 `(mergepoint)` 后缀被精确断言误拒）。处置：fail-closed 停止；08:52:24Z–08:53:39Z 执行 pre-exposure `recover` PASS（旧 app 恢复、health 200、无 exposure）；旧目录将改名 `.aborted-…-migrate-mergepoint` 归档；授权清理不回滚。
-- **尝试 #3（当前）**：使用 F9+F10 修复后的控制器（LF sha256 `92c802bcc4ad8d2046e4a64b01dc6ef0c1819aaaf46a23c4ee20ee43faa63cba`）新建 release 目录重跑；不复用任何旧 marker/intent。
+- **尝试 #3（aborted，已 pre-exposure recover）**：F9+F10 修复后控制器（`92c802bc…`）新建目录重跑：preflight/images/freeze/backup-old/migrate/backup-new/bluegreen PASS；10:23:38Z `cutover` FAIL（F11：Caddy 导出 route 含 `terminal:true` 被严格键集拒绝，`main route is not singular`）；10:24:21Z–10:25:38Z 执行 pre-exposure `recover` PASS（旧 app 恢复、health 200、无 exposure）；旧目录将改名 `.aborted-…-cutover-route-terminal` 归档。
+
+- **尝试 #4（当前）**：使用 F11 修复后的控制器（LF sha256 `2b2aa5ca2ca305b9f42574b50f505199169919323eea9d7c80ed90e3f19e2d1e`）新建 release 目录重跑；不复用任何旧 marker/intent。
+
+## 全阶段 dry-run 门禁（freeze 前强制）
+
+- 每次 attempt 在 `freeze` 前，采集当次生产 live 只读快照（`capture_snapshots.sh`，含采集身份/新鲜度/逐文件 sha256）并用 `team/tools/g7/dry_run.py` 离线回放 19 项断言（快照元数据 fail-closed、控制器摘要钉定 + manifest 经控制器 `validate` 校验、route 形状/terminal/未知键、条件 PATCH+412+If-Match、adapt 同源与来源差异、curl exchange/ETag、Mounts 规范化、alembic stdout+exit code、nginx 摘要、7 类回执身份链与严格结构/关键值）；**status=PASS 且控制器摘要=已审值、负例回归 ALL_OK 并落私有 evidence 后才允许 freeze**。
+- 首次执行结果：19/19 PASS + 21 项负例变异/拒绝用例全部按目标检查项 fail-closed（快照 2026-11-08T11:22:29Z，候选镜像 alembic 输出含 exit code；回执校验含 artifacts 精确路径/basename、DB/Caddy protected 逐容器全量匹配、E1 时间窗；详见 `team/reports/tech/2026-11-08-G7-dry-run报告.md`，其中明确列出未覆盖项与负例日志 `dry-run-negative-tests.log`）。
 
 ## 执行前人工核验清单（每次生产执行必做，不替代代码门禁）
 
