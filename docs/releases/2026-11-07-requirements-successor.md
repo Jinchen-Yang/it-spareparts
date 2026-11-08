@@ -40,7 +40,7 @@
 
 ## 控制器
 
-入口是 `.deploy/requirements_successor_ops.py`。本次审核时的字节摘要是 `939e7505f102b7900374c306ab651076de30d54c9d4d060baca27727fd6992ff`。只读 smoke 是 `.deploy/requirements_successor_smoke.py`，摘要 `f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f`。这两个摘要属于控制器身份；应用镜像身份仍是 `e62cd60`。
+入口是 `.deploy/requirements_successor_ops.py`。**接管修复后的已审字节摘要（LF）是 `4c039152b2917e89bfc4fe8c43d1ddfa4e66b6f17d29786b5c42ab4fdc591e3b`**（原候选 `225e4cc5` 时为 `939e7505f102b7900374c306ab651076de30d54c9d4d060baca27727fd6992ff`）。只读 smoke 是 `.deploy/requirements_successor_smoke.py`，摘要 `f44594c3390cc67f4cb56cf9e0d58a54d6d25f399136bcf43c0124a394c6196f`。这两个摘要属于控制器身份；应用镜像身份仍是 `e62cd60`。
 
 发布目录是 `/data/spareparts/releases/requirements-successor-e62cd60cdbcc3fef896c5289388250057c4ce513`，root、0700，制品 0600。新 owner 是 `.requirements-successor-active-owner.json`。新容器前缀是 `itsp-successor-e62cd60cdbcc`。旧容器、旧目录和旧 owner 保留。
 
@@ -89,6 +89,8 @@ python3 .deploy/requirements_successor_ops.py --check-archive REPO source.tar.gz
 
 开发机未连接生产，没有创建标签，也没有执行部署阶段。
 
+### 原始候选（225e4cc5，作者本机）
+
 ```text
 Python 3.12.3
 git version 2.43.0
@@ -100,11 +102,35 @@ Ran 25 tests in 0.026s
 OK (skipped=1)
 ```
 
-共享池仍是 24 项通过。跳过的 1 项是原来的 Caddy 合同镜像测试，本机没有 `ITSP_CADDY_CONTRACT_IMAGE`，不是本次豁免。
+共享池仍是 24 项通过。跳过的 1 项是原来的 Caddy 合同镜像测试，本机没有 `ITSP_CADDY_CONTRACT_IMAGE`，不是本次豁免。40 项里有接续合同，也有原来的 5 项可见性合同。本机没有 docker，Caddy 证明不是 `--network none` 容器，也不声称现场 Caddy 版本。CI 仍跑这些测试，没有新增按 PR 号跳过的路径。
 
-40 项里有接续合同，也有原来的 5 项可见性合同。本轮持久反例包括：缺 `active` 的切流回执在真实 `Hotfix.verify` 上 `KeyError`，补上后贯穿 verify；同 inode 上先改其他站点再提交，重启 Caddy 2.11.4 后修改仍在，删掉重新读取则丢失；标量 dial ETag 在交换 host 后 `PATCH 200` 改错站点，route ETag 不改错站点；全新 bare 仓库 depth 1 看不到父提交，depth 2 后 1940 个 blob 与归档对照通过；删除 `execute` / `cas_file` / `rollback` 里的守卫后错误操作成功，原方法仍拒绝。本机没有 docker，Caddy 证明不是 `--network none` 容器，也不声称现场 Caddy 版本。CI 仍跑这些测试，没有新增按 PR 号跳过的路径。
+### 接管修复后（2026-11-08，Linux + Docker 实测）
 
-这些测试覆盖：历史常量和 Caddy / 写者 / 冻结 / 备份 / 切流函数身份不变；只接受 `e62cd60` 而拒绝两个父提交和 `782c`；禁止 upgrade、downgrade 和旧 import allowlist；无网络 PG15 恢复标志缺失时不调用 alembic；暴露或 schema 变化时不调用 Docker；失败路径不回滚且不改前序 owner；两把锁跨进程互斥；真实 Git blob 对照和 CRLF 拒绝。它们不代替现场备份、真实恢复、镜像构建、认证冒烟或用户点按。
+接管方（`tech-manager`）修复 CI 确定性失败与独立复审发现后，在 `jinchen-dev`（Linux、Docker 29.9.0、`caddy:2.11.4` 镜像）用 **LF 归档**（`git -c core.autocrlf=false -c core.eol=lf archive`）重跑：
+
+- 共享池合同 `test_presales_pool_ops.py`：**25 项通过 / 1 项按既有条件跳过**（设置 `ITSP_CADDY_CONTRACT_IMAGE=caddy:2.11.4`，与 CI 一致）；
+- 可见性合同 `test_requirements_visibility_ops.py`：**5 项通过**；
+- 接续合同 `test_requirements_successor_ops.py`（除 `ArchiveTests`/`FetchContractTests`——这两类需要完整 Git 对象与远端网络，由 CI 覆盖）：**36 项通过**；
+- Caddy docker 分支真实容器：`CaddyConditionalTests` 通过；运行后 `docker ps -a --filter name=itst-team-caddytest-` 与 `itsp-successor-caddy` **均无残留容器**；
+- 控制器字节摘要（LF）：见「控制器」节；smoke 摘要仍为 `f44594c3…196f`；visibility/pool 继承链摘要不变。
+
+本轮修复覆盖：Caddy docker 分支 admin 端口统一（P1，CI run `42375262184` 根因）、测试容器清理、manifest `helper_sha256` 继承链校验（P2-1）、recover 暴露判据与前置门（P2-2 / F5）、切流主站 matcher OR 语义（F1）与对应 hermetic 反例（P2-4）。仍未覆盖：真实 Git 对照（Archive/Fetch 类，CI 覆盖）、真实 Linux 多进程 flock 竞争、真实 Caddy 重载与生产恢复。
+
+## 独立复审与已知边界
+
+接管方在修复前后做了两次独立复审（报告落盘在团队目录、非本仓库，供执行授权方查阅）：
+
+- `team/reports/tech/review/2026-11-08-516独立复审-qa.md`：P0=0、P1=1（Caddy 端口，已修）、P2=4（helper_sha256 / recover 边界 / 容器清理 / 测试覆盖，已按建议修复或补测）、P3=8（文档/措辞）。
+- `team/reports/tech/review/2026-11-08-516独立复审-codex.md`（**Codex 后端独立复审**）：P0=0、P1=3、P2=4。已修 **F1**（matcher OR 语义）与 **F5**（被拒绝的 recover 污染发布状态）；以下为**已知边界/后续加固项**：
+  - **F2**（重读后的 Caddyfile 未再做语义校验）：执行前必须由操作员确认 Caddyfile 唯一写者，并在切流前复核 mounted 与 running 配置；代码加固另立任务。
+  - **F3**（advisory flock 无法阻止不取锁的写者）：发布窗口必须冻结其他配置写者（runbook 明确列出并核对）；应用层无法完全消除。
+  - **F4**（route CAS 作用域与全配置比较不一致，合法并发修改可能被误判）：遇到 412/异常/回执丢失时按 intent + 现场显式 reconcile（人工），不自动回滚。
+  - **F6**（后续阶段未重绑备份制品字节）：启用候选/切流前由操作员复核 dump/uploads 摘要与恢复回执一致；代码加固另立任务。
+  - **F7**（Docker-only 环境下 `FileRestartTests` 缺少启动/查询分支）：测试缺口记录；CI 若未安装 caddy 二进制，该用例只做字节替换断言，不能当作"重启后保持其他站点"的证明。
+
+跨模型复审现状：上述 Codex 后端复审为独立模型通道尝试；本文件不把同模型复审冒充为跨模型复审。最终合并与执行结论仍需 `lead`/用户与执行授权方确认。
+
+这些边界不改变"禁止自动回滚 / 暴露后前向处理"的既有安全方向，但意味着本控制器**合并后仍不是可直接执行生产阶段的授权**：执行前必须 用户授权 + 现场重读 + 上述边界由执行方逐项确认或完成后续加固。
 
 ## 执行限制
 
