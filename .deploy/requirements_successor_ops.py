@@ -576,6 +576,33 @@ class Release(vis.Release):
                and gate.get("active_return_receipts") == 0, "processing must be empty; old waiver refused")
         return result
 
+    def head_revision(self):
+        """断言候选迁移树恰好一个 head（失败时给出明确诊断）。
+
+        只规范化行尾空白与合法的 `(mergepoint)` 后缀（合并修订的 head 行可能带该标记），
+        仍要求恰好一行；多 head/漂移一律拒绝。
+        """
+        raw = self.alembic(["heads"])
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        h.need(len(lines) == 1, "candidate must have exactly one migration head")
+        allowed = {SCHEMA + " (head)", SCHEMA + " (head) (mergepoint)"}
+        h.need(lines[0] in allowed, "candidate migration head")
+        return lines[0]
+
+    def current_revision(self):
+        """断言数据库恰好停在 held head（单修订）。
+
+        `alembic current` 对**合并修订**会附加 `(mergepoint)`（本库 98af 即合并点，实际输出
+        `98afc0d2157b (head) (mergepoint)`）；不能把这类合法输出误判为"不在 head"。这里只
+        规范化该后缀，仍要求恰好一行（单 current），其余输出差异一律拒绝。
+        """
+        raw = self.alembic(["current"])
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        h.need(len(lines) == 1, "database must have exactly one current revision")
+        allowed = {SCHEMA + " (head)", SCHEMA + " (head) (mergepoint)"}
+        h.need(lines[0] in allowed, "database is not already at the held head")
+        return lines[0]
+
     def migrate(self):
         backup = self.marker("backup-old")
         restore = backup.get("restore") or {}
@@ -589,8 +616,8 @@ class Release(vis.Release):
         h.need(self.schema() == SCHEMA == self.marker("preflight")["schema"] == self.marker("freeze")["schema"],
                "schema drifted before the no-migration gate")
         self.unchanged_business()
-        h.need(self.alembic(["heads"]) == SCHEMA + " (head)", "candidate migration head")
-        h.need(self.alembic(["current"]) == SCHEMA + " (head)", "database is not already at the held head")
+        self.head_revision()
+        self.current_revision()
         self.alembic(["check"])
         self.unchanged_business()
         h.need(self.schema() == SCHEMA and self.counts() == self.marker("freeze")["counts"], "no-migration gate changed data")
