@@ -339,8 +339,33 @@ def route_hosts(route):
     return {host for match in (route.get("match") or []) for host in (match.get("host") or [])}
 
 
+def main_matcher_hosts(route):
+    """Caddy 的多个 matcher set 是 OR；每个分支都必须只由 host 组成且受限主站域名。
+
+    只取所有分支 host 的并集会把"主站 host 分支 + 无 host 的 path 分支"误判为仅主站，
+    使切流同时影响其他域名（独立复审 F1）。因此这里要求：
+    - match 是非空列表；每个 matcher 是仅含 "host" 的 dict（未知结构一律拒绝）；
+    - 每个分支 host 非空、全部为主站域名；所有分支并集恰为两个主站域名。
+    """
+    match = route.get("match")
+    if not isinstance(match, list) or not match:
+        return None
+    hosts = set()
+    for matcher in match:
+        if not isinstance(matcher, dict) or set(matcher) != {"host"}:
+            return None
+        values = matcher.get("host")
+        if not isinstance(values, list) or not values:
+            return None
+        for host in values:
+            if not isinstance(host, str) or host not in h.HOSTS:
+                return None
+            hosts.add(host)
+    return hosts if hosts == set(h.HOSTS) else None
+
+
 def route_is_main(route, dial):
-    if not isinstance(route, dict) or route_hosts(route) != h.HOSTS:
+    if not isinstance(route, dict) or main_matcher_hosts(route) is None:
         return False
     dials = []
     collect_dials(route, dials)
@@ -701,9 +726,21 @@ class Release(vis.Release):
         return {"schema": SCHEMA, "schema_preserved": True, "migration_performed": False,
                 "restored_dump_into_production": False, "downgrade_invoked": False}
 
+    def recover_gate(self):
+        """recover 的非变更前置资格检查；必须在写 recover intent 之前调用。
+
+        否则一次被拒绝的 recover（已暴露/schema 变化）也会留下 recover-*.intent.json，
+        使正常阶段永久终止、连 verify 都无法继续（独立复审 F5）。
+        """
+        h.need(not (self.root / "exposure-started.json").exists(),
+               "exposure may have begun; forward repair required")
+        h.need(self.schema() == SCHEMA, "schema changed; forward repair required")
+
     def execute(self, phase):
         h.need(phase in {*PHASES, "recover"}, "unknown phase")
         h.need(self.path.read_bytes() == self.manifest_bytes, "manifest changed")
+        if phase == "recover":
+            self.recover_gate()
         if phase != "recover":
             h.need(not list(self.root.glob("recover-*.intent.json")), "recovered release is terminal")
         predecessor = h.BASE / PREDECESSOR_OWNER

@@ -1171,6 +1171,30 @@ class SuccessorManifestAndTestContractTests(unittest.TestCase):
         self.assertIn("def _remove_container(self)", source)
         self.assertIn('"docker", "rm", "-f", self.container', source)
 
+    def test_route_identity_rejects_or_branches_without_host(self):
+        """独立复审 F1：matcher set 为 OR；无 host 的并行分支不得被判为主站。"""
+        route = caddy_config(20219)["apps"]["http"]["servers"]["main"]["routes"][0]
+        self.assertTrue(ops.route_is_main(route, "old-front:80"))
+        handle = route["handle"]
+        for bad in (
+            {"match": [{"host": ["ybwznt.com", "www.ybwznt.com"]}, {"path": ["/"]}], "handle": handle},
+            {"match": [{"path": ["/"]}], "handle": handle},
+            {"match": [], "handle": handle},
+            {"match": [{"host": ["ybwznt.com", "www.ybwznt.com"]}, {"host": ["files.example"]}], "handle": handle},
+            {"match": [{"host": ["ybwznt.com", "www.ybwznt.com"]}], "handle": handle, "extra": 1},
+        ):
+            self.assertFalse(ops.route_is_main(bad, "old-front:80"))
+
+    def test_recover_gate_blocks_before_intent_creation(self):
+        """独立复审 F5：recover 资格检查在写 intent 之前，拒绝不污染发布状态。"""
+        release = self.release()
+        (release.root / "exposure-started.json").write_text("{}\n")
+        with self.assertRaisesRegex(RuntimeError, "forward repair"):
+            ops.Release.recover_gate(release)
+        release.run.assert_not_called()
+        clean = self.release()
+        self.assertIsNone(ops.Release.recover_gate(clean))
+
 
 def inspect_source(function):
     import inspect
