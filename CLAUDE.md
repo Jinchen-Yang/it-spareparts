@@ -5,5 +5,7 @@
 开工前按 `AGENTS.md` §2 的顺序阅读：`docs/decisions/`（唯一真值口径）→ `CONTEXT.md`（领域统一语言）→
 `docs/handoff/` 最新交接 → `docs/agents/`（issue/标签约定），然后 `git fetch` 对齐远端再开工。
 
+本地测试与 CI：**不要事事全量**。按 `AGENTS.md` §2.1 按改动类型跑相关测试；合入 main 的必需 CI 是分支保护门禁，不是每次提交的仪式。
+
 本地跑栈 / API 冒烟 / UI 截图：用 `run-it-spareparts` 技能（`.claude/skills/run-it-spareparts/`）。
 工程类技能（`to-issues`、`triage`、`to-prd`、`diagnose`、`tdd` 等）的仓库配置在 `docs/agents/`。
