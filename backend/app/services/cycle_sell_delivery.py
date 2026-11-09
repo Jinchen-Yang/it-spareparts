@@ -64,7 +64,9 @@ class Claim:
     condition_bucket: str
     lease_token: UUID
     attempts: int
-    previous_blocked: bool
+    # N1：持久证据——最后一次被商城接受的回执（applied/unchanged/blocked/conflict）。
+    # ``unchanged`` 只有在它为 ``applied`` 时才可接受为 delivered。
+    previous_receipt_status: str | None
 
 
 def _bound_transaction(db: Session) -> None:
@@ -106,9 +108,13 @@ def claim_one(session_factory=SessionLocal) -> Claim | None:
         )
         if row is None:
             return None
-        # F-13：R9 证据以「当前 attempt 前状态」为准，不能把历史 block_code 永真化；
-        # 网络失败回 pending 时清空 block_code（last_error_code 保留网络码）。
-        previous_blocked = row.state == "blocked" or row.receipt_status == "blocked"
+        # N1：把「展示用 block_code」与「尚未得到 applied 的持久证据」分开。
+        # 持久证据 = receipt_status（最后一次被商城接受的回执）；block_code 仅供展示，
+        # 网络/无效回执失败不得清掉 receipt_status。
+        previous_receipt_status = row.receipt_status
+        if row.state == "blocked" and previous_receipt_status is None:
+            # 兼容历史数据/外部种子：blocked 行即使 receipt_status 空缺也视为未 applied。
+            previous_receipt_status = "blocked"
         row.state = "delivering"
         row.lease_token = uuid4()
         row.lease_until = now + timedelta(seconds=LEASE_SECONDS)
@@ -121,7 +127,7 @@ def claim_one(session_factory=SessionLocal) -> Claim | None:
             condition_bucket=row.condition_bucket,
             lease_token=row.lease_token,
             attempts=row.attempts,
-            previous_blocked=previous_blocked,
+            previous_receipt_status=previous_receipt_status,
         )
 
 
@@ -146,9 +152,12 @@ def acknowledge(
         if row is None:
             return False
         effective = result
-        # R9：先前只是 blocked 的重放若返回 unchanged，是契约违约 → 按无效回执重试。
-        if effective == "unchanged" and claim.previous_blocked:
+        # N1/R9：持久记录里「上一次被接受的回执=applied」才允许 unchanged 成功；
+        # 否则（None/blocked/conflict/unchanged）一律视为无效回执，保持 pending 退避。
+        if effective == "unchanged" and claim.previous_receipt_status != "applied":
             effective = "invalid_receipt"
+        # 网络/无效回执失败把行送回 pending 时必须保留持久证据，不能清成 None。
+        preserved_status = claim.previous_receipt_status
         values: dict = {
             "lease_token": None,
             "lease_until": None,
@@ -163,7 +172,7 @@ def acknowledge(
             code = block_code if block_code in BLOCK_CODES else None
             if code is None:
                 values.update(
-                    state="pending", receipt_status=None, block_code=None,
+                    state="pending", receipt_status=preserved_status, block_code=None,
                     last_error_code="invalid_receipt",
                     available_at=now + timedelta(seconds=_network_backoff(claim.attempts)),
                 )
@@ -181,9 +190,8 @@ def acknowledge(
         else:
             code = effective if effective in NETWORK_RESULTS else "transport_error"
             values.update(
-                state="pending", receipt_status=None, last_error_code=code,
-                # F-13：网络失败不是商城业务 blocked；清掉历史 block_code，避免
-                # 后续 unchanged 被永久判为 invalid_receipt。
+                state="pending", receipt_status=preserved_status, last_error_code=code,
+                # block_code 只是展示；网络失败清掉展示码，但保留 receipt_status 证据。
                 block_code=None,
                 available_at=now + timedelta(seconds=_network_backoff(claim.attempts)),
             )

@@ -382,17 +382,21 @@ def test_work_item_summary_and_subject_events_hide_sensitive_fields(db):
                           "project_id", "成本", "价格"):
             assert forbidden not in rendered
 
-        # 待办时间线（subject events）工人 payload 白名单
-        # F-10：固定期望集合（明文，不引用实现常量自证），并区分引擎外壳与业务 payload。
-        business_keys = {"result", "next", "to", "outcome", "condition_bucket"}
+        # 待办时间线（subject events）工人 payload
+        # F-10/N2：固定期望集合为任务书 §6.4 四字段 pn/part_id/station/unit_uid；
+        # 引擎外壳（version/assignee_id/from_user_id/to_user_id）与自由文本不返回。
+        expected_fields = {"pn", "part_id", "station", "unit_uid"}
         engine_shell_keys = {"version", "assignee_id", "from_user_id", "to_user_id"}
         worker_events = tester.get(f"/api/subjects/cycle_test/{unit['id']}/events")
         assert worker_events.status_code == 200, worker_events.text
         assert worker_events.json()["items"], worker_events.text
         for event in worker_events.json()["items"]:
-            payload_keys = set(event["payload"])
-            assert payload_keys <= business_keys, event
-            assert payload_keys.isdisjoint(engine_shell_keys), event
+            payload = event["payload"]
+            assert set(payload) == expected_fields, event
+            assert set(payload).isdisjoint(engine_shell_keys), event
+            assert payload["pn"] == part.pn_std
+            assert payload["part_id"] == part.id
+            assert payload["station"] == "testing"
         assert "WI-SN-1" not in str(worker_events.json())
 
         # 主管可见事件审计字段（引擎外壳保留），但同样不含供应商/SN/收货单

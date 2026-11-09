@@ -10,6 +10,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -141,7 +142,7 @@ def test_claim_pending_leases_and_increments_attempts(db):
     assert claim.part_id == unit.part_id
     assert claim.condition_bucket == "good"
     assert claim.attempts == 1
-    assert claim.previous_blocked is False
+    assert claim.previous_receipt_status is None
     row = _row(db, intent.delivery_id)
     assert row.state == "delivering"
     assert row.lease_token == claim.lease_token
@@ -168,7 +169,7 @@ def test_claim_expired_delivering_lease_reclaims(db):
     assert second.attempts == 2
 
 
-def test_claim_blocked_due_marks_previous_blocked(db):
+def test_claim_blocked_due_exposes_previous_receipt_status(db):
     unit = _unit(db)
     intent = _intent(
         db, unit, state="blocked", receipt_status="blocked",
@@ -178,7 +179,7 @@ def test_claim_blocked_due_marks_previous_blocked(db):
     claim = svc.claim_one()
     assert claim is not None
     assert claim.delivery_id == intent.delivery_id
-    assert claim.previous_blocked is True
+    assert claim.previous_receipt_status == "blocked"
 
 
 # ---------------------------------------------------------------------------
@@ -202,15 +203,160 @@ def test_applied_receipt_marks_delivered_and_stops(db):
     assert svc.acknowledge(claim, "applied") is False
 
 
-def test_unchanged_without_prior_block_is_success(db):
+def test_unchanged_without_prior_applied_evidence_is_invalid(db):
+    """N1/R9：只有持久记录「上一次被接受的回执=applied」才接受 unchanged。"""
     unit = _unit(db)
     intent = _intent(db, unit)
     claim = svc.claim_one()
     assert claim is not None
+    assert claim.previous_receipt_status is None
+    assert svc.acknowledge(claim, "unchanged") is True
+    row = _row(db, intent.delivery_id)
+    assert row.state == "pending"
+    assert row.receipt_status is None
+    assert row.last_error_code == "invalid_receipt"
+    assert row.completed_at is None
+    # 第二次 unchanged：持久证据仍非 applied，不得因「上一跳被清空」而放行（N1 多跳）
+    _force_due(db, intent.delivery_id)
+    second = svc.claim_one()
+    assert second is not None and second.previous_receipt_status is None
+    assert svc.acknowledge(second, "unchanged") is True
+    row = _row(db, intent.delivery_id)
+    assert row.state == "pending"
+    assert row.receipt_status is None
+    assert row.last_error_code == "invalid_receipt"
+
+
+def test_blocked_then_unchanged_twice_never_reports_delivered(db):
+    """N1 最小复现：blocked → unchanged → unchanged 不得误报 delivered。"""
+    unit = _unit(db)
+    intent = _intent(db, unit)
+    claim = svc.claim_one()
+    assert claim is not None
+    assert svc.acknowledge(claim, "blocked", block_code="missing_formal_image") is True
+
+    _force_due(db, intent.delivery_id)
+    first = svc.claim_one()
+    assert first is not None and first.previous_receipt_status == "blocked"
+    assert svc.acknowledge(first, "unchanged") is True
+    row = _row(db, intent.delivery_id)
+    assert row.state == "pending"
+    assert row.receipt_status == "blocked", "网络/无效回执不得清掉持久 blocked 证据"
+    assert row.last_error_code == "invalid_receipt"
+
+    _force_due(db, intent.delivery_id)
+    second = svc.claim_one()
+    assert second is not None and second.previous_receipt_status == "blocked"
+    assert svc.acknowledge(second, "unchanged") is True
+    row = _row(db, intent.delivery_id)
+    assert row.state == "pending"
+    assert row.receipt_status == "blocked"
+    assert row.last_error_code == "invalid_receipt"
+    assert row.completed_at is None
+
+
+def test_blocked_then_network_failure_then_unchanged_stays_invalid(db):
+    """N1：网络失败保留持久证据；后续 unchanged 仍不得 delivered。"""
+    unit = _unit(db)
+    intent = _intent(db, unit)
+    claim = svc.claim_one()
+    assert claim is not None
+    assert svc.acknowledge(claim, "blocked", block_code="missing_list_price") is True
+
+    _force_due(db, intent.delivery_id)
+    retry = svc.claim_one()
+    assert retry is not None and retry.previous_receipt_status == "blocked"
+    assert svc.acknowledge(retry, "transport_error") is True
+    row = _row(db, intent.delivery_id)
+    assert row.state == "pending"
+    assert row.block_code is None  # 展示码清空
+    assert row.receipt_status == "blocked"  # 持久证据保留
+    assert row.last_error_code == "transport_error"
+
+    _force_due(db, intent.delivery_id)
+    after = svc.claim_one()
+    assert after is not None and after.previous_receipt_status == "blocked"
+    assert svc.acknowledge(after, "unchanged") is True
+    row = _row(db, intent.delivery_id)
+    assert row.state == "pending"
+    assert row.receipt_status == "blocked"
+    assert row.last_error_code == "invalid_receipt"
+
+
+def test_unchanged_is_legal_when_persisted_last_receipt_is_applied(db):
+    """N1：持久记录 receipt_status=applied 时，unchanged 才可接受为 delivered。"""
+    unit = _unit(db)
+    intent = _intent(
+        db, unit, state="delivering", receipt_status="applied",
+        attempts=1,
+        lease_token=uuid4(),
+        lease_until=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+    claim = svc.claim_one()
+    assert claim is not None
+    assert claim.delivery_id == intent.delivery_id
+    assert claim.previous_receipt_status == "applied"
     assert svc.acknowledge(claim, "unchanged") is True
     row = _row(db, intent.delivery_id)
     assert row.state == "delivered"
     assert row.receipt_status == "unchanged"
+    assert row.completed_at is not None
+
+
+@pytest.mark.parametrize("prior", [None, "blocked", "applied"])
+@pytest.mark.parametrize(
+    ("result", "block_code"),
+    [
+        ("applied", None),
+        ("unchanged", None),
+        ("blocked", "missing_list_price"),
+        ("conflict", None),
+        ("transport_error", None),
+        ("invalid_receipt", None),
+    ],
+)
+def test_acknowledge_transition_matrix(db, prior, result, block_code):
+    """N1 自查矩阵：receipt_status × 回执结果的落库组合（防下一轮再出 P1）。"""
+    unit = _unit(db)
+    intent = _intent(db, unit, receipt_status=prior)
+    if prior is not None and prior != "blocked":
+        # 允许「持久证据=applied」的恢复态通过 delivering 过期被重领
+        db.execute(
+            update(MaintenanceCycleSellIntent)
+            .where(MaintenanceCycleSellIntent.delivery_id == intent.delivery_id)
+            .values(
+                state="delivering",
+                attempts=1,
+                lease_token=uuid4(),
+                lease_until=datetime.now(timezone.utc) - timedelta(seconds=1),
+            )
+        )
+        db.commit()
+    claim = svc.claim_one()
+    assert claim is not None, (prior, result)
+    assert svc.acknowledge(claim, result, block_code=block_code) is True
+    row = _row(db, intent.delivery_id)
+    if result == "applied":
+        assert row.state == "delivered" and row.receipt_status == "applied"
+    elif result == "unchanged":
+        if prior == "applied":
+            assert row.state == "delivered"
+            assert row.receipt_status == "unchanged"
+        else:
+            assert row.state == "pending"
+            assert row.receipt_status == prior
+            assert row.last_error_code == "invalid_receipt"
+    elif result == "blocked":
+        assert row.state == "blocked" and row.receipt_status == "blocked"
+        assert row.block_code == block_code
+    elif result == "conflict":
+        assert row.state == "failed" and row.receipt_status == "conflict"
+        assert row.last_error_code == "manual_conflict"
+    else:
+        assert row.state == "pending"
+        assert row.receipt_status == prior, "网络/无效回执不得改写持久证据"
+        assert row.last_error_code == result
+        assert row.block_code is None
 
 
 def test_blocked_sets_5min_backoff_and_then_R9_unchanged_is_invalid(db):
@@ -228,12 +374,12 @@ def test_blocked_sets_5min_backoff_and_then_R9_unchanged_is_invalid(db):
 
     _force_due(db, intent.delivery_id)
     retry = svc.claim_one()
-    assert retry is not None and retry.previous_blocked is True
-    # R9：先前只是 blocked，商城重放若返回 unchanged → 无效回执，不标 delivered。
+    assert retry is not None and retry.previous_receipt_status == "blocked"
+    # R9/N1：持久证据仍非 applied，商城重放 unchanged → 无效回执，不标 delivered。
     assert svc.acknowledge(retry, "unchanged") is True
     row = _row(db, intent.delivery_id)
     assert row.state == "pending"
-    assert row.receipt_status is None
+    assert row.receipt_status == "blocked"
     assert row.last_error_code == "invalid_receipt"
 
 

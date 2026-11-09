@@ -363,13 +363,16 @@ def test_worker_work_item_list_and_events_do_not_leak_reason(db):
         worker_events = tester.get(f"/api/subjects/cycle_test/{unit['id']}/events")
         assert worker_events.status_code == 200, worker_events.text
         assert "PRIVATE" not in str(worker_events.json())
-        # F-10：固定期望集合（明文），引擎外壳字段对工人不出现
-        business_keys = {"result", "next", "to", "outcome", "condition_bucket"}
+        # F-10/N2：固定期望集合为 §6.4 四字段；引擎外壳字段对工人不出现
+        expected_fields = {"pn", "part_id", "station", "unit_uid"}
         engine_shell_keys = {"version", "assignee_id", "from_user_id", "to_user_id"}
         for event in worker_events.json()["items"]:
-            payload_keys = set(event["payload"])
-            assert payload_keys <= business_keys, event
-            assert payload_keys.isdisjoint(engine_shell_keys), event
+            payload = event["payload"]
+            assert set(payload) == expected_fields, event
+            assert set(payload).isdisjoint(engine_shell_keys), event
+            assert payload["pn"] == part.pn_std
+            assert payload["part_id"] == part.id
+            assert payload["station"] == "testing"
 
         # 主管审计保留：列表仍可见 last_reason 原文
         manager_list = manager.get(
@@ -736,8 +739,13 @@ def test_manager_without_pool_key_claim_is_403_consistent(db):
         assert _active_items(db, unit["id"])[0].status == "pending"
 
 
-def test_network_failure_after_blocked_clears_block_code_and_unchanged_recovers(db):
-    """F-13：blocked 后网络失败回 pending 必须清 block_code，R9 不永久 invalid。"""
+def test_network_failure_after_blocked_keeps_evidence_and_unchanged_stays_invalid(db):
+    """N1/F-13：block_code 是展示码可清空，但 receipt_status 持久证据不得清。
+
+    修复前：blocked→网络失败→unchanged 会因证据被清成 None 而误报 delivered；
+    修复后：网络失败清 block_code 但保留 receipt_status='blocked'，后续 unchanged
+    仍按 invalid_receipt 保持 pending 退避。
+    """
     part = _part(db, "CYCLE-FIX-F13")
     db.commit()
     with _recycle(db, "fix-f13-recycle") as recycle:
@@ -752,24 +760,28 @@ def test_network_failure_after_blocked_clears_block_code_and_unchanged_recovers(
     assert sell.acknowledge(first, "blocked", block_code="missing_formal_image") is True
     blocked_row = _intent_row(db, intent.delivery_id)
     assert blocked_row.state == "blocked"
+    assert blocked_row.receipt_status == "blocked"
 
     _force_intent_due(db, intent.delivery_id)
     retry = sell.claim_one()
-    assert retry is not None and retry.previous_blocked is True
+    assert retry is not None and retry.previous_receipt_status == "blocked"
     assert sell.acknowledge(retry, "transport_error") is True
     pending_row = _intent_row(db, intent.delivery_id)
     assert pending_row.state == "pending"
     assert pending_row.last_error_code == "transport_error"
-    assert pending_row.block_code is None
-    assert pending_row.receipt_status is None
+    assert pending_row.block_code is None  # 展示码清空
+    assert pending_row.receipt_status == "blocked"  # 持久证据保留
     status = sell.read_status(db, closed["id"])
     assert status["status"] == "pending"
     assert status["blockCode"] is None
+    assert status["receiptStatus"] == "blocked"
 
+    # N1：网络失败后 unchanged 仍不得 delivered
     _force_intent_due(db, intent.delivery_id)
     recovered = sell.claim_one()
-    assert recovered is not None and recovered.previous_blocked is False
+    assert recovered is not None and recovered.previous_receipt_status == "blocked"
     assert sell.acknowledge(recovered, "unchanged") is True
-    delivered_row = _intent_row(db, intent.delivery_id)
-    assert delivered_row.state == "delivered"
-    assert delivered_row.receipt_status == "unchanged"
+    final_row = _intent_row(db, intent.delivery_id)
+    assert final_row.state == "pending"
+    assert final_row.receipt_status == "blocked"
+    assert final_row.last_error_code == "invalid_receipt"

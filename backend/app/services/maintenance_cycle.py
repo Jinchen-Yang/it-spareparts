@@ -22,7 +22,7 @@ from typing import Iterable
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app import permissions
 from app.models.dimensions import DimPart
@@ -454,12 +454,11 @@ def _has_sell_intent(db: Session, unit_id: int) -> bool:
 SUBJECT_TYPES = ("cycle_test", "cycle_repair")
 SUBJECT_BY_STATION = {"testing": "cycle_test", "repairing": "cycle_repair"}
 POOL_KEY_BY_SUBJECT = {"cycle_test": TEST_PAGE, "cycle_repair": REPAIR_PAGE}
-# 工人可见的待办事件业务 payload 白名单（任务书 §6.4：result/next/to/outcome/condition_bucket）。
-# 引擎外壳字段（version/assignee_id/from_user_id/to_user_id）与自由文本（reason）对工人一并不返回；
-# 主管视图保留完整 payload 供审计。F2 修复：不以引擎常量自证符合。
-WORKER_SUBJECT_EVENT_KEYS = frozenset(
-    {"result", "next", "to", "outcome", "condition_bucket"}
-)
+# 工人可见的待办事件 payload 字段（任务书 §6.4：pn/part_id/station/unit_uid）。
+# 非主管事件 payload 由当前单位快照生成这四个业务字段；引擎外壳字段
+# （version/assignee_id/from_user_id/to_user_id）与自由文本（reason）一律不返回。
+# 主管视图保留完整 payload 供审计。N2 修复：此前误用循环事件白名单。
+WORKER_SUBJECT_UNIT_FIELDS = ("pn", "part_id", "station", "unit_uid")
 ACTIVE_ITEM_STATES = ("pending", "in_progress")
 
 
@@ -625,16 +624,26 @@ def _subject_summarize(db: Session, unit_ids, ctx: UserContext) -> dict[int, dic
 
 
 def _subject_filter_events(rows, ctx: UserContext):
-    """非主管的待办事件 payload 只保留引擎生成字段；主管保留审计字段。"""
+    """非主管事件 payload 只暴露任务书 §6.4 的四个业务字段（N2）。
+
+    由当前单位快照生成 ``pn/part_id/station/unit_uid``；引擎外壳字段
+    （version/assignee_id/from_user_id/to_user_id）与自由文本（reason）不返回。
+    主管保留完整引擎 payload 供审计。
+    """
     if can_manage(ctx):
         return rows
     sanitized = []
     for row in rows:
-        payload = {
-            key: value
-            for key, value in (row.payload or {}).items()
-            if key in WORKER_SUBJECT_EVENT_KEYS
-        }
+        db = object_session(row)
+        payload: dict = {}
+        unit = db.get(MaintenanceCycleUnit, row.subject_id) if db is not None else None
+        if unit is not None and can_view_unit(db, unit, ctx):
+            payload = {
+                "pn": unit.pn,
+                "part_id": unit.part_id,
+                "station": unit.station,
+                "unit_uid": str(unit.unit_uid),
+            }
         sanitized.append(
             SimpleNamespace(
                 **{
