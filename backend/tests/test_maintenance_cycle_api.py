@@ -513,11 +513,18 @@ def test_mark_sold_requires_manager_and_is_idempotent(db):
         assert sold.json()["outcome"] == "sold"
         assert sold.json()["station"] == "closed"
 
-        # 重复调用幂等：旧版本号仍返回当前状态（不重复改版本）
-        again = _transition(manager, sold_body, "mark-sold")
+        # F3：人工路径先做乐观锁——stale 版本即使已 sold 也 409
+        stale_sold = _transition(manager, sold_body, "mark-sold")
+        assert stale_sold.status_code == 409, stale_sold.text
+        # 幂等只对当前版本成立：返回当前 sold 状态且不再改版本
+        current = sold.json()
+        again = manager.post(
+            f"/api/cycle/units/{unit['id']}/mark-sold",
+            json={"expected_version": current["version"]},
+        )
         assert again.status_code == 200, again.text
         assert again.json()["outcome"] == "sold"
-        assert _unit(db, unit["id"]).version == sold.json()["version"]
+        assert _unit(db, unit["id"]).version == current["version"]
 
 
 def test_mark_sold_rejects_non_shop_outcome(db):

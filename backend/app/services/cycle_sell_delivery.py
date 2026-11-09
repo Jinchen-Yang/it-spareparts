@@ -193,7 +193,9 @@ def acknowledge(
                 MaintenanceCycleSellIntent.delivery_id == claim.delivery_id,
                 MaintenanceCycleSellIntent.state == "delivering",
                 MaintenanceCycleSellIntent.lease_token == claim.lease_token,
-                MaintenanceCycleSellIntent.lease_until > now,
+                # F5：用数据库实时时钟做截止比较；取锁等待跨过到期点后 CAS 必须失败，
+                # 不能用进入事务前/取锁前取到的 Python now。
+                MaintenanceCycleSellIntent.lease_until > func.clock_timestamp(),
             )
             .values(**values)
         )
