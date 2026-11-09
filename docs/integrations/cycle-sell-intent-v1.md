@@ -70,7 +70,7 @@ HTTP 200：
 | `conflict` | 身份冲突或人工保护，需人处理 | `failed`（不自动重试） |
 
 - **`unchanged` 只表示「先前已 applied」**。先前只是 `blocked` 时，重放仍返回 `blocked`，或条件满足后返回 `applied`；禁止用 `unchanged` 表示"什么都没做"。
-- itsp 对 `unchanged` 的接受条件：本次领取行此前**没有 blocked 证据**（`state=blocked` 或 `block_code/receipt_status=blocked`）。若先前 blocked 的重放返回 `unchanged`，itsp 视为 `invalid_receipt`（不标 delivered，保持 pending 重试）。
+- itsp 对 `unchanged` 的接受条件：**持久证据显示该 delivery 上一次被商城接受的回执是 `applied`**。实现使用持久字段 `receipt_status`（不是展示用 `block_code`）；`block_code` 只是错误码展示，网络失败/无效回执只清展示码、不清 `receipt_status`。此前无 `applied` 证据（包括仅 blocked、network 失败、invalid_receipt）时收到 `unchanged`，itsp 视为 `invalid_receipt`（不标 delivered，保持 pending 退避并保留证据），直到收到 `applied`。
 - `deliveryId`/`partId`/`unitId` 必须与领取行一致，否则 `invalid_receipt`，不标 `delivered`。
 - 回执字段使用 pydantic `extra=forbid`（strict）；未知字段/类型错误 = 无效回执。
 
@@ -83,6 +83,13 @@ HTTP 200：
 - 商城缺类目映射（当前无映射表）→ `missing_category_mapping`；缺正式图/标价同理。
 - `blocked` 必须携带上述集合内的 `blockCode`；否则 itsp 按无效回执重试（不进入 blocked 退避）。
 
+### 3.2 补条件续跑（requeue）契约（本轮 itsp **未实现**；文本保留供 T7 对齐）
+
+- 商城在正式图/类目映射/标价从缺变齐后，尽力调用 itsp：`POST /api/integrations/cycle/requeue`，body **只有** `{"deliveryId": "<uuid>"}`。
+- 独立服务凭据 `CYCLE_SELL_CALLBACK_TOKEN`（与出站 `SHOP_CYCLE_SELL_TOKEN` 不同；商城只存 SHA-256，itsp 用 `SecretStr` 校验）。
+- itsp 行为：仅当该 `deliveryId` 行当前 `state='blocked'` 时，把 `available_at = now()`；其他状态幂等返回当前状态、不改行为。
+- webhook 丢失只影响速度，不丢正确性；itsp 自身 blocked 重试（5m/15m/1h/6h）是第二路。
+- **实现状态（T1–T5）**：该端点与回调凭据**未实现（范围调整）**；轮询重试已保证最终重试；T7 商城接入时另案实现并独立安全审查。
 ## 4. 商城侧语义（拟定；T7 实现）
 
 - 幂等账 `cycle_sell_delivery(delivery_id PK, part_id, condition_bucket, stock_applied, publish_applied, applied_at)`；`cycle_listing` 唯一 `(part_id, condition_bucket)`；`cycle_allocation` 唯一 `(shop_order_line_id, delivery_id)`。
@@ -96,6 +103,16 @@ HTTP 200：
   7. `live`：调闲管家；当前无客户端 → 保持 `publish_api_missing_stock_update`，不创建第二帖。
 - 禁止为补货删除旧帖再发新帖；数量降 0 时下架/库存设 0 并保留商品 id（`sold_out`），再次入账用原 id 重新上架。
 
+### 4.2 售出分配与超卖（拟定；T9 实现，本轮不编码）
+
+- 可分配集合：该合帖下 `stock_applied=true` 且尚未分配（无未作废 `cycle_allocation`）的 delivery，按 `(applied_at, delivery_id)` 升序取。
+- 订单件数大于可分配件数：**整笔分配回滚**，订单进入商城异常队列；不得把差数记成负库存，不得部分标记 itsp 单位 sold。
+- 每件分配成功后调用 `POST /api/integrations/cycle/mark-sold`（body `{schemaVersion, deliveryId, shopOrderLineId, qty:1}`）：
+  - `deliveryId` 对应单位 outcome 已是 `sold` 且事件中同一 `shopOrderLineId` → 200 当前状态，不第二次写；
+  - outcome=`to_shop` → 改 `sold` 并写事件；其他 outcome → 409，商城把分配标 `remote_conflict`，不重试成另一件。
+- 人工主管 mark-sold（T2 已实现）与商城回调冲突：人工路径 `expected_version` CAS，回调按 delivery 幂等；冲突 409，不覆盖。
+- 未发货取消/退款：作废 allocation、数量加回、按 §8.4 补货，调用 `revert-sold`；仅当前 sold 且同一 `shopOrderLineId` 才回 `to_shop`；已发货退货不改 itsp。
+- 本轮范围：仅 T2 人工 mark-sold；分配/超卖/revert 为 T9，**未实现**。
 ## 5. itsp 投递语义（T4 实现）
 
 - 领取：`FOR UPDATE SKIP LOCKED`；`pending` 到期、`delivering` 租约过期、`blocked` 到期；租约 60s；语句超时 5s、锁超时 1s；事务在 HTTP 前结束。
