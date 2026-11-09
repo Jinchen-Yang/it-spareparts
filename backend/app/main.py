@@ -33,6 +33,7 @@ from app.api import (
     maintenance_collection_plan_imports,
     maintenance_collection_reminders,
     maintenance_collection_evidence,
+    maintenance_cycle,
     maintenance_demands,
     maintenance_doc_import,
     maintenance_expense_reconcile,
@@ -176,6 +177,7 @@ app.include_router(
 )
 app.include_router(maintenance_row_workbench.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipts.router, prefix=settings.api_prefix)
+app.include_router(maintenance_cycle.router, prefix=settings.api_prefix)
 app.include_router(maintenance_receipt_workbook.router, prefix=settings.api_prefix)
 app.include_router(resale_export.router, prefix=settings.api_prefix)
 app.include_router(resale_catalog_export.router, prefix=settings.api_prefix)
