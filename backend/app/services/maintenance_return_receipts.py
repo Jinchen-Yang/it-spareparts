@@ -858,8 +858,19 @@ def update_receipt(
         )
     # 坏件循环互锁（D-0057 §3.3/§6.5）：锁顺序已在上面固定为 收货行 → 循环单位。
     # 只认 source_receipt_id（rkd_line_id），不按 part_id/PN/大类连带其它收货行。
-    if {"qty", "pn", "part_id"} & set(values):
-        _assert_cycle_units_identity_free(db, receipt_id, new_qty=values.get("qty"))
+    # P2-C：前端表单会回填 pn/part_id 等字段——只有**实际值变化**才算身份变更；
+    # 仅改 note/件况等非身份字段时不得因字段存在性触发 409。
+    new_qty = values.get("qty", row.qty)
+    new_pn = values.get("pn", row.pn)
+    new_part_id = values.get("part_id", row.part_id)
+    qty_changed = Decimal(new_qty) != Decimal(row.qty)
+    identity_changed = (
+        qty_changed or new_pn != row.pn or new_part_id != row.part_id
+    )
+    if identity_changed:
+        _assert_cycle_units_identity_free(
+            db, receipt_id, new_qty=Decimal(new_qty) if qty_changed else None
+        )
     before = _receipt_dict(row, _order_no(db, row.source_order_id))
     after_order_no = _order_no(db, values.get("source_order_id", row.source_order_id))
     for key, value in values.items():

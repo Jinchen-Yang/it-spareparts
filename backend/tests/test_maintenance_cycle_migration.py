@@ -587,3 +587,73 @@ def test_downgrade_to_frozen_baseline_removes_everything_and_upgrade_restores(db
             assert all(permissions_json[key] is False for key in CYCLE_PAGE_KEYS)
     finally:
         _ensure_head()
+
+
+# ---------- 9. F-01：NULL template_perms 旧账号不因迁移制造快照/丢权限 ----------
+def test_null_template_perms_legacy_account_not_snapshotted_and_keeps_permissions(db):
+    """复盘 F-01：旧账号 template_perms IS NULL 时，升级不得创建「只有五键的快照」。
+
+    期望：template_perms 保持 NULL（继续走角色模板/legacy 图回退）；legacy
+    permissions 仅合并五键 false 并保留原有键；降级只删五键、不制造 '{}'。
+    """
+    from types import SimpleNamespace
+
+    db.rollback()
+    cfg = _cfg()
+    try:
+        alembic_command.downgrade(cfg, PREVIOUS)
+        with engine.begin() as conn:
+            _set_timeouts(conn)
+            conn.execute(
+                text(
+                    "INSERT INTO sys_user"
+                    " (username, role, display_name, password_hash, is_active,"
+                    "  template_perms, perm_overrides, permissions)"
+                    " VALUES ('f01-legacy-null', 'sales', '旧账号', 'x', true,"
+                    "         NULL, NULL, CAST(:p AS jsonb))"
+                ),
+                {"p": json.dumps({"page_parts": True})},
+            )
+
+        alembic_command.upgrade(cfg, "head")
+        assert _db_version() == REVISION
+        with engine.connect() as conn:
+            template_perms, perm_overrides, legacy = conn.execute(
+                text(
+                    "SELECT template_perms, perm_overrides, permissions"
+                    " FROM sys_user WHERE username = 'f01-legacy-null'"
+                )
+            ).one()
+        assert template_perms is None, "升级不得为 NULL 快照账号创建 template_perms"
+        assert perm_overrides is None
+        assert legacy["page_parts"] is True, "旧账号原有权限不得丢失"
+        for key in CYCLE_PAGE_KEYS:
+            assert legacy[key] is False, f"legacy 图必须写入 {key}=false"
+
+        # 用真实权限函数断言有效权限：原有 page_parts 保留、五循环键失败关闭
+        user = SimpleNamespace(
+            role="sales",
+            permissions=legacy,
+            template_perms=None,
+            perm_overrides=None,
+            is_active=True,
+        )
+        effective = permissions.effective_for_user(user)
+        assert effective["page_parts"] is True
+        for key in CYCLE_PAGE_KEYS:
+            assert effective[key] is False
+
+        # 降级：只删五键，不制造 '{}' 快照，legacy 图回到原状
+        alembic_command.downgrade(cfg, PREVIOUS)
+        assert _db_version() == PREVIOUS
+        with engine.connect() as conn:
+            template_perms2, legacy2 = conn.execute(
+                text(
+                    "SELECT template_perms, permissions FROM sys_user"
+                    " WHERE username = 'f01-legacy-null'"
+                )
+            ).one()
+        assert template_perms2 is None
+        assert legacy2 == {"page_parts": True}
+    finally:
+        _ensure_head()

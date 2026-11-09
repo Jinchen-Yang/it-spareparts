@@ -106,12 +106,9 @@ def claim_one(session_factory=SessionLocal) -> Claim | None:
         )
         if row is None:
             return None
-        # R9：保留「先前被商城明确 blocked」的证据，供 unchanged 语义校验。
-        previous_blocked = (
-            row.state == "blocked"
-            or row.block_code is not None
-            or row.receipt_status == "blocked"
-        )
+        # F-13：R9 证据以「当前 attempt 前状态」为准，不能把历史 block_code 永真化；
+        # 网络失败回 pending 时清空 block_code（last_error_code 保留网络码）。
+        previous_blocked = row.state == "blocked" or row.receipt_status == "blocked"
         row.state = "delivering"
         row.lease_token = uuid4()
         row.lease_until = now + timedelta(seconds=LEASE_SECONDS)
@@ -185,6 +182,9 @@ def acknowledge(
             code = effective if effective in NETWORK_RESULTS else "transport_error"
             values.update(
                 state="pending", receipt_status=None, last_error_code=code,
+                # F-13：网络失败不是商城业务 blocked；清掉历史 block_code，避免
+                # 后续 unchanged 被永久判为 invalid_receipt。
+                block_code=None,
                 available_at=now + timedelta(seconds=_network_backoff(claim.attempts)),
             )
         changed = db.execute(

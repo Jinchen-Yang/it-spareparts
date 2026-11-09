@@ -42,9 +42,18 @@ CYCLE_PAGE_KEYS = (
 def _cycle_page_keys_false() -> None:
     """把五个页面键以 false 写入全部模板与存量账号权限图（fail-closed）。
 
-    模板与账号权限图都是 JSONB；权限中心 v2 之后有效权限来自
-    sys_user.template_perms（快照）⊕ perm_overrides（稀疏覆盖），旧账号还读
-    legacy permissions 列，因此三处都要写 false，并清掉该键的覆盖层。
+    F-01：**不得为 ``template_perms IS NULL``/非 object 的旧账号创建快照**。
+    这类账号的有效权限来自 legacy ``permissions``（或角色模板回退）；若升级时把
+    template_perms 从 NULL 变成「只有五个 false 键的 {} 快照」，effective_for_user
+    会把它当账号快照使用，从而丢掉该账号原有全部权限。
+
+    处理口径：
+    - sys_role_template.permissions：JSONB 模板，合并 false（非 object 退化为 {} 的
+      旧行为保留，模板本身由迁移/seed 维护）。
+    - sys_user.template_perms：**仅当已是 object 快照时**合并 false；NULL/非 object 不动。
+    - sys_user.permissions（legacy 图）：仅当已是 object 时合并 false；NULL 不动。
+    - sys_user.perm_overrides：所有 object 覆盖层都删掉该键（避免稀疏覆盖重新打开）；
+      NULL/非 object 不动。
     """
     for key in CYCLE_PAGE_KEYS:
         op.execute(
@@ -62,14 +71,8 @@ def _cycle_page_keys_false() -> None:
             sa.text(
                 """
                 UPDATE sys_user
-                SET template_perms = CASE
-                      WHEN jsonb_typeof(template_perms) = 'object' THEN template_perms
-                      ELSE '{}'::jsonb
-                    END || jsonb_build_object(:key, false),
-                    perm_overrides = CASE
-                      WHEN jsonb_typeof(perm_overrides) = 'object' THEN perm_overrides
-                      ELSE '{}'::jsonb
-                    END - :key
+                SET template_perms = template_perms || jsonb_build_object(:key, false)
+                WHERE jsonb_typeof(template_perms) = 'object'
                 """
             ).bindparams(key=key)
         )
@@ -77,17 +80,24 @@ def _cycle_page_keys_false() -> None:
             sa.text(
                 """
                 UPDATE sys_user
-                SET permissions = CASE
-                      WHEN jsonb_typeof(permissions) = 'object' THEN permissions
-                      ELSE '{}'::jsonb
-                    END || jsonb_build_object(:key, false)
-                WHERE permissions IS NOT NULL
+                SET perm_overrides = perm_overrides - :key
+                WHERE jsonb_typeof(perm_overrides) = 'object'
+                """
+            ).bindparams(key=key)
+        )
+        op.execute(
+            sa.text(
+                """
+                UPDATE sys_user
+                SET permissions = permissions || jsonb_build_object(:key, false)
+                WHERE jsonb_typeof(permissions) = 'object'
                 """
             ).bindparams(key=key)
         )
 
 
 def _cycle_page_keys_removed() -> None:
+    """F-01：降级只从 object 图里删键，绝不制造 '{}' 快照。"""
     for key in CYCLE_PAGE_KEYS:
         for table, column in (
             ("sys_role_template", "permissions"),

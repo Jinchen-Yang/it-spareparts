@@ -32,6 +32,7 @@ from app.services.workflow import work_items as wf
 from tests.boss_board_helpers import client_for
 from tests.test_maintenance_analytics import _part, _project
 from tests.test_maintenance_return_metrics import _receipt
+from tests.test_maintenance_return_receipts_api import _client as _receipt_client
 
 
 def _client(db, username: str, **overrides):
@@ -362,8 +363,13 @@ def test_worker_work_item_list_and_events_do_not_leak_reason(db):
         worker_events = tester.get(f"/api/subjects/cycle_test/{unit['id']}/events")
         assert worker_events.status_code == 200, worker_events.text
         assert "PRIVATE" not in str(worker_events.json())
+        # F-10：固定期望集合（明文），引擎外壳字段对工人不出现
+        business_keys = {"result", "next", "to", "outcome", "condition_bucket"}
+        engine_shell_keys = {"version", "assignee_id", "from_user_id", "to_user_id"}
         for event in worker_events.json()["items"]:
-            assert set(event["payload"]) <= cycle_service.WORKER_SUBJECT_EVENT_KEYS
+            payload_keys = set(event["payload"])
+            assert payload_keys <= business_keys, event
+            assert payload_keys.isdisjoint(engine_shell_keys), event
 
         # 主管审计保留：列表仍可见 last_reason 原文
         manager_list = manager.get(
@@ -550,3 +556,220 @@ def test_ack_cas_fails_when_lock_wait_crosses_lease_expiry(db):
     assert stored.state == "delivering"
     assert stored.receipt_status is None
     assert stored.completed_at is None
+
+
+# ---------------------------------------------------------------------------
+# 第二轮复审补修：F-04 mark-sold 遗留意图 / P2-C 互锁实际值 / F-08 claim 权限 / F-13 网络失败
+# ---------------------------------------------------------------------------
+
+
+def _intent_row(db, delivery_id) -> MaintenanceCycleSellIntent:
+    db.expire_all()
+    row = db.get(MaintenanceCycleSellIntent, delivery_id)
+    assert row is not None
+    return row
+
+
+def _force_intent_due(db, delivery_id) -> None:
+    db.execute(
+        update(MaintenanceCycleSellIntent)
+        .where(MaintenanceCycleSellIntent.delivery_id == delivery_id)
+        .values(available_at=datetime.now(timezone.utc) - timedelta(seconds=60))
+    )
+    db.commit()
+
+
+def _close_to_shop(recycle, part) -> dict:
+    unit = _intake(recycle, part)[0]
+    ready = recycle.post(
+        f"/api/cycle/units/{unit['id']}/self-pass",
+        json={"expected_version": unit["version"]},
+    )
+    assert ready.status_code == 200, ready.text
+    closed = recycle.post(
+        f"/api/cycle/units/{unit['id']}/close",
+        json={
+            "expected_version": ready.json()["version"],
+            "outcome": "to_shop",
+            "condition_bucket": "good",
+        },
+    )
+    assert closed.status_code == 200, closed.text
+    return closed.json()
+
+
+def test_mark_sold_fails_pending_intent_in_same_transaction(db):
+    """F-04：人工售出必须终止未投递意图，worker 启动后不得再投递已售单位。"""
+    part = _part(db, "CYCLE-FIX-F04A")
+    db.commit()
+    with _recycle(db, "fix-f04-recycle-a") as recycle, \
+            _manager(db, "fix-f04-mgr-a") as manager:
+        closed = _close_to_shop(recycle, part)
+        pending = db.scalar(
+            select(MaintenanceCycleSellIntent).where(
+                MaintenanceCycleSellIntent.unit_id == closed["id"]
+            )
+        )
+        assert pending is not None and pending.state == "pending"
+        sold = manager.post(
+            f"/api/cycle/units/{closed['id']}/mark-sold",
+            json={"expected_version": closed["version"]},
+        )
+        assert sold.status_code == 200, sold.text
+        row = _intent_row(db, pending.delivery_id)
+        assert row.state == "failed"
+        assert row.last_error_code == "unit_sold_manually"
+        assert row.completed_at is not None
+        assert row.lease_token is None and row.lease_until is None
+        assert row.receipt_status is None and row.block_code is None
+        # worker 关闭/启动后都不再领取该意图
+        assert sell.claim_one() is None
+        assert _unit(db, closed["id"]).outcome == "sold"
+
+
+def test_mark_sold_conflicts_when_intent_delivering(db):
+    """F-04：在途 delivering 返回 409（不抢在途 HTTP 的租约），单位保持 to_shop。"""
+    part = _part(db, "CYCLE-FIX-F04B")
+    db.commit()
+    with _recycle(db, "fix-f04-recycle-b") as recycle, \
+            _manager(db, "fix-f04-mgr-b") as manager:
+        closed = _close_to_shop(recycle, part)
+        intent = db.scalar(
+            select(MaintenanceCycleSellIntent).where(
+                MaintenanceCycleSellIntent.unit_id == closed["id"]
+            )
+        )
+        db.execute(
+            update(MaintenanceCycleSellIntent)
+            .where(MaintenanceCycleSellIntent.delivery_id == intent.delivery_id)
+            .values(
+                state="delivering",
+                lease_token=uuid4(),
+                lease_until=datetime.now(timezone.utc) + timedelta(seconds=60),
+            )
+        )
+        db.commit()
+        blocked = manager.post(
+            f"/api/cycle/units/{closed['id']}/mark-sold",
+            json={"expected_version": closed["version"]},
+        )
+        assert blocked.status_code == 409, blocked.text
+        stored_unit = _unit(db, closed["id"])
+        assert stored_unit.outcome == "to_shop"
+        assert stored_unit.version == closed["version"]
+        assert _intent_row(db, intent.delivery_id).state == "delivering"
+
+
+def test_receipt_update_only_note_after_unit_left_pool_allowed(db):
+    """P2-C：前端回填 pn/part_id 但值未变时，仅改 note/件况不得 409。"""
+    project = _project(db, "FIX-P2C")
+    part = _part(db, "CYCLE-FIX-P2C")
+    receipt = _receipt(db, project, part, "3", condition="坏品")
+    db.commit()
+    with _recycle(db, "fix-p2c-recycle") as recycle:
+        created = recycle.post(
+            "/api/cycle/units/handoff-from-receipt",
+            json={
+                "receipt_id": receipt.rkd_line_id,
+                "qty": 1,
+                "expected_receipt_version": receipt.version,
+            },
+        )
+        assert created.status_code == 201, created.text
+        unit = created.json()["items"][0]
+        dispatched = recycle.post(
+            f"/api/cycle/units/{unit['id']}/dispatch",
+            json={"expected_version": unit["version"], "to": "testing"},
+        )
+        assert dispatched.status_code == 200, dispatched.text
+
+    admin = _receipt_client(db, username="fix-p2c-admin")
+    # pn/part_id 与现值相同（前端总回填）+ 仅改 note → 允许
+    patched = admin.patch(
+        f"/api/maintenance/return-receipts/{receipt.rkd_line_id}",
+        json={
+            "version": receipt.version,
+            "reason": "仅改备注",
+            "pn": part.pn_std,
+            "part_id": part.id,
+            "note": "只改备注不碰件数",
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    db.expire_all()
+    stored = db.get(type(receipt), receipt.rkd_line_id)
+    assert stored.version == 2
+    assert stored.note == "只改备注不碰件数"
+    assert _unit(db, unit["id"]).station == "testing"
+    # 真正改 qty（离开 pool 后）→ 409 零写入
+    conflict = admin.patch(
+        f"/api/maintenance/return-receipts/{receipt.rkd_line_id}",
+        json={"version": 2, "reason": "改数量", "qty": 2},
+    )
+    assert conflict.status_code == 409, conflict.text
+    db.expire_all()
+    assert db.get(type(receipt), receipt.rkd_line_id).qty == Decimal("3.000")
+
+
+def test_manager_without_pool_key_claim_is_403_consistent(db):
+    """F-08：只有 page_cycle_manage、无对应 pool 键的主管 claim → 403（API/引擎口径一致）。"""
+    part = _part(db, "CYCLE-FIX-F08")
+    db.commit()
+    with _recycle(db, "fix-f08-recycle") as recycle, \
+            _manager(db, "fix-f08-mgr") as manager:
+        unit = _intake(recycle, part)[0]
+        dispatched = _dispatch(recycle, unit, "testing")
+        assert dispatched.status_code == 200, dispatched.text
+        item = _active_items(db, unit["id"])[0]
+        response = manager.post(
+            f"/api/cycle/units/{unit['id']}/claim",
+            json={
+                "expected_version": dispatched.json()["version"],
+                "item_version": item.version,
+            },
+        )
+        assert response.status_code == 403, response.text
+        assert "无权领取" in response.json()["detail"]
+        stored_unit = _unit(db, unit["id"])
+        assert stored_unit.assignee_username is None
+        assert stored_unit.version == dispatched.json()["version"]
+        assert _active_items(db, unit["id"])[0].status == "pending"
+
+
+def test_network_failure_after_blocked_clears_block_code_and_unchanged_recovers(db):
+    """F-13：blocked 后网络失败回 pending 必须清 block_code，R9 不永久 invalid。"""
+    part = _part(db, "CYCLE-FIX-F13")
+    db.commit()
+    with _recycle(db, "fix-f13-recycle") as recycle:
+        closed = _close_to_shop(recycle, part)
+    intent = db.scalar(
+        select(MaintenanceCycleSellIntent).where(
+            MaintenanceCycleSellIntent.unit_id == closed["id"]
+        )
+    )
+    first = sell.claim_one()
+    assert first is not None and first.delivery_id == intent.delivery_id
+    assert sell.acknowledge(first, "blocked", block_code="missing_formal_image") is True
+    blocked_row = _intent_row(db, intent.delivery_id)
+    assert blocked_row.state == "blocked"
+
+    _force_intent_due(db, intent.delivery_id)
+    retry = sell.claim_one()
+    assert retry is not None and retry.previous_blocked is True
+    assert sell.acknowledge(retry, "transport_error") is True
+    pending_row = _intent_row(db, intent.delivery_id)
+    assert pending_row.state == "pending"
+    assert pending_row.last_error_code == "transport_error"
+    assert pending_row.block_code is None
+    assert pending_row.receipt_status is None
+    status = sell.read_status(db, closed["id"])
+    assert status["status"] == "pending"
+    assert status["blockCode"] is None
+
+    _force_intent_due(db, intent.delivery_id)
+    recovered = sell.claim_one()
+    assert recovered is not None and recovered.previous_blocked is False
+    assert sell.acknowledge(recovered, "unchanged") is True
+    delivered_row = _intent_row(db, intent.delivery_id)
+    assert delivered_row.state == "delivered"
+    assert delivered_row.receipt_status == "unchanged"

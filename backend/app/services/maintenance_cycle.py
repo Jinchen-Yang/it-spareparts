@@ -579,6 +579,14 @@ def claim_unit(
     if unit.assignee_username is not None:
         raise CycleConflict("该单位已被指派或领取")
     _assert_visible(db, unit, ctx)
+    # F-08：API 门对 claim 放行 manage，但引擎 claim 只认 pool 权限；这里先做同一口径校验，
+    # 让「只有 page_cycle_manage、无对应 pool 键」的主管得到一致的 403 而不是 API/引擎分叉。
+    subject_type = SUBJECT_BY_STATION[unit.station]
+    pool_key = POOL_KEY_BY_SUBJECT[subject_type]
+    if not permissions.page_permission_allowed(
+        role=ctx.role, permission_map=_graph(ctx), page_key=pool_key
+    ):
+        raise CycleForbidden("无权领取该工位待办（缺少对应的检测/维修页键）")
     items = active_station_items(db, unit.id)
     if not items:
         raise CycleConflict("该单位没有可领取的待办")
@@ -1104,6 +1112,29 @@ def mark_sold(
         return serialize_unit(unit, ctx)
     if unit.station != "closed" or unit.outcome != "to_shop":
         raise CycleConflict("只有已结案去电商的单位可以标记售出")
+    # F-04：人工售出同事务终止未投递意图（pending/blocked → failed），避免 worker 启动后
+    # 仍把已售单位投递到商城；在途 delivering 返回 409（不抢在途 HTTP 的租约）。
+    intent = db.scalar(
+        select(MaintenanceCycleSellIntent)
+        .where(MaintenanceCycleSellIntent.unit_id == unit.id)
+        .with_for_update()
+    )
+    if intent is not None:
+        if intent.state == "delivering":
+            raise CycleConflict(
+                "该单位的可售意图正在投递中，请先停止 worker 并等待回调后再标记售出"
+            )
+        if intent.state in ("pending", "blocked"):
+            now = _now()
+            intent.state = "failed"
+            intent.receipt_status = None
+            intent.block_code = None
+            intent.last_error_code = "unit_sold_manually"
+            intent.lease_token = None
+            intent.lease_until = None
+            intent.completed_at = now
+            intent.updated_at = now
+            db.flush()
     unit.outcome = "sold"
     _bump(unit, actor)
     _event(db, unit, "mark_sold", actor, {"outcome": "sold"})
