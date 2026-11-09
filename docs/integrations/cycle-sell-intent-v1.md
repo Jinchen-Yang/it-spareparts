@@ -117,7 +117,7 @@ HTTP 200：
 
 ## 6. 售出与取消（本轮范围）
 
-- **mark-sold 人工主管兜底归 T2**：`closed` + `to_shop` → `sold`，`expected_version`，重复调用幂等；本轮不实现商城回调。
+- **mark-sold 人工主管兜底归 T2**：`closed` + `to_shop` → `sold`，`expected_version`；**幂等仅限当前版本**（旧 expected_version → 409），不能以幂等代替 CAS；若存在 pending/blocked 可售意图则同事务置 `failed/unit_sold_manually` 阻止 worker 投递，`delivering` 时 409。本轮不实现商城回调。
 - T9（商城回调 mark-sold / 未发货 revert-sold）本轮不做，契约预留：
   - itsp 服务凭据路径按 `deliveryId` 找单位；outcome 已 `sold` 且同一 `shopOrderLineId` 返回 200 不重写；outcome 是 `to_shop` → 改 `sold` 并记事件；其他 outcome 409。
   - 未发货取消/退款才 revert；已发货退货不改 itsp。
@@ -151,3 +151,21 @@ HTTP 200：
 | 10 | 测试数据库起法 | 本机 PG15 `TEST_DATABASE_URL`、compose `db` 服务、CI helper；均无需删除已有容器 |
 
 报告：`team/reports/tech/2026-11-08-T6商城待核.md`（十项均带仓库内路径/命令证据）。
+
+## 9. 实现状态与范围调整（相对任务书 §8；T5 交付时如实登记）
+
+> 本节记录"契约文本 vs 本轮实际实现"的差异，避免把拟定当已实现。T1–T5 交付范围：itsp 后端 + 契约文档；商城 T7+ 与 T9 回调不在本轮。
+
+| 任务书条目 | 本轮状态 | 说明 |
+| --- | --- | --- |
+| §8.1 请求格式/禁止字段 | **已实现（itsp）** | T4 `SellIntentWorker` 只发送 schemaVersion/deliveryId/unitId/partId/conditionBucket/qty；禁止字段不出现在载荷/日志 |
+| §8.2 回执四态与 `unchanged` 语义 | **已实现（itsp）** | applied/unchanged→delivered；blocked→blocked；conflict→failed；`unchanged` 仅在领取行无"先前 blocked 证据"时接受；先前 blocked 收到 unchanged 视为 invalid_receipt（R9） |
+| §8.3 blocked 双路续跑（itsp 重试 + 商城 requeue 回调） | **部分实现 / 范围调整** | itsp 侧阻塞重试（5m/15m/1h/6h 封顶）**已实现**；**`POST /api/integrations/cycle/requeue` 与 `CYCLE_SELL_CALLBACK_TOKEN` 本轮未实现**（不在 T1–T5 编码范围；保留契约字段，T7 商城接入时另案实现并单独审） |
+| §8.3 商城补条件后主动回调 | **未实现（商城侧）** | 商城尚未实现，本契约仅拟定；轮询重试可保证最终一致（只影响速度） |
+| §8.4 合帖/上下架/售出/补货 + dry_run test_mode 隔离 | **未实现（商城侧，T7 拟定）** | 本轮只交付契约文本；itsp 不实现商城发布逻辑。dry_run 语义：商城本地帖 `external_listing_id` 为空、`test_mode=true` 仅测试列、不调闲管家；`stock_applied`/`publish_applied` 分离，重试只补发布不加库存；禁止删旧帖补货 |
+| §8.5 售出分配/超卖/取消/人工冲突 | **部分实现（itsp 人工兜底）** | T2 仅实现主管人工 mark-sold（closed+to_shop→sold、expected_version、幂等）；商城回调分配/整笔回滚/revert-sold **T9 不做**。人工 mark-sold 与服务回调冲突规则：人工路径 409、不覆盖；回调要求 deliveryId/shopOrderLineId 幂等（T9 实现） |
+| §8.6 开关默认值 | **itsp 已实现；shop 侧未实现** | itsp `SHOP_CYCLE_SELL_ENABLED=false`/URL/token 校验已实现；shop 发布模式 `off`、allowlist、live confirm 为 T7/T8 配置项，本轮仅写入契约 |
+| 回调凭据分离（出站 vs 回调） | **未实现（T9）** | 契约要求两个独立 token、商城只存 SHA-256；本轮仅出站 token 已实现；回调 token 待 T9 |
+| 主管投递状态查询 API | **未接线** | `cycle_sell_delivery.read_status()` 服务函数存在，但**未暴露 HTTP API**；主管界面/接口待后续（不在 T1–T5 验收内） |
+
+**范围调整声明**：涉及"商城 requeue 回调 / 回调凭据 / 售出与取消回调（T9）/ 主管投递状态 API"的条目，本轮 T1–T5 不编码；如用户要求在本轮补齐，需另立任务与独立安全审查，不在本 PR 声称完成。
