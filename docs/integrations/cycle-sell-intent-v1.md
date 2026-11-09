@@ -90,7 +90,8 @@ HTTP 200：
 - itsp 行为：仅当该 `deliveryId` 行当前 `state='blocked'` 时，把 `available_at = now()`；其他状态幂等返回当前状态、不改行为。
 - webhook 丢失只影响速度，不丢正确性；itsp 自身 blocked 重试（5m/15m/1h/6h）是第二路。
 - **实现状态（T1–T5）**：该端点与回调凭据**未实现（范围调整）**；轮询重试已保证最终重试；T7 商城接入时另案实现并独立安全审查。
-\n## 4. 商城侧语义（拟定；T7 实现）
+
+## 4. 商城侧语义（拟定；T7 实现）
 
 - 幂等账 `cycle_sell_delivery(delivery_id PK, part_id, condition_bucket, stock_applied, publish_applied, applied_at)`；`cycle_listing` 唯一 `(part_id, condition_bucket)`；`cycle_allocation` 唯一 `(shop_order_line_id, delivery_id)`。
 - 处理顺序（同一商城事务）：
