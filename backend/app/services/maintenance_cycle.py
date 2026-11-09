@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Iterable
 
 from sqlalchemy import func, or_, select
@@ -33,7 +34,16 @@ from app.models.maintenance_cycle import (
     MaintenanceCycleUnit,
 )
 from app.models.system import SysUser
+from app.models.workflow import WorkItem
 from app.security import UserContext
+from app.services.workflow import work_items
+from app.services.workflow.registry import (
+    Subject,
+    SubjectSpec,
+    get_spec as get_subject_spec,
+    register,
+    registered,
+)
 
 # ---------------------------------------------------------------------------
 # 错误类型：API 层映射 400 / 404 / 409
@@ -92,6 +102,7 @@ WRITE_PAGE_KEYS: dict[str, tuple[str, ...]] = {
     "outsource_return": (RECYCLE_PAGE, MANAGE_PAGE),
     "complete_test": (TEST_PAGE, MANAGE_PAGE),
     "complete_repair": (REPAIR_PAGE, MANAGE_PAGE),
+    "claim": (TEST_PAGE, REPAIR_PAGE, MANAGE_PAGE),
     "mark_sold": (MANAGE_PAGE,),
     "read": READ_PAGE_KEYS,
     "wip": (WIP_PAGE, MANAGE_PAGE),
@@ -394,6 +405,204 @@ def _has_sell_intent(db: Session, unit_id: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 待办接线（T3）：只复用 work_item 引擎的 open_items/claim/complete/cancel_subject，
+# 不复制领取 UPDATE；同一单位在检测/维修工位最多一张未结束待办。
+# ---------------------------------------------------------------------------
+
+SUBJECT_TYPES = ("cycle_test", "cycle_repair")
+SUBJECT_BY_STATION = {"testing": "cycle_test", "repairing": "cycle_repair"}
+POOL_KEY_BY_SUBJECT = {"cycle_test": TEST_PAGE, "cycle_repair": REPAIR_PAGE}
+# 工人可见的待办事件 payload 键（引擎生成字段；供应商/SN/收货单/项目/备注一律不出现）
+WORKER_SUBJECT_EVENT_KEYS = frozenset(
+    {"version", "assignee_id", "from_user_id", "to_user_id"}
+)
+ACTIVE_ITEM_STATES = ("pending", "in_progress")
+
+
+def _require_active_user(db: Session, username: str | None) -> SysUser | None:
+    if not username:
+        return None
+    user = db.scalar(
+        select(SysUser).where(
+            SysUser.username == username,
+            SysUser.is_active.is_(True),
+            SysUser.deleted_at.is_(None),
+        )
+    )
+    if user is None:
+        raise CycleInvalid("指派账号不存在或已停用")
+    return user
+
+
+def _assert_visible(unit: MaintenanceCycleUnit, ctx: UserContext) -> None:
+    if not can_view_unit(unit, ctx):
+        raise CycleNotFound("循环单位不存在")
+
+
+def active_station_items(db: Session, unit_id: int) -> list[WorkItem]:
+    return list(
+        db.scalars(
+            select(WorkItem)
+            .where(
+                WorkItem.subject_type.in_(SUBJECT_TYPES),
+                WorkItem.subject_id == unit_id,
+                WorkItem.status.in_(ACTIVE_ITEM_STATES),
+            )
+            .order_by(WorkItem.id)
+        ).all()
+    )
+
+
+def _open_station_item(
+    db: Session,
+    unit: MaintenanceCycleUnit,
+    station: str,
+    assignee_user_id: int | None,
+    ctx: UserContext,
+) -> WorkItem:
+    """派工进入检测/维修工位时开待办：有指派就指派，没有就进公共池。"""
+    subject_type = SUBJECT_BY_STATION[station]
+    if active_station_items(db, unit.id):
+        raise CycleConflict("该单位已有未结束的检测/维修待办")
+    items = work_items.open_items(
+        db,
+        Subject(subject_type, unit.id),
+        [assignee_user_id] if assignee_user_id else [],
+        subject_type,
+        ctx,
+    )
+    return items[0]
+
+
+def _finish_station_items(
+    db: Session, unit: MaintenanceCycleUnit, ctx: UserContext
+) -> None:
+    """业务动作完成时结束对应待办：已领取/已指派 → complete；公共池 → 领取后 complete；
+    主管可取消公共池待办。待办写入失败会抛出并让整个工位转移回滚。"""
+    for item in active_station_items(db, unit.id):
+        pool_key = POOL_KEY_BY_SUBJECT[item.subject_type]
+        pool_ok = permissions.page_permission_allowed(
+            role=ctx.role, permission_map=_graph(ctx), page_key=pool_key
+        )
+        if item.claimed_by is not None or item.assignee_id is not None:
+            work_items.complete(db, item.id, ctx, item.version)
+        elif pool_ok:
+            claimed = work_items.claim(db, item.id, ctx, item.version)
+            work_items.complete(db, claimed.id, ctx, claimed.version)
+        elif can_manage(ctx):
+            work_items.cancel_subject(
+                db,
+                Subject(item.subject_type, unit.id),
+                ctx,
+                "业务动作已完成，待办取消",
+                expected_versions={item.id: item.version},
+            )
+        else:
+            raise CycleConflict("请先领取待办后再完成该动作")
+
+
+def claim_unit(
+    db: Session,
+    *,
+    unit_id: int,
+    expected_version: int,
+    item_version: int,
+    actor: str,
+    ctx: UserContext,
+) -> dict:
+    """公共池领取：同一事务调用 work_item 引擎 claim() 并写回单位负责人。"""
+    unit = _locked_unit(db, unit_id)
+    _check_version(unit, expected_version)
+    if unit.withdrawn_at is not None:
+        raise CycleConflict("单位已撤回，不能领取")
+    if unit.station not in ("testing", "repairing"):
+        raise CycleInvalid("只有检测/维修工位的单位可以领取")
+    # W-03：第二个工人重复领取必须得到 409，而不是因不可见得到 404。
+    if unit.assignee_username is not None:
+        raise CycleConflict("该单位已被指派或领取")
+    _assert_visible(unit, ctx)
+    items = active_station_items(db, unit.id)
+    if not items:
+        raise CycleConflict("该单位没有可领取的待办")
+    item = items[0]
+    if item.assignee_id is not None or item.claimed_by is not None:
+        raise CycleConflict("待办已被领取")
+    work_items.claim(db, item.id, ctx, item_version)
+    unit.assignee_username = _username(ctx)
+    _bump(unit, actor)
+    _event(db, unit, "claim", actor, {})
+    db.flush()
+    return serialize_unit(unit, ctx)
+
+
+def _subject_view(db: Session, unit_id: int, ctx: UserContext) -> bool:
+    unit = db.get(MaintenanceCycleUnit, unit_id)
+    return unit is not None and can_view_unit(unit, ctx)
+
+
+def _subject_summarize(db: Session, unit_ids, ctx: UserContext) -> dict[int, dict]:
+    ids = list(dict.fromkeys(unit_ids))
+    if not ids:
+        return {}
+    result: dict[int, dict] = {}
+    for unit in db.scalars(
+        select(MaintenanceCycleUnit).where(MaintenanceCycleUnit.id.in_(ids))
+    ).all():
+        if can_view_unit(unit, ctx):
+            result[unit.id] = {
+                "pn": unit.pn,
+                "part_id": unit.part_id,
+                "station": unit.station,
+                "unit_uid": str(unit.unit_uid),
+            }
+    return result
+
+
+def _subject_filter_events(rows, ctx: UserContext):
+    """非主管的待办事件 payload 只保留引擎生成字段；主管保留审计字段。"""
+    if can_manage(ctx):
+        return rows
+    sanitized = []
+    for row in rows:
+        payload = {
+            key: value
+            for key, value in (row.payload or {}).items()
+            if key in WORKER_SUBJECT_EVENT_KEYS
+        }
+        sanitized.append(
+            SimpleNamespace(
+                **{
+                    column.name: getattr(row, column.name)
+                    for column in row.__table__.columns
+                    if column.name != "payload"
+                },
+                payload=payload,
+                __table__=row.__table__,
+            )
+        )
+    return sanitized
+
+
+def register_subjects() -> None:
+    """把检测/维修两个主体注册进现有待办引擎（复用 open_items/claim/complete）。"""
+    specs = registered()
+    for subject_type, stage in (("cycle_test", "testing"), ("cycle_repair", "repairing")):
+        if subject_type in specs:
+            continue
+        register(
+            subject_type,
+            SubjectSpec(
+                pool_permission=POOL_KEY_BY_SUBJECT[subject_type],
+                supervisor_permission=MANAGE_PAGE,
+                can_view_subject=_subject_view,
+                summarize=_subject_summarize,
+                filter_events=_subject_filter_events,
+                pool_key=subject_type,
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
 # 入池：返还收货交接 / 外部入池
 # ---------------------------------------------------------------------------
 
@@ -532,6 +741,7 @@ def dispatch(
     ctx: UserContext,
 ) -> dict:
     unit = _locked_unit(db, unit_id)
+    _assert_visible(unit, ctx)
     _check_version(unit, expected_version)
     if unit.withdrawn_at is not None:
         raise CycleConflict("单位已撤回，不能派工")
@@ -541,6 +751,7 @@ def dispatch(
         raise CycleInvalid("派工去向仅支持 testing/repairing/outsource")
     vendor: str | None = None
     assignee: str | None = None
+    target_user: SysUser | None = None
     if to == "outsource":
         if vendor_name is None or not str(vendor_name).strip():
             raise CycleInvalid("委外必须填写供应商名称")
@@ -548,7 +759,12 @@ def dispatch(
     else:
         if vendor_name not in (None, ""):
             raise CycleInvalid("只有委外可以填写供应商名称")
-        assignee = _active_user_id(db, assignee_username)
+        target_user = _require_active_user(db, assignee_username)
+        assignee = target_user.username if target_user is not None else None
+        # T3：进入检测/维修工位同一事务开待办；有指派则指派，否则进公共池。
+        _open_station_item(
+            db, unit, to, target_user.id if target_user is not None else None, ctx
+        )
     unit.station = to
     unit.outcome = None
     unit.vendor_name = vendor
@@ -569,6 +785,7 @@ def self_pass(
     db: Session, *, unit_id: int, expected_version: int, actor: str, ctx: UserContext
 ) -> dict:
     unit = _locked_unit(db, unit_id)
+    _assert_visible(unit, ctx)
     _check_version(unit, expected_version)
     if unit.withdrawn_at is not None:
         raise CycleConflict("单位已撤回，不能自测")
@@ -595,11 +812,14 @@ def complete_test(
     ctx: UserContext,
 ) -> dict:
     unit = _locked_unit(db, unit_id)
+    _assert_visible(unit, ctx)
     _check_version(unit, expected_version)
     if unit.station != "testing":
         raise CycleInvalid("只有检测中单位可以完成检测")
     if result not in ("good", "bad"):
         raise CycleInvalid("检测结果仅支持 good|bad")
+    # T3：业务动作完成 → 结束检测待办；测坏送修 → 同事务打开未指派维修待办。
+    _finish_station_items(db, unit, ctx)
     if result == "good":
         if next_station not in (None, "ready"):
             raise CycleInvalid("测好只能进入待处置（ready）")
@@ -612,10 +832,12 @@ def complete_test(
         if next_station not in ("repairing", "scrap"):
             raise CycleInvalid("测坏必须选择送修（repairing）或报废（scrap）")
         if next_station == "repairing":
+            _open_station_item(db, unit, "repairing", None, ctx)
             unit.station = "repairing"
             unit.condition_bucket = None
             unit.outcome = None
-            # §6.4 / R6：检测转维修清空检测人，维修负责人由 T3 的未指派待办重新领取。
+            unit.repair_round += 1
+            # §6.4 / R6：检测转维修清空检测人，维修待办未指派。
             _clear_assignee(unit)
             payload = {"result": "bad", "next": "repairing"}
         else:
@@ -642,15 +864,19 @@ def complete_repair(
     ctx: UserContext,
 ) -> dict:
     unit = _locked_unit(db, unit_id)
+    _assert_visible(unit, ctx)
     _check_version(unit, expected_version)
     if unit.station != "repairing":
         raise CycleInvalid("只有维修中单位可以完成维修")
     if result not in ("fixed", "unfixed"):
         raise CycleInvalid("维修结果仅支持 fixed|unfixed")
+    # T3：业务动作完成 → 结束维修待办；修好再测 → 同事务打开未指派检测待办。
+    _finish_station_items(db, unit, ctx)
     if result == "fixed":
         if next_station not in ("testing", "ready"):
             raise CycleInvalid("修好后必须选择再测（testing）或不测（ready）")
         if next_station == "testing":
+            _open_station_item(db, unit, "testing", None, ctx)
             unit.station = "testing"
             unit.condition_bucket = None
             payload = {"result": "fixed", "next": "testing"}
@@ -686,12 +912,17 @@ def outsource_return(
     ctx: UserContext,
 ) -> dict:
     unit = _locked_unit(db, unit_id)
+    _assert_visible(unit, ctx)
     _check_version(unit, expected_version)
     if unit.station != "outsource":
         raise CycleInvalid("只有委外中单位可以登记委外回来")
     if next_station not in ("testing", "repairing", "to_shop", "to_company", "scrap"):
         raise CycleInvalid("委外回来去向必须显式五选一")
     bucket = _validate_bucket(condition_bucket, required=next_station == "to_shop")
+    # T3：委外本身没有工人待办；回到检测/维修工位时同事务开未指派待办。
+    _finish_station_items(db, unit, ctx)
+    if next_station in ("testing", "repairing"):
+        _open_station_item(db, unit, next_station, None, ctx)
     _clear_assignee(unit)
     unit.condition_bucket = bucket
     if next_station in ("testing", "repairing"):
@@ -724,6 +955,7 @@ def close(
     ctx: UserContext,
 ) -> dict:
     unit = _locked_unit(db, unit_id)
+    _assert_visible(unit, ctx)
     _check_version(unit, expected_version)
     if unit.withdrawn_at is not None:
         raise CycleConflict("单位已撤回，不能结案")
@@ -733,6 +965,7 @@ def close(
         raise CycleInvalid("结案去向仅支持 to_shop/to_company/scrap")
     bucket = _validate_bucket(condition_bucket, required=outcome == "to_shop")
     clean_note = _optional_text(note, "备注", MAX_NOTE_LENGTH)
+    _finish_station_items(db, unit, ctx)
     unit.station = "closed"
     unit.outcome = outcome
     unit.condition_bucket = bucket
@@ -758,6 +991,7 @@ def withdraw(
     db: Session, *, unit_id: int, expected_version: int, actor: str, ctx: UserContext
 ) -> dict:
     unit = _locked_unit(db, unit_id)
+    _assert_visible(unit, ctx)
     _check_version(unit, expected_version)
     if unit.withdrawn_at is not None:
         raise CycleConflict("单位已撤回")

@@ -24,6 +24,7 @@ from app.db import get_db
 from app.models.system import SysUser
 from app.security import UserContext, record_access_log
 from app.services import maintenance_cycle as cycle
+from app.services.workflow.registry import WorkflowError
 
 router = APIRouter(tags=["cycle"])
 UnitId = Annotated[int, Path(gt=0, le=2**63 - 1)]
@@ -105,6 +106,12 @@ def _write(db: Session, fn, /, **kwargs) -> dict:
         db.rollback()
         _raise_cycle_error(exc)
         raise
+    except WorkflowError as exc:
+        db.rollback()
+        raise HTTPException(
+            getattr(exc, "status_code", status.HTTP_409_CONFLICT),
+            getattr(exc, "detail", str(exc)),
+        ) from exc
     except DBAPIError as exc:
         db.rollback()
         _raise_dbapi(exc)
@@ -147,6 +154,12 @@ class ExternalIntakeInput(BaseModel):
 class VersionInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_version: int = Field(ge=1, le=2**31 - 1)
+
+
+class ClaimInput(VersionInput):
+    """领取公共池检测/维修待办：同时提交单位版本与待办版本。"""
+
+    item_version: int = Field(ge=1, le=2**31 - 1)
 
 
 class DispatchInput(VersionInput):
@@ -387,6 +400,27 @@ def withdraw(unit_id: UnitId, body: VersionInput, db: Db, ctx: Ctx) -> dict:
 
 
 @router.post(
+    "/cycle/units/{unit_id}/claim",
+    dependencies=[Depends(require_cycle_pages(*cycle.WRITE_PAGE_KEYS["claim"]))],
+)
+def claim_unit(unit_id: UnitId, body: ClaimInput, db: Db, ctx: Ctx) -> dict:
+    """公共池领取：同一事务复用 work_item 引擎 claim() 并写回单位负责人（T3）。"""
+    payload = _write(
+        db,
+        cycle.claim_unit,
+        unit_id=unit_id,
+        expected_version=body.expected_version,
+        item_version=body.item_version,
+        actor=str(ctx.user_id),
+        ctx=ctx,
+    )
+    record_access_log(
+        ctx, "cycle_claim", "maintenance_cycle_unit", {"unit_id": unit_id}
+    )
+    return payload
+
+
+@router.post(
     "/cycle/units/{unit_id}/mark-sold",
     dependencies=[Depends(require_cycle_pages(*cycle.WRITE_PAGE_KEYS["mark_sold"]))],
 )
@@ -476,3 +510,7 @@ def wip(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "part_ids 必须为 1–100 个正整数"
         )
     return cycle.wip_counts(db, part_ids=parsed)
+
+
+# 主体注册必须在应用启动/请求前完成（与 presales 的 register_subjects 同款）。
+cycle.register_subjects()

@@ -306,7 +306,8 @@ def test_handoff_concurrent_intake_only_one_succeeds(db):
 def test_dispatch_self_pass_and_version_conflict_zero_write(db):
     part = _part(db, "CYCLE-PN-D")
     db.commit()
-    with _recycle(db, "cycle-recycle-d") as recycle:
+    with _recycle(db, "cycle-recycle-d") as recycle, \
+            _manager(db, "cycle-mgr-d") as manager:
         unit = _intake(recycle, part, 1).json()["items"][0]
         stale = recycle.post(
             f"/api/cycle/units/{unit['id']}/dispatch",
@@ -322,11 +323,17 @@ def test_dispatch_self_pass_and_version_conflict_zero_write(db):
         assert body["station"] == "testing"
         assert body["version"] == unit["version"] + 1
 
-        invalid_from = recycle.post(
+        # 非法转移（可见性通过后）→ 400；回收岗看不到 testing 单位 → 404。
+        invalid_from = manager.post(
             f"/api/cycle/units/{unit['id']}/self-pass",
             json={"expected_version": body["version"]},
         )
         assert invalid_from.status_code == 400, invalid_from.text
+        hidden_from = recycle.post(
+            f"/api/cycle/units/{unit['id']}/self-pass",
+            json={"expected_version": body["version"]},
+        )
+        assert hidden_from.status_code == 404, hidden_from.text
 
         # 委外必须带供应商名称（A-08）
         outsource_unit = _intake(recycle, part, 1).json()["items"][0]
@@ -540,7 +547,10 @@ def test_withdraw_only_pool_hides_from_list_and_releases_consumed(db):
         ).json()["items"]
         withdrawn = _transition(recycle, items[0], "withdraw")
         assert withdrawn.status_code == 200, withdrawn.text
-        again = _transition(recycle, withdrawn.json(), "withdraw")
+        # 撤回国工人不可见 → 404；主管可见，重复撤回 → 409
+        hidden_again = _transition(recycle, withdrawn.json(), "withdraw")
+        assert hidden_again.status_code == 404, hidden_again.text
+        again = _transition(manager, withdrawn.json(), "withdraw")
         assert again.status_code == 409, again.text
 
         listing = recycle.get("/api/cycle/units", params={"station": "pool"})
