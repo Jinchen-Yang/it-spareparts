@@ -18,10 +18,12 @@ def test_role_template_and_admin_full():
     assert sales["page_purchases"] is True   # 合同重点：销售也能查采购记录
     assert sales["own_customers_only"] is True
     assert sales["page_governance"] is False
-    # admin 恒全开，自定义也锁不住
+    # admin 恒全开，自定义也锁不住；坏件循环五个页键是实名名单，不进入全开图。
     admin = permissions.effective("admin", {"data_supplier": False, "page_governance": False})
     assert admin["data_supplier"] is True
-    assert all(admin[k] for k in permissions.PAGE_KEYS)
+    assert all(admin[k] for k in permissions.PAGE_KEYS
+               if k not in permissions.ACCOUNT_SCOPED_BETA_PAGE_KEYS)
+    assert all(admin[k] is False for k in permissions.CYCLE_PAGE_KEYS)
 
 
 def test_custom_overrides_template():

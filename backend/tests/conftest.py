@@ -161,6 +161,8 @@ _TABLES = [
     "maintenance_demand_delete_intent",
     "f_project_expense",
     "maintenance_source_order_assignment",
+    # 坏件循环池（D-0057 T1）：事件/意图 → 单位（CASCADE 由单条 TRUNCATE 处理）。
+    "maintenance_cycle_sell_intent", "maintenance_cycle_event", "maintenance_cycle_unit",
     "f_maintenance_line", "f_maintenance_order",
     "f_sales_reconciliation_snapshot",
     "f_sales_line", "f_sales_order", "f_purchase_line", "f_purchase_order",

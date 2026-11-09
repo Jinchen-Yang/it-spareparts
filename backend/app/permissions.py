@@ -49,13 +49,28 @@ PAGE_KEYS: list[str] = [
     # page_permission_allowed 恒放行）；sales/purchaser/readonly 显式 False。
     "page_purchase_analytics",
     "page_presales",
+    # 坏件循环池（D-0057）：与 page_maintenance 脱钩的五个独立工位页键。
+    "page_cycle_recycle",
+    "page_cycle_test",
+    "page_cycle_repair",
+    "page_cycle_manage",
+    "page_cycle_wip",
 ]
-# 这两个页面不是角色能力，而是生产灰度名单。即使 role=admin，也必须从实名账号
+# 坏件循环五个页键：生产默认全关（含 admin），不进入 _full() 全开图；运行时必须
+# 由实名账号 template_perms ⊕ perm_overrides 显式授权（见 ACCOUNT_SCOPED_BETA_PAGE_KEYS）。
+CYCLE_PAGE_KEYS: frozenset[str] = frozenset({
+    "page_cycle_recycle",
+    "page_cycle_test",
+    "page_cycle_repair",
+    "page_cycle_manage",
+    "page_cycle_wip",
+})
+# 这些页面不是角色能力，而是生产灰度/运营岗位名单。即使 role=admin，也必须从实名账号
 # template_perms ⊕ perm_overrides 得到 True；旧 token/共享口令/缺失账号快照一律失败关闭。
 ACCOUNT_SCOPED_BETA_PAGE_KEYS: frozenset[str] = frozenset({
     "page_maintenance_beta",
     "page_replenishment_beta",
-})
+}) | CYCLE_PAGE_KEYS
 # 回款提醒两个写动作同为实名白名单能力（设计 §9）：不进入 admin 常规全开图，
 # require_action 的 admin 短路不适用；必须由 security.require_explicit_account_action
 # 读取实名账号快照⊕覆盖后显式放行。迁移把存量模板与账号中的这两个键强制回填 false。
@@ -180,6 +195,11 @@ LABELS: dict[str, str] = {
     "page_sales_analysis": "销售分析（大单追踪）",
     "data_reconciliation": "销售单对账数据（已对账/待对账/退货已对账）",
     "page_presales": "售前询价与报价库",
+    "page_cycle_recycle": "坏件循环·回收池",
+    "page_cycle_test": "坏件循环·检测队列",
+    "page_cycle_repair": "坏件循环·维修队列",
+    "page_cycle_manage": "坏件循环·主管全览",
+    "page_cycle_wip": "坏件循环·在制只读",
     "action_presales_inquire": "销售询价管理",
     "action_presales_quote": "询价回复报价",
     "action_presales_offer": "主动报价管理",
@@ -198,6 +218,10 @@ def _full(own: bool = False) -> dict[str, bool]:
     d.update({k: True for k in PAGE_KEYS})
     d.update({k: True for k in ACTION_KEYS})
     for key in ACCOUNT_SCOPED_ACTION_KEYS:
+        d[key] = False
+    # 坏件循环工位页不进全开图：admin/boss/readonly 兜底模板同样默认 false
+    # （运行时只认实名账号快照 ⊕ 覆盖，见 ACCOUNT_SCOPED_BETA_PAGE_KEYS）。
+    for key in CYCLE_PAGE_KEYS:
         d[key] = False
     d["own_customers_only"] = own
     # 维保行级收敛键不进全开图：admin/boss 恒全范围（is_scoped_maintenance 双保险）
@@ -1189,6 +1213,52 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["销售", "维保负责人角色"],
         "sensitivity": "low",
         "risk": "限制型开关（勾上=看得更少）；不勾时维持「能进页面即全量可见」的既有名单制口径。",
+    },
+    # ---- 坏件循环池（D-0057）：五个工位页键默认全关（含 admin），逐实名账号显式授权 ----
+    "page_cycle_recycle": {
+        "label": "坏件循环·回收池",
+        "summary": "可打开坏件循环回收池：从返还收货交接入池、外部入池、派发检测/维修/委外、委外回来手选去向、待处置结案。",
+        "can": "查看回收池与委外/待处置工位；接收外部件与自返还单入池；派工、撤回仍在池内的件、结案（去电商/回公司/报废）。",
+        "cannot": "不自动获得检测/维修写动作或主管全览；供应商、SN、来源收货单等敏感字段仅主管可见；不改库存与变卖台账。",
+        "typical": ["回收仓管", "显式授权的维保人员"],
+        "sensitivity": "medium",
+        "risk": "入池即进入循环闭环，误入会污染后续检测维修与可售意图；页键需逐账号开通。",
+    },
+    "page_cycle_test": {
+        "label": "坏件循环·检测队列",
+        "summary": "可打开坏件循环检测工位，从公共池领取并登记检测结果。",
+        "can": "查看自己负责或可领取的检测中单位；提交测好/测坏结论（测好进待处置、测坏送修或报废）。",
+        "cannot": "不能从返还单入池或主管结案；看不到供应商、SN、来源单与备注；无检测待办时无法查看他人单位。",
+        "typical": ["检测员"],
+        "sensitivity": "medium",
+        "risk": "成色桶决定一类一贴的可售意图聚合，错标会影响商城合帖。",
+    },
+    "page_cycle_repair": {
+        "label": "坏件循环·维修队列",
+        "summary": "可打开坏件循环维修工位，领取维修并登记修好/修不了结果。",
+        "can": "查看自己负责或可领取的维修中/委外中单位；修好选择再测或不测；修不了报废。",
+        "cannot": "不能入池或主管结案；看不到供应商、SN、来源单与备注；不能改成本/价格。",
+        "typical": ["维修员"],
+        "sensitivity": "medium",
+        "risk": "修后去向与再测选择写错会卡住工位或错误触发可售意图。",
+    },
+    "page_cycle_manage": {
+        "label": "坏件循环·主管全览",
+        "summary": "可全工位查看坏件循环单位，含供应商/SN/来源收货单与事件审计，并可处理结案。",
+        "can": "查看全部工位与全部字段；处理结案与人工 mark-sold 兜底；读取可售意图与失败原因。",
+        "cannot": "不替代各工位写动作授权；不改库存、氚云或变卖台账；不直接调用商城/闲鱼。",
+        "typical": ["维保主管", "管理员"],
+        "sensitivity": "high",
+        "risk": "暴露供应商与来源链路；关单进入 closed 后由业务规则约束不可逆。",
+    },
+    "page_cycle_wip": {
+        "label": "坏件循环·在制只读",
+        "summary": "可只读查看坏件循环在制数量（采购/售前 PN 旁的数字），不进入工位作业。",
+        "can": "查看按 PN 汇总的检测/维修/委外/待处置在制数量。",
+        "cannot": "任何写动作；看不到供应商、来源单、SN、项目与金额。",
+        "typical": ["需要进度可视的协同角色"],
+        "sensitivity": "low",
+        "risk": "只读口径，误授影响较小；无此权限时界面不得显示假 0。",
     },
 }
 
