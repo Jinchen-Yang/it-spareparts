@@ -27,7 +27,8 @@ vi.mock("../AppShell", async () => {
   return { default: () => <Outlet /> };
 });
 
-vi.mock("../nav", async () => {
+vi.mock("../nav", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../nav")>();
   const { useState } = await import("react");
   const PartsPage = () => {
     const [sessionName] = useState(() => localStorage.getItem("name"));
@@ -54,6 +55,7 @@ vi.mock("../nav", async () => {
     DETAIL_ROUTES: [],
     NAV_REDIRECTS: [],
     defaultPath: (allowed: Array<{ path: string }>) => allowed[0].path,
+    isNavItemAllowed: actual.isNavItemAllowed,
   };
 });
 

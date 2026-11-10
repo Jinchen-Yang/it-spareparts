@@ -3,7 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Button, Result } from "antd";
 import LoginPage from "./pages/LoginPage";
 import AppShell from "./AppShell";
-import { DETAIL_ROUTES, NAV_ITEMS, NAV_REDIRECTS, defaultPath } from "./nav";
+import { DETAIL_ROUTES, NAV_ITEMS, NAV_REDIRECTS, defaultPath, isNavItemAllowed } from "./nav";
 import { clearSessionScopedPreferences } from "./sessionPreferences";
 import { TaxBasisProvider } from "./context/TaxBasis";
 import { getBetaFeatures } from "./api";
@@ -96,29 +96,16 @@ export default function App() {
   const allowed = useMemo(() => {
     if (!token) return [];
     const role = localStorage.getItem("role") || "";
-    const isAdmin = role === "admin";
     const perms = readPerms();
-    // admin 全通；组合能力入口优先按完整能力判断；其余沿用单权限/任一权限规则。
-    return NAV_ITEMS.filter((it) => (
-      !it.betaFeature || betaFeatures[it.betaFeature] === true
-    ) && (isAdmin
-      || (it.visibleWhen ? it.visibleWhen()
-        : it.perm ? !!perms[it.perm]
-        : it.anyPerm ? it.anyPerm.some((p) => !!perms[p])
-          : false)));
+    return NAV_ITEMS.filter((it) => isNavItemAllowed(it, role, perms, betaFeatures));
   }, [token, betaFeatures]);
 
   // 带参详情路由（如 /pool-analysis/:groupId）：与母页共用同一权限门，无权限则不注册
   const allowedDetails = useMemo(() => {
     if (!token) return [];
-    const isAdmin = (localStorage.getItem("role") || "") === "admin";
+    const role = localStorage.getItem("role") || "";
     const perms = readPerms();
-    return DETAIL_ROUTES.filter((r) => (
-      !r.betaFeature || betaFeatures[r.betaFeature] === true
-    ) && (isAdmin
-      || (r.perm ? !!perms[r.perm]
-        : r.anyPerm ? r.anyPerm.some((p) => !!perms[p])
-          : false)));
+    return DETAIL_ROUTES.filter((r) => isNavItemAllowed(r, role, perms, betaFeatures));
   }, [token, betaFeatures]);
 
   // 未登录时任何路径都先登录；登录后停留在原地址（支持深链接直达）

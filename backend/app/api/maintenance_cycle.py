@@ -23,7 +23,7 @@ from app.auth import current_identity
 from app.db import get_db
 from app.models.system import SysUser
 from app.security import UserContext, record_access_log
-from app.services import maintenance_cycle as cycle
+from app.services import cycle_sell_delivery, maintenance_cycle as cycle
 from app.services.workflow.registry import WorkflowError
 
 router = APIRouter(tags=["cycle"])
@@ -510,6 +510,16 @@ def wip(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "part_ids 必须为 1–100 个正整数"
         )
     return cycle.wip_counts(db, part_ids=parsed)
+
+
+@router.get(
+    "/cycle/units/{unit_id}/sell-intent",
+    dependencies=[Depends(require_cycle_pages(cycle.MANAGE_PAGE))],
+)
+def sell_intent(unit_id: UnitId, db: Db, ctx: Ctx) -> dict:
+    """主管投递状态。响应等于 read_status；不可见单位 404。"""
+    _read(cycle.get_unit, db=db, unit_id=unit_id, ctx=ctx)
+    return cycle_sell_delivery.read_status(db, unit_id)
 
 
 # 主体注册必须在应用启动/请求前完成（与 presales 的 register_subjects 同款）。
