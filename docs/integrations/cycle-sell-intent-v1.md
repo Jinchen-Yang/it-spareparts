@@ -113,7 +113,7 @@ HTTP 200：
   - outcome=`to_shop` → 改 `sold` 并写事件；其他 outcome → 409，商城把分配标 `remote_conflict`，不重试成另一件。
 - 人工主管 mark-sold（T2 已实现）与商城回调冲突：人工路径 `expected_version` CAS，回调按 delivery 幂等；冲突 409，不覆盖。
 - 未发货取消/退款：作废 allocation、数量加回、按 §8.4 补货，调用 `revert-sold`；仅当前 sold 且同一 `shopOrderLineId` 才回 `to_shop`；已发货退货不改 itsp。
-- 本轮范围：仅 T2 人工 mark-sold；分配/超卖/revert 为 T9，**未实现**。
+- 商城分配账、超卖和订单枚举仍未实现。itsp 收到回调后的状态码见 §10。
 ## 5. itsp 投递语义（T4 实现）
 
 - 领取：`FOR UPDATE SKIP LOCKED`；`pending` 到期、`delivering` 租约过期、`blocked` 到期；租约 60s；语句超时 5s、锁超时 1s；事务在 HTTP 前结束。
@@ -135,11 +135,8 @@ HTTP 200：
 
 ## 6. 售出与取消（本轮范围）
 
-- **mark-sold 人工主管兜底归 T2**：`closed` + `to_shop` → `sold`，`expected_version`；**幂等仅限当前版本**（旧 expected_version → 409），不能以幂等代替 CAS；若存在 pending/blocked 可售意图则同事务置 `failed/unit_sold_manually` 阻止 worker 投递，`delivering` 时 409。本轮不实现商城回调。
-- T9（商城回调 mark-sold / 未发货 revert-sold）本轮不做，契约预留：
-  - itsp 服务凭据路径按 `deliveryId` 找单位；outcome 已 `sold` 且同一 `shopOrderLineId` 返回 200 不重写；outcome 是 `to_shop` → 改 `sold` 并记事件；其他 outcome 409。
-  - 未发货取消/退款才 revert；已发货退货不改 itsp。
-  - 回调 token 与出站 token 不同：发送方商城持原始 token，接收方 itsp 只存 SHA-256 摘要并校验。
+- **mark-sold 人工主管兜底归 T2**：`closed` + `to_shop` → `sold`，`expected_version`；**幂等仅限当前版本**（旧 expected_version → 409），不能以幂等代替 CAS；若存在 pending/blocked 可售意图则同事务置 `failed/unit_sold_manually` 阻止 worker 投递，`delivering` 时 409。人工路径不读 `shopOrderLineId`。
+- itsp 入站回调的路径、字段和状态码以 §10 为准。商城侧的分配账、超卖和订单枚举仍未实现；已发货退货不改 itsp。
 
 ## 7. 禁止字段与安全
 
@@ -151,7 +148,7 @@ HTTP 200：
 
 - **商城侧尚未实现本契约**：无 `/api/integrations/cycle/sell-intents`、无 cycle 表、无闲管家客户端、无类目映射、无订单/支付/发货/取消/退款枚举。本文档为拟定契约；T7+ 需用户确认后才编码。
 - itsp 侧 T4 worker 默认关闭；本轮未连真实商城/闲管家；未打开 live；未部署。
-- 真实上架、闲管家 API、合帖、售出回写均为后续任务（T7–T9），不在本契约交付范围。
+- 真实上架、闲管家 API、合帖仍未实现。itsp 入站见 §10，默认不连真实商城。
 
 ## 附录 A：T6 商城只读待核结论（`origin/main = 7723be7`）
 
@@ -172,18 +169,74 @@ HTTP 200：
 
 ## 9. 实现状态与范围调整（相对任务书 §8；T5 交付时如实登记）
 
-> 本节记录"契约文本 vs 本轮实际实现"的差异，避免把拟定当已实现。T1–T5 交付范围：itsp 后端 + 契约文档；商城 T7+ 与 T9 回调不在本轮。
+> 本节记录契约文本和 itsp 代码的差异。商城合帖、闲管家和订单账不在 itsp。
 
 | 任务书条目 | 本轮状态 | 说明 |
 | --- | --- | --- |
 | §8.1 请求格式/禁止字段 | **已实现（itsp）** | T4 `SellIntentWorker` 只发送 schemaVersion/deliveryId/unitId/partId/conditionBucket/qty；禁止字段不出现在载荷/日志 |
 | §8.2 回执四态与 `unchanged` 语义 | **已实现（itsp）** | applied→delivered；blocked→blocked；conflict→failed；**`unchanged` 仅在持久 `receipt_status=applied` 时接受**（无 applied 证据时视为 invalid_receipt 保持 pending，R9）；网络/无效回执不清持久证据 |
-| §8.3 blocked 双路续跑（itsp 重试 + 商城 requeue 回调） | **部分实现 / 范围调整** | itsp 侧阻塞重试（5m/15m/1h/6h 封顶）**已实现**；**`POST /api/integrations/cycle/requeue` 与 `CYCLE_SELL_CALLBACK_TOKEN` 本轮未实现**（不在 T1–T5 编码范围；保留契约字段，T7 商城接入时另案实现并单独审） |
-| §8.3 商城补条件后主动回调 | **未实现（商城侧）** | 商城尚未实现，本契约仅拟定；轮询重试可保证最终一致（只影响速度） |
-| §8.4 合帖/上下架/售出/补货 + dry_run test_mode 隔离 | **未实现（商城侧，T7 拟定）** | 本轮只交付契约文本；itsp 不实现商城发布逻辑。dry_run 语义：商城本地帖 `external_listing_id` 为空、`test_mode=true` 仅测试列、不调闲管家；`stock_applied`/`publish_applied` 分离，重试只补发布不加库存；禁止删旧帖补货 |
-| §8.5 售出分配/超卖/取消/人工冲突 | **部分实现（itsp 人工兜底）** | T2 仅实现主管人工 mark-sold（closed+to_shop→sold、expected_version、幂等）；商城回调分配/整笔回滚/revert-sold **T9 不做**。人工 mark-sold 与服务回调冲突规则：人工路径 409、不覆盖；回调要求 deliveryId/shopOrderLineId 幂等（T9 实现） |
-| §8.6 开关默认值 | **itsp 已实现；shop 侧未实现** | itsp `SHOP_CYCLE_SELL_ENABLED=false`/URL/token 校验已实现；shop 发布模式 `off`、allowlist、live confirm 为 T7/T8 配置项，本轮仅写入契约 |
-| 回调凭据分离（出站 vs 回调） | **未实现（T9）** | 契约要求两个独立 token：发送方商城持原始 token，接收方 itsp 只存 SHA-256 摘要；本轮仅出站 token 已实现；回调 token 待 T9 |
-| 主管投递状态查询 API | **未接线** | `cycle_sell_delivery.read_status()` 服务函数存在，但**未暴露 HTTP API**；主管界面/接口待后续（不在 T1–T5 验收内） |
+| §8.3 blocked 双路续跑（itsp 重试 + 商城 requeue 回调） | **itsp 已实现；商城未实现** | itsp 阻塞重试与 `POST /api/integrations/cycle/requeue` 见 §10。商城何时调用仍未实现；丢失 webhook 只影响速度 |
+| §8.3 商城补条件后主动回调 | **未实现（商城侧）** | 商城尚未实现；itsp 接收端按 §10 待命 |
+| §8.4 合帖/上下架/售出/补货 + dry_run test_mode 隔离 | **未实现（商城侧，T7 拟定）** | itsp 不实现商城发布逻辑，不调用闲管家。dry_run 语义仍只存在于契约 |
+| §8.5 售出分配/超卖/取消/人工冲突 | **itsp 入站已实现；商城分配账未实现** | 人工 mark-sold 保持 T2。服务凭据 mark-sold / revert-sold 见 §10。商城分配、超卖和对账不在 itsp |
+| §8.6 开关默认值 | **itsp 已实现；shop 侧未实现** | 出站开关默认关。回调摘要未配置时入站 404。shop 发布模式 `off`、allowlist、live confirm 仍只在契约里 |
+| 回调凭据分离（出站 vs 回调） | **itsp 已实现** | 商城持有原始 `CYCLE_SELL_CALLBACK_TOKEN`；itsp 只配置 `CYCLE_SELL_CALLBACK_TOKEN_SHA256`。摘要不得等于出站 token 的 SHA-256 |
+| 主管投递状态查询 API | **已接线** | `GET /api/cycle/units/{id}/sell-intent`，仅 `page_cycle_manage`；响应等于 `read_status()` |
 
-**范围调整声明**：涉及"商城 requeue 回调 / 回调凭据 / 售出与取消回调（T9）/ 主管投递状态 API"的条目，本轮 T1–T5 不编码；如用户要求在本轮补齐，需另立任务与独立安全审查，不在本 PR 声称完成。
+商城合帖、闲管家客户端、类目映射、订单枚举、真实上架和 live 开关仍然没有实现。itsp 入站打开后默认不发任何出站 HTTP。
+
+## 10. itsp 入站与主管查询（协议冻结）
+
+itsp 不新增表、不新增列。幂等靠 `maintenance_cycle_event.payload.shopOrderLineId`。回调凭据是环境变量里的 SHA-256，不入库。不写 `inventory`、`stock_dynamic`、`maintenance_bad_salvage`。日志只有 `deliveryId` 和结果码。
+
+配置：`CYCLE_SELL_CALLBACK_TOKEN_SHA256`，64 位小写十六进制。空则下列三个 POST 一律 **404** `not_enabled`，不解析 body。已配置时校验 `Authorization: Bearer`，原始 token 须为 32–256 位无空白 ASCII，摘要用 `hmac.compare_digest`。失败 **401** `credential_invalid`。该摘要不得等于 `SHOP_CYCLE_SELL_TOKEN` 的 SHA-256。
+
+未知 JSON 字段 **422**。`Cache-Control: no-store`。
+
+### 10.1 `POST /api/integrations/cycle/requeue`
+
+Body 只有 `{"deliveryId":"<uuid>"}`。
+
+| 条件 | HTTP | body |
+| --- | --- | --- |
+| 无此 `deliveryId` | 404 | `{"detail":"not_found"}` |
+| `state=blocked` | 200 | 把 `available_at=now()`，`state` 与 `blockCode` 不变 |
+| 其他状态 | 200 | 不改行 |
+
+200 body：`schemaVersion=1`，`deliveryId`，`status`（当前 state），`requeued`（仅本次从 blocked 提前时为 true），`nextAttemptAt`（pending/blocked 为 `available_at` 的 ISO-8601，否则 null）。
+
+### 10.2 `POST /api/integrations/cycle/mark-sold`
+
+```json
+{"schemaVersion":1,"deliveryId":"<uuid>","shopOrderLineId":"line-1","qty":1}
+```
+
+`shopOrderLineId` 匹配 `^[A-Za-z0-9._:-]{1,64}$`。`qty` 只能是 1。
+
+先读出 `unit_id`，再锁单位，再锁意图。锁序与人工 mark-sold 相同，避免交叉等待。
+
+| 条件 | HTTP |
+| --- | --- |
+| 无此意图 | 404 `not_found` |
+| outcome 已是 `sold`，且最新一条 `mark_sold` 事件的 `shopOrderLineId` 相同 | 200，不写第二笔 |
+| `station=closed` 且 outcome 为 `to_shop`，意图不是 `delivering`/`failed` | 200，outcome 改为 `sold`，追加事件 |
+| 其余 | 409 `remote_conflict`，不覆盖 |
+
+`pending`/`blocked` 同事务改为 `failed`，`last_error_code=unit_sold_by_callback`。`delivered` 保持不动。事件 actor 为 `integration:cycle-sell`，payload 只有 `outcome`、`shopOrderLineId`、`qty`。
+
+200 body：`schemaVersion`，`deliveryId`，`unitId`，`outcome`，`shopOrderLineId`，`idempotent`。
+
+### 10.3 `POST /api/integrations/cycle/revert-sold`
+
+Body 与 mark-sold 相同。只把单位 outcome 从 `sold` 改回 `to_shop`，工位保持 `closed`，不新建意图，不改商城库存。
+
+| 条件 | HTTP |
+| --- | --- |
+| 无此意图 | 404 `not_found` |
+| outcome 为 `to_shop`，且晚于最近一次 `mark_sold` 的 `revert_sold` 使用同一 `shopOrderLineId` | 200，不写第二笔 |
+| outcome 为 `sold`，且最新 `mark_sold` 的 `shopOrderLineId` 相同 | 200，改回 `to_shop` 并追加 `revert_sold` |
+| 其余，含已发货退货被误调用 | 409 `remote_conflict` |
+
+### 10.4 `GET /api/cycle/units/{id}/sell-intent`
+
+用户 JWT。仅 `page_cycle_manage`。单位不可见为 404。响应等于 `read_status()`：无意图时 `{"unit_id","status":"not_queued"}`；有意图时含 `deliveryId`、`status`、`attempts`、`blockCode`、`lastErrorCode`、`receiptStatus`、`nextAttemptAt`、`createdAt`、`updatedAt`、`completedAt`。
