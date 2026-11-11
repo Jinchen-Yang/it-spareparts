@@ -33,6 +33,7 @@ from app.api import (
     maintenance_collection_plan_imports,
     maintenance_collection_reminders,
     maintenance_collection_evidence,
+    maintenance_cycle,
     maintenance_demands,
     maintenance_doc_import,
     maintenance_expense_reconcile,
@@ -87,6 +88,7 @@ from app.maintenance_beta import require_maintenance_beta
 from app.maintenance_boss import require_maintenance_boss
 from app.request_diagnostics import RequestDiagnosticsMiddleware
 from app.services.catalog_delivery import DeliveryWorker
+from app.services.cycle_sell_delivery import SellIntentWorker
 
 _log = logging.getLogger("startup")
 settings = get_settings()
@@ -104,10 +106,13 @@ if _sec_warns:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     worker = DeliveryWorker(settings)
+    cycle_sell_worker = SellIntentWorker(settings)
     await worker.start()
+    await cycle_sell_worker.start()
     try:
         yield
     finally:
+        await cycle_sell_worker.close()
         await worker.close()
 
 
@@ -176,6 +181,7 @@ app.include_router(
 )
 app.include_router(maintenance_row_workbench.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipts.router, prefix=settings.api_prefix)
+app.include_router(maintenance_cycle.router, prefix=settings.api_prefix)
 app.include_router(maintenance_receipt_workbook.router, prefix=settings.api_prefix)
 app.include_router(resale_export.router, prefix=settings.api_prefix)
 app.include_router(resale_catalog_export.router, prefix=settings.api_prefix)
