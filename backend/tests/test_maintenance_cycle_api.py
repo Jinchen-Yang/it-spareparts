@@ -345,6 +345,20 @@ def test_dispatch_self_pass_and_version_conflict_zero_write(db):
         assert "vendor_name" not in with_vendor.json()
 
 
+def test_redispatch_from_ready_clears_good_bucket(db):
+    part = _part(db, "CYCLE-PN-REDISPATCH")
+    db.commit()
+    with _recycle(db, "cycle-recycle-re") as recycle:
+        unit = _intake(recycle, part, 1).json()["items"][0]
+        ready = _transition(recycle, unit, "self-pass")
+        assert ready.status_code == 200, ready.text
+        assert ready.json()["condition_bucket"] == "good"
+        again = _dispatch(recycle, ready.json(), "testing")
+        assert again.status_code == 200, again.text
+        assert again.json()["station"] == "testing"
+        assert again.json()["condition_bucket"] is None
+
+
 def test_self_pass_moves_pool_to_ready_good_but_not_withdrawn(db):
     part = _part(db, "CYCLE-PN-E")
     db.commit()

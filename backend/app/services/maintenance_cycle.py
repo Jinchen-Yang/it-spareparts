@@ -866,6 +866,9 @@ def dispatch(
         )
     unit.station = to
     unit.outcome = None
+    # 从待处置再派回检测/维修时，清掉自测或上次通过留下的好坏标记。
+    if to in ("testing", "repairing"):
+        unit.condition_bucket = None
     unit.vendor_name = vendor
     unit.assignee_username = assignee
     _bump(unit, actor)
