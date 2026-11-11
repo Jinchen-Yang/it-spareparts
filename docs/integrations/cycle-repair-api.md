@@ -69,15 +69,23 @@
 
 `POST /api/cycle/repair-records` 与作废都要求请求头 `Idempotency-Key`：1–128 位、无空白的可见 ASCII。
 
-落库表 `maintenance_repair_command`，主键是 `(actor, idempotency_key)`，不要只用键做全局主键，避免一个账号读到另一个账号的响应。指纹算法沿用现场问题命令：`json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=False)` 的 SHA-256。指纹只覆盖 body，不含头。
+落库表 `maintenance_repair_command`，主键是 `(actor, idempotency_key)`，不要只用键做全局主键，避免一个账号读到另一个账号的响应。另存 `action`（`submit` / `void`）和 `record_id`（作废时为路径里的结果 id，提交时为空）。
+
+指纹算法沿用现场问题命令：对下面这个对象做 `json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=False)` 再取 SHA-256。指纹覆盖动作、目标记录和 body，不含 `Idempotency-Key` 头。这样同一 body 打到两条不同的作废路径不会被当成同一次请求。
+
+```json
+{"action": "void", "record_id": "6f1c2c3e-7b8a-4d9e-8f10-223344556677", "body": {"expected_version": 1, "reason": "填反了", "shop_stock_manually_reduced": false}}
+```
+
+提交时 `record_id` 为 `null`，目标型号和数量在 `body` 里。重放前先比对已存的 `action` 与 `record_id`，再比对指纹。任一不一致都拒绝，不返回上一次的响应。
 
 同一事务里先 `pg_advisory_xact_lock(hashtextextended(actor || ':' || key, 0))`，再读命令行。这与 `maintenance_project_operations._lock_idempotency_key` 同一手法。
 
 | 情况 | 结果 |
 | --- | --- |
-| 无此键 | 执行业务，成功后写入命令行（含 HTTP 状态与响应体） |
-| 同一账号、同一键、同一指纹 | 原样返回第一次的状态和响应体，不再写业务表。响应头 `Idempotent-Replayed: true` |
-| 同一键但指纹不同，或键属于别的账号 | 409，`detail` 为「幂等键已被用于不同的请求」 |
+| 无此键 | 执行业务，成功后写入命令行（含动作、目标记录、HTTP 状态与响应体） |
+| 同一账号、同一键、同一动作、同一 `record_id`、同一指纹 | 原样返回第一次的状态和响应体，不再写业务表。响应头 `Idempotent-Replayed: true` |
+| 同一键但动作、`record_id` 或指纹不同，或键属于别的账号 | 409，`detail` 为「幂等键已被用于不同的请求」 |
 | 缺少头或格式不对 | 400，`detail` 为「Idempotency-Key 须为 1–128 位无空白 ASCII」 |
 
 业务失败（4xx）不写命令行，调用方用同一键修正后可以重试。只有成功响应被记住。命令行不是数量账本，删除它只影响重放，不改变待修数。
