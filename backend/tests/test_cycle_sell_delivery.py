@@ -1,75 +1,104 @@
-"""坏件循环 T4：SellIntentWorker 契约（任务书 §6.6 / §8.2 / §11 T4 / §12 R1、R9）。
-
-不连真实商城：全部 HTTP 用 httpx.MockTransport 假回执；默认开关关闭。
-"""
+"""可售意图 v2：金样例当作 mock 商城，开关默认关闭。"""
 from __future__ import annotations
 
 import asyncio
-import gzip
 import json
-import logging
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
-from uuid import uuid4
+from pathlib import Path
+from uuid import UUID
 
 import httpx
 import pytest
-from pydantic import SecretStr, ValidationError
-from sqlalchemy import select, update
+from pydantic import SecretStr
+from sqlalchemy import delete, select, update
 
 from app.config import Settings
 from app.models.dimensions import DimPart
-from app.models.maintenance_cycle import MaintenanceCycleSellIntent, MaintenanceCycleUnit
+from app.models.maintenance_cycle import MaintenanceCycleSellIntent
+from app.models.maintenance_repair import MaintenanceRepairRecord
 from app.services import cycle_sell_delivery as svc
 
 TOKEN = "synthetic-cycle-sell-token-for-tests"
 URL = "https://shop.example/api/integrations/cycle/sell-intents"
+EXAMPLES = json.loads(
+    (Path(__file__).resolve().parents[2] / "docs/integrations/cycle-sell-intent-v2-examples.json").read_text()
+)
+RECEIPT_KEYS = ["schemaVersion", "deliveryId", "unitId", "partId", "status", "blockCode"]
+CASE_IDS = [
+    "applied",
+    "unchanged",
+    "blocked_missing_catalog_identity",
+    "blocked_missing_operator",
+    "validation_422",
+    "merge_409_retryable",
+    "applied_v1",
+    "conflict_v2_bad",
+]
 
 
-def _settings(**kw) -> Settings:
+def _settings(**kwargs) -> Settings:
     return Settings(
         _env_file=None,
         shop_cycle_sell_url=URL,
         shop_cycle_sell_token=SecretStr(TOKEN),
         shop_cycle_sell_enabled=True,
-        **kw,
+        **kwargs,
     )
 
 
-def _unit(db, pn: str = "CYCLE-SELL-PN") -> MaintenanceCycleUnit:
-    part = DimPart(pn_std=pn, description="sell intent test")
+def _case(case_id: str) -> dict:
+    return next(item for item in EXAMPLES["cases"] if item["id"] == case_id)
+
+
+def _terminal(result: str) -> str:
+    if result in {"applied", "unchanged"}:
+        return "delivered"
+    if result == "blocked":
+        return "blocked"
+    if result in {"conflict", "invalid_request"}:
+        return "failed"
+    if result == "remote_busy":
+        return "pending"
+    return "pending"
+
+
+def _part(db, part_id: int, pn: str) -> DimPart:
+    existing = db.get(DimPart, part_id)
+    if existing is not None:
+        return existing
+    part = DimPart(id=part_id, pn_std=pn, description="sell", status="active")
     db.add(part)
     db.flush()
-    unit = MaintenanceCycleUnit(
+    return part
+
+
+def _intent_for_case(db, case: dict, *, condition: str = "good") -> MaintenanceCycleSellIntent:
+    request = case["request"]
+    part = _part(db, int(request["partId"]), f"SELL-{request['partId']}")
+    wire = int(request["unitId"])
+    record = MaintenanceRepairRecord(
+        wire_unit_id=wire,
+        record_no=f"WX{wire:08d}",
         part_id=part.id,
-        pn=pn,
-        station="closed",
-        outcome="to_shop",
-        condition_bucket="good",
-        source_kind="external",
-        closed_at=datetime.now(timezone.utc),
-        created_by="t4-test",
-        updated_by="t4-test",
+        pn=part.pn_std,
+        fixed_qty=int(request["qty"]),
+        scrap_qty=0,
+        operator="sell-test",
     )
-    db.add(unit)
+    db.add(record)
     db.flush()
-    return unit
-
-
-def _intent(db, unit: MaintenanceCycleUnit, **overrides) -> MaintenanceCycleSellIntent:
-    values = dict(
-        unit_id=unit.id,
-        part_id=unit.part_id,
-        qty=Decimal(1),
-        condition_bucket="good",
+    intent = MaintenanceCycleSellIntent(
+        delivery_id=UUID(request["deliveryId"]),
+        record_id=record.record_id,
+        part_id=part.id,
+        qty=int(request["qty"]),
+        wire_unit_id=wire,
+        condition_bucket=condition,
         state="pending",
-        attempts=0,
     )
-    values.update(overrides)
-    row = MaintenanceCycleSellIntent(**values)
-    db.add(row)
+    db.add(intent)
     db.commit()
-    return row
+    return intent
 
 
 def _row(db, delivery_id) -> MaintenanceCycleSellIntent:
@@ -79,24 +108,207 @@ def _row(db, delivery_id) -> MaintenanceCycleSellIntent:
     return row
 
 
-def _force_due(db, delivery_id, *, seconds_ago: int = 60) -> None:
+def _force_due(db, delivery_id) -> None:
     db.execute(
         update(MaintenanceCycleSellIntent)
         .where(MaintenanceCycleSellIntent.delivery_id == delivery_id)
-        .values(available_at=datetime.now(timezone.utc) - timedelta(seconds=seconds_ago))
+        .values(available_at=datetime.now(timezone.utc) - timedelta(seconds=5))
     )
     db.commit()
 
 
-# ---------------------------------------------------------------------------
-# R1/R10：默认关闭
-# ---------------------------------------------------------------------------
+def _mock(case: dict, captured: dict):
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["sent"] = json.loads(request.content)
+        captured["auth"] = request.headers.get("authorization")
+        body = case.get("responseBody")
+        headers = case.get("responseHeaders") or {}
+        if body is None:
+            return httpx.Response(case["httpStatus"], headers=headers)
+        return httpx.Response(case["httpStatus"], json=body, headers=headers)
+
+    return httpx.MockTransport(handler)
 
 
-def test_default_settings_disable_cycle_sell_worker_and_keep_pending(db):
-    assert Settings(_env_file=None).shop_cycle_sell_enabled is False
-    unit = _unit(db)
-    intent = _intent(db, unit)
+def _run(case: dict, claim: svc.Claim) -> dict:
+    captured: dict = {}
+    result, block = asyncio.run(
+        svc.deliver(claim, _settings(), transport=_mock(case, captured))
+    )
+    captured["result"] = result
+    captured["block"] = block
+    return captured
+
+
+def test_examples_file_is_the_eight_case_contract():
+    assert EXAMPLES["receiptKeys"] == RECEIPT_KEYS
+    assert [item["id"] for item in EXAMPLES["cases"]] == CASE_IDS
+    for case in EXAMPLES["cases"]:
+        if case["httpStatus"] == 200:
+            assert list(case["responseBody"]) == RECEIPT_KEYS
+
+
+def test_parser_matches_every_example_terminal():
+    for case in EXAMPLES["cases"]:
+        body = json.dumps(case["responseBody"]).encode() if case.get("responseBody") else b""
+        result, block = svc.interpret_shop_response(
+            case["request"], case["httpStatus"], body
+        )
+        assert _terminal(result) == case["itspTerminal"], case["id"]
+        if case["id"] == "blocked_missing_operator":
+            assert block == "missing_operator"
+        if case["id"] == "blocked_missing_catalog_identity":
+            assert block == "missing_catalog_identity"
+        if case["id"] == "validation_422":
+            assert result == "invalid_request"
+        if case["id"] == "merge_409_retryable":
+            assert result == "remote_busy"
+        if case["id"] == "conflict_v2_bad":
+            assert result == "conflict"
+        if case["id"] == "unchanged":
+            assert case["requiresPriorAppliedReceipt"] is False
+
+
+def test_outbound_payload_is_v2_six_keys_and_examples_drive_the_worker(db):
+    for case in EXAMPLES["cases"]:
+        if case["id"] == "applied_v1":
+            continue
+        db.execute(delete(MaintenanceCycleSellIntent))
+        db.execute(delete(MaintenanceRepairRecord))
+        db.commit()
+        condition = "good"
+        intent = _intent_for_case(db, case, condition=condition)
+        claim = svc.claim_one()
+        assert claim is not None
+        assert claim.delivery_id == intent.delivery_id
+        captured = _run(case, claim)
+        sent = captured["sent"]
+        assert list(sent) == [
+            "schemaVersion", "deliveryId", "unitId", "partId", "conditionBucket", "qty",
+        ]
+        assert sent["schemaVersion"] == 2
+        assert sent["unitId"] == int(intent.wire_unit_id)
+        assert sent["qty"] == int(intent.qty)
+        assert sent["conditionBucket"] == "good"
+        assert "recordId" not in sent
+        assert captured["auth"] == f"Bearer {TOKEN}"
+        assert svc.acknowledge(claim, captured["result"], block_code=captured["block"]) is True
+        row = _row(db, intent.delivery_id)
+        assert row.state == case["itspTerminal"]
+        if case["id"] == "applied":
+            assert row.receipt_status == "applied"
+        if case["id"] == "unchanged":
+            assert row.state == "delivered"
+            assert row.receipt_status == "applied"
+        if case["id"] == "blocked_missing_operator":
+            assert row.block_code == "missing_operator"
+            assert row.receipt_status == "blocked"
+            assert row.available_at >= datetime.now(timezone.utc) + timedelta(seconds=290)
+        if case["id"] == "validation_422":
+            assert row.last_error_code == "invalid_request"
+            assert svc.claim_one() is None or _row(db, intent.delivery_id).state == "failed"
+        if case["id"] == "merge_409_retryable":
+            assert row.state == "pending"
+            assert row.last_error_code == "remote_busy"
+            assert row.available_at >= datetime.now(timezone.utc) + timedelta(seconds=4)
+        if case["id"] == "conflict_v2_bad":
+            assert row.state == "failed"
+            assert sent["conditionBucket"] != "bad"
+
+
+def test_v1_echo_to_a_v2_post_is_invalid_and_itsp_does_not_send_v1(db):
+    case = _case("applied_v1")
+    payload = {
+        "schemaVersion": 2,
+        "deliveryId": case["request"]["deliveryId"],
+        "unitId": case["request"]["unitId"],
+        "partId": case["request"]["partId"],
+        "conditionBucket": "good",
+        "qty": 1,
+    }
+    echoed = json.dumps(case["responseBody"]).encode()
+    result, _block = svc.interpret_shop_response(payload, 200, echoed)
+    assert result == "invalid_receipt"
+    matched, _block = svc.interpret_shop_response(case["request"], 200, echoed)
+    assert matched == "applied"
+
+
+def test_extra_record_id_or_missing_unit_id_is_invalid_receipt():
+    sent = _case("applied")["request"]
+    extra = dict(_case("applied")["responseBody"])
+    extra["recordId"] = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+    result, _block = svc.interpret_shop_response(sent, 200, json.dumps(extra).encode())
+    assert result == "invalid_receipt"
+    missing = dict(_case("applied")["responseBody"])
+    missing.pop("unitId")
+    result, _block = svc.interpret_shop_response(sent, 200, json.dumps(missing).encode())
+    assert result == "invalid_receipt"
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["schemaVersion", "deliveryId", "unitId", "partId", "status", "blockCode"],
+)
+def test_receipt_missing_any_of_the_six_keys_is_invalid(missing):
+    sent = _case("applied")["request"]
+    body = dict(_case("applied")["responseBody"])
+    body.pop(missing)
+    result, _block = svc.interpret_shop_response(sent, 200, json.dumps(body).encode())
+    assert result == "invalid_receipt"
+
+
+def test_missing_operator_then_unchanged_delivers_without_prior_applied(db):
+    case = _case("blocked_missing_operator")
+    intent = _intent_for_case(db, case)
+    claim = svc.claim_one()
+    captured = _run(case, claim)
+    assert svc.acknowledge(claim, captured["result"], block_code=captured["block"]) is True
+    _force_due(db, intent.delivery_id)
+    second = svc.claim_one()
+    assert second is not None
+    assert second.previous_receipt_status == "blocked"
+    unchanged = _case("unchanged")
+    unchanged = {
+        **unchanged,
+        "request": case["request"],
+        "responseBody": {**unchanged["responseBody"], **{
+            "deliveryId": case["request"]["deliveryId"],
+            "unitId": case["request"]["unitId"],
+            "partId": case["request"]["partId"],
+        }},
+    }
+    captured = _run(unchanged, second)
+    assert captured["result"] == "unchanged"
+    assert svc.acknowledge(second, "unchanged") is True
+    row = _row(db, intent.delivery_id)
+    assert row.state == "delivered"
+    assert row.receipt_status == "applied"
+
+
+def test_catalog_block_survives_timeout(db):
+    case = _case("blocked_missing_catalog_identity")
+    intent = _intent_for_case(db, case)
+    claim = svc.claim_one()
+    captured = _run(case, claim)
+    assert svc.acknowledge(claim, "blocked", block_code=captured["block"]) is True
+    _force_due(db, intent.delivery_id)
+    second = svc.claim_one()
+    assert svc.acknowledge(second, "deadline_exceeded") is True
+    row = _row(db, intent.delivery_id)
+    assert row.state == "pending"
+    assert row.receipt_status == "blocked"
+    assert row.block_code == "missing_catalog_identity"
+    assert row.attempts == 2
+
+
+def test_disabled_worker_does_not_send(db):
+    case = _case("applied")
+    intent = _intent_for_case(db, case)
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(500)
 
     async def scenario() -> None:
         worker = svc.SellIntentWorker(Settings(_env_file=None))
@@ -105,339 +317,15 @@ def test_default_settings_disable_cycle_sell_worker_and_keep_pending(db):
         await worker.close()
 
     asyncio.run(scenario())
-    row = _row(db, intent.delivery_id)
-    assert row.state == "pending"
+    assert calls["n"] == 0
+    assert _row(db, intent.delivery_id).state == "pending"
+    assert Settings(_env_file=None).shop_cycle_sell_enabled is False
 
 
-def test_worker_without_url_does_not_start(db):
-    from types import SimpleNamespace
-
-    settings = SimpleNamespace(
-        shop_cycle_sell_enabled=True,
-        shop_cycle_sell_url="",
-        shop_cycle_sell_token=SecretStr(TOKEN),
-    )
-
-    async def scenario() -> None:
-        worker = svc.SellIntentWorker(settings)  # type: ignore[arg-type]
-        await worker.start()
-        assert worker.task is None
-        await worker.close()
-
-    asyncio.run(scenario())
-
-
-# ---------------------------------------------------------------------------
-# 领取：pending 到期 / blocked 到期 / delivering 租约过期
-# ---------------------------------------------------------------------------
-
-
-def test_claim_pending_leases_and_increments_attempts(db):
-    unit = _unit(db)
-    intent = _intent(db, unit)
-    claim = svc.claim_one()
-    assert claim is not None
-    assert claim.delivery_id == intent.delivery_id
-    assert claim.unit_id == unit.id
-    assert claim.part_id == unit.part_id
-    assert claim.condition_bucket == "good"
-    assert claim.attempts == 1
-    assert claim.previous_receipt_status is None
-    row = _row(db, intent.delivery_id)
-    assert row.state == "delivering"
-    assert row.lease_token == claim.lease_token
-    assert row.lease_until is not None
-    # 租约未过期：第二个工人领不到
-    assert svc.claim_one() is None
-
-
-def test_claim_expired_delivering_lease_reclaims(db):
-    unit = _unit(db)
-    intent = _intent(db, unit)
-    first = svc.claim_one()
-    assert first is not None
-    db.execute(
-        update(MaintenanceCycleSellIntent)
-        .where(MaintenanceCycleSellIntent.delivery_id == intent.delivery_id)
-        .values(lease_until=datetime.now(timezone.utc) - timedelta(seconds=1))
-    )
-    db.commit()
-    second = svc.claim_one()
-    assert second is not None
-    assert second.delivery_id == intent.delivery_id
-    assert second.lease_token != first.lease_token
-    assert second.attempts == 2
-
-
-def test_claim_blocked_due_exposes_previous_receipt_status(db):
-    unit = _unit(db)
-    intent = _intent(
-        db, unit, state="blocked", receipt_status="blocked",
-        block_code="missing_list_price",
-        available_at=datetime.now(timezone.utc) - timedelta(minutes=1),
-    )
-    claim = svc.claim_one()
-    assert claim is not None
-    assert claim.delivery_id == intent.delivery_id
-    assert claim.previous_receipt_status == "blocked"
-
-
-# ---------------------------------------------------------------------------
-# 回执：delivered / blocked 退避 / conflict / 网络失败
-# ---------------------------------------------------------------------------
-
-
-def test_applied_receipt_marks_delivered_and_stops(db):
-    unit = _unit(db)
-    intent = _intent(db, unit)
-    claim = svc.claim_one()
-    assert claim is not None
-    assert svc.acknowledge(claim, "applied") is True
-    row = _row(db, intent.delivery_id)
-    assert row.state == "delivered"
-    assert row.receipt_status == "applied"
-    assert row.completed_at is not None
-    assert row.lease_token is None and row.lease_until is None
-    # 终态不再被领取/二次回执
-    assert svc.claim_one() is None
-    assert svc.acknowledge(claim, "applied") is False
-
-
-def test_unchanged_without_prior_applied_evidence_is_invalid(db):
-    """N1/R9：只有持久记录「上一次被接受的回执=applied」才接受 unchanged。"""
-    unit = _unit(db)
-    intent = _intent(db, unit)
-    claim = svc.claim_one()
-    assert claim is not None
-    assert claim.previous_receipt_status is None
-    assert svc.acknowledge(claim, "unchanged") is True
-    row = _row(db, intent.delivery_id)
-    assert row.state == "pending"
-    assert row.receipt_status is None
-    assert row.last_error_code == "invalid_receipt"
-    assert row.completed_at is None
-    # 第二次 unchanged：持久证据仍非 applied，不得因「上一跳被清空」而放行（N1 多跳）
-    _force_due(db, intent.delivery_id)
-    second = svc.claim_one()
-    assert second is not None and second.previous_receipt_status is None
-    assert svc.acknowledge(second, "unchanged") is True
-    row = _row(db, intent.delivery_id)
-    assert row.state == "pending"
-    assert row.receipt_status is None
-    assert row.last_error_code == "invalid_receipt"
-
-
-def test_blocked_then_unchanged_twice_never_reports_delivered(db):
-    """N1 最小复现：blocked → unchanged → unchanged 不得误报 delivered。"""
-    unit = _unit(db)
-    intent = _intent(db, unit)
-    claim = svc.claim_one()
-    assert claim is not None
-    assert svc.acknowledge(claim, "blocked", block_code="missing_formal_image") is True
-
-    _force_due(db, intent.delivery_id)
-    first = svc.claim_one()
-    assert first is not None and first.previous_receipt_status == "blocked"
-    assert svc.acknowledge(first, "unchanged") is True
-    row = _row(db, intent.delivery_id)
-    assert row.state == "pending"
-    assert row.receipt_status == "blocked", "网络/无效回执不得清掉持久 blocked 证据"
-    assert row.last_error_code == "invalid_receipt"
-
-    _force_due(db, intent.delivery_id)
-    second = svc.claim_one()
-    assert second is not None and second.previous_receipt_status == "blocked"
-    assert svc.acknowledge(second, "unchanged") is True
-    row = _row(db, intent.delivery_id)
-    assert row.state == "pending"
-    assert row.receipt_status == "blocked"
-    assert row.last_error_code == "invalid_receipt"
-    assert row.completed_at is None
-
-
-def test_blocked_then_network_failure_then_unchanged_stays_invalid(db):
-    """N1：网络失败保留持久证据；后续 unchanged 仍不得 delivered。"""
-    unit = _unit(db)
-    intent = _intent(db, unit)
-    claim = svc.claim_one()
-    assert claim is not None
-    assert svc.acknowledge(claim, "blocked", block_code="missing_list_price") is True
-
-    _force_due(db, intent.delivery_id)
-    retry = svc.claim_one()
-    assert retry is not None and retry.previous_receipt_status == "blocked"
-    assert svc.acknowledge(retry, "transport_error") is True
-    row = _row(db, intent.delivery_id)
-    assert row.state == "pending"
-    assert row.block_code is None  # 展示码清空
-    assert row.receipt_status == "blocked"  # 持久证据保留
-    assert row.last_error_code == "transport_error"
-
-    _force_due(db, intent.delivery_id)
-    after = svc.claim_one()
-    assert after is not None and after.previous_receipt_status == "blocked"
-    assert svc.acknowledge(after, "unchanged") is True
-    row = _row(db, intent.delivery_id)
-    assert row.state == "pending"
-    assert row.receipt_status == "blocked"
-    assert row.last_error_code == "invalid_receipt"
-
-
-def test_unchanged_is_legal_when_persisted_last_receipt_is_applied(db):
-    """N1：持久记录 receipt_status=applied 时，unchanged 才可接受为 delivered。"""
-    unit = _unit(db)
-    intent = _intent(
-        db, unit, state="delivering", receipt_status="applied",
-        attempts=1,
-        lease_token=uuid4(),
-        lease_until=datetime.now(timezone.utc) - timedelta(seconds=1),
-    )
-    claim = svc.claim_one()
-    assert claim is not None
-    assert claim.delivery_id == intent.delivery_id
-    assert claim.previous_receipt_status == "applied"
-    assert svc.acknowledge(claim, "unchanged") is True
-    row = _row(db, intent.delivery_id)
-    assert row.state == "delivered"
-    assert row.receipt_status == "unchanged"
-    assert row.completed_at is not None
-
-
-@pytest.mark.parametrize("prior", [None, "blocked", "applied"])
-@pytest.mark.parametrize(
-    ("result", "block_code"),
-    [
-        ("applied", None),
-        ("unchanged", None),
-        ("blocked", "missing_list_price"),
-        ("conflict", None),
-        ("transport_error", None),
-        ("invalid_receipt", None),
-    ],
-)
-def test_acknowledge_transition_matrix(db, prior, result, block_code):
-    """N1 自查矩阵：receipt_status × 回执结果的落库组合（防下一轮再出 P1）。"""
-    unit = _unit(db)
-    intent = _intent(db, unit, receipt_status=prior)
-    if prior is not None and prior != "blocked":
-        # 允许「持久证据=applied」的恢复态通过 delivering 过期被重领
-        db.execute(
-            update(MaintenanceCycleSellIntent)
-            .where(MaintenanceCycleSellIntent.delivery_id == intent.delivery_id)
-            .values(
-                state="delivering",
-                attempts=1,
-                lease_token=uuid4(),
-                lease_until=datetime.now(timezone.utc) - timedelta(seconds=1),
-            )
-        )
-        db.commit()
-    claim = svc.claim_one()
-    assert claim is not None, (prior, result)
-    assert svc.acknowledge(claim, result, block_code=block_code) is True
-    row = _row(db, intent.delivery_id)
-    if result == "applied":
-        assert row.state == "delivered" and row.receipt_status == "applied"
-    elif result == "unchanged":
-        if prior == "applied":
-            assert row.state == "delivered"
-            assert row.receipt_status == "unchanged"
-        else:
-            assert row.state == "pending"
-            assert row.receipt_status == prior
-            assert row.last_error_code == "invalid_receipt"
-    elif result == "blocked":
-        assert row.state == "blocked" and row.receipt_status == "blocked"
-        assert row.block_code == block_code
-    elif result == "conflict":
-        assert row.state == "failed" and row.receipt_status == "conflict"
-        assert row.last_error_code == "manual_conflict"
-    else:
-        assert row.state == "pending"
-        assert row.receipt_status == prior, "网络/无效回执不得改写持久证据"
-        assert row.last_error_code == result
-        assert row.block_code is None
-
-
-def test_blocked_sets_5min_backoff_and_then_R9_unchanged_is_invalid(db):
-    unit = _unit(db)
-    intent = _intent(db, unit)
-    claim = svc.claim_one()
-    assert claim is not None
-    before = datetime.now(timezone.utc)
-    assert svc.acknowledge(claim, "blocked", block_code="missing_formal_image") is True
-    row = _row(db, intent.delivery_id)
-    assert row.state == "blocked"
-    assert row.receipt_status == "blocked"
-    assert row.block_code == "missing_formal_image"
-    assert before + timedelta(seconds=250) <= row.available_at <= before + timedelta(seconds=400)
-
-    _force_due(db, intent.delivery_id)
-    retry = svc.claim_one()
-    assert retry is not None and retry.previous_receipt_status == "blocked"
-    # R9/N1：持久证据仍非 applied，商城重放 unchanged → 无效回执，不标 delivered。
-    assert svc.acknowledge(retry, "unchanged") is True
-    row = _row(db, intent.delivery_id)
-    assert row.state == "pending"
-    assert row.receipt_status == "blocked"
-    assert row.last_error_code == "invalid_receipt"
-
-
-def test_blocked_backoff_steps_and_cap(db):
-    unit = _unit(db)
-    intent = _intent(db, unit, attempts=0)
-    observed = []
-    for expected_seconds in (300, 900, 3600, 21600, 21600):
-        _force_due(db, intent.delivery_id)
-        claim = svc.claim_one()
-        assert claim is not None
-        before = datetime.now(timezone.utc)
-        assert svc.acknowledge(claim, "blocked", block_code="publish_disabled") is True
-        row = _row(db, intent.delivery_id)
-        assert row.state == "blocked"
-        delay = (row.available_at - before).total_seconds()
-        observed.append(delay)
-        assert expected_seconds - 60 <= delay <= expected_seconds + 60, observed
-    # 第 4/5 次都封顶 6 小时（微秒级抖动不参与严格排序）
-    assert abs(observed[-1] - 21600) <= 60
-    assert abs(observed[-2] - 21600) <= 60
-
-
-def test_conflict_marks_failed_without_retry(db):
-    unit = _unit(db)
-    intent = _intent(db, unit)
-    claim = svc.claim_one()
-    assert claim is not None
-    assert svc.acknowledge(claim, "conflict") is True
-    row = _row(db, intent.delivery_id)
-    assert row.state == "failed"
-    assert row.receipt_status == "conflict"
-    assert row.completed_at is not None
-    assert svc.claim_one() is None
-
-
-@pytest.mark.parametrize(
-    "result", ["transport_error", "deadline_exceeded", "remote_http_error", "invalid_receipt"]
-)
-def test_network_failures_return_to_pending_with_backoff_not_blocked(db, result):
-    unit = _unit(db)
-    intent = _intent(db, unit)
-    claim = svc.claim_one()
-    assert claim is not None
-    before = datetime.now(timezone.utc)
-    assert svc.acknowledge(claim, result) is True
-    row = _row(db, intent.delivery_id)
-    assert row.state == "pending"
-    assert row.receipt_status is None
-    assert row.block_code is None
-    assert row.last_error_code == result
-    delay = (row.available_at - before).total_seconds()
-    assert 2 <= delay <= 10  # 5 秒起
-
-
-def test_stale_lease_ack_is_ignored_and_new_worker_wins(db):
-    unit = _unit(db)
-    intent = _intent(db, unit)
+def test_receipt_after_expired_lease_does_not_land(db):
+    """租约过期后才到的回执影响 0 行，新工人仍可投递成功。"""
+    case = _case("applied")
+    intent = _intent_for_case(db, case)
     stale = svc.claim_one()
     assert stale is not None
     db.execute(
@@ -446,275 +334,23 @@ def test_stale_lease_ack_is_ignored_and_new_worker_wins(db):
         .values(lease_until=datetime.now(timezone.utc) - timedelta(seconds=1))
     )
     db.commit()
+    assert svc.acknowledge(stale, "applied") is False
+    assert _row(db, intent.delivery_id).state == "delivering"
     fresh = svc.claim_one()
     assert fresh is not None and fresh.lease_token != stale.lease_token
-    # 旧工人回执影响 0 行，不覆盖新工人
-    assert svc.acknowledge(stale, "applied") is False
     assert svc.acknowledge(fresh, "applied") is True
     assert _row(db, intent.delivery_id).state == "delivered"
 
 
-# ---------------------------------------------------------------------------
-# deliver：mock transport 与回执校验
-# ---------------------------------------------------------------------------
-
-
-def _claim_for(db) -> svc.Claim:
-    _unit(db)
-    unit = db.scalars(select(MaintenanceCycleUnit)).first()
-    _intent(db, unit)
+def test_late_ack_after_failed_changes_nothing(db):
+    case = _case("applied")
+    intent = _intent_for_case(db, case)
     claim = svc.claim_one()
-    assert claim is not None
-    return claim
-
-
-def _receipt(claim: svc.Claim, **overrides) -> dict:
-    payload = {
-        "schemaVersion": 1,
-        "deliveryId": str(claim.delivery_id),
-        "unitId": claim.unit_id,
-        "partId": claim.part_id,
-        "status": "applied",
-        "blockCode": None,
-    }
-    payload.update(overrides)
-    return payload
-
-
-def test_deliver_applied_payload_is_minimal_camel_case(db):
-    claim = _claim_for(db)
-    captured: dict = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["json"] = json.loads(request.content)
-        captured["headers"] = dict(request.headers)
-        return httpx.Response(200, json=_receipt(claim))
-
-    result = asyncio.run(
-        svc.deliver(claim, _settings(), transport=httpx.MockTransport(handler))
+    db.execute(
+        update(MaintenanceCycleSellIntent)
+        .where(MaintenanceCycleSellIntent.delivery_id == intent.delivery_id)
+        .values(state="failed", lease_token=None, lease_until=None, last_error_code="record_voided")
     )
-    assert result == ("applied", None)
-    assert captured["url"] == URL
-    assert captured["json"] == {
-        "schemaVersion": 1,
-        "deliveryId": str(claim.delivery_id),
-        "unitId": claim.unit_id,
-        "partId": claim.part_id,
-        "conditionBucket": claim.condition_bucket,
-        "qty": 1,
-    }
-    for forbidden in ("projectId", "project_id", "serialNumber", "vendorName",
-                      "note", "cost", "price", "customerId"):
-        assert forbidden not in captured["json"]
-    assert captured["headers"]["authorization"] == f"Bearer {TOKEN}"
-
-
-def test_deliver_blocked_receipt_returns_block_code(db):
-    claim = _claim_for(db)
-    result = asyncio.run(
-        svc.deliver(
-            claim,
-            _settings(),
-            transport=httpx.MockTransport(
-                lambda request: httpx.Response(
-                    200, json=_receipt(claim, status="blocked",
-                                       blockCode="missing_list_price")
-                )
-            ),
-        )
-    )
-    assert result == ("blocked", "missing_list_price")
-
-
-@pytest.mark.parametrize(
-    "overrides,headers,expected",
-    [
-        ({"deliveryId": "00000000-0000-0000-0000-000000000000"}, None, "invalid_receipt"),
-        ({"unitId": 999999}, None, "invalid_receipt"),
-        ({"partId": 999999}, None, "invalid_receipt"),
-        ({"projectId": 42}, None, "invalid_receipt"),
-        ({"blockCode": "missing_list_price"}, None, "invalid_receipt"),
-        ({"status": "blocked", "blockCode": "unknown_code"}, None, "invalid_receipt"),
-    ],
-)
-def test_deliver_rejects_invalid_receipts(db, overrides, headers, expected):
-    claim = _claim_for(db)
-    response_kwargs = {"json": _receipt(claim, **overrides)}
-    if headers:
-        response_kwargs["headers"] = headers
-    result = asyncio.run(
-        svc.deliver(
-            claim,
-            _settings(),
-            transport=httpx.MockTransport(lambda request: httpx.Response(200, **response_kwargs)),
-        )
-    )
-    assert result == (expected, None)
-
-
-def test_deliver_oversize_and_non_200_and_transport_error(db):
-    claim = _claim_for(db)
-    # content-encoding 必须 identity：用真实 gzip 字节构造，避免 httpx 构造期解码报错。
-    gzip_response = httpx.Response(
-        200, content=gzip.compress(b"{}"), headers={"content-encoding": "gzip"}
-    )
-    assert asyncio.run(
-        svc.deliver(
-            claim, _settings(),
-            transport=httpx.MockTransport(lambda r: gzip_response),
-        )
-    ) == ("invalid_receipt", None)
-    oversize = httpx.Response(200, content=b"x" * (svc.MAX_RECEIPT_BYTES + 1))
-    assert asyncio.run(
-        svc.deliver(claim, _settings(), transport=httpx.MockTransport(lambda r: oversize))
-    ) == ("invalid_receipt", None)
-    assert asyncio.run(
-        svc.deliver(
-            claim, _settings(),
-            transport=httpx.MockTransport(lambda r: httpx.Response(500, json={})),
-        )
-    ) == ("remote_http_error", None)
-
-    def boom(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("synthetic connection failure", request=request)
-
-    assert asyncio.run(
-        svc.deliver(claim, _settings(), transport=httpx.MockTransport(boom))
-    ) == ("transport_error", None)
-
-
-# ---------------------------------------------------------------------------
-# 配置校验
-# ---------------------------------------------------------------------------
-
-
-def test_settings_default_false_and_valid_settings_build():
-    settings = Settings(_env_file=None)
-    assert settings.shop_cycle_sell_enabled is False
-    assert settings.shop_cycle_sell_url == ""
-    valid = _settings()
-    assert valid.shop_cycle_sell_url == URL
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"shop_cycle_sell_url": "https://shop.example/api/integrations/catalog/parts/sync"},
-        {"shop_cycle_sell_url": "https://shop.example/api/integrations/cycle/sell-intents?x=1"},
-        {"shop_cycle_sell_url": "https://user:pw@shop.example/api/integrations/cycle/sell-intents"},
-        {"shop_cycle_sell_token": SecretStr("short-token")},
-        {
-            "shop_cycle_sell_enabled": True,
-            "shop_cycle_sell_url": "",
-            "shop_cycle_sell_token": SecretStr(TOKEN),
-        },
-        {
-            "shop_cycle_sell_token": SecretStr(""),
-            "shop_cycle_sell_url": URL,
-            "shop_cycle_sell_enabled": True,
-        },
-        {
-            "shop_cycle_sell_url": "http://shop.example/api/integrations/cycle/sell-intents",
-        },
-        {"shop_catalog_sync_token": SecretStr(TOKEN)},
-    ],
-)
-def test_settings_reject_invalid_cycle_sell_configuration(kwargs):
-    base = {
-        "shop_cycle_sell_url": URL,
-        "shop_cycle_sell_token": SecretStr(TOKEN),
-        "shop_cycle_sell_enabled": True,
-    }
-    base.update(kwargs)
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, **base)
-
-
-def test_settings_allow_loopback_http_in_dev():
-    settings = Settings(
-        _env_file=None,
-        shop_cycle_sell_url="http://127.0.0.1:18080/api/integrations/cycle/sell-intents",
-        shop_cycle_sell_token=SecretStr(TOKEN),
-        shop_cycle_sell_enabled=True,
-    )
-    assert settings.shop_cycle_sell_url.startswith("http://127.0.0.1")
-
-
-# ---------------------------------------------------------------------------
-# 端到端：worker 循环（mock deliver）与日志去敏
-# ---------------------------------------------------------------------------
-
-
-def test_run_worker_delivers_pending_intent_and_logs_without_token(db, monkeypatch):
-    unit = _unit(db)
-    intent = _intent(db, unit)
-    settings = _settings()
-
-    async def fake_deliver(claim, settings, *, transport=None):
-        return "applied", None
-
-    monkeypatch.setattr(svc, "deliver", fake_deliver)
-    log_calls: list[tuple[str, tuple]] = []
-
-    class FakeLog:
-        def info(self, message, *args, **kwargs):
-            log_calls.append((message, args))
-
-        def warning(self, message, *args, **kwargs):
-            log_calls.append((message, args))
-
-    monkeypatch.setattr(svc, "log", FakeLog())
-
-    async def scenario() -> None:
-        stop, wake = asyncio.Event(), asyncio.Event()
-        task = asyncio.create_task(svc.run_worker(settings, stop, wake))
-        await asyncio.sleep(0.5)
-        stop.set()
-        wake.set()
-        await asyncio.wait_for(task, timeout=5)
-
-    asyncio.run(scenario())
-    row = _row(db, intent.delivery_id)
-    assert row.state == "delivered"
-    assert row.receipt_status == "applied"
-    text = " ".join(f"{message} {args}" for message, args in log_calls)
-    assert TOKEN not in text
-    assert "cycle_sell_intent" in text
-    assert "applied" in text
-    # 日志夹具不出现回执 body / traceback
-    assert "schemaVersion" not in text
-    assert "Traceback" not in text
-
-
-def test_worker_start_close_with_enabled_settings(db, monkeypatch):
-    unit = _unit(db)
-    intent = _intent(db, unit)
-    settings = _settings()
-
-    async def fake_deliver(claim, settings, *, transport=None):
-        return "applied", None
-
-    monkeypatch.setattr(svc, "deliver", fake_deliver)
-
-    async def scenario() -> None:
-        worker = svc.SellIntentWorker(settings)
-        await worker.start()
-        assert worker.task is not None
-        await asyncio.sleep(0.4)
-        await worker.close()
-        assert worker.task is None
-
-    asyncio.run(scenario())
-    assert _row(db, intent.delivery_id).state == "delivered"
-
-
-def test_read_status_contract(db):
-    unit = _unit(db)
-    intent = _intent(db, unit)
-    status = svc.read_status(db, unit.id)
-    assert status["unit_id"] == unit.id
-    assert status["status"] == "pending"
-    assert status["deliveryId"] == str(intent.delivery_id)
-    assert status["attempts"] == 0
-    assert svc.read_status(db, unit.id + 999999)["status"] == "not_queued"
+    db.commit()
+    assert svc.acknowledge(claim, "applied") is False
+    assert _row(db, intent.delivery_id).state == "failed"

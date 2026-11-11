@@ -1,6 +1,6 @@
 # 坏件循环接口契约（D-0058）
 
-> 状态：**已冻结，尚未编码**。决策：[D-0058](../decisions/0038-坏件循环待修池与结果记录.md)。
+> 状态：**已冻结，后端已按本契约实现**。出站开关仍关闭，未部署。决策：[D-0058](../decisions/0038-坏件循环待修池与结果记录.md)。
 > 范围：itsp 页面接口、itsp → 商城出站、商城 → itsp 回调。出站相对 v1 的差异摘要在 [cycle-sell-intent-v2.md](cycle-sell-intent-v2.md)。冲突时以本文件为准。
 > 前缀：itsp 用户接口与回调都挂在 `settings.api_prefix`（`/api`）。商城接收路径是商城自己的 `/api/integrations/cycle/sell-intents`。
 > 本文件不授权打开 `SHOP_CYCLE_SELL_ENABLED`，不授权真实闲鱼发帖，不授权部署。

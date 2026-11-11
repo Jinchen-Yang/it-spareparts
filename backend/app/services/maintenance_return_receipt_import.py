@@ -18,6 +18,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import delete, insert, or_, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app.business_time import business_today
@@ -963,6 +964,87 @@ def public_job(
     return public
 
 
+def _lock_repair_parts_before_receipt_rows(db: Session, report: dict) -> None:
+    """维修型号锁先于项目行锁和返还行锁。
+
+    改单/作废是「型号顾问锁 → 项目共享锁 → 返还行」。导入若先独占项目行再等
+    型号锁，两边会互相等待到锁超时，上传被标成失败。
+    """
+    from app.services.maintenance_repair import lock_parts
+
+    receipt_ids = [
+        row["receipt_id"] for row in report.get("rows", []) if row.get("receipt_id")
+    ]
+    pns = {
+        pn
+        for row in report.get("rows", [])
+        for side in (row.get("after") or {}, row.get("before") or {})
+        if (pn := side.get("pn"))
+    }
+    part_ids: set[int] = set()
+    if receipt_ids:
+        part_ids.update(
+            int(part_id)
+            for part_id in db.scalars(
+                select(Receipt.part_id).where(
+                    Receipt.rkd_line_id.in_(receipt_ids),
+                    Receipt.part_id.is_not(None),
+                )
+            ).all()
+        )
+    if pns:
+        part_ids.update(
+            int(part_id)
+            for part_id in db.scalars(
+                select(DimPart.id).where(DimPart.pn_std.in_(pns))
+            ).all()
+        )
+    lock_parts(db, part_ids)
+
+
+def _guard_repair_deductions(db: Session, plan: dict, part_map: dict) -> None:
+    from app.services.maintenance_repair import (
+        RepairDeductionExceeded,
+        assert_receipt_change,
+        lock_sources_and_intents,
+        try_lock_part,
+    )
+
+    changes = []
+    for item in plan["rows"]:
+        if item.get("action") != "change" or not item.get("receipt_id"):
+            continue
+        row = db.get(Receipt, item["receipt_id"])
+        if row is None:
+            continue
+        changes.append((row, item["after"]))
+    if not changes:
+        return
+    for row, canonical in changes:
+        for part_id in (row.part_id, part_map.get(canonical["pn"])):
+            if part_id is not None and not try_lock_part(db, int(part_id)):
+                raise ImportError(
+                    "repair_part_busy",
+                    "该型号正在被其他操作处理，请稍后重试",
+                    409,
+                )
+    lock_sources_and_intents(db, [row.rkd_line_id for row, _canonical in changes])
+    for row, canonical in changes:
+        try:
+            assert_receipt_change(
+                db,
+                row,
+                new_qty=Decimal(canonical["qty"]),
+                new_part_id=part_map.get(canonical["pn"]),
+                new_test_result=canonical.get("condition"),
+                new_line_status=canonical["line_status"],
+            )
+        except RepairDeductionExceeded as exc:
+            raise ImportError(
+                "repair_deduction_exceeds_receipt", str(exc), 422
+            ) from exc
+
+
 def apply(
     db: Session,
     batch_id: str,
@@ -1016,6 +1098,7 @@ def apply(
         }
     )
     maintenance_project_operations.lock_workbook_states(db, project_ids=project_ids)
+    _lock_repair_parts_before_receipt_rows(db, report)
     for project_id in project_ids:
         db.scalar(
             select(Project)
@@ -1069,6 +1152,7 @@ def apply(
         )
     }
     now = datetime.now(UTC)
+    _guard_repair_deductions(db, plan, part_map)
     applied = 0
     for item in plan["rows"]:
         if item["action"] not in ("create", "change"):
@@ -1145,10 +1229,20 @@ def apply(
             operated_by=operator,
         )
         applied += 1
-    db.flush()
-    batch.status, batch.applied_by, batch.applied_at = "applied", operator, now
-    _state(batch, status="applied", preview_token=None, applied_lines=applied)
-    db.commit()
+    try:
+        db.flush()
+        batch.status, batch.applied_by, batch.applied_at = "applied", operator, now
+        _state(batch, status="applied", preview_token=None, applied_lines=applied)
+        db.commit()
+    except DBAPIError as exc:
+        db.rollback()
+        if getattr(exc.orig, "sqlstate", None) == "23514":
+            raise ImportError(
+                "repair_deduction_exceeds_receipt",
+                "该返还收货已有维修扣数，变更后将少于已扣件数",
+                422,
+            ) from exc
+        raise
     return {
         "batch_id": batch_id,
         "status": "applied",

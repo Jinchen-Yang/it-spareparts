@@ -283,10 +283,27 @@ def parse(data: bytes, *, project_id: str) -> dict:
 
 def _lock(db: Session, plan: dict, authorize: Callable[[], None]) -> None:
     receipts.lock_receipt_context(db)
+    ids = sorted(plan["baseline"])
+    from app.services.maintenance_repair import lock_parts
+
+    peeked_part_ids = {
+        int(part_id)
+        for part_id in db.scalars(
+            select(MaintenanceRkdReturnLine.part_id).where(
+                MaintenanceRkdReturnLine.rkd_line_id.in_(ids),
+                MaintenanceRkdReturnLine.part_id.is_not(None),
+            )
+        ).all()
+    }
+    for operation in plan["operations"]:
+        part_id = operation["updates"].get("part_id")
+        if isinstance(part_id, int):
+            peeked_part_ids.add(part_id)
+    # 与改单、作废、入库导入相同：型号顾问锁先于项目行锁，再锁返还行。
+    lock_parts(db, peeked_part_ids)
     receipts.lock_receipt_projects(db, {plan["project_id"]})
     authorize()
     receipts._get_project(db, plan["project_id"], lock=True)
-    ids = sorted(plan["baseline"])
     rows = db.scalars(select(MaintenanceRkdReturnLine).where(
         MaintenanceRkdReturnLine.rkd_line_id.in_(ids),
     ).order_by(MaintenanceRkdReturnLine.rkd_line_id).with_for_update()
@@ -310,9 +327,11 @@ def _execute(db: Session, plan: dict, operator: str) -> list[dict]:
         args = {"receipt_id": op["receipt_id"], "expected_version": op["version"],
                 "reason": op["reason"], "operated_by": operator}
         if op["action"] == "作废":
-            result = receipts.void_receipt(db, **args)
+            result = receipts.void_receipt(db, parts_already_locked=True, **args)
         else:
-            result = receipts.update_receipt(db, updates=op["updates"], **args)
+            result = receipts.update_receipt(
+                db, updates=op["updates"], parts_already_locked=True, **args
+            )
         results.append({"row_no": op["row_no"], "receipt_id": result["receipt_id"],
                         "version": result["version"], "action": op["action"]})
     return sorted(results, key=lambda row: row["row_no"])

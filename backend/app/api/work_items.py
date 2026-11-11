@@ -10,18 +10,13 @@ from sqlalchemy.orm import Session
 from app.auth import current_identity
 from app.db import get_db
 from app.models.system import SysUser
-from app.models.workflow import WorkItem
 from app.security import UserContext, record_access_log
-from app.services import maintenance_cycle as cycle_service
 from app.services.workflow import events, work_items
 from app.services.workflow.event_labels import event_label
 from app.services.workflow.registry import Subject, WorkflowError
 
 router = APIRouter(tags=["workflow"])
 ItemId = Annotated[int, Path(gt=0, le=2**63 - 1)]
-
-# F1：坏件循环 subject 的通用写动作必须走 /api/cycle 专用入口（持单位锁+双版本+联动）。
-CYCLE_SUBJECT_TYPES = frozenset(cycle_service.SUBJECT_TYPES)
 
 
 def workflow_context(ident: dict = Depends(current_identity), db: Session = Depends(get_db)) -> UserContext:
@@ -91,20 +86,7 @@ class ReassignInput(ReasonInput):
     to_user_id: int | None = Field(gt=0, le=2**31 - 1)
 
 
-def _reject_cycle_subject(db: Session, item_id: int) -> None:
-    """循环待办不允许走通用写入口：claim/release/transfer/... 都会绕过单位锁与联动。"""
-    subject_type = db.scalar(
-        select(WorkItem.subject_type).where(WorkItem.id == item_id)
-    )
-    if subject_type in CYCLE_SUBJECT_TYPES:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "坏件循环检测/维修待办只能通过 /api/cycle 专用入口处理",
-        )
-
-
 def _act(db, ctx, item_id, action, body):
-    _reject_cycle_subject(db, item_id)
     fn = getattr(work_items, action)
     kwargs = body.model_dump()
     try:

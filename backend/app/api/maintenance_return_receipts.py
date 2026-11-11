@@ -157,7 +157,12 @@ def _raise_service_error(exc: Exception) -> None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     if isinstance(exc, receipts.ReturnReceiptError):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-    if isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) == "55P03":
+    sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+    if isinstance(exc, DBAPIError) and sqlstate == "23514":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "该返还收货已有维修扣数，变更后将少于已扣件数"
+        ) from exc
+    if isinstance(exc, DBAPIError) and sqlstate in {"55P03", "40P01", "40001"}:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "该项目正在被其他操作处理，请稍后重试",
@@ -165,10 +170,24 @@ def _raise_service_error(exc: Exception) -> None:
     raise exc
 
 
-def _receipt_project(db: Session, receipt_id: str, *, target_project_id: str | None = None) -> str:
-    # Lock before checking project scope: a concurrent transfer must not make
-    # an authorization decision refer to the previous owner project.
+def _receipt_project(
+    db: Session,
+    receipt_id: str,
+    *,
+    target_project_id: str | None = None,
+    lock_row: bool = True,
+) -> str:
+    # 写路径先只读出项目做授权，型号锁必须先于行锁。读审计仍锁行，避免转移窗口。
     receipts.lock_receipt_context(db)
+    if not lock_row:
+        project_id = db.scalar(
+            select(receipts.MaintenanceRkdReturnLine.project_id).where(
+                receipts.MaintenanceRkdReturnLine.rkd_line_id == receipt_id
+            )
+        )
+        if project_id is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "返还记录不存在")
+        return project_id
     try:
         row = receipts._load_receipt(db, receipt_id, lock=True, target_project_id=target_project_id)
     except receipts.ReturnReceiptError as exc:
@@ -341,16 +360,32 @@ def update_receipt(
     _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    project_id = _receipt_project(db, receipt_id, target_project_id=body.project_id)
+    # 先锁型号，再锁项目与返还行，最后才做范围授权。这样撤销可见范围会挡住
+    # 已经开始的改单，而提交结果也不会在持有行锁时等待型号锁。
+    receipts.lock_receipt_context(db)
+    peeked = db.get(receipts.MaintenanceRkdReturnLine, receipt_id)
+    if peeked is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "返还记录不存在")
+    updates = body.model_dump(
+        exclude={"version", "reason"}, exclude_unset=True
+    )
+    from app.services.maintenance_repair import lock_parts
+
+    lock_parts(db, receipts._repair_part_ids_for_update(db, peeked, updates))
+    try:
+        row = receipts._load_receipt(
+            db, receipt_id, lock=True, target_project_id=body.project_id
+        )
+    except receipts.ReturnReceiptError as exc:
+        _raise_service_error(exc)
+        raise
+    project_id = row.project_id
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     if body.project_id and body.project_id != project_id:
         enforce_maintenance_project_access(
             db, project_id=body.project_id, ctx=ctx
         )
     operator = _real_operator(db, ident)
-    updates = body.model_dump(
-        exclude={"version", "reason"}, exclude_unset=True
-    )
     try:
         payload = receipts.update_receipt(
             db,
@@ -359,6 +394,8 @@ def update_receipt(
             updates=updates,
             reason=body.reason,
             operated_by=operator,
+            authorized_project_id=project_id,
+            parts_already_locked=True,
         )
         db.commit()
     except HTTPException:
@@ -387,7 +424,20 @@ def void_receipt(
     _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    project_id = _receipt_project(db, receipt_id)
+    receipts.lock_receipt_context(db)
+    peeked = db.get(receipts.MaintenanceRkdReturnLine, receipt_id)
+    if peeked is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "返还记录不存在")
+    if peeked.part_id is not None:
+        from app.services.maintenance_repair import lock_parts
+
+        lock_parts(db, [peeked.part_id])
+    try:
+        row = receipts._load_receipt(db, receipt_id, lock=True)
+    except receipts.ReturnReceiptError as exc:
+        _raise_service_error(exc)
+        raise
+    project_id = row.project_id
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     operator = _real_operator(db, ident)
     try:
@@ -397,6 +447,8 @@ def void_receipt(
             expected_version=body.version,
             reason=body.reason,
             operated_by=operator,
+            authorized_project_id=project_id,
+            parts_already_locked=True,
         )
         db.commit()
     except HTTPException:

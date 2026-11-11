@@ -45,11 +45,12 @@ from app.models.maintenance_bad_return import (
     MaintenanceReturnObligation,
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
-from app.models.maintenance_cycle import (
-    MaintenanceCycleEvent,
-    MaintenanceCycleSellIntent,
-    MaintenanceCycleUnit,
+from app.models.maintenance_repair import (
+    MaintenanceRepairCommand,
+    MaintenanceRepairRecord,
+    MaintenanceRepairRecordSource,
 )
+from app.models.maintenance_cycle import MaintenanceCycleSellIntent
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionReceipt,
     MaintenanceCollectionSnapshot,
@@ -210,8 +211,9 @@ __all__ = [
     "MaintenanceBadReturnLine",
     "MaintenanceBadReturnCommand",
     "MaintenanceSourceOrderAssignment",
-    "MaintenanceCycleUnit",
-    "MaintenanceCycleEvent",
+    "MaintenanceRepairRecord",
+    "MaintenanceRepairRecordSource",
+    "MaintenanceRepairCommand",
     "MaintenanceCycleSellIntent",
     "MaintenanceCollectionReceipt",
     "MaintenanceCollectionSnapshot",

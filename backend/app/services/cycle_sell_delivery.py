@@ -1,18 +1,11 @@
-"""坏件循环可售意图出站 worker（D-0057 T4）。
+"""坏件循环可售意图出站 worker（D-0058 / v2）。
 
-与目录通知（``catalog_delivery``）同款质量，但独立开关/地址/凭据，不塞进目录 worker：
-- 默认关闭：``SHOP_CYCLE_SELL_ENABLED=false`` 或 URL 为空时不启动网络循环，意图保持 pending。
-- 领取：``FOR UPDATE SKIP LOCKED``（pending 到期 / delivering 租约过期 / blocked 到期），
-  租约 60 秒；语句超时 5 秒、锁超时 1 秒；事务在 HTTP 之前结束。
-- HTTP：总期限 15 秒、不跟随重定向、``trust_env=false``、响应最大 4 KiB、
-  ``content-encoding`` 必须 identity；回执 ``extra=forbid`` 且身份必须与领取行一致。
-- 回执落库用租约 CAS；晚到的旧工人回执影响 0 行。
-- 日志只含 deliveryId / partId / 结果码 / 是否接受：无 traceback、无 token、无 body。
-- 错误与退避：applied/unchanged → delivered；blocked → 5m/15m/1h/6h（封顶 6h）；
-  conflict → failed 不自动重试；超时/传输失败/非 200/无效回执 → pending，
-  5 秒起指数退避封顶 1 小时；网络失败不写成 blocked。
-- R9：先前只是 blocked 的意图若收到 ``unchanged``，视为无效回执（不标 delivered，
-  回 pending 重试）；只有「先前已 applied」的 unchanged 才是成功。
+默认关闭：``SHOP_CYCLE_SELL_ENABLED=false`` 或 URL 为空时不启动网络循环。
+载荷仍是六键：``schemaVersion`` 为 2，``unitId`` 为结果的 ``wire_unit_id``，
+``qty`` 为修好数。不发送 ``recordId``。
+422 进入 failed 且不重试；409 与 5xx 一样回到 pending 并退避。
+身份一致的 ``unchanged`` 直接记 delivered，不要求先前见过 ``applied``。
+网络失败不得清掉上一份未加库存回执。
 """
 from __future__ import annotations
 
@@ -30,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db import SessionLocal
+from app.models.maintenance_cycle import BLOCK_CODES as MODEL_BLOCK_CODES
 from app.models.maintenance_cycle import MaintenanceCycleSellIntent
 
 log = logging.getLogger(__name__)
@@ -41,32 +35,37 @@ MAX_RECEIPT_BYTES = 4096
 BLOCK_BACKOFF_SECONDS = (300, 900, 3600, 21600)
 NETWORK_BACKOFF_BASE_SECONDS = 5
 NETWORK_BACKOFF_CAP_SECONDS = 3600
-# 商城稳定 blockCode 集合（任务书 §8.2）
-BLOCK_CODES = frozenset({
-    "missing_formal_image",
-    "missing_category_mapping",
-    "missing_list_price",
-    "missing_catalog_identity",
-    "publish_api_missing_stock_update",
-    "publish_disabled",
-})
+BLOCK_CODES = frozenset(MODEL_BLOCK_CODES)
 NETWORK_RESULTS = frozenset({
-    "transport_error", "deadline_exceeded", "remote_http_error", "invalid_receipt",
+    "transport_error",
+    "deadline_exceeded",
+    "remote_http_error",
+    "invalid_receipt",
+    "remote_busy",
+    "credential_rejected",
 })
 TERMINAL_OK = frozenset({"applied", "unchanged"})
+WIRE_KEYS = (
+    "schemaVersion",
+    "deliveryId",
+    "unitId",
+    "partId",
+    "conditionBucket",
+    "qty",
+)
 
 
 @dataclass(frozen=True)
 class Claim:
     delivery_id: UUID
-    unit_id: int
+    wire_unit_id: int
     part_id: int
+    qty: int
     condition_bucket: str
     lease_token: UUID
     attempts: int
-    # N1：持久证据——最后一次被商城接受的回执（applied/unchanged/blocked/conflict）。
-    # ``unchanged`` 只有在它为 ``applied`` 时才可接受为 delivered。
     previous_receipt_status: str | None
+    previous_block_code: str | None
 
 
 def _bound_transaction(db: Session) -> None:
@@ -76,11 +75,30 @@ def _bound_transaction(db: Session) -> None:
 
 def _network_backoff(attempts: int) -> int:
     exponent = min(max(attempts - 1, 0), 10)
-    return min(NETWORK_BACKOFF_CAP_SECONDS, NETWORK_BACKOFF_BASE_SECONDS * 2 ** exponent)
+    return min(
+        NETWORK_BACKOFF_CAP_SECONDS, NETWORK_BACKOFF_BASE_SECONDS * 2 ** exponent
+    )
 
 
 def _block_backoff(attempts: int) -> int:
-    return BLOCK_BACKOFF_SECONDS[min(max(attempts - 1, 0), len(BLOCK_BACKOFF_SECONDS) - 1)]
+    return BLOCK_BACKOFF_SECONDS[
+        min(max(attempts - 1, 0), len(BLOCK_BACKOFF_SECONDS) - 1)
+    ]
+
+
+def build_payload(claim: Claim) -> dict:
+    """itsp 只发 v2 六键。坏件桶不发出；调用方插入的意图本期都是 good。"""
+    payload = {
+        "schemaVersion": 2,
+        "deliveryId": str(claim.delivery_id),
+        "unitId": int(claim.wire_unit_id),
+        "partId": int(claim.part_id),
+        "conditionBucket": claim.condition_bucket,
+        "qty": int(claim.qty),
+    }
+    if set(payload) != set(WIRE_KEYS) or "recordId" in payload:
+        raise RuntimeError("cycle sell payload drifted from the six wire keys")
+    return payload
 
 
 def claim_one(session_factory=SessionLocal) -> Claim | None:
@@ -91,12 +109,18 @@ def claim_one(session_factory=SessionLocal) -> Claim | None:
         row = db.scalar(
             select(MaintenanceCycleSellIntent)
             .where(or_(
-                and_(MaintenanceCycleSellIntent.state == "pending",
-                     MaintenanceCycleSellIntent.available_at <= now),
-                and_(MaintenanceCycleSellIntent.state == "delivering",
-                     MaintenanceCycleSellIntent.lease_until <= now),
-                and_(MaintenanceCycleSellIntent.state == "blocked",
-                     MaintenanceCycleSellIntent.available_at <= now),
+                and_(
+                    MaintenanceCycleSellIntent.state == "pending",
+                    MaintenanceCycleSellIntent.available_at <= now,
+                ),
+                and_(
+                    MaintenanceCycleSellIntent.state == "delivering",
+                    MaintenanceCycleSellIntent.lease_until <= now,
+                ),
+                and_(
+                    MaintenanceCycleSellIntent.state == "blocked",
+                    MaintenanceCycleSellIntent.available_at <= now,
+                ),
             ))
             .order_by(
                 MaintenanceCycleSellIntent.available_at,
@@ -108,13 +132,10 @@ def claim_one(session_factory=SessionLocal) -> Claim | None:
         )
         if row is None:
             return None
-        # N1：把「展示用 block_code」与「尚未得到 applied 的持久证据」分开。
-        # 持久证据 = receipt_status（最后一次被商城接受的回执）；block_code 仅供展示，
-        # 网络/无效回执失败不得清掉 receipt_status。
         previous_receipt_status = row.receipt_status
         if row.state == "blocked" and previous_receipt_status is None:
-            # 兼容历史数据/外部种子：blocked 行即使 receipt_status 空缺也视为未 applied。
             previous_receipt_status = "blocked"
+        previous_block_code = row.block_code
         row.state = "delivering"
         row.lease_token = uuid4()
         row.lease_until = now + timedelta(seconds=LEASE_SECONDS)
@@ -122,13 +143,28 @@ def claim_one(session_factory=SessionLocal) -> Claim | None:
         row.updated_at = now
         return Claim(
             delivery_id=row.delivery_id,
-            unit_id=row.unit_id,
-            part_id=row.part_id,
+            wire_unit_id=int(row.wire_unit_id),
+            part_id=int(row.part_id),
+            qty=int(row.qty),
             condition_bucket=row.condition_bucket,
             lease_token=row.lease_token,
-            attempts=row.attempts,
+            attempts=int(row.attempts),
             previous_receipt_status=previous_receipt_status,
+            previous_block_code=previous_block_code,
         )
+
+
+def _preserved(claim: Claim) -> tuple[str | None, str | None]:
+    """网络失败或 409 不得擦掉已证明的入账/未入账证据。"""
+    status = claim.previous_receipt_status
+    block = claim.previous_block_code if claim.previous_block_code in BLOCK_CODES else None
+    if status in {"applied", "unchanged"}:
+        return "applied", None
+    if status == "blocked" and block is not None:
+        return "blocked", block
+    if block == "publish_disabled":
+        return "blocked", block
+    return None, None
 
 
 def acknowledge(
@@ -138,8 +174,8 @@ def acknowledge(
     block_code: str | None = None,
     session_factory=SessionLocal,
 ) -> bool:
-    """租约 CAS 落回执；过期/被回收工人的回执返回 False 且不改任何行。"""
-    if result not in TERMINAL_OK | {"blocked", "conflict"} | NETWORK_RESULTS:
+    """租约 CAS 落回执；过期或已被作废改成 failed 的回执影响 0 行。"""
+    if result not in TERMINAL_OK | {"blocked", "conflict", "invalid_request"} | NETWORK_RESULTS:
         result = "transport_error"
     with session_factory() as db, db.begin():
         _bound_transaction(db)
@@ -152,47 +188,61 @@ def acknowledge(
         if row is None:
             return False
         effective = result
-        # N1/R9：持久记录里「上一次被接受的回执=applied」才允许 unchanged 成功；
-        # 否则（None/blocked/conflict/unchanged）一律视为无效回执，保持 pending 退避。
-        if effective == "unchanged" and claim.previous_receipt_status != "applied":
-            effective = "invalid_receipt"
-        # 网络/无效回执失败把行送回 pending 时必须保留持久证据，不能清成 None。
-        preserved_status = claim.previous_receipt_status
         values: dict = {
             "lease_token": None,
             "lease_until": None,
             "updated_at": now,
         }
         if effective in TERMINAL_OK:
+            # unchanged 与 applied 都表示库存已经加上。持久状态写成 applied。
             values.update(
-                state="delivered", receipt_status=effective, completed_at=now,
-                block_code=None, last_error_code=None,
+                state="delivered",
+                receipt_status="applied",
+                completed_at=now,
+                block_code=None,
+                last_error_code=None,
             )
         elif effective == "blocked":
             code = block_code if block_code in BLOCK_CODES else None
             if code is None:
+                receipt_status, preserved_block = _preserved(claim)
                 values.update(
-                    state="pending", receipt_status=preserved_status, block_code=None,
+                    state="pending",
+                    receipt_status=receipt_status,
+                    block_code=preserved_block,
                     last_error_code="invalid_receipt",
                     available_at=now + timedelta(seconds=_network_backoff(claim.attempts)),
                 )
             else:
                 values.update(
-                    state="blocked", receipt_status="blocked", block_code=code,
+                    state="blocked",
+                    receipt_status="blocked",
+                    block_code=code,
                     last_error_code=None,
                     available_at=now + timedelta(seconds=_block_backoff(claim.attempts)),
                 )
-        elif effective == "conflict":
+        elif effective in {"conflict", "invalid_request"}:
+            receipt_status, preserved_block = _preserved(claim)
+            stocked = receipt_status == "applied" or preserved_block == "publish_disabled"
             values.update(
-                state="failed", receipt_status="conflict", completed_at=now,
-                block_code=None, last_error_code="manual_conflict",
+                state="failed",
+                receipt_status="applied" if stocked and receipt_status == "applied" else (
+                    "blocked" if stocked else ("conflict" if effective == "conflict" else None)
+                ),
+                block_code=preserved_block if stocked else None,
+                completed_at=now,
+                last_error_code=(
+                    "manual_conflict" if effective == "conflict" else "invalid_request"
+                ),
             )
         else:
             code = effective if effective in NETWORK_RESULTS else "transport_error"
+            receipt_status, preserved_block = _preserved(claim)
             values.update(
-                state="pending", receipt_status=preserved_status, last_error_code=code,
-                # block_code 只是展示；网络失败清掉展示码，但保留 receipt_status 证据。
-                block_code=None,
+                state="pending",
+                receipt_status=receipt_status,
+                block_code=preserved_block,
+                last_error_code=code,
                 available_at=now + timedelta(seconds=_network_backoff(claim.attempts)),
             )
         changed = db.execute(
@@ -201,8 +251,6 @@ def acknowledge(
                 MaintenanceCycleSellIntent.delivery_id == claim.delivery_id,
                 MaintenanceCycleSellIntent.state == "delivering",
                 MaintenanceCycleSellIntent.lease_token == claim.lease_token,
-                # F5：用数据库实时时钟做截止比较；取锁等待跨过到期点后 CAS 必须失败，
-                # 不能用进入事务前/取锁前取到的 Python now。
                 MaintenanceCycleSellIntent.lease_until > func.clock_timestamp(),
             )
             .values(**values)
@@ -212,12 +260,45 @@ def acknowledge(
 
 class Receipt(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    schemaVersion: int = Field(ge=1, le=1)
+    schemaVersion: Literal[1, 2]
     deliveryId: str
     unitId: int = Field(gt=0, le=2**63 - 1)
     partId: int = Field(gt=0, le=2**31 - 1)
     status: Literal["applied", "unchanged", "blocked", "conflict"]
-    blockCode: str | None = None
+    # 六键都必须出现。blockCode 允许 JSON null，缺键则是无效回执。
+    blockCode: str | None
+
+
+def interpret_shop_response(
+    sent: dict, status_code: int, body: bytes
+) -> tuple[str, str | None]:
+    """按金样例把一次商城响应收成回执码。``sent`` 是这次实际发出的 JSON。"""
+    if status_code == 422:
+        return "invalid_request", None
+    if status_code == 409:
+        return "remote_busy", None
+    if status_code in {401, 403}:
+        return "credential_rejected", None
+    if status_code != 200:
+        return "remote_http_error", None
+    try:
+        receipt = Receipt.model_validate_json(body)
+    except (ValidationError, ValueError):
+        return "invalid_receipt", None
+    if (
+        receipt.schemaVersion != sent.get("schemaVersion")
+        or receipt.deliveryId != str(sent.get("deliveryId"))
+        or receipt.unitId != sent.get("unitId")
+        or receipt.partId != sent.get("partId")
+    ):
+        return "invalid_receipt", None
+    if receipt.status == "blocked":
+        if receipt.blockCode not in BLOCK_CODES:
+            return "invalid_receipt", None
+        return "blocked", receipt.blockCode
+    if receipt.blockCode is not None:
+        return "invalid_receipt", None
+    return receipt.status, None
 
 
 async def deliver(
@@ -225,6 +306,7 @@ async def deliver(
 ) -> tuple[str, str | None]:
     """发送一条 sell-intent；返回 (结果码, blockCode)。不做任何 DB 写入。"""
     token = settings.shop_cycle_sell_token.get_secret_value()
+    payload = build_payload(claim)
 
     async def request() -> tuple[str, str | None]:
         async with httpx.AsyncClient(
@@ -241,18 +323,10 @@ async def deliver(
                     "Accept-Encoding": "identity",
                     "Content-Type": "application/json",
                 },
-                # 跨仓 JSON 用 camelCase；载荷只有 part/桶/qty/投递 id。
-                json={
-                    "schemaVersion": 1,
-                    "deliveryId": str(claim.delivery_id),
-                    "unitId": claim.unit_id,
-                    "partId": claim.part_id,
-                    "conditionBucket": claim.condition_bucket,
-                    "qty": 1,
-                },
+                json=payload,
             ) as response:
                 if response.status_code != 200:
-                    return "remote_http_error", None
+                    return interpret_shop_response(payload, response.status_code, b"")
                 if (
                     response.headers.get("content-encoding", "identity").lower()
                     != "identity"
@@ -263,23 +337,7 @@ async def deliver(
                     body.extend(chunk)
                     if len(body) > MAX_RECEIPT_BYTES:
                         return "invalid_receipt", None
-                try:
-                    receipt = Receipt.model_validate_json(bytes(body))
-                except (ValidationError, ValueError):
-                    return "invalid_receipt", None
-                if (
-                    receipt.deliveryId != str(claim.delivery_id)
-                    or receipt.partId != claim.part_id
-                    or receipt.unitId != claim.unit_id
-                ):
-                    return "invalid_receipt", None
-                if receipt.status == "blocked":
-                    if receipt.blockCode not in BLOCK_CODES:
-                        return "invalid_receipt", None
-                    return "blocked", receipt.blockCode
-                if receipt.blockCode is not None:
-                    return "invalid_receipt", None
-                return receipt.status, None
+                return interpret_shop_response(payload, response.status_code, bytes(body))
 
     try:
         return await asyncio.wait_for(request(), timeout=HTTP_DEADLINE_SECONDS)
@@ -308,7 +366,6 @@ async def run_worker(settings: Settings, stop: asyncio.Event, wake: asyncio.Even
         except asyncio.CancelledError:
             raise
         except Exception:
-            # 不打 traceback：SQL 参数/响应体可能带业务数据或凭据。
             log.warning("cycle_sell_intent worker_error")
         try:
             await asyncio.wait_for(wake.wait(), timeout=POLL_SECONDS)
@@ -317,7 +374,7 @@ async def run_worker(settings: Settings, stop: asyncio.Event, wake: asyncio.Even
 
 
 class SellIntentWorker:
-    """默认关闭的可售意图出站 worker；开关/URL 不满足时完全不起网络循环。"""
+    """默认关闭的可售意图出站 worker；开关或 URL 不满足时完全不起网络循环。"""
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -338,29 +395,11 @@ class SellIntentWorker:
         self.stop.set()
         self.wake.set()
         if self.task is not None:
-            # 让有界当前请求完成并落回执后再退出。
             await self.task
             self.task = None
 
 
-def read_status(db: Session, unit_id: int) -> dict:
-    row = db.scalar(
-        select(MaintenanceCycleSellIntent).where(
-            MaintenanceCycleSellIntent.unit_id == unit_id
-        )
-    )
-    if row is None:
-        return {"unit_id": unit_id, "status": "not_queued"}
-    return {
-        "unit_id": row.unit_id,
-        "deliveryId": str(row.delivery_id),
-        "status": row.state,
-        "attempts": row.attempts,
-        "blockCode": row.block_code,
-        "lastErrorCode": row.last_error_code,
-        "receiptStatus": row.receipt_status,
-        "nextAttemptAt": row.available_at if row.state in {"pending", "blocked"} else None,
-        "createdAt": row.created_at,
-        "updatedAt": row.updated_at,
-        "completedAt": row.completed_at,
-    }
+def read_status(db: Session, record_id: UUID) -> dict:
+    from app.services.maintenance_repair import intent_status
+
+    return intent_status(db, record_id)
