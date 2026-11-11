@@ -71,31 +71,18 @@ def requeue(
     return _finish(db, lambda: inbound.requeue(db, body.deliveryId))
 
 
-@router.post("/mark-sold", dependencies=[Depends(require_callback_token)])
-def mark_sold(
-    body: SoldInput,
-    response: Response,
-    db: Annotated[Session, Depends(get_db)],
-) -> dict:
+def _phase_deferred(body: SoldInput, response: Response) -> None:
+    """合法 v1 售出体本期零写入。解析通过后直接拒绝，不查库存、不改意图。"""
+    del body
     response.headers["Cache-Control"] = "no-store"
-    return _finish(
-        db,
-        lambda: inbound.mark_sold(
-            db, delivery_id=body.deliveryId, shop_order_line_id=body.shopOrderLineId
-        ),
-    )
+    raise HTTPException(status_code=409, detail="phase_deferred")
+
+
+@router.post("/mark-sold", dependencies=[Depends(require_callback_token)])
+def mark_sold(body: SoldInput, response: Response) -> None:
+    _phase_deferred(body, response)
 
 
 @router.post("/revert-sold", dependencies=[Depends(require_callback_token)])
-def revert_sold(
-    body: SoldInput,
-    response: Response,
-    db: Annotated[Session, Depends(get_db)],
-) -> dict:
-    response.headers["Cache-Control"] = "no-store"
-    return _finish(
-        db,
-        lambda: inbound.revert_sold(
-            db, delivery_id=body.deliveryId, shop_order_line_id=body.shopOrderLineId
-        ),
-    )
+def revert_sold(body: SoldInput, response: Response) -> None:
+    _phase_deferred(body, response)

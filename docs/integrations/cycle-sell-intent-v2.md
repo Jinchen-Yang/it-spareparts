@@ -1,6 +1,6 @@
 # 循环可售意图投递契约 v2 增补（相对 v1）
 
-> 状态：**已冻结的增补，尚未编码**。决策：D-0058。需求：00014。
+> 状态：**已冻结的增补，itsp 出站已按本文件实现**。开关仍关闭，未部署。决策：D-0058。需求：00014。
 > 对照：商城 PR #91。线路以商城为准。金样例是该 PR head `fdb29abc` 的 `docs/integrations/cycle-sell-intent-v2-examples.json` 原样拷贝，不改键、不改用例。
 > 金样例：[cycle-sell-intent-v2-examples.json](cycle-sell-intent-v2-examples.json)。八个用例：`applied`、`unchanged`、`blocked_missing_catalog_identity`、`blocked_missing_operator`、`validation_422`、`merge_409_retryable`、`applied_v1`、`conflict_v2_bad`。每个 HTTP 200 的 `responseBody` 恰好是 `schemaVersion`、`deliveryId`、`unitId`、`partId`、`status`、`blockCode`。
 > 页面接口仍以 [cycle-repair-api.md](cycle-repair-api.md) 为准。本文件与该契约冲突时，线路字段以本文件和金样例为准，并在同一次修改里改两边。
