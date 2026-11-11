@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const listUnits = vi.fn();
 const selfPass = vi.fn();
 const sellIntent = vi.fn();
+const listWorkItems = vi.fn();
 
 vi.mock("../../../api/cyclePool", () => ({
   listUnits: (...args: unknown[]) => listUnits(...args),
@@ -23,10 +24,10 @@ vi.mock("../../../api/cyclePool", () => ({
 }));
 
 vi.mock("../../../api/workItems", () => ({
-  listWorkItems: vi.fn(async () => ({ items: [], total: 0, page: 1, page_size: 100, can_supervise: false })),
+  listWorkItems: (...args: unknown[]) => listWorkItems(...args),
 }));
 
-import CyclePoolPage from "../CyclePoolPage";
+import CyclePoolPage, { resultChoices } from "../CyclePoolPage";
 
 const unit = {
   id: 7,
@@ -52,6 +53,7 @@ describe("维修循环工位页", () => {
     listUnits.mockResolvedValue({ items: [unit], total: 1, page: 1, page_size: 20 });
     selfPass.mockResolvedValue(unit);
     sellIntent.mockResolvedValue({ unit_id: 7, status: "blocked", blockCode: "missing_list_price" });
+    listWorkItems.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100, can_supervise: false });
   });
 
   afterEach(() => {
@@ -70,6 +72,48 @@ describe("维修循环工位页", () => {
     fireEvent.click(await screen.findByRole("button", { name: "自测通过" }));
     await waitFor(() => expect(selfPass).toHaveBeenCalledWith(7, 3));
     expect(screen.queryByRole("button", { name: "标记售出" })).toBeNull();
+  });
+
+  it("待办超过第一页时仍能领取当前这件", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ page_cycle_test: true }));
+    listUnits.mockResolvedValue({
+      items: [{ ...unit, station: "testing" }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    listWorkItems.mockImplementation(async (params: { page?: number }) => {
+      if ((params.page ?? 1) === 1) {
+        return {
+          items: Array.from({ length: 100 }, (_, index) => ({ subject_id: 1000 + index, version: 1 })),
+          total: 101,
+          page: 1,
+          page_size: 100,
+          can_supervise: false,
+        };
+      }
+      return {
+        items: [{ subject_id: 7, version: 4 }],
+        total: 101,
+        page: 2,
+        page_size: 100,
+        can_supervise: false,
+      };
+    });
+    render(<CyclePoolPage />);
+    expect(await screen.findByText("CYCLE-PN")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "处理" }));
+    const claim = await screen.findByRole("button", { name: "领 取" });
+    expect(claim.hasAttribute("disabled")).toBe(false);
+    expect(listWorkItems).toHaveBeenCalledTimes(2);
+  });
+
+  it("结果只对应接口接受的去向", () => {
+    expect(resultChoices("test", "good").options.map((item) => item.value)).toEqual(["ready"]);
+    expect(resultChoices("test", "bad").options.map((item) => item.value)).toEqual(["repairing", "scrap"]);
+    expect(resultChoices("repair", "fixed").required).toBe(true);
+    expect(resultChoices("repair", "fixed").options.map((item) => item.value)).toEqual(["testing", "ready"]);
+    expect(resultChoices("repair", "unfixed").options.map((item) => item.value)).toEqual(["scrap"]);
   });
 
   it("主管能看投递状态", async () => {

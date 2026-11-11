@@ -320,6 +320,45 @@ def test_mark_sold_rejects_delivering_failed_and_manual_sale(db, monkeypatch):
     assert row.last_error_code == "unit_sold_by_callback"
 
 
+def test_revert_of_callback_sale_accepts_a_later_order_line(db, monkeypatch):
+    token = _enable(monkeypatch)
+    unit = _unit(db, pn="IN-LOST-RECEIPT")
+    intent = _intent(db, unit, state="pending", receipt_status=None)
+    client = TestClient(app)
+    sold = client.post(
+        "/api/integrations/cycle/mark-sold",
+        json=_sold_body(intent.delivery_id, "first-line"),
+        headers=_auth(token),
+    )
+    assert sold.status_code == 200, sold.text
+    db.expire_all()
+    failed = db.get(MaintenanceCycleSellIntent, intent.delivery_id)
+    assert failed.state == "failed"
+    assert failed.last_error_code == "unit_sold_by_callback"
+
+    reverted = client.post(
+        "/api/integrations/cycle/revert-sold",
+        json=_sold_body(intent.delivery_id, "first-line"),
+        headers=_auth(token),
+    )
+    assert reverted.status_code == 200, reverted.text
+    db.expire_all()
+    restored = db.get(MaintenanceCycleSellIntent, intent.delivery_id)
+    assert restored.state == "delivered"
+    assert restored.last_error_code is None
+    assert db.get(MaintenanceCycleUnit, unit.id).outcome == "to_shop"
+
+    again = client.post(
+        "/api/integrations/cycle/mark-sold",
+        json=_sold_body(intent.delivery_id, "second-line"),
+        headers=_auth(token),
+    )
+    assert again.status_code == 200, again.text
+    db.expire_all()
+    assert db.get(MaintenanceCycleUnit, unit.id).outcome == "sold"
+    assert len(_events(db, unit.id, "mark_sold")) == 2
+
+
 def test_sell_intent_status_is_manager_only_and_hides_serial_from_worker(db):
     unit = _unit(db, station="pool", outcome=None, closed_at=None)
     intent = _intent(db, unit, state="blocked", block_code="publish_disabled")

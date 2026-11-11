@@ -88,10 +88,8 @@ export default function CyclePoolPage() {
         setTotal(data.total);
         if (station === "testing" || station === "repairing") {
           const subject = station === "testing" ? "cycle_test" : "cycle_repair";
-          const pool = await listWorkItems({ tab: "pool", subject_type: subject, page_size: 100 });
+          const versions = await loadPoolVersions(subject, data.items.map((item) => item.id));
           if (cancel) return;
-          const versions: Record<number, number> = {};
-          for (const item of pool.items) versions[item.subject_id] = item.version;
           setPoolVersions(versions);
         }
       } catch (error) {
@@ -213,6 +211,25 @@ export default function CyclePoolPage() {
   );
 }
 
+async function loadPoolVersions(subject: string, unitIds: number[]) {
+  const wanted = new Set(unitIds);
+  const versions: Record<number, number> = {};
+  let page = 1;
+  let seen = 0;
+  let total = 0;
+  do {
+    const pool = await listWorkItems({ tab: "pool", subject_type: subject, page, page_size: 100 });
+    total = pool.total;
+    seen += pool.items.length;
+    for (const item of pool.items) {
+      if (wanted.has(item.subject_id)) versions[item.subject_id] = item.version;
+    }
+    if (pool.items.length === 0) break;
+    page += 1;
+  } while (seen < total && Object.keys(versions).length < wanted.size && page <= 50);
+  return versions;
+}
+
 function compact(body: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(
     Object.entries(body).filter(([, value]) => value !== undefined && value !== null && value !== ""),
@@ -272,17 +289,13 @@ function UnitActions({
       )}
       {unit.station === "testing" && (
         <ResultForm
-          good="good"
-          bad="bad"
-          nextOptions={[{ value: "ready", label: "待处置" }, { value: "repairing", label: "送修" }, { value: "scrap", label: "报废" }]}
+          kind="test"
           onSubmit={(body) => onRun(() => completeTest(unit.id, { expected_version: version, ...body }))}
         />
       )}
       {unit.station === "repairing" && (
         <ResultForm
-          good="fixed"
-          bad="unfixed"
-          nextOptions={[{ value: "testing", label: "再测" }, { value: "ready", label: "不测" }, { value: "scrap", label: "报废" }]}
+          kind="repair"
           onSubmit={(body) => onRun(() => completeRepair(unit.id, { expected_version: version, ...body }))}
         />
       )}
@@ -359,23 +372,59 @@ function ReturnForm({ onSubmit }: { onSubmit: (body: object) => void }) {
   );
 }
 
+export function resultChoices(kind: "test" | "repair", result?: string) {
+  if (kind === "test" && result === "good") {
+    return { options: [{ value: "ready", label: "待处置" }], required: false };
+  }
+  if (kind === "test" && result === "bad") {
+    return {
+      options: [{ value: "repairing", label: "送修" }, { value: "scrap", label: "报废" }],
+      required: true,
+    };
+  }
+  if (kind === "repair" && result === "fixed") {
+    return {
+      options: [{ value: "testing", label: "再测" }, { value: "ready", label: "不测" }],
+      required: true,
+    };
+  }
+  if (kind === "repair" && result === "unfixed") {
+    return { options: [{ value: "scrap", label: "报废" }], required: true };
+  }
+  return { options: [] as { value: string; label: string }[], required: false };
+}
+
 function ResultForm({
-  good,
-  bad,
-  nextOptions,
+  kind,
   onSubmit,
 }: {
-  good: string;
-  bad: string;
-  nextOptions: { value: string; label: string }[];
+  kind: "test" | "repair";
   onSubmit: (body: object) => void;
 }) {
+  const [form] = Form.useForm();
+  const result = Form.useWatch("result", form) as string | undefined;
+  const choice = resultChoices(kind, result);
   return (
-    <Form layout="vertical" onFinish={(values) => onSubmit({ result: values.result, next: values.next })}>
-      <Form.Item name="result" label="结果" rules={[{ required: true }]}>
-        <Select options={[{ value: good, label: good }, { value: bad, label: bad }]} />
+    <Form
+      form={form}
+      layout="vertical"
+      onFinish={(values) => onSubmit(compact({ result: values.result, next: values.next }))}
+    >
+      <Form.Item name="result" label="结果" rules={[{ required: true, message: "请选择结果" }]}>
+        <Select
+          options={kind === "test"
+            ? [{ value: "good", label: "好" }, { value: "bad", label: "坏" }]
+            : [{ value: "fixed", label: "修好" }, { value: "unfixed", label: "没修好" }]}
+          onChange={() => form.setFieldValue("next", undefined)}
+        />
       </Form.Item>
-      <Form.Item name="next" label="下一步"><Select allowClear options={nextOptions} /></Form.Item>
+      <Form.Item
+        name="next"
+        label="下一步"
+        rules={choice.required ? [{ required: true, message: "请选择下一步" }] : []}
+      >
+        <Select allowClear={!choice.required} disabled={!result} options={choice.options} />
+      </Form.Item>
       <Button htmlType="submit">完成</Button>
     </Form>
   );

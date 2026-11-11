@@ -111,6 +111,20 @@ def requeue(db: Session, delivery_id: UUID) -> dict:
     }
 
 
+def _reopen_callback_sale(intent: MaintenanceCycleSellIntent) -> None:
+    """回执丢失时，售出回调会把仍在排队的意图标成失败。
+
+    取消这笔成交后改回已送达：商城可以再卖，后续成交能入账，投递也不会把同一件再发一次。
+    """
+    if intent.state != "failed" or intent.last_error_code != "unit_sold_by_callback":
+        return
+    now = datetime.now(UTC)
+    intent.state = "delivered"
+    intent.last_error_code = None
+    intent.completed_at = now
+    intent.updated_at = now
+
+
 def _fail_open_intent(intent: MaintenanceCycleSellIntent) -> None:
     if intent.state not in {"pending", "blocked"}:
         return
@@ -174,6 +188,7 @@ def revert_sold(db: Session, *, delivery_id: UUID, shop_order_line_id: str) -> d
         return _receipt(intent, unit, shop_order_line_id, idempotent=True)
     if unit.outcome == "sold" and _line(latest_mark) == shop_order_line_id:
         unit.outcome = "to_shop"
+        _reopen_callback_sale(intent)
         _bump(unit, CALLBACK_ACTOR)
         _event(
             db,
