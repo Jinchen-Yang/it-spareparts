@@ -728,7 +728,7 @@ def test_current_restore_drill_fails_closed_and_compares_stable_project_tables()
     assert '[ -f "$DUMP" ] && [ ! -L "$DUMP" ]' in script
     assert '[ -f "$DUMP.sha256" ] && [ ! -L "$DUMP.sha256" ]' in script
     assert '[ -d "$DOCKER_ROOT" ] && [ ! -L "$DOCKER_ROOT" ]' in script
-    assert "readonly EXPECTED_DB_HEAD=86f7486b9ed5" in script
+    assert "readonly EXPECTED_DB_HEAD=c3e8a1d94b27" in script
     assert '"$SOURCE_DB_HEAD" = "$EXPECTED_DB_HEAD"' in script
     assert '"$RESTORED_DB_HEAD" = "$EXPECTED_DB_HEAD"' in script
     assert "compose ps -q db" in script
@@ -890,9 +890,9 @@ def test_current_restore_drill_runs_restore_only_in_restricted_container(
         "RESTORE_DRILL_TEST_DUMP": str(dump),
         "RESTORE_DRILL_TEST_DOCKER_ROOT": str(tmp_path),
         "RESTORE_STUB_LOG": str(command_log),
-        "RESTORE_STUB_SOURCE_HEAD": "86f7486b9ed5",
+        "RESTORE_STUB_SOURCE_HEAD": "c3e8a1d94b27",
         "RESTORE_STUB_SOURCE_DB_SIZE": "1000",
-        "RESTORE_STUB_RESTORED_HEAD": "86f7486b9ed5",
+        "RESTORE_STUB_RESTORED_HEAD": "c3e8a1d94b27",
         "RESTORE_STUB_SOURCE_COUNTS": (
             "maintenance_project|2\nmaintenance_project_contract|3"
         ),

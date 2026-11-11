@@ -23,11 +23,6 @@ from sqlalchemy.orm import Session
 from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, RKD_RETURN_CATEGORIES, RKD_RETURN_TEST_RESULTS
 from app.models.dimensions import DimPart
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
-from app.models.maintenance_cycle import (
-    MaintenanceCycleEvent,
-    MaintenanceCycleSellIntent,
-    MaintenanceCycleUnit,
-)
 from app.models.maintenance_doc_import import MaintenanceDocLineRow, MaintenanceRkdReturnLine
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
@@ -531,103 +526,41 @@ def _load_receipt(
 
 
 def lock_receipt_row(db: Session, receipt_id: str) -> MaintenanceRkdReturnLine:
-    """坏件循环入池的公共入口：调用方必须先执行 ``lock_receipt_context``。
-
-    锁顺序固定在「收货行 → 循环单位」；本函数只锁收货行（含共享项目锁），
-    循环单位由 ``maintenance_cycle`` 在同一事务内追加。
-    """
+    """锁一张返还行。调用方必须先拿共享 DATA_CHANGE，并先锁相关维修型号。"""
     return _load_receipt(db, receipt_id, lock=True)
 
 
-def _cycle_units_for_receipt(
-    db: Session, receipt_id: str, *, lock: bool = False
-) -> list[MaintenanceCycleUnit]:
-    """Bad-return interlock: only the same source receipt line (rkd_line_id) counts."""
-    stmt = (
-        select(MaintenanceCycleUnit)
-        .where(MaintenanceCycleUnit.source_receipt_id == receipt_id)
-        .order_by(MaintenanceCycleUnit.id)
-    )
-    if lock:
-        stmt = stmt.with_for_update()
-    return list(db.scalars(stmt.execution_options(populate_existing=True)).all())
-
-
-def _cycle_intent_exists(db: Session, unit_ids: list[int]) -> bool:
-    if not unit_ids:
-        return False
-    return (
-        db.scalar(
-            select(func.count())
-            .select_from(MaintenanceCycleSellIntent)
-            .where(MaintenanceCycleSellIntent.unit_id.in_(unit_ids))
-        )
-        or 0
-    ) > 0
-
-
-def _assert_cycle_units_identity_free(
-    db: Session, receipt_id: str, *, new_qty: Decimal | None = None
-) -> None:
-    """§3.3：任一未撤回单位离开 pool 或已有可售意图时，拒改 qty/pn/part_id。
-
-    退货件数仍可上调；下调不得小于已入池未撤回件数（报废/去电商/售出仍占件数）。
-    """
-    units = [
-        unit
-        for unit in _cycle_units_for_receipt(db, receipt_id, lock=True)
-        if unit.withdrawn_at is None
-    ]
-    if not units:
-        return
-    if any(unit.station != "pool" for unit in units) or _cycle_intent_exists(
-        db, [unit.id for unit in units]
-    ):
-        raise ReturnReceiptConflict(
-            "该返还收货已有循环单位离开回收池或已生成可售意图，"
-            "不能修改数量/PN/备件身份"
-        )
-    if new_qty is not None and Decimal(new_qty) < len(units):
-        raise ReturnReceiptConflict(
-            f"收货数量不能小于已入池未撤回件数（{len(units)}）"
-        )
-
-
-def _withdraw_cycle_units_for_void(
-    db: Session, receipt_id: str, operated_by: str
-) -> None:
-    """§3.3/§6.5：作废收货行时，同一事务撤回全部仍在 pool 的未撤回单位。
-
-    任一单位已离开 pool 或已有可售意图时整笔拒绝（收货行与单位零写入）。
-    """
-    units = [
-        unit
-        for unit in _cycle_units_for_receipt(db, receipt_id, lock=True)
-        if unit.withdrawn_at is None
-    ]
-    if not units:
-        return
-    if any(unit.station != "pool" for unit in units) or _cycle_intent_exists(
-        db, [unit.id for unit in units]
-    ):
-        raise ReturnReceiptConflict(
-            "该返还收货存在已流转的循环单位或已生成可售意图，不能作废"
-        )
-    now = _now()
-    for unit in units:
-        unit.withdrawn_at = now
-        unit.version += 1
-        unit.updated_by = operated_by
-        unit.updated_at = now
-        db.add(
-            MaintenanceCycleEvent(
-                unit_id=unit.id,
-                event_type="withdraw",
-                payload={"reason": "receipt_voided"},
-                actor=operated_by,
+def _repair_part_ids_for_update(db: Session, peeked, updates: dict) -> set[int]:
+    part_ids: set[int] = set()
+    if peeked.part_id is not None:
+        part_ids.add(int(peeked.part_id))
+    raw_part_id = updates.get("part_id")
+    if isinstance(raw_part_id, int):
+        part_ids.add(raw_part_id)
+    if isinstance(updates.get("pn"), str) and updates["pn"].strip():
+        candidate = db.scalar(
+            select(DimPart.id).where(
+                DimPart.pn_std == updates["pn"].strip(),
+                DimPart.status == "active",
             )
         )
-    db.flush()
+        if candidate is not None:
+            part_ids.add(int(candidate))
+    return part_ids
+
+
+def _guard_repair_deduction(db: Session, row, **changes) -> None:
+    from app.services.maintenance_repair import (
+        RepairDeductionExceeded,
+        assert_receipt_change,
+        lock_sources_and_intents,
+    )
+
+    lock_sources_and_intents(db, [row.rkd_line_id])
+    try:
+        assert_receipt_change(db, row, **changes)
+    except RepairDeductionExceeded as exc:
+        raise ReturnReceiptConflict(exc.detail) from exc
 
 
 def _order_no(db: Session, source_order_id: str | None) -> str | None:
@@ -763,6 +696,7 @@ def update_receipt(
     updates: dict,
     reason: str,
     operated_by: str,
+    authorized_project_id: str | None = None,
 ) -> dict:
     if not isinstance(reason, str) or not reason.strip() or len(reason) > 256:
         raise ReturnReceiptValidation("必须填写修改原因")
@@ -774,7 +708,20 @@ def update_receipt(
     ):
         raise ReturnReceiptValidation("项目不能为空")
     lock_receipt_context(db)
+    peeked = db.get(MaintenanceRkdReturnLine, receipt_id)
+    if peeked is None:
+        raise ReturnReceiptNotFound("返还记录不存在")
+    from app.services.maintenance_repair import lock_parts, try_lock_part
+
+    part_ids = _repair_part_ids_for_update(db, peeked, updates)
+    lock_parts(db, part_ids)
     row = _load_receipt(db, receipt_id, lock=True, target_project_id=updates.get("project_id"))
+    if authorized_project_id is not None and row.project_id != authorized_project_id:
+        raise ReturnReceiptConflict("返还记录归属已变化，请刷新后重试")
+    if row.part_id is not None and int(row.part_id) not in part_ids:
+        if not try_lock_part(db, int(row.part_id)):
+            raise ReturnReceiptConflict("该型号正在被其他操作处理，请稍后重试")
+        part_ids.add(int(row.part_id))
     if row.line_status != "active":
         raise ReturnReceiptConflict("已作废的返还记录不能修改")
     if row.version != expected_version:
@@ -856,21 +803,18 @@ def update_receipt(
             requested=values.get("qty", row.qty), old_source_order_id=row.source_order_id,
             old_qty=row.qty, old_project_id=old_project_id,
         )
-    # 坏件循环互锁（D-0057 §3.3/§6.5）：锁顺序已在上面固定为 收货行 → 循环单位。
-    # 只认 source_receipt_id（rkd_line_id），不按 part_id/PN/大类连带其它收货行。
-    # P2-C：前端表单会回填 pn/part_id 等字段——只有**实际值变化**才算身份变更；
-    # 仅改 note/件况等非身份字段时不得因字段存在性触发 409。
-    new_qty = values.get("qty", row.qty)
-    new_pn = values.get("pn", row.pn)
-    new_part_id = values.get("part_id", row.part_id)
-    qty_changed = Decimal(new_qty) != Decimal(row.qty)
-    identity_changed = (
-        qty_changed or new_pn != row.pn or new_part_id != row.part_id
+    final_part_id = values.get("part_id", row.part_id)
+    if final_part_id is not None and int(final_part_id) not in part_ids:
+        if not try_lock_part(db, int(final_part_id)):
+            raise ReturnReceiptConflict("该型号正在被其他操作处理，请稍后重试")
+    _guard_repair_deduction(
+        db,
+        row,
+        new_qty=values.get("qty", row.qty),
+        new_part_id=final_part_id,
+        new_test_result=values.get("test_result", row.test_result),
+        new_line_status=row.line_status,
     )
-    if identity_changed:
-        _assert_cycle_units_identity_free(
-            db, receipt_id, new_qty=Decimal(new_qty) if qty_changed else None
-        )
     before = _receipt_dict(row, _order_no(db, row.source_order_id))
     after_order_no = _order_no(db, values.get("source_order_id", row.source_order_id))
     for key, value in values.items():
@@ -911,19 +855,42 @@ def void_receipt(
     expected_version: int,
     reason: str,
     operated_by: str,
+    authorized_project_id: str | None = None,
 ) -> dict:
     if not isinstance(reason, str) or not reason.strip() or len(reason) > 256:
         raise ReturnReceiptValidation("必须填写作废原因")
     lock_receipt_context(db)
+    peeked = db.get(MaintenanceRkdReturnLine, receipt_id)
+    if peeked is None:
+        raise ReturnReceiptNotFound("返还记录不存在")
+    from app.services.maintenance_repair import lock_parts, try_lock_part
+
+    if peeked.part_id is not None:
+        lock_parts(db, [peeked.part_id])
     row = _load_receipt(db, receipt_id, lock=True)
+    if authorized_project_id is not None and row.project_id != authorized_project_id:
+        raise ReturnReceiptConflict("返还记录归属已变化，请刷新后重试")
+    if (
+        row.part_id is not None
+        and peeked.part_id is not None
+        and int(row.part_id) != int(peeked.part_id)
+        and not try_lock_part(db, int(row.part_id))
+    ):
+        raise ReturnReceiptConflict("该型号正在被其他操作处理，请稍后重试")
     if row.line_status != "active":
         raise ReturnReceiptConflict("该返还记录已作废")
     if row.version != expected_version:
         raise ReturnReceiptConflict(
             "版本冲突：该记录已被他人修改，请刷新后重试"
         )
-    # 坏件循环互锁（D-0057 §3.3/§6.5）：已锁收货行，同事务撤回仍在回收池的单位。
-    _withdraw_cycle_units_for_void(db, receipt_id, operated_by)
+    _guard_repair_deduction(
+        db,
+        row,
+        new_qty=row.qty,
+        new_part_id=row.part_id,
+        new_test_result=row.test_result,
+        new_line_status="voided",
+    )
     before = _receipt_dict(row, _order_no(db, row.source_order_id))
     lock_receipt_demands(db, {row.source_order_id} if row.source_order_id else set())
     row.line_status = "voided"

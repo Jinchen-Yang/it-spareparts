@@ -287,6 +287,22 @@ def _lock(db: Session, plan: dict, authorize: Callable[[], None]) -> None:
     authorize()
     receipts._get_project(db, plan["project_id"], lock=True)
     ids = sorted(plan["baseline"])
+    from app.services.maintenance_repair import lock_parts
+
+    peeked_part_ids = {
+        int(part_id)
+        for part_id in db.scalars(
+            select(MaintenanceRkdReturnLine.part_id).where(
+                MaintenanceRkdReturnLine.rkd_line_id.in_(ids),
+                MaintenanceRkdReturnLine.part_id.is_not(None),
+            )
+        ).all()
+    }
+    for operation in plan["operations"]:
+        part_id = operation["updates"].get("part_id")
+        if isinstance(part_id, int):
+            peeked_part_ids.add(part_id)
+    lock_parts(db, peeked_part_ids)
     rows = db.scalars(select(MaintenanceRkdReturnLine).where(
         MaintenanceRkdReturnLine.rkd_line_id.in_(ids),
     ).order_by(MaintenanceRkdReturnLine.rkd_line_id).with_for_update()
