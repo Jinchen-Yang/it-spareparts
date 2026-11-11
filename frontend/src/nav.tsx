@@ -287,11 +287,9 @@ export const NAV_GROUPS: NavGroup[] = [
       {
         key: "cycle-pool",
         path: "/maintenance/cycle",
-        label: "维修循环",
+        label: "待修池",
         icon: <ToolOutlined />,
         anyPerm: [
-          "page_cycle_recycle",
-          "page_cycle_test",
           "page_cycle_repair",
           "page_cycle_manage",
           "page_cycle_wip",

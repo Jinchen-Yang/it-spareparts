@@ -6,15 +6,13 @@ const cycle = NAV_GROUPS
   .find((group) => group.key === "grp-maintenance")
   ?.items.find((item) => item.key === "cycle-pool");
 
-describe("维修循环导航", () => {
-  it("挂在维保组，五个页键任一可见，并且 admin 不能绕过账号快照", () => {
+describe("待修池导航", () => {
+  it("挂在维保组，只有维修、主管、采购三个页键可见，admin 不能绕过账号快照", () => {
     expect(cycle).toMatchObject({
       path: "/maintenance/cycle",
-      label: "维修循环",
+      label: "待修池",
       accountScoped: true,
       anyPerm: [
-        "page_cycle_recycle",
-        "page_cycle_test",
         "page_cycle_repair",
         "page_cycle_manage",
         "page_cycle_wip",
@@ -23,8 +21,11 @@ describe("维修循环导航", () => {
     expect(cycle).toBeDefined();
     const item = cycle!;
     expect(isNavItemAllowed(item, "admin", {}, {})).toBe(false);
-    expect(isNavItemAllowed(item, "admin", { page_cycle_recycle: true }, {})).toBe(true);
+    expect(isNavItemAllowed(item, "admin", { page_cycle_repair: true }, {})).toBe(true);
+    expect(isNavItemAllowed(item, "admin", { page_cycle_manage: true }, {})).toBe(true);
     expect(isNavItemAllowed(item, "readonly", { page_cycle_wip: true }, {})).toBe(true);
+    expect(isNavItemAllowed(item, "admin", { page_cycle_recycle: true }, {})).toBe(false);
+    expect(isNavItemAllowed(item, "admin", { page_cycle_test: true }, {})).toBe(false);
     expect(isNavItemAllowed(item, "readonly", {}, {})).toBe(false);
   });
 
