@@ -327,9 +327,11 @@ def _execute(db: Session, plan: dict, operator: str) -> list[dict]:
         args = {"receipt_id": op["receipt_id"], "expected_version": op["version"],
                 "reason": op["reason"], "operated_by": operator}
         if op["action"] == "作废":
-            result = receipts.void_receipt(db, **args)
+            result = receipts.void_receipt(db, parts_already_locked=True, **args)
         else:
-            result = receipts.update_receipt(db, updates=op["updates"], **args)
+            result = receipts.update_receipt(
+                db, updates=op["updates"], parts_already_locked=True, **args
+            )
         results.append({"row_no": op["row_no"], "receipt_id": result["receipt_id"],
                         "version": result["version"], "action": op["action"]})
     return sorted(results, key=lambda row: row["row_no"])

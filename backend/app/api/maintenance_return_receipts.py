@@ -162,7 +162,7 @@ def _raise_service_error(exc: Exception) -> None:
         raise HTTPException(
             status.HTTP_409_CONFLICT, "该返还收货已有维修扣数，变更后将少于已扣件数"
         ) from exc
-    if isinstance(exc, DBAPIError) and sqlstate == "55P03":
+    if isinstance(exc, DBAPIError) and sqlstate in {"55P03", "40P01", "40001"}:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "该项目正在被其他操作处理，请稍后重试",
@@ -395,6 +395,7 @@ def update_receipt(
             reason=body.reason,
             operated_by=operator,
             authorized_project_id=project_id,
+            parts_already_locked=True,
         )
         db.commit()
     except HTTPException:
@@ -447,6 +448,7 @@ def void_receipt(
             reason=body.reason,
             operated_by=operator,
             authorized_project_id=project_id,
+            parts_already_locked=True,
         )
         db.commit()
     except HTTPException:

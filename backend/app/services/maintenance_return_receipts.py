@@ -549,6 +549,24 @@ def _repair_part_ids_for_update(db: Session, peeked, updates: dict) -> set[int]:
     return part_ids
 
 
+_PART_BUSY = "该型号正在被其他操作处理，请稍后重试"
+
+
+def _lock_repair_parts(db: Session, part_ids, *, blocking: bool) -> None:
+    """型号锁。已经持有返还行时只能 try-lock，避免和提交结果对锁。"""
+    from app.services.maintenance_repair import lock_parts, try_lock_part
+
+    ids = sorted({int(part_id) for part_id in part_ids if part_id is not None})
+    if not ids:
+        return
+    if blocking:
+        lock_parts(db, ids)
+        return
+    for part_id in ids:
+        if not try_lock_part(db, part_id):
+            raise ReturnReceiptConflict(_PART_BUSY)
+
+
 def _guard_repair_deduction(db: Session, row, **changes) -> None:
     from app.services.maintenance_repair import (
         RepairDeductionExceeded,
@@ -697,6 +715,7 @@ def update_receipt(
     reason: str,
     operated_by: str,
     authorized_project_id: str | None = None,
+    parts_already_locked: bool = False,
 ) -> dict:
     if not isinstance(reason, str) or not reason.strip() or len(reason) > 256:
         raise ReturnReceiptValidation("必须填写修改原因")
@@ -711,16 +730,14 @@ def update_receipt(
     peeked = db.get(MaintenanceRkdReturnLine, receipt_id)
     if peeked is None:
         raise ReturnReceiptNotFound("返还记录不存在")
-    from app.services.maintenance_repair import lock_parts, try_lock_part
-
     part_ids = _repair_part_ids_for_update(db, peeked, updates)
-    lock_parts(db, part_ids)
+    # 调用方若已锁住返还行，这里不能再阻塞等待新型号锁。
+    _lock_repair_parts(db, part_ids, blocking=not parts_already_locked)
     row = _load_receipt(db, receipt_id, lock=True, target_project_id=updates.get("project_id"))
     if authorized_project_id is not None and row.project_id != authorized_project_id:
         raise ReturnReceiptConflict("返还记录归属已变化，请刷新后重试")
     if row.part_id is not None and int(row.part_id) not in part_ids:
-        if not try_lock_part(db, int(row.part_id)):
-            raise ReturnReceiptConflict("该型号正在被其他操作处理，请稍后重试")
+        _lock_repair_parts(db, [row.part_id], blocking=False)
         part_ids.add(int(row.part_id))
     if row.line_status != "active":
         raise ReturnReceiptConflict("已作废的返还记录不能修改")
@@ -805,8 +822,7 @@ def update_receipt(
         )
     final_part_id = values.get("part_id", row.part_id)
     if final_part_id is not None and int(final_part_id) not in part_ids:
-        if not try_lock_part(db, int(final_part_id)):
-            raise ReturnReceiptConflict("该型号正在被其他操作处理，请稍后重试")
+        _lock_repair_parts(db, [final_part_id], blocking=False)
     _guard_repair_deduction(
         db,
         row,
@@ -856,6 +872,7 @@ def void_receipt(
     reason: str,
     operated_by: str,
     authorized_project_id: str | None = None,
+    parts_already_locked: bool = False,
 ) -> dict:
     if not isinstance(reason, str) or not reason.strip() or len(reason) > 256:
         raise ReturnReceiptValidation("必须填写作废原因")
@@ -863,20 +880,15 @@ def void_receipt(
     peeked = db.get(MaintenanceRkdReturnLine, receipt_id)
     if peeked is None:
         raise ReturnReceiptNotFound("返还记录不存在")
-    from app.services.maintenance_repair import lock_parts, try_lock_part
-
     if peeked.part_id is not None:
-        lock_parts(db, [peeked.part_id])
+        _lock_repair_parts(db, [peeked.part_id], blocking=not parts_already_locked)
     row = _load_receipt(db, receipt_id, lock=True)
     if authorized_project_id is not None and row.project_id != authorized_project_id:
         raise ReturnReceiptConflict("返还记录归属已变化，请刷新后重试")
-    if (
-        row.part_id is not None
-        and peeked.part_id is not None
-        and int(row.part_id) != int(peeked.part_id)
-        and not try_lock_part(db, int(row.part_id))
+    if row.part_id is not None and (
+        peeked.part_id is None or int(row.part_id) != int(peeked.part_id)
     ):
-        raise ReturnReceiptConflict("该型号正在被其他操作处理，请稍后重试")
+        _lock_repair_parts(db, [row.part_id], blocking=False)
     if row.line_status != "active":
         raise ReturnReceiptConflict("该返还记录已作废")
     if row.version != expected_version:
