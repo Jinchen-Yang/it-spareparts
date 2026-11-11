@@ -182,6 +182,43 @@ describe("待修池", () => {
     expect(submitRecord).toHaveBeenCalledTimes(2);
   });
 
+  it("搜索卸掉表单后，同一件数仍复用没收到结果的幂等键", async () => {
+    grant({ page_cycle_repair: true });
+    let rejectSubmit: ((error: unknown) => void) | undefined;
+    submitRecord.mockImplementation(() => new Promise((_resolve, reject) => {
+      rejectSubmit = reject;
+    }));
+    listPool.mockImplementation(async (params: { q?: string }) => (
+      params.q === "GONE" ? pageOf([]) : pageOf([poolRow])
+    ));
+    listRecords.mockResolvedValue(pageOf([]));
+    render(<CyclePoolPage />);
+    expect(await screen.findByText(PN)).toBeTruthy();
+    fireEvent.click(screen.getAllByRole("radio")[0]);
+    fireEvent.change(screen.getByRole("spinbutton", { name: "修好件数" }), { target: { value: "2" } });
+    fireEvent.change(screen.getByRole("spinbutton", { name: "废品件数" }), { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交结果" }));
+    await waitFor(() => expect(submitRecord).toHaveBeenCalledTimes(1));
+    const key = submitRecord.mock.calls[0][1];
+
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索 PN" }), { target: { value: "GONE" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    await waitFor(() => expect(screen.queryByRole("spinbutton", { name: "修好件数" })).toBeNull());
+    rejectSubmit?.(new Error("network"));
+    expect(await screen.findByText("上次提交没有收到结果，请保持原来的内容再试一次")).toBeTruthy();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索 PN" }), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    expect(await screen.findByText(PN)).toBeTruthy();
+    fireEvent.click(screen.getAllByRole("radio")[0]);
+    fireEvent.change(screen.getByRole("spinbutton", { name: "修好件数" }), { target: { value: "2" } });
+    fireEvent.change(screen.getByRole("spinbutton", { name: "废品件数" }), { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交结果" }));
+    await waitFor(() => expect(submitRecord).toHaveBeenCalledTimes(2));
+    expect(submitRecord.mock.calls[1][0]).toEqual({ part_id: 101, fixed_qty: 2, scrap_qty: 1 });
+    expect(submitRecord.mock.calls[1][1]).toBe(key);
+  });
+
   it("换一个型号时清空刚才填的件数", async () => {
     grant({ page_cycle_repair: true });
     listPool.mockResolvedValue(pageOf([poolRow, { ...poolRow, part_id: 202, pn: "OTHER-PN", pending_qty: 4 }]));

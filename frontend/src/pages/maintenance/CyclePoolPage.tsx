@@ -363,11 +363,35 @@ function PoolCard({
   onSelect: (row: RepairPoolItem | null) => void;
   onSaved: () => void;
 }) {
+  const { message } = App.useApp();
+  // 结果未知的提交键放在这张卡片上。搜索或翻页会卸掉下面的表单，不能把键一起卸掉。
+  const { attempt, running, run } = useCommandRunner("repair-submit");
   const columns: ColumnsType<RepairPoolItem> = [
     { title: "PN", dataIndex: "pn" },
     { title: "描述", dataIndex: "description", render: (value: string | null) => textOrDash(value) },
     { title: "待修件数", dataIndex: "pending_qty" },
   ];
+  const submit = async (row: RepairPoolItem, fixedQty: number, scrapQty: number) => {
+    const fingerprint = JSON.stringify({ part_id: row.part_id, fixed_qty: fixedQty, scrap_qty: scrapQty });
+    try {
+      const result = await run(fingerprint, (key) => submitRepairRecord({
+        part_id: row.part_id,
+        fixed_qty: fixedQty,
+        scrap_qty: scrapQty,
+      }, key));
+      if (result === "busy") return false;
+      if (result === "blocked") {
+        message.warning(UNKNOWN_ATTEMPT_MESSAGE);
+        return false;
+      }
+      message.success(`已记下修好 ${fixedQty} 件、废品 ${scrapQty} 件`);
+      onSaved();
+      return true;
+    } catch (error) {
+      message.error(detailOf(error));
+      return false;
+    }
+  };
   return (
     <Card size="small" title="待修">
       <Table
@@ -383,17 +407,31 @@ function PoolCard({
           onChange: (_keys, rows) => onSelect(rows[0] ?? null),
         }}
       />
-      {selected && <ResultForm row={selected} onSaved={onSaved} />}
+      {attempt?.unknown && <Alert type="warning" showIcon message={UNKNOWN_ATTEMPT_MESSAGE} style={{ marginTop: 16 }} />}
+      {selected && (
+        <ResultForm
+          row={selected}
+          running={running}
+          onSubmit={(fixedQty, scrapQty) => submit(selected, fixedQty, scrapQty)}
+        />
+      )}
     </Card>
   );
 }
 
-function ResultForm({ row, onSaved }: { row: RepairPoolItem; onSaved: () => void }) {
+function ResultForm({
+  row,
+  running,
+  onSubmit,
+}: {
+  row: RepairPoolItem;
+  running: boolean;
+  onSubmit: (fixedQty: number, scrapQty: number) => Promise<boolean>;
+}) {
   const { message } = App.useApp();
   const [partId, setPartId] = useState(row.part_id);
   const [fixed, setFixed] = useState<number | null>(null);
   const [scrap, setScrap] = useState<number | null>(null);
-  const { attempt, running, run } = useCommandRunner("repair-submit");
   if (partId !== row.part_id) {
     setPartId(row.part_id);
     setFixed(null);
@@ -410,24 +448,9 @@ function ResultForm({ row, onSaved }: { row: RepairPoolItem; onSaved: () => void
       message.warning(problem ?? "请填写修好件数或废品件数");
       return;
     }
-    const fingerprint = JSON.stringify({ part_id: row.part_id, fixed_qty: fixedQty, scrap_qty: scrapQty });
-    try {
-      const result = await run(fingerprint, (key) => submitRepairRecord({
-        part_id: row.part_id,
-        fixed_qty: fixedQty,
-        scrap_qty: scrapQty,
-      }, key));
-      if (result === "busy") return;
-      if (result === "blocked") {
-        message.warning(UNKNOWN_ATTEMPT_MESSAGE);
-        return;
-      }
-      message.success(`已记下修好 ${fixedQty} 件、废品 ${scrapQty} 件`);
+    if (await onSubmit(fixedQty, scrapQty)) {
       setFixed(null);
       setScrap(null);
-      onSaved();
-    } catch (error) {
-      message.error(detailOf(error));
     }
   };
 
@@ -436,7 +459,6 @@ function ResultForm({ row, onSaved }: { row: RepairPoolItem; onSaved: () => void
       <Typography.Text>
         {`正在填写 ${row.pn}，待修 ${row.pending_qty} 件`}
       </Typography.Text>
-      {attempt?.unknown && <Alert type="warning" showIcon message={UNKNOWN_ATTEMPT_MESSAGE} />}
       <Space wrap>
         <label>
           修好件数
