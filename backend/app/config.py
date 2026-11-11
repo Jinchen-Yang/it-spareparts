@@ -5,6 +5,7 @@
 2. 业务规则开关（§8）—— 待客户确认的口径集中在此，确认后改这里即可，不动逻辑。
 """
 
+import hashlib
 from datetime import date
 from decimal import Decimal
 from functools import lru_cache
@@ -158,7 +159,13 @@ class Settings(BaseSettings):
             self.shop_gallery_token.get_secret_value(),
         }:
             raise ValueError("循环可售意图凭据不能复用目录通知或图库凭据")
+        callback_hash = self.cycle_sell_callback_token_sha256.get_secret_value()
+        if token and callback_hash and hashlib.sha256(token.encode("utf-8")).hexdigest() == callback_hash:
+            raise ValueError("循环回调凭据不能复用出站凭据")
         return self
+
+    # 商城 → itsp 回调。商城保存原始 token，这里只存 SHA-256。空 = 入站 404。
+    cycle_sell_callback_token_sha256: SecretStr = SecretStr("")
     # M1 资料召回在分档、字段打分前截断；PN/别名和报价加权候选另走车道。
     part_search_candidate_limit: int = Field(default=300, ge=1)
 
@@ -178,6 +185,7 @@ class Settings(BaseSettings):
         "resale_export_token_sha256",
         "resale_catalog_token_sha256",
         "pn_master_integration_token_sha256",
+        "cycle_sell_callback_token_sha256",
     )
     @classmethod
     def validate_resale_export_hash(

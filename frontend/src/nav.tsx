@@ -61,9 +61,33 @@ export interface NavItem {
   visibleWhen?: () => boolean;
   /** 服务端总闸与实名白名单共同签发的 Beta 能力。 */
   betaFeature?: "maintenance" | "replenishment" | "maintenance_boss";
+  /** 账号快照显式门：admin 角色也不能绕过，必须快照里有对应 page_*。 */
+  accountScoped?: boolean;
   page: LazyExoticComponent<ComponentType>;
   /** 与 page 共用同一 import() 工厂：当前路由或菜单悬停/聚焦时预取。 */
   load: () => Promise<{ default: ComponentType }>;
+}
+
+type NavGate = Pick<NavItem, "perm" | "anyPerm" | "visibleWhen" | "betaFeature" | "accountScoped">;
+
+/** 菜单与详情路由共用的可见性。accountScoped 与后端 page_permission_allowed 一致，admin 不短路。 */
+export function isNavItemAllowed(
+  item: NavGate,
+  role: string,
+  perms: Record<string, boolean>,
+  betaFeatures: Record<string, boolean>,
+): boolean {
+  if (item.betaFeature && betaFeatures[item.betaFeature] !== true) return false;
+  const granted = item.visibleWhen
+    ? item.visibleWhen()
+    : item.perm
+      ? !!perms[item.perm]
+      : item.anyPerm
+        ? item.anyPerm.some((key) => !!perms[key])
+        : false;
+  if (item.accountScoped) return granted;
+  if (role === "admin") return true;
+  return granted;
 }
 
 export interface NavGroup {
@@ -95,6 +119,7 @@ const loadMaintenanceProjectPanel = () =>
   import("./pages/maintenance/MaintenanceProjectPanelPage");
 const loadMaintenanceDemands = () =>
   import("./pages/maintenance/MaintenanceDemandsPage");
+const loadCyclePool = () => import("./pages/maintenance/CyclePoolPage");
 const loadInventory = () => import("./pages/InventoryPage");
 const loadImport = () => import("./pages/ImportPage");
 const loadMasterData = () => import("./pages/MasterDataPage");
@@ -137,6 +162,7 @@ const MaintenanceAnalyticsPage = lazy(loadMaintenanceAnalytics);
 const MaintenanceDashboardPage = lazy(loadMaintenanceDashboard);
 const MaintenanceProjectPanelPage = lazy(loadMaintenanceProjectPanel);
 const MaintenanceDemandsPage = lazy(loadMaintenanceDemands);
+const CyclePoolPage = lazy(loadCyclePool);
 const InventoryPage = lazy(loadInventory);
 const ImportPage = lazy(loadImport);
 const MasterDataPage = lazy(loadMasterData);
@@ -257,6 +283,22 @@ export const NAV_GROUPS: NavGroup[] = [
         perm: "page_maintenance",
         page: MaintenanceDemandsPage,
         load: loadMaintenanceDemands,
+      },
+      {
+        key: "cycle-pool",
+        path: "/maintenance/cycle",
+        label: "维修循环",
+        icon: <ToolOutlined />,
+        anyPerm: [
+          "page_cycle_recycle",
+          "page_cycle_test",
+          "page_cycle_repair",
+          "page_cycle_manage",
+          "page_cycle_wip",
+        ],
+        accountScoped: true,
+        page: CyclePoolPage,
+        load: loadCyclePool,
       },
       // 补库申请是维保业务动作（业务指示 2026-08-17 迁出销售组）：
       // 权限/betaFeature/页面不变，仅归组与路径；旧 /sales/replenishment-beta 有重定向

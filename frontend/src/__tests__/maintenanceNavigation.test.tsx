@@ -29,6 +29,7 @@ describe("维保信息架构（2 页定稿 + #267 需求单页）", () => {
       { key: "maintenance-analytics", path: "/maintenance/analytics" },
       { key: "maintenance-dashboard", path: "/maintenance/dashboard" },
       { key: "maintenance-demands", path: "/maintenance/demands" },
+      { key: "cycle-pool", path: "/maintenance/cycle" },
       { key: "replenishment-beta", path: "/maintenance/replenishment" },
     ]);
   });
@@ -115,6 +116,7 @@ describe("维保信息架构（2 页定稿 + #267 需求单页）", () => {
       "/maintenance/analytics",
       "/maintenance/dashboard",
       "/maintenance/demands",
+      "/maintenance/cycle",
       "/maintenance/replenishment",
     ]);
   });
