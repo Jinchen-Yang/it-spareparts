@@ -1,83 +1,173 @@
 import { api } from "../api";
 
-export interface CycleUnit {
-  id: number;
-  unit_uid: string;
-  part_id: number;
-  pn: string;
-  station: string;
-  outcome: string | null;
-  condition_bucket: string | null;
-  intake_condition: string | null;
-  repair_round: number;
-  assignee_username: string | null;
-  version: number;
-  created_at: string;
-  updated_at: string;
-  closed_at: string | null;
-  source_kind?: string;
-  source_receipt_id?: string | null;
-  serial_number?: string | null;
-  vendor_name?: string | null;
-  note?: string | null;
-}
+/**
+ * 坏件循环待修池接口（D-0058 / cycle-repair-api.md）。
+ * 用户接口走 snake_case。旧的逐件工位动作已删除，不要在这里加回来。
+ */
 
-export interface CycleUnitPage {
-  items: CycleUnit[];
+export interface PageResult<T> {
+  items: T[];
   total: number;
   page: number;
   page_size: number;
 }
 
-export interface SellIntentStatus {
+/** 维修员与主管的待修池行。只有这四个字段。 */
+export interface RepairPoolItem {
+  part_id: number;
+  pn: string;
+  description: string | null;
+  pending_qty: number;
+}
+
+/** 提交成功体。维修员列表在此基础上另有作废字段，仍不含来源和 delivery_id。 */
+export interface RepairRecord {
+  record_id: string;
+  record_no: string;
+  part_id: number;
+  pn: string;
+  description: string | null;
+  fixed_qty: number;
+  scrap_qty: number;
+  status: string;
+  version: number;
+  created_at: string;
+  operator: string;
+  voided_at?: string | null;
+  void_reason?: string | null;
+}
+
+export interface RepairSource {
+  receipt_id: string;
+  qty: number;
+  occurred_at: string | null;
+  line_qty: number;
+  test_result: string | null;
+  project_id: string | null;
+}
+
+/** 主管明细里的出站意图。unit_id 是发给商城的正整数，不是 UUID。 */
+export interface RepairSellIntent {
+  delivery_id: string;
   unit_id: number;
   status: string;
-  deliveryId?: string;
-  attempts?: number;
-  blockCode?: string | null;
-  lastErrorCode?: string | null;
-  receiptStatus?: string | null;
-  nextAttemptAt?: string | null;
+  qty: number;
+  attempts: number;
+  block_code: string | null;
+  last_error_code: string | null;
+  receipt_status: string | null;
+  next_attempt_at: string | null;
+  shop_closeout: string | null;
 }
 
-export async function listUnits(params: {
-  station?: string;
+export interface RepairRecordDetail extends RepairRecord {
+  sources: RepairSource[];
+  sell_intent: RepairSellIntent | null;
+}
+
+export interface RepairSummaryItem {
+  part_id: number;
+  pn: string;
+  description: string | null;
+  pending_qty: number;
+  shop_qty: number;
+  scrap_qty: number;
+}
+
+export interface SubmitRepairBody {
+  part_id: number;
+  fixed_qty: number;
+  scrap_qty: number;
+}
+
+export interface VoidRepairBody {
+  expected_version: number;
+  reason: string;
+  shop_stock_manually_reduced: boolean;
+}
+
+export interface AttestShopBody {
+  expected_version: number;
+}
+
+export interface RepairListQuery {
+  q?: string;
   page?: number;
   page_size?: number;
-}): Promise<CycleUnitPage> {
-  const { data } = await api.get<CycleUnitPage>("/cycle/units", { params });
+}
+
+export type RepairSellIntentResponse =
+  | RepairSellIntent
+  | { record_id: string; status: "not_queued" };
+
+function query(params: object): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(params).filter(([, value]) => value !== undefined && value !== ""),
+  );
+}
+
+function idempotency(key: string) {
+  return { headers: { "Idempotency-Key": key } };
+}
+
+function recordPath(recordId: string, suffix = ""): string {
+  return `/cycle/repair-records/${encodeURIComponent(recordId)}${suffix}`;
+}
+
+export async function listRepairPool(params: RepairListQuery = {}): Promise<PageResult<RepairPoolItem>> {
+  const { data } = await api.get<PageResult<RepairPoolItem>>("/cycle/pool", { params: query(params) });
   return data;
 }
 
-export async function wipCounts(partIds: number[]): Promise<Record<string, unknown>> {
-  const { data } = await api.get("/cycle/wip", { params: { part_ids: partIds.join(",") } });
+export async function submitRepairRecord(body: SubmitRepairBody, idempotencyKey: string): Promise<RepairRecord> {
+  const { data } = await api.post<RepairRecord>("/cycle/repair-records", body, idempotency(idempotencyKey));
   return data;
 }
 
-export async function sellIntent(unitId: number): Promise<SellIntentStatus> {
-  const { data } = await api.get<SellIntentStatus>(`/cycle/units/${unitId}/sell-intent`);
+export async function listRepairRecords(params: RepairListQuery & {
+  status?: "active" | "voided";
+  part_id?: number;
+} = {}): Promise<PageResult<RepairRecord>> {
+  const { data } = await api.get<PageResult<RepairRecord>>("/cycle/repair-records", { params: query(params) });
   return data;
 }
 
-async function postUnit(unitId: number, action: string, body: object): Promise<CycleUnit> {
-  const { data } = await api.post<CycleUnit>(`/cycle/units/${unitId}/${action}`, body);
+export async function getRepairRecord(recordId: string): Promise<RepairRecordDetail> {
+  const { data } = await api.get<RepairRecordDetail>(recordPath(recordId));
   return data;
 }
 
-export const intakeExternal = (body: object) =>
-  api.post<CycleUnit[]>("/cycle/units/intake-external", body).then((r) => r.data);
+export async function voidRepairRecord(
+  recordId: string,
+  body: VoidRepairBody,
+  idempotencyKey: string,
+): Promise<RepairRecord> {
+  const { data } = await api.post<RepairRecord>(recordPath(recordId, "/void"), body, idempotency(idempotencyKey));
+  return data;
+}
 
-export const handoffFromReceipt = (body: object) =>
-  api.post<CycleUnit[]>("/cycle/units/handoff-from-receipt", body).then((r) => r.data);
+/** 主管单独看推送状态。页面明细用记录详情里的 sell_intent，这条保留给契约上的独立读。 */
+export async function getRepairSellIntent(recordId: string): Promise<RepairSellIntentResponse> {
+  const { data } = await api.get<RepairSellIntentResponse>(recordPath(recordId, "/sell-intent"));
+  return data;
+}
 
-export const dispatchUnit = (id: number, body: object) => postUnit(id, "dispatch", body);
-export const selfPass = (id: number, expectedVersion: number) =>
-  postUnit(id, "self-pass", { expected_version: expectedVersion });
-export const completeTest = (id: number, body: object) => postUnit(id, "complete-test", body);
-export const completeRepair = (id: number, body: object) => postUnit(id, "complete-repair", body);
-export const outsourceReturn = (id: number, body: object) => postUnit(id, "outsource-return", body);
-export const closeUnit = (id: number, body: object) => postUnit(id, "close", body);
-export const withdrawUnit = (id: number, body: object) => postUnit(id, "withdraw", body);
-export const claimUnit = (id: number, body: object) => postUnit(id, "claim", body);
-export const markSold = (id: number, expectedVersion: number) =>
-  postUnit(id, "mark-sold", { expected_version: expectedVersion });
+export async function listRepairSummary(params: RepairListQuery & {
+  part_ids?: string;
+} = {}): Promise<PageResult<RepairSummaryItem>> {
+  const { data } = await api.get<PageResult<RepairSummaryItem>>("/cycle/summary", { params: query(params) });
+  return data;
+}
+
+export async function attestShopAdjustment(
+  recordId: string,
+  body: AttestShopBody,
+  idempotencyKey: string,
+): Promise<RepairRecord> {
+  const { data } = await api.post<RepairRecord>(
+    recordPath(recordId, "/attest-shop-adjustment"),
+    body,
+    idempotency(idempotencyKey),
+  );
+  return data;
+}
