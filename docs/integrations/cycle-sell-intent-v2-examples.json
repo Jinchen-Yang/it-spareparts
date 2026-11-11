@@ -1,0 +1,217 @@
+{
+  "contract": "cycle-sell-intent-v2",
+  "authority": "spareparts-shop",
+  "method": "POST",
+  "path": "/api/integrations/cycle/sell-intents",
+  "requestContentType": "application/json",
+  "receiptKeys": ["schemaVersion", "deliveryId", "unitId", "partId", "status", "blockCode"],
+  "cases": [
+    {
+      "id": "applied",
+      "when": "schemaVersion 2, conditionBucket good, catalog identity and operator are present, this deliveryId has not added stock",
+      "httpStatus": 200,
+      "retry": false,
+      "itspTerminal": "delivered",
+      "request": {
+        "schemaVersion": 2,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440000",
+        "unitId": 42,
+        "partId": 101,
+        "conditionBucket": "good",
+        "qty": 5
+      },
+      "responseHeaders": {
+        "cache-control": "no-store"
+      },
+      "responseBody": {
+        "schemaVersion": 2,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440000",
+        "unitId": 42,
+        "partId": 101,
+        "status": "applied",
+        "blockCode": null
+      }
+    },
+    {
+      "id": "unchanged",
+      "when": "the same deliveryId already added stock. Returned only when stock_applied is true. A blocked delivery that has not added stock is not this case",
+      "httpStatus": 200,
+      "retry": false,
+      "itspTerminal": "delivered",
+      "requiresPriorAppliedReceipt": false,
+      "request": {
+        "schemaVersion": 2,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440000",
+        "unitId": 42,
+        "partId": 101,
+        "conditionBucket": "good",
+        "qty": 5
+      },
+      "responseHeaders": {
+        "cache-control": "no-store"
+      },
+      "responseBody": {
+        "schemaVersion": 2,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440000",
+        "unitId": 42,
+        "partId": 101,
+        "status": "unchanged",
+        "blockCode": null
+      }
+    },
+    {
+      "id": "blocked_missing_catalog_identity",
+      "when": "no active itsp catalog link for partId, or the grade SKU does not exist. Replay of this same body rechecks and returns applied once the identity exists. It does not return unchanged while stock has not been added",
+      "httpStatus": 200,
+      "retry": true,
+      "itspTerminal": "blocked",
+      "backoffSeconds": [300, 900, 3600, 21600],
+      "request": {
+        "schemaVersion": 2,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440010",
+        "unitId": 42,
+        "partId": 202,
+        "conditionBucket": "good",
+        "qty": 5
+      },
+      "responseHeaders": {
+        "cache-control": "no-store"
+      },
+      "responseBody": {
+        "schemaVersion": 2,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440010",
+        "unitId": 42,
+        "partId": 202,
+        "status": "blocked",
+        "blockCode": "missing_catalog_identity"
+      }
+    },
+    {
+      "id": "blocked_missing_operator",
+      "when": "catalog identity exists and operator_user_id is null. Saving the operator applies this row without another POST. The next POST of this same body then returns unchanged because stock was added",
+      "httpStatus": 200,
+      "retry": true,
+      "itspTerminal": "blocked",
+      "backoffSeconds": [300, 900, 3600, 21600],
+      "request": {
+        "schemaVersion": 2,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440011",
+        "unitId": 42,
+        "partId": 101,
+        "conditionBucket": "good",
+        "qty": 5
+      },
+      "responseHeaders": {
+        "cache-control": "no-store"
+      },
+      "responseBody": {
+        "schemaVersion": 2,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440011",
+        "unitId": 42,
+        "partId": 101,
+        "status": "blocked",
+        "blockCode": "missing_operator"
+      }
+    },
+    {
+      "id": "validation_422",
+      "when": "extra key recordId. Any 422 is final for this body. Shop stores no delivery row. The handler keeps only loc, msg, and type",
+      "httpStatus": 422,
+      "retry": false,
+      "itspTerminal": "failed",
+      "request": {
+        "schemaVersion": 2,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440000",
+        "unitId": 42,
+        "partId": 101,
+        "conditionBucket": "good",
+        "qty": 5,
+        "recordId": "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+      },
+      "responseBody": {
+        "detail": [
+          {
+            "loc": ["body", "recordId"],
+            "msg": "Extra inputs are not permitted",
+            "type": "extra_forbidden"
+          }
+        ]
+      }
+    },
+    {
+      "id": "merge_409_retryable",
+      "when": "PN merge reservation is in progress. The transaction rolls back and no delivery row remains. Any HTTP 409 from this endpoint is retryable, including stock above MAX_QUANTITY. merge_id changes per reservation; match the message, not the id",
+      "httpStatus": 409,
+      "retry": true,
+      "itspTerminal": "pending",
+      "backoff": "exponential from 5 seconds, cap 3600 seconds",
+      "exampleOnlyFields": ["responseBody.detail.merge_id"],
+      "request": {
+        "schemaVersion": 2,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440012",
+        "unitId": 42,
+        "partId": 101,
+        "conditionBucket": "good",
+        "qty": 5
+      },
+      "responseBody": {
+        "detail": {
+          "message": "该 PN 正在合并，完成或取消后才能修改",
+          "merge_id": "11111111-1111-4111-8111-111111111111"
+        }
+      }
+    },
+    {
+      "id": "applied_v1",
+      "when": "schemaVersion 1 and qty 1 remain accepted and add one unit of the requested condition bucket",
+      "httpStatus": 200,
+      "retry": false,
+      "itspTerminal": "delivered",
+      "request": {
+        "schemaVersion": 1,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440001",
+        "unitId": 7,
+        "partId": 101,
+        "conditionBucket": "good",
+        "qty": 1
+      },
+      "responseHeaders": {
+        "cache-control": "no-store"
+      },
+      "responseBody": {
+        "schemaVersion": 1,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440001",
+        "unitId": 7,
+        "partId": 101,
+        "status": "applied",
+        "blockCode": null
+      }
+    },
+    {
+      "id": "conflict_v2_bad",
+      "when": "schemaVersion 2 and conditionBucket bad. Scrap does not add sellable stock and does not create a listing. Replay stays conflict",
+      "httpStatus": 200,
+      "retry": false,
+      "itspTerminal": "failed",
+      "request": {
+        "schemaVersion": 2,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440013",
+        "unitId": 43,
+        "partId": 101,
+        "conditionBucket": "bad",
+        "qty": 3
+      },
+      "responseHeaders": {
+        "cache-control": "no-store"
+      },
+      "responseBody": {
+        "schemaVersion": 2,
+        "deliveryId": "550e8400-e29b-41d4-a716-446655440013",
+        "unitId": 43,
+        "partId": 101,
+        "status": "conflict",
+        "blockCode": null
+      }
+    }
+  ]
+}

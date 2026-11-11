@@ -181,18 +181,20 @@
   ],
   "sell_intent": {
     "delivery_id": "550e8400-e29b-41d4-a716-446655440000",
+    "unit_id": 42,
     "status": "pending",
     "qty": 2,
     "attempts": 0,
     "block_code": null,
     "last_error_code": null,
     "receipt_status": null,
-    "next_attempt_at": null
+    "next_attempt_at": null,
+    "shop_closeout": null
   }
 }
 ```
 
-没有推送时 `sell_intent` 为 null。主管响应仍不含成本、价格、SN、供应商、客户名。`project_id` 只出现在这个明细里。
+`unit_id` 是发给商城的正整数，等于结果的 `wire_unit_id`，不是 UUID。`shop_closeout` 为 `awaiting_shop_reversal` 时，主管用 `delivery_id` 和 `qty` 到商城做盘点减回；其它时候为 null。没有推送时 `sell_intent` 为 null。主管响应仍不含成本、价格、SN、供应商、客户名。`project_id` 只出现在这个明细里。维修员响应不包含 `sell_intent`。
 
 ### 4.5 `POST /api/cycle/repair-records/{record_id}/void`
 
@@ -220,6 +222,7 @@
 | 维修员作废，但创建日不是 Asia/Shanghai 的今天 | 403 | 已超过当天，只有主管可以作废 |
 | 意图 `delivering` 且租约未过期 | 409 | 推送进行中，请稍后再作废 |
 | 第 5 节要求勾选但未勾选 | 409 | 修好数量可能已计入商城库存，请先在商城手工减库存并勾选确认 |
+| `missing_operator` 却把勾选打成 true | 409 | 这笔推送还没入账，作废时不要勾选。请等商城补上经办人并盘点减回、核对在手后，再登记 |
 | 原因为空或超长 | 422 | 由请求模型产生 |
 
 作废不调用商城，不减少商城库存。
@@ -232,7 +235,7 @@
 {"record_id": "...", "status": "not_queued"}
 ```
 
-这是现有 `cycle_sell_delivery.read_status` 的记录版，字段从 `unit_id` 改为 `record_id`，并增加 `qty`。
+这是现有 `cycle_sell_delivery.read_status` 的记录版。响应含内部 `record_id`、线路 `unit_id`（正整数）和 `qty`。不要把 UUID 放进 `unit_id`。
 
 ### 4.7 `GET /api/cycle/summary`
 
@@ -255,17 +258,36 @@
 
 本阶段前端只在 `/maintenance/cycle` 使用它。型号全景和采购分析不嵌这三列，避免和主库存放在同一屏。
 
+### 4.8 `POST /api/cycle/repair-records/{record_id}/attest-shop-adjustment`
+
+仅主管。需要 `Idempotency-Key`。动作名 `attest_shop_adjustment`，指纹同样包含动作和 `record_id`。
+
+```json
+{"expected_version": 2}
+```
+
+只用于已经作废、勾选仍为 false、且意图的 `block_code` 是 `missing_operator` 的记录。成功后 `shop_adjusted_manually=true`，版本 +1，`shop_closeout` 变为 null。不改待修数，不调用商城。
+
+| 条件 | HTTP | detail |
+| --- | --- | --- |
+| 不是这种延迟入库的作废 | 409 | 这笔记录不用登记商城减库存 |
+| 版本不符 | 409 | 版本冲突：记录已被他人处理，请刷新后重试 |
+
 ## 5. 作废与「商城可能已加库存」
 
 「可能已加库存」为真，当且仅当存在意图，且下面任一成立：
 
 - `state=delivered`，或 `receipt_status` 为 `applied` / `unchanged`
-- `block_code=publish_disabled`（v1/v2：这种 blocked 已经加过库存）
+- `block_code=publish_disabled`（v1 里这种 blocked 已经加过库存；商城 v2 不发这个码）
 - `attempts > 0` 且状态是 `pending`，或租约已过期的 `delivering`（应答可能丢了）
 
-为真时必须 `shop_stock_manually_reduced=true` 才作废，并把头写成 `failed` / `record_voided`。
+这里不包括 `missing_operator`。
 
-为假时不要求勾选，包括：没有意图（纯废品）、`attempts=0` 的 `pending`、`blocked` 且 block code 属于「未加库存」集合、`failed` 且 `receipt_status` 不是 `applied`。`attempts=0` 的作废把意图改为 `failed`，避免随后发出。
+为真时必须 `shop_stock_manually_reduced=true` 才作废，并把意图写成 `failed` / `record_voided`。
+
+`block_code=missing_operator` 是延迟入库，不是「确定没库存」。作废时意图改为 `failed` / `record_voided`，`shop_stock_manually_reduced` 必须保持 false。主管明细把 `shop_closeout` 标成 `awaiting_shop_reversal`，并显示 `delivery_id`、`unit_id`、`qty`。商城以后保存经办人时会把这行和其它未入账行一起加上库存。主管到商城按商城 v2 §6.2 用盘点减回、核对在手，再调用第 4.8 节把勾选写成 true。作废请求里提前打勾会被拒绝。
+
+「确定未加库存」只有 `missing_catalog_identity`，以及没有意图的纯废品、`attempts=0` 的 `pending`、`failed` 且 `receipt_status` 不是 `applied`。这些作废不要求勾选。`conflict` 不自动重试，作废同样不要求勾选。
 
 租约未过期的 `delivering` 不作废，调用方稍后重试。过期工人的回执 CAS 要求状态仍是 `delivering`，作废已把状态改成 `failed` 时，晚到的回执影响 0 行。
 
@@ -277,8 +299,9 @@
 
 - 意图在提交结果的同一事务插入，`state=pending`。worker 仍是 `SellIntentWorker`：`FOR UPDATE SKIP LOCKED`，租约 60 秒，HTTP 在事务外，回执用租约 CAS。开关关闭时不发 HTTP，意图保持 `pending`。
 - 一条有效结果最多一条意图（`record_id` 唯一）。重发使用同一个 `deliveryId`，不新建第二条。
-- 商城停机、超时、5xx：结果与扣数保持有效，待修数不退回，`shop_qty` 已包含这件。主管在明细里看到 `pending` 和 `last_error_code`。采购三数不区分是否送达。
-- 商城 422/409：意图 `failed`，扣数不自动退回。主管作废后待修恢复，再提交会生成新的 `deliveryId`。
+- 商城停机、超时、5xx、409：结果与扣数保持有效，待修数不退回，`shop_qty` 已包含这件。意图保持 `pending` 并退避。主管在明细里看到 `last_error_code`。采购三数不区分是否送达。
+- 商城 422：意图 `failed`，不重试，扣数不自动退回。主管作废后待修恢复，再提交会生成新的 `deliveryId` 和新的意图；`wire_unit_id` 仍是原结果上的那个整数，不回收。
+- 一次推送的成败只看这一次 POST 的 HTTP 回执。本期商城不调用 requeue。
 - 部分成功：数据库事务要么整笔提交（结果 + 全部扣数行 + 至多一条意图 + 幂等行），要么整笔回滚。商城一次投递要么加上全部 `qty`，要么不加。没有「商城只加了一部分」的成功回执。作废要么整笔退回，要么整笔拒绝。
 
 ### 6.1 回调
@@ -306,7 +329,7 @@
 
 ## 8. 兼容与禁止
 
-- 不静默改 v1 字段的含义。`unitId` 与 `qty=1` 只存在于 v1 文档和被替换前的代码。
+- 不静默改 v1 六键的名字。v2 仍用这六个键；`unitId` 改为结果的稳定整数，`qty` 改为 1–1000。`recordId` 不上线路。商城继续接受 v1 的 `qty=1`。
 - 用户接口不返回价格、成本、token、SN、供应商、客户名。
 - 日志沿用出站现规则：只有 `deliveryId`、`partId`、结果码、是否接受。幂等冲突日志不打 body。
 - 页面批量仍不是跨 PN 的数据库事务。一次提交只涉及一个 PN。
