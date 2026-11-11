@@ -91,12 +91,14 @@ itsp 用 `extra=forbid` 解析。缺 `unitId`、多 `recordId`、或其它未知
 | 200 `blocked` 且 `blockCode` 在集合内 | `blocked` | 5 分钟 / 15 分钟 / 1 小时 / 6 小时，封顶 6 小时。`missing_operator` 同样走这档 |
 | 200 `conflict` | `failed` | 不重试 |
 | 422 | `failed`，`last_error_code=invalid_request` | 不重试 |
-| 409 | `pending`，`last_error_code=remote_busy` | 5 秒起指数退避，封顶 1 小时。商品合并进行中、库存超上限等都算暂时失败，合并结束后同一 `deliveryId` 仍可入账 |
+| 409 | `pending`，`last_error_code=remote_busy` | 5 秒起指数退避，封顶 1 小时。商品合并进行中、库存超上限等都算暂时失败，事务回滚，不留下投递行。合并结束后同一 `deliveryId` 仍可入账。没有 `applied` / `unchanged` / `publish_disabled` 时，作废不要求勾选「商城已手工减库存」 |
 | 401 / 403 | `pending`，`last_error_code=credential_rejected` | 同上，5 秒起，封顶 1 小时 |
 | 404 / 408 / 429 / 5xx / 超时 / 无效回执 | `pending` | 同上 |
 | 出站开关关闭或 URL 为空 | 保持 `pending` | worker 不发 HTTP |
 
 401/403/404/409/5xx 会重试。422 重试也不会成功。
+
+网络失败或 5xx 不得清掉上一份「未加库存」回执。若持久证据仍是 `blocked` 且 `blockCode` 属于未加库存集合（含 `missing_catalog_identity`），作废不因为 `attempts > 0` 而要求勾选。`publish_disabled` 不在这个集合里。
 
 ## 5. 商城侧行为（以商城 v2 为准，itsp 不另加门槛）
 

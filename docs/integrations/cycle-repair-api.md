@@ -279,15 +279,20 @@
 
 - `state=delivered`，或 `receipt_status` 为 `applied` / `unchanged`
 - `block_code=publish_disabled`（v1 里这种 blocked 已经加过库存；商城 v2 不发这个码）
-- `attempts > 0` 且状态是 `pending`，或租约已过期的 `delivering`（应答可能丢了）
-
-这里不包括 `missing_operator`。
+- `attempts > 0` 且状态是 `pending`，或租约已过期的 `delivering`，并且下面的「确定未加库存」都不成立（应答可能丢了，商城也许已经加上）
 
 为真时必须 `shop_stock_manually_reduced=true` 才作废，并把意图写成 `failed` / `record_voided`。
 
-`block_code=missing_operator` 是延迟入库，不是「确定没库存」。作废时意图改为 `failed` / `record_voided`，`shop_stock_manually_reduced` 必须保持 false。主管明细把 `shop_closeout` 标成 `awaiting_shop_reversal`，并显示 `delivery_id`、`unit_id`、`qty`。商城以后保存经办人时会把这行和其它未入账行一起加上库存。主管到商城按商城 v2 §6.2 用盘点减回、核对在手，再调用第 4.8 节把勾选写成 true。作废请求里提前打勾会被拒绝。
+「确定未加库存」时作废不要求勾选。包括：
 
-「确定未加库存」只有 `missing_catalog_identity`，以及没有意图的纯废品、`attempts=0` 的 `pending`、`failed` 且 `receipt_status` 不是 `applied`。这些作废不要求勾选。`conflict` 不自动重试，作废同样不要求勾选。
+- 没有意图的纯废品，以及 `attempts=0` 的 `pending`
+- `receipt_status=blocked` 且 `block_code` 属于未加库存集合：`missing_catalog_identity`、`missing_formal_image`、`missing_category_mapping`、`missing_list_price`、`publish_api_missing_stock_update`。之后的超时或 5xx 把状态改回 `pending` 时，必须留下这个 `block_code` 和 `receipt_status`，不能因为 `attempts > 0` 就改要勾选
+- 最近一次商城结果是 HTTP 409（`last_error_code=remote_busy`），且没有 `applied` / `unchanged` / `publish_disabled`。金样例 `merge_409_retryable` 会回滚事务，不留下投递行。合并退避期间作废不要求勾选
+- `conflict` 或 422 导致的 `failed`，且 `receipt_status` 不是 `applied`
+
+`block_code=missing_operator` 是延迟入库，单独处理，不并进上面两条。作废时意图改为 `failed` / `record_voided`，`shop_stock_manually_reduced` 必须保持 false，即使 `attempts > 0`。主管明细把 `shop_closeout` 标成 `awaiting_shop_reversal`，并显示 `delivery_id`、`unit_id`、`qty`。商城以后保存经办人时会把这行和其它未入账行一起加上库存。主管到商城按商城 v2 §6.2 用盘点减回、核对在手，再调用第 4.8 节把勾选写成 true。作废请求里提前打勾会被拒绝。
+
+已经有 `applied` / `unchanged` / `publish_disabled` 时，后来的 409 或超时不再把这行改成「确定未加库存」。
 
 租约未过期的 `delivering` 不作废，调用方稍后重试。过期工人的回执 CAS 要求状态仍是 `delivering`，作废已把状态改成 `failed` 时，晚到的回执影响 0 行。
 
