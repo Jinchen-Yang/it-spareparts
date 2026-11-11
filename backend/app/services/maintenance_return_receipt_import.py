@@ -965,7 +965,11 @@ def public_job(
 
 
 def _lock_repair_parts_before_receipt_rows(db: Session, report: dict) -> None:
-    """维修型号锁必须先于返还行锁，避免和提交结果交叉等待。"""
+    """维修型号锁先于项目行锁和返还行锁。
+
+    改单/作废是「型号顾问锁 → 项目共享锁 → 返还行」。导入若先独占项目行再等
+    型号锁，两边会互相等待到锁超时，上传被标成失败。
+    """
     from app.services.maintenance_repair import lock_parts
 
     receipt_ids = [
@@ -1094,6 +1098,7 @@ def apply(
         }
     )
     maintenance_project_operations.lock_workbook_states(db, project_ids=project_ids)
+    _lock_repair_parts_before_receipt_rows(db, report)
     for project_id in project_ids:
         db.scalar(
             select(Project)
@@ -1112,7 +1117,6 @@ def apply(
     if scope_provider is not None:
         allowed_project_ids = scope_provider()
     verify_archive(report["storage_path"], batch.file_hash)
-    _lock_repair_parts_before_receipt_rows(db, report)
     plan = build_plan(db, batch, locked=True, allowed_project_ids=allowed_project_ids)
     if plan["plan_hash"] != plan_hash:
         raise ImportError("stale_preview", "预览后返件或项目归属已变化，请重新预览")

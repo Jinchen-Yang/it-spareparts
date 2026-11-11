@@ -12,6 +12,7 @@ from fastapi import (
     Response,
 )
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
@@ -258,8 +259,17 @@ def apply(
         _error(db, exc, ctx, batch_id)
     except HTTPException:
         raise
-    except Exception:
+    except Exception as exc:
         db.rollback()
+        sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+        if isinstance(exc, DBAPIError) and sqlstate in {"55P03", "40P01", "40001"}:
+            raise HTTPException(
+                409,
+                {
+                    "code": "repair_part_busy",
+                    "message": "该型号正在被其他操作处理，请稍后重试",
+                },
+            ) from exc
         batch = service._load(db, batch_id, lock=True)
         if batch.report_json["status"] == "ready":
             service._state(

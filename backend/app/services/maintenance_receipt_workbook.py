@@ -283,9 +283,6 @@ def parse(data: bytes, *, project_id: str) -> dict:
 
 def _lock(db: Session, plan: dict, authorize: Callable[[], None]) -> None:
     receipts.lock_receipt_context(db)
-    receipts.lock_receipt_projects(db, {plan["project_id"]})
-    authorize()
-    receipts._get_project(db, plan["project_id"], lock=True)
     ids = sorted(plan["baseline"])
     from app.services.maintenance_repair import lock_parts
 
@@ -302,7 +299,11 @@ def _lock(db: Session, plan: dict, authorize: Callable[[], None]) -> None:
         part_id = operation["updates"].get("part_id")
         if isinstance(part_id, int):
             peeked_part_ids.add(part_id)
+    # 与改单、作废、入库导入相同：型号顾问锁先于项目行锁，再锁返还行。
     lock_parts(db, peeked_part_ids)
+    receipts.lock_receipt_projects(db, {plan["project_id"]})
+    authorize()
+    receipts._get_project(db, plan["project_id"], lock=True)
     rows = db.scalars(select(MaintenanceRkdReturnLine).where(
         MaintenanceRkdReturnLine.rkd_line_id.in_(ids),
     ).order_by(MaintenanceRkdReturnLine.rkd_line_id).with_for_update()
