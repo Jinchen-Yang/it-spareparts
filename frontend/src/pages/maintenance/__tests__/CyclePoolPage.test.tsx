@@ -141,6 +141,43 @@ describe("维修循环工位页", () => {
     expect(screen.queryByRole("button", { name: "领 取" })).toBeNull();
   });
 
+  it("切换工位失败时不留下上一工位的件", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ page_cycle_manage: true }));
+    listUnits.mockImplementation(async (params: { station?: string }) => {
+      if (params.station === "testing") {
+        throw { response: { data: { detail: "检测列表失败" } } };
+      }
+      return {
+        items: [{ ...unit, pn: "POOL-PN", station: "pool" }],
+        total: 1,
+        page: 1,
+        page_size: 20,
+      };
+    });
+    render(<CyclePoolPage />);
+    expect(await screen.findByText("POOL-PN")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "检测" }));
+    expect(await screen.findByText("检测列表失败")).toBeTruthy();
+    expect(screen.queryByText("POOL-PN")).toBeNull();
+    expect(screen.queryByRole("button", { name: "处理" })).toBeNull();
+  });
+
+  it("换一件处理时不沿用上一件填过的账号", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ page_cycle_recycle: true }));
+    listUnits.mockResolvedValue({
+      items: [unit, { ...unit, id: 8, pn: "OTHER-PN" }],
+      total: 2,
+      page: 1,
+      page_size: 20,
+    });
+    render(<CyclePoolPage />);
+    const open = await screen.findAllByRole("button", { name: "处理" });
+    fireEvent.click(open[0]);
+    fireEvent.change(await screen.findByLabelText("检测/维修账号"), { target: { value: "tester-a" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "处理" })[1]);
+    expect((await screen.findByLabelText("检测/维修账号") as HTMLInputElement).value).toBe("");
+  });
+
   it("结果只对应接口接受的去向", () => {
     expect(resultChoices("test", "good").options.map((item) => item.value)).toEqual(["ready"]);
     expect(resultChoices("test", "bad").options.map((item) => item.value)).toEqual(["repairing", "scrap"]);

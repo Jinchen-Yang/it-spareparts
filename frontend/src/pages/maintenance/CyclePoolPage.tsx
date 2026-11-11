@@ -82,6 +82,10 @@ export default function CyclePoolPage() {
     if (!stations.some((item) => item.key === station)) return;
     let cancel = false;
     setLoading(true);
+    setRows([]);
+    setTotal(0);
+    setCurrent(null);
+    setIntent(null);
     void (async () => {
       try {
         const data = await listUnits({ station, page, page_size: 20 });
@@ -111,7 +115,13 @@ export default function CyclePoolPage() {
           }
         }
       } catch (error) {
-        if (!cancel) message.error(detailOf(error));
+        if (!cancel) {
+          setRows([]);
+          setTotal(0);
+          setCurrent(null);
+          setIntent(null);
+          message.error(detailOf(error));
+        }
       } finally {
         if (!cancel) setLoading(false);
       }
@@ -210,6 +220,7 @@ export default function CyclePoolPage() {
       >
         {current && (
           <UnitActions
+            key={current.id}
             unit={current}
             manage={manage}
             canClaim={(current.station === "testing" && canTest) || (current.station === "repairing" && canRepair)}
@@ -300,13 +311,13 @@ function UnitActions({
         <Button onClick={() => onRun(() => withdrawUnit(unit.id, { expected_version: version }))}>撤回</Button>
       )}
       {(unit.station === "pool" || unit.station === "ready") && (
-        <DispatchForm onSubmit={(body) => onRun(() => dispatchUnit(unit.id, { expected_version: version, ...body }))} />
+        <DispatchForm key={`dispatch-${unit.id}`} onSubmit={(body) => onRun(() => dispatchUnit(unit.id, { expected_version: version, ...body }))} />
       )}
       {(unit.station === "pool" || unit.station === "ready") && (
-        <CloseForm onSubmit={(body) => onRun(() => closeUnit(unit.id, { expected_version: version, ...body }))} />
+        <CloseForm key={`close-${unit.id}`} onSubmit={(body) => onRun(() => closeUnit(unit.id, { expected_version: version, ...body }))} />
       )}
       {unit.station === "outsource" && (
-        <ReturnForm onSubmit={(body) => onRun(() => outsourceReturn(unit.id, { expected_version: version, ...body }))} />
+        <ReturnForm key={`return-${unit.id}`} onSubmit={(body) => onRun(() => outsourceReturn(unit.id, { expected_version: version, ...body }))} />
       )}
       {canClaim && (unit.station === "testing" || unit.station === "repairing") && !unit.assignee_username && (
         itemVersion === undefined ? (
@@ -325,12 +336,14 @@ function UnitActions({
       )}
       {unit.station === "testing" && (
         <ResultForm
+          key={`test-${unit.id}`}
           kind="test"
           onSubmit={(body) => onRun(() => completeTest(unit.id, { expected_version: version, ...body }))}
         />
       )}
       {unit.station === "repairing" && (
         <ResultForm
+          key={`repair-${unit.id}`}
           kind="repair"
           onSubmit={(body) => onRun(() => completeRepair(unit.id, { expected_version: version, ...body }))}
         />
