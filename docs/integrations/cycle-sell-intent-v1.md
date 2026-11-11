@@ -1,5 +1,7 @@
 # 循环池可售意图投递契约 v1（itsp → spareparts-shop）
 
+> **v2**：D-0058 的新推送见 [cycle-sell-intent-v2.md](cycle-sell-intent-v2.md)，规范性全文在 [cycle-repair-api.md](cycle-repair-api.md)。本文件继续描述 main 上已实现的一件一行、`qty=1`、`unitId` 行为，直到替换 PR 删掉该实现。不要把本文件的 `qty=1` 改成 v2 的数量语义。
+
 > 状态：**拟定契约**。生产者 itsp 已实现（T4 `SellIntentWorker`，默认关闭）；消费者 spareparts-shop **尚未实现**（T6 只读待核结论：无该路由、无闲管家客户端、无类目映射、无订单状态枚举）。
 > 决策：D-0057（`docs/decisions/0037-坏件循环池与闲鱼可售意图.md`，PR #527）；需求：00014。
 > 范围：跨仓 JSON 契约 + itsp 投递语义 + 商城侧拟定语义（T7 实现，需用户确认）。**本轮不打开 live、不部署、不合入。**
