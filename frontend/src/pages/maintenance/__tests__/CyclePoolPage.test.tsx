@@ -108,6 +108,39 @@ describe("维修循环工位页", () => {
     expect(listWorkItems).toHaveBeenCalledTimes(2);
   });
 
+  it("只有主管权限时不提供领取，也不去拉待办", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ page_cycle_manage: true }));
+    listUnits.mockResolvedValue({
+      items: [{ ...unit, station: "testing" }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    render(<CyclePoolPage />);
+    fireEvent.click(await screen.findByRole("tab", { name: "检测" }));
+    expect(await screen.findByText("CYCLE-PN")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "处理" }));
+    expect(await screen.findByText("版本 3")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "领 取" })).toBeNull();
+    expect(listWorkItems).not.toHaveBeenCalled();
+  });
+
+  it("待办版本失败时单位列表还在，并说明暂时不能领取", async () => {
+    localStorage.setItem("permissions", JSON.stringify({ page_cycle_test: true }));
+    listUnits.mockResolvedValue({
+      items: [{ ...unit, station: "testing" }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    });
+    listWorkItems.mockRejectedValue({ response: { data: { detail: "待办服务不可用" } } });
+    render(<CyclePoolPage />);
+    expect(await screen.findByText("CYCLE-PN")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "处理" }));
+    expect(await screen.findByText(/暂时不能领取：待办服务不可用/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "领 取" })).toBeNull();
+  });
+
   it("结果只对应接口接受的去向", () => {
     expect(resultChoices("test", "good").options.map((item) => item.value)).toEqual(["ready"]);
     expect(resultChoices("test", "bad").options.map((item) => item.value)).toEqual(["repairing", "scrap"]);

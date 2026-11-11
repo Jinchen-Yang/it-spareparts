@@ -72,6 +72,8 @@ export default function CyclePoolPage() {
   const [current, setCurrent] = useState<CycleUnit | null>(null);
   const [intent, setIntent] = useState<SellIntentStatus | null>(null);
   const [poolVersions, setPoolVersions] = useState<Record<number, number>>({});
+  const [claimLoad, setClaimLoad] = useState<"off" | "loading" | "ready" | "failed">("off");
+  const [claimNote, setClaimNote] = useState<string | null>(null);
   const [wipPart, setWipPart] = useState("");
   const [wip, setWip] = useState<string>("");
   const [refresh, setRefresh] = useState(0);
@@ -86,11 +88,27 @@ export default function CyclePoolPage() {
         if (cancel) return;
         setRows(data.items);
         setTotal(data.total);
-        if (station === "testing" || station === "repairing") {
+        const mayClaim = (station === "testing" && canTest) || (station === "repairing" && canRepair);
+        if (!mayClaim) {
+          setPoolVersions({});
+          setClaimLoad("off");
+          setClaimNote(null);
+        } else {
           const subject = station === "testing" ? "cycle_test" : "cycle_repair";
-          const versions = await loadPoolVersions(subject, data.items.map((item) => item.id));
-          if (cancel) return;
-          setPoolVersions(versions);
+          setClaimLoad("loading");
+          try {
+            const versions = await loadPoolVersions(subject, data.items.map((item) => item.id));
+            if (cancel) return;
+            setPoolVersions(versions);
+            setClaimLoad("ready");
+            setClaimNote(null);
+          } catch (error) {
+            if (cancel) return;
+            setPoolVersions({});
+            setClaimLoad("failed");
+            setClaimNote(detailOf(error));
+            message.warning("待办版本没有取到，领取暂时不可用");
+          }
         }
       } catch (error) {
         if (!cancel) message.error(detailOf(error));
@@ -194,6 +212,9 @@ export default function CyclePoolPage() {
           <UnitActions
             unit={current}
             manage={manage}
+            canClaim={(current.station === "testing" && canTest) || (current.station === "repairing" && canRepair)}
+            claimLoad={claimLoad}
+            claimNote={claimNote}
             itemVersion={poolVersions[current.id]}
             intent={intent}
             onIntent={async () => {
@@ -250,6 +271,9 @@ function IntakeForm({ onSubmit }: { onSubmit: (body: object) => void }) {
 function UnitActions({
   unit,
   manage,
+  canClaim,
+  claimLoad,
+  claimNote,
   itemVersion,
   intent,
   onIntent,
@@ -257,6 +281,9 @@ function UnitActions({
 }: {
   unit: CycleUnit;
   manage: boolean;
+  canClaim: boolean;
+  claimLoad: "off" | "loading" | "ready" | "failed";
+  claimNote: string | null;
   itemVersion?: number;
   intent: SellIntentStatus | null;
   onIntent: () => void;
@@ -281,11 +308,20 @@ function UnitActions({
       {unit.station === "outsource" && (
         <ReturnForm onSubmit={(body) => onRun(() => outsourceReturn(unit.id, { expected_version: version, ...body }))} />
       )}
-      {(unit.station === "testing" || unit.station === "repairing") && !unit.assignee_username && (
-        <Button
-          disabled={itemVersion === undefined}
-          onClick={() => onRun(() => claimUnit(unit.id, { expected_version: version, item_version: itemVersion }))}
-        >领取</Button>
+      {canClaim && (unit.station === "testing" || unit.station === "repairing") && !unit.assignee_username && (
+        itemVersion === undefined ? (
+          <Typography.Text type="secondary">
+            {claimLoad === "failed"
+              ? `待办版本没有取到，暂时不能领取：${claimNote ?? "请稍后重试"}`
+              : claimLoad === "loading"
+                ? "正在读取待办版本"
+                : "没有可领取的待办"}
+          </Typography.Text>
+        ) : (
+          <Button
+            onClick={() => onRun(() => claimUnit(unit.id, { expected_version: version, item_version: itemVersion }))}
+          >领取</Button>
+        )
       )}
       {unit.station === "testing" && (
         <ResultForm
