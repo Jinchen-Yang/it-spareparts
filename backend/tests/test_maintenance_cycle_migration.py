@@ -9,7 +9,7 @@ from alembic.config import Config as AlembicConfig
 from alembic.script import ScriptDirectory
 import pytest
 from sqlalchemy import inspect, text
-from sqlalchemy.exc import DatabaseError
+from sqlalchemy.exc import DatabaseError, IntegrityError
 
 from app import permissions
 from app.db import engine
@@ -340,3 +340,36 @@ def test_null_template_perms_legacy_account_not_snapshotted(db):
         assert legacy2 == {"page_parts": True}
     finally:
         _ensure_head()
+
+
+def test_record_no_keeps_full_wire_unit_id_past_eight_digits(db):
+    from app.services.maintenance_repair import format_record_no
+
+    assert format_record_no(100_000_000) == "WX100000000"
+    part_id = db.scalar(
+        text("INSERT INTO dim_part (pn_std) VALUES ('PN-BIG-WIRE') RETURNING id")
+    )
+    db.execute(
+        text(
+            "INSERT INTO maintenance_repair_record"
+            " (record_id, wire_unit_id, record_no, part_id, pn,"
+            "  fixed_qty, scrap_qty, operator)"
+            " VALUES (gen_random_uuid(), 100000000, 'WX100000000', :part_id,"
+            "         'PN-BIG-WIRE', 1, 0, 'big')"
+        ),
+        {"part_id": part_id},
+    )
+    db.flush()
+    with pytest.raises(IntegrityError):
+        with db.begin_nested():
+            db.execute(
+                text(
+                    "INSERT INTO maintenance_repair_record"
+                    " (record_id, wire_unit_id, record_no, part_id, pn,"
+                    "  fixed_qty, scrap_qty, operator)"
+                    " VALUES (gen_random_uuid(), 100000001, 'WX10000000', :part_id,"
+                    "         'PN-BIG-WIRE', 1, 0, 'trunc')"
+                ),
+                {"part_id": part_id},
+            )
+    db.rollback()

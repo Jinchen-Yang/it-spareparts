@@ -159,7 +159,8 @@ def _create_repair_objects() -> None:
         ),
         sa.CheckConstraint("wire_unit_id > 0", name="ck_maintenance_repair_record_wire"),
         sa.CheckConstraint(
-            "record_no = 'WX' || lpad(wire_unit_id::text, 8, '0')",
+            "record_no = 'WX' || lpad(wire_unit_id::text, "
+            "GREATEST(8, length(wire_unit_id::text)), '0')",
             name="ck_maintenance_repair_record_no",
         ),
         sa.CheckConstraint(

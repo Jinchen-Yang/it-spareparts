@@ -158,17 +158,25 @@ def lock_parts(
     ids = sorted({int(part_id) for part_id in part_ids if part_id is not None})
     if not ids:
         return
+    # 只在拿型号锁时把 lock_timeout 收成 1 秒。用 SET LOCAL 记住并恢复调用方的值，
+    # 避免把 30 秒写进返还改单、导入和工作簿后面的语句。
+    previous = db.scalar(text("SELECT current_setting('lock_timeout')"))
     _lock_timeout(db, "1000ms")
-    for part_id in ids:
-        db.execute(
-            select(
-                func.pg_advisory_xact_lock(
-                    func.hashtextextended(f"repair-part:{part_id}", 0)
+    try:
+        for part_id in ids:
+            db.execute(
+                select(
+                    func.pg_advisory_xact_lock(
+                        func.hashtextextended(f"repair-part:{part_id}", 0)
+                    )
                 )
             )
-        )
-    if not keep_lock_timeout:
-        _lock_timeout(db, "30000ms")
+    finally:
+        if not keep_lock_timeout and previous is not None:
+            db.execute(
+                text("SELECT set_config('lock_timeout', :value, true)"),
+                {"value": previous},
+            )
 
 
 def try_lock_part(db: Session, part_id: int) -> bool:
@@ -602,9 +610,9 @@ def submit_result(
     part = db.get(DimPart, part_id)
     deducted = _active_deducted_map(db, [line.rkd_line_id for line in lines])
     pending = _pending_qty(lines, deducted)
-    eligible_total = sum(eligible_qty(line) for line in lines)
     requested = fixed_qty + scrap_qty
-    if part is None or part.status != "active" or eligible_total <= 0:
+    # 契约：待修已经是 0，或档案不是 active → 400。还有剩余但合计超过 → 409。
+    if part is None or part.status != "active" or pending <= 0:
         raise RepairError("该型号当前没有待修件数", 400)
     if requested > pending:
         raise RepairConflict("修好数与废品数之和超过当前待修件数")

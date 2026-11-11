@@ -384,3 +384,41 @@ def test_summary_part_ids_keep_request_order_and_zeros(db):
         invalid = buyer.get("/api/cycle/summary", params={"part_ids": "abc"})
         assert invalid.status_code == 422
         assert invalid.json()["detail"] == "part_ids 必须为 1–100 个正整数"
+
+
+def test_submit_when_pending_is_already_zero_is_400(db):
+    project = _project(db, "ZERO")
+    part = _part(db, "ZERO-PN")
+    _receipt(db, project, part, "1", condition="坏品")
+    db.commit()
+    with _repairer(db, "zero-repairer") as repairer:
+        assert _submit(repairer, part.id, 1, 0).status_code == 201
+        again = _submit(repairer, part.id, 1, 0)
+        assert again.status_code == 400
+        assert again.json()["detail"] == "该型号当前没有待修件数"
+
+
+def test_commit_time_deduction_trigger_returns_contract_409(db, monkeypatch):
+    project = _project(db, "TRIG")
+    part = _part(db, "TRIG-PN")
+    _receipt(db, project, part, "1", condition="坏品")
+    db.commit()
+
+    def over_allocate(lines, deducted, qty):
+        return [(lines[0].rkd_line_id, 5)]
+
+    monkeypatch.setattr("app.services.maintenance_repair.allocate_fifo", over_allocate)
+    with _repairer(db, "trig-repairer") as repairer:
+        response = _submit(repairer, part.id, 1, 0)
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": "修好数与废品数之和超过当前待修件数"}
+    assert _count(db, MaintenanceRepairRecord) == 0
+
+
+def test_lock_parts_restores_the_callers_lock_timeout(db):
+    from app.services.maintenance_repair import lock_parts
+
+    before = db.scalar(text("SELECT current_setting('lock_timeout')"))
+    lock_parts(db, [1])
+    assert db.scalar(text("SELECT current_setting('lock_timeout')")) == before
+    db.rollback()

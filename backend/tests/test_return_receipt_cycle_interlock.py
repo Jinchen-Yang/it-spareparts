@@ -123,3 +123,26 @@ def test_void_without_deduction_does_not_create_units_and_condition_leaves_pool(
     assert voided.status_code == 200, voided.text
     assert not inspect(engine).has_table("maintenance_cycle_unit")
     assert db.scalar(select(MaintenanceRepairRecordSource)) is None
+
+
+def test_note_only_edit_is_allowed_after_deduction(db):
+    project = _project(db, "NOTE")
+    part = _part(db, "NOTE-PN")
+    receipt = _receipt(db, project, part, "3", condition="坏品")
+    db.commit()
+    admin = _receipt_client(db, username="note-admin")
+    _deduct(db, receipt, part, 1)
+    row = _row(db, receipt.rkd_line_id)
+    patched = _patch(
+        admin,
+        receipt.rkd_line_id,
+        row.version,
+        pn=part.pn_std,
+        part_id=part.id,
+        note="只改备注不碰件数",
+    )
+    assert patched.status_code == 200, patched.text
+    stored = _row(db, receipt.rkd_line_id)
+    assert stored.note == "只改备注不碰件数"
+    assert stored.qty == Decimal("3.000")
+    assert stored.part_id == part.id

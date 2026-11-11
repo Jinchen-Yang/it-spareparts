@@ -104,7 +104,12 @@ def _raise_repair(exc: repair.RepairError) -> None:
 
 
 def _raise_dbapi(exc: DBAPIError) -> None:
-    if getattr(exc.orig, "sqlstate", None) in {"55P03", "40001", "40P01"}:
+    sqlstate = getattr(exc.orig, "sqlstate", None)
+    if sqlstate == "23514":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "修好数与废品数之和超过当前待修件数"
+        ) from exc
+    if sqlstate in {"55P03", "40001", "40P01"}:
         raise HTTPException(
             status.HTTP_409_CONFLICT, "该型号正在被其他操作处理，请稍后重试"
         ) from exc

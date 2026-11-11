@@ -265,7 +265,8 @@ class Receipt(BaseModel):
     unitId: int = Field(gt=0, le=2**63 - 1)
     partId: int = Field(gt=0, le=2**31 - 1)
     status: Literal["applied", "unchanged", "blocked", "conflict"]
-    blockCode: str | None = None
+    # 六键都必须出现。blockCode 允许 JSON null，缺键则是无效回执。
+    blockCode: str | None
 
 
 def interpret_shop_response(

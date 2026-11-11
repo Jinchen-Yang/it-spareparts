@@ -73,7 +73,10 @@ def test_concurrent_submits_cannot_exceed_received_qty(db):
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(attempt, clients))
-    assert sorted(response.status_code for response in results) == [201, 409]
+    # 赢家扣完后待修为 0，契约返回 400，而不是把请求改小。
+    assert sorted(response.status_code for response in results) == [201, 400]
+    loser = next(response for response in results if response.status_code == 400)
+    assert loser.json()["detail"] == "该型号当前没有待修件数"
     db.expire_all()
     deducted = int(
         db.scalar(select(func.coalesce(func.sum(MaintenanceRepairRecordSource.qty), 0)))

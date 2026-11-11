@@ -245,6 +245,18 @@ def test_extra_record_id_or_missing_unit_id_is_invalid_receipt():
     assert result == "invalid_receipt"
 
 
+@pytest.mark.parametrize(
+    "missing",
+    ["schemaVersion", "deliveryId", "unitId", "partId", "status", "blockCode"],
+)
+def test_receipt_missing_any_of_the_six_keys_is_invalid(missing):
+    sent = _case("applied")["request"]
+    body = dict(_case("applied")["responseBody"])
+    body.pop(missing)
+    result, _block = svc.interpret_shop_response(sent, 200, json.dumps(body).encode())
+    assert result == "invalid_receipt"
+
+
 def test_missing_operator_then_unchanged_delivers_without_prior_applied(db):
     case = _case("blocked_missing_operator")
     intent = _intent_for_case(db, case)
@@ -308,6 +320,26 @@ def test_disabled_worker_does_not_send(db):
     assert calls["n"] == 0
     assert _row(db, intent.delivery_id).state == "pending"
     assert Settings(_env_file=None).shop_cycle_sell_enabled is False
+
+
+def test_receipt_after_expired_lease_does_not_land(db):
+    """租约过期后才到的回执影响 0 行，新工人仍可投递成功。"""
+    case = _case("applied")
+    intent = _intent_for_case(db, case)
+    stale = svc.claim_one()
+    assert stale is not None
+    db.execute(
+        update(MaintenanceCycleSellIntent)
+        .where(MaintenanceCycleSellIntent.delivery_id == intent.delivery_id)
+        .values(lease_until=datetime.now(timezone.utc) - timedelta(seconds=1))
+    )
+    db.commit()
+    assert svc.acknowledge(stale, "applied") is False
+    assert _row(db, intent.delivery_id).state == "delivering"
+    fresh = svc.claim_one()
+    assert fresh is not None and fresh.lease_token != stale.lease_token
+    assert svc.acknowledge(fresh, "applied") is True
+    assert _row(db, intent.delivery_id).state == "delivered"
 
 
 def test_late_ack_after_failed_changes_nothing(db):
