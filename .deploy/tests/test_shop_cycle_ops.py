@@ -116,5 +116,60 @@ class ShopBoundaryTests(unittest.TestCase):
         self.assertNotIn("next.env.read", text)
 
 
+class ShopRecoverTests(unittest.TestCase):
+    def test_failed_recover_can_be_retried_until_pass(self):
+        import tempfile
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        release = object.__new__(ops.Release)
+        release.root = Path(folder.name)
+        release.raw = b"{}"
+        release.m = {"intermediate_head": "0028_cycle_sell_held"}
+        release.schema = Mock(return_value="0028_cycle_sell_held")
+        self.assertTrue(ops.Release.reuse_intent(release, "recover-freeze") is False)
+        self.assertTrue((release.root / "recover-freeze.intent.json").is_file())
+        self.assertTrue(ops.Release.reuse_intent(release, "recover-freeze"))
+        (release.root / "recover-freeze.json").write_text("{}\n")
+        with self.assertRaisesRegex(RuntimeError, "already completed"):
+            ops.Release.reuse_intent(release, "recover-freeze")
+
+    def test_recover_waits_for_backend_and_frontend_health(self):
+        import tempfile
+        from unittest.mock import patch
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        release = object.__new__(ops.Release)
+        release.root = Path(folder.name)
+        (release.root / "freeze.intent.json").write_text("{}\n")
+        release.m = {"old": {name: {"id": name + "-id", "image": "sha256:" + "a" * 64} for name in ops.MANAGED}}
+        release.mark = Mock(return_value={"entry": {"ok": True}})
+        release.schema = Mock(return_value=ops.OLD_HEAD)
+        release.posted_cycle_rows = Mock(return_value=0)
+        release.entry = Mock(return_value={"ok": True})
+        state = {"probes": 0}
+
+        def inspect(cid):
+            name = cid[: -len("-id")] if cid.endswith("-id") else cid
+            status = "healthy" if state["probes"] else "starting"
+            return {"Id": cid if cid.endswith("-id") else name + "-id", "Name": "/" + name,
+                    "Image": "sha256:" + "a" * 64,
+                    "State": {"Running": True, "Health": {"Status": status}, "StartedAt": "t", "OOMKilled": False},
+                    "RestartCount": 0}
+
+        release.inspect = inspect
+        release.run = Mock(return_value=b"")
+        release.http = Mock(return_value={"status": 200, "sha256": "ab"})
+
+        def sleep(_seconds):
+            state["probes"] += 1
+
+        with patch.object(ops.time, "sleep", sleep):
+            result = ops.Release.recover_freeze(release)
+        self.assertEqual(state["probes"], 1)
+        self.assertEqual(set(result["checks"]), {"/api/ready", "/healthz"})
+        release.http.assert_any_call("/api/ready")
+        release.http.assert_any_call("/healthz")
+
+
 if __name__ == "__main__":
     unittest.main()

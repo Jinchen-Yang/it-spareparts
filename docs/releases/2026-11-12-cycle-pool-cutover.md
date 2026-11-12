@@ -36,7 +36,7 @@ python3 .deploy/cycle_pool_ops.py \
   PHASE
 ```
 
-`PHASE` 依次为 `preflight`、`images`、`dry-run`、`freeze`、`backup-old`、`migrate`、`backup-new`、`bluegreen`、`cutover`、`verify`。切流前、且 schema 仍是 `98afc0d2157b` 时，显式恢复阶段是 `recover`。出站开关是切流和 verify 之后的独立阶段：`enable-outbound`、`disable-outbound`。只停 manifest 里的旧 app，不停 `it-spareparts-db-1`、Caddy 或商城。禁止 `docker compose down` 项目 `it-spareparts`。
+`PHASE` 依次为 `preflight`、`images`、`dry-run`、`freeze`、`backup-old`、`migrate`、`backup-new`、`bluegreen`、`cutover`、`verify`。切流前、且 schema 仍是 `98afc0d2157b` 时，显式恢复阶段是 `recover`。`recover.intent.json` 落下之后，正常阶段不再执行；没有 PASS 回执时可以再跑一次 `recover`。出站开关是切流和 verify 之后的独立阶段：`enable-outbound`、`disable-outbound`。只停 manifest 里的旧 app，不停 `it-spareparts-db-1`、Caddy 或商城。禁止 `docker compose down` 项目 `it-spareparts`。
 
 `dry-run` 把当次只读快照写到发布目录，再跑 `.deploy/cycle_pool_dry_run.py` 的 19 项检查和负例。19/19 且负例 `ALL_OK` 才会留下 PASS；`freeze` 核对这份回执和控制器 sha256。也可以离线重放，不连生产：
 
@@ -77,7 +77,7 @@ python3 .deploy/shop_cycle_ops.py \
   PHASE
 ```
 
-`PHASE` 依次为 `preflight`、`freeze`、`backup-old`、`migrate`、`backup-new`、`create`、`activate`、`verify`。freeze 已开始但还没有迁移/创建/暴露时，`recover-freeze` 只拉起原来的五个容器。停写范围是 backend、worker、agent、frontend 和 NocoDB bridge。不碰 Noco 界面和 Noco 的两个库，不碰 `it-shop-prod-*`、itsp、Caddy。不 `compose down`，不改 Caddyfile 里的 `shop.ybwznt.com`。`preflight` 执行候选树里的 `deploy/scripts/check-external-networks.sh`；frontend 起来之后执行 `deploy/scripts/rollback-networks.sh` 把 ingress 接回去。两份脚本的 sha256 钉在 manifest 里，脚本里若出现 `docker compose down` 则拒绝。
+`PHASE` 依次为 `preflight`、`freeze`、`backup-old`、`migrate`、`backup-new`、`create`、`activate`、`verify`。freeze 已开始但还没有迁移/创建/暴露时，`recover-freeze` 拉起原来的五个容器，并等到 backend 与 frontend 的 Docker 健康检查以及公网 `/api/ready`、`/healthz` 都通过才写 PASS。失败后只要还没有这份 PASS，就可以再跑 `recover-freeze`。停写范围是 backend、worker、agent、frontend 和 NocoDB bridge。不碰 Noco 界面和 Noco 的两个库，不碰 `it-shop-prod-*`、itsp、Caddy。不 `compose down`，不改 Caddyfile 里的 `shop.ybwznt.com`。`preflight` 执行候选树里的 `deploy/scripts/check-external-networks.sh`；frontend 起来之后执行 `deploy/scripts/rollback-networks.sh` 把 ingress 接回去。两份脚本的 sha256 钉在 manifest 里，脚本里若出现 `docker compose down` 则拒绝。
 
 部署期间 `CYCLE_SELL_TOKEN_SHA256` 必须为空。不改 `CATALOG_*` / `PN_MASTER_*`。不降级。0029 上若已经有名字里带 `cycle` 的表写入行，控制器拒绝再把旧程序指回这个库。
 

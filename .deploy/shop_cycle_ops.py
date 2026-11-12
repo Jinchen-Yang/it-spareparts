@@ -493,7 +493,47 @@ class Release:
                  "recovery identity differs")
             if not row["State"]["Running"]:
                 self.run(["docker", "start", row["Id"]])
-        return {"schema": OLD_HEAD, "restored_original_processes": True, "database_restored": False, "downgrade_invoked": False}
+        deadline = time.monotonic() + 90
+        checks = None
+        for attempt in range(60):
+            current = {}
+            for name, expected in self.m["old"].items():
+                row = self.inspect(expected["id"])
+                need(row["Id"] == expected["id"] and row["Name"] == "/" + name and row["Image"] == expected["image"]
+                     and row["State"]["Running"], "original process failed after restart: " + name)
+                current[name] = row
+            healthy = all(current[name]["State"].get("Health", {}).get("Status") == "healthy" for name in (APPS[0], APPS[3]))
+            if healthy:
+                try:
+                    checks = {path: self.http(path) for path in ("/api/ready", "/healthz")}
+                except Exception:
+                    if attempt == 59 or time.monotonic() >= deadline:
+                        raise RuntimeError("original public readiness failed after restart") from None
+                else:
+                    final = {name: self.inspect(self.m["old"][name]["id"]) for name in (APPS[0], APPS[3])}
+                    need(all(row["State"].get("Health", {}).get("Status") == "healthy" for row in final.values()),
+                         "original health changed during recovery verification")
+                    break
+            if attempt == 59 or time.monotonic() >= deadline:
+                raise RuntimeError("original container health timeout after restart")
+            time.sleep(1)
+        return {"schema": OLD_HEAD, "restored_original_processes": True, "database_restored": False,
+                "downgrade_invoked": False, "checks": checks}
+
+    def reuse_intent(self, phase):
+        intent = self.root / (phase + ".intent.json")
+        if phase == "recover-freeze" and intent.exists():
+            need(not (self.root / "recover-freeze.json").exists(), "recover-freeze already completed")
+            return True
+        if phase == "migrate" and intent.exists():
+            need(self.schema() in {self.m["intermediate_head"], TARGET_HEAD},
+                 "migrate intent exists; only continuation from 0028 or 0029 is allowed")
+            return True
+        if phase == "verify":
+            return True
+        need(not intent.exists(), "phase intent already exists")
+        save(intent, {"at": now(), "phase": phase, "manifest_sha256": sha(self.raw)})
+        return False
 
     def execute(self, phase):
         need(phase in PHASES, "unknown phase")
@@ -511,13 +551,7 @@ class Release:
         need(not owner.is_symlink() and json.loads(owner.read_bytes()) == {"release": self.release, "manifest_sha256": sha(self.raw)},
              "other release owns shop")
         need(not (BASE / ".shop-pn-active-owner.json").is_symlink(), "shop PN owner must not be replaced by a symlink")
-        intent = self.root / (phase + ".intent.json")
-        if phase == "migrate" and intent.exists():
-            need(self.schema() in {self.m["intermediate_head"], TARGET_HEAD},
-                 "migrate intent exists; only continuation from 0028 or 0029 is allowed")
-        elif phase != "verify":
-            need(not intent.exists(), "phase intent already exists")
-            save(intent, {"at": now(), "phase": phase, "manifest_sha256": sha(self.raw)})
+        self.reuse_intent(phase)
         if phase == "recover-freeze":
             result = self.recover_freeze()
         elif phase.startswith("backup-"):

@@ -395,5 +395,22 @@ class OutboundTests(unittest.TestCase):
         self.assertTrue((release.root / (release.app + ".create.redacted.json")).is_file())
 
 
+class RecoverLockTests(unittest.TestCase):
+    def test_plain_recover_intent_blocks_later_phases(self):
+        import tempfile
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        release = object.__new__(ops.Release)
+        release.root = Path(folder.name)
+        self.assertFalse(ops.Release.recover_started(release))
+        (release.root / "recover.intent.json").write_text("{}\n")
+        self.assertTrue(ops.Release.recover_started(release))
+        self.assertFalse(ops.Release.recover_passed(release))
+        (release.root / "recover-stamp.intent.json").write_text("{}\n")
+        self.assertFalse(ops.Release.recover_passed(release))
+        (release.root / "recover-stamp-abc.json").write_text("{}\n")
+        self.assertTrue(ops.Release.recover_passed(release))
+
+
 if __name__ == "__main__":
     unittest.main()

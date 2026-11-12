@@ -1031,6 +1031,15 @@ class Release(vis.Release):
     def disable_outbound(self):
         return self.recreate_app("false")
 
+    def recover_started(self):
+        """recover writes recover.intent.json; a hyphenated glob does not see that file."""
+        if (self.root / "recover.intent.json").is_file():
+            return True
+        return any(self.root.glob("recover-*.intent.json"))
+
+    def recover_passed(self):
+        return any(path.is_file() and ".intent." not in path.name for path in self.root.glob("recover-*.json"))
+
     def recover_gate(self):
         h.need(not (self.root / "exposure-started.json").exists(), "exposure may have begun; forward repair required")
         h.need(self.schema() == OLD_SCHEMA, "schema already moved; re-run upgrade head and do not downgrade")
@@ -1067,7 +1076,7 @@ class Release(vis.Release):
         if phase in {"enable-outbound", "disable-outbound"}:
             h.need(any(self.root.glob("verify-*.json")), "verify required before outbound change")
         elif phase != "recover":
-            h.need(not list(self.root.glob("recover-*.intent.json")), "recovered release is terminal")
+            h.need(not self.recover_started(), "recovered release is terminal")
         before = self.predecessor()
         self.evidence()
         h.need(self.predecessor() == before, "predecessor owner changed")
@@ -1085,7 +1094,9 @@ class Release(vis.Release):
             raise RuntimeError("migrate already completed")
         suffix = phase + ("-" + h.stamp() + "-" + uuid.uuid4().hex if phase in {"verify", "recover"} else "")
         intent = self.root / (phase + ".intent.json")
-        if phase == "migrate" and intent.exists():
+        if phase == "recover" and intent.exists():
+            h.need(not self.recover_passed(), "recover already completed")
+        elif phase == "migrate" and intent.exists():
             h.need(self.schema() in {MID_SCHEMA, TARGET}, "migrate intent exists; only continuation from 86f7 or c3e8 is allowed")
         elif phase not in {"verify"}:
             h.save(self.root / (phase + ".intent.json"), {**identity, "phase": phase, "time": h.stamp()})
