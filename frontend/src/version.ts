@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.46.0";
+export const APP_VERSION = "1.47.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.47.0",
+    date: "2026-11-12",
+    items: [
+      "坏件返还会按型号和数量进入待修池。维修人员在池子里找到对应型号，填写修好的数量和无法修复的废品数量即可，不用再按件派工。",
+      "修好的零件直接进入电商库存，不再回到备件系统主库。修不好的会打上废品标记，不再继续流转。",
+      "采购可以按型号看待修、已上电商和废品数量。主管可以查看维修记录并作废；如果作废时商城已经加过库存，需要确认是否已经手工减掉。",
+    ],
+  },
   {
     version: "1.46.0",
     date: "2026-11-06",
