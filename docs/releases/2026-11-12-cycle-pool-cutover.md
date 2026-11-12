@@ -1,6 +1,6 @@
 # 坏件循环待修池发布控制器（只准备，不执行）
 
-决策: D-0058
+决策: D-0058、D-0059
 
 本文登记两支新的生产发布控制器和它们的阶段命令。它不是生产回执，不表示已经打标签、切流、开出站或上线。本变更不合并、不部署、不连接生产写、不生成或轮换 token、不改 `frontend/src/version.ts`、不打开闲鱼/闲管家 live 发布，也不碰 HOLD 的 #520–#522。
 
@@ -53,7 +53,7 @@ python3 .deploy/cycle_pool_ops.py --check-archive REPO source.tar.gz
 
 manifest 必须带上控制器、smoke、dry-run、可见性、接续、pool、helper 的 sha256。执行时以文件字节为准；上面历史控制器的摘要是固定门禁。
 
-## 商城
+## 商城（按 D-0059 在线发布）
 
 `SHOP_RELEASE` 还没有。必须从生产 `4b40bb24c6de3cc95e1361e97ca55e3b53475792` 窄移植 #89 和 #92 之后，用那个合并提交的 40 位 SHA。不要部署商城 main（已知发散头前缀 `f5481cf1`），也不要把这条 release 分支合回商城 main。本仓库不包含那次窄移植。
 
@@ -77,9 +77,34 @@ python3 .deploy/shop_cycle_ops.py \
   PHASE
 ```
 
-`PHASE` 依次为 `preflight`、`freeze`、`backup-old`、`migrate`、`backup-new`、`create`、`activate`、`verify`。freeze 已开始但还没有迁移/创建/暴露时，`recover-freeze` 拉起原来的五个容器，并等到 backend 与 frontend 的 Docker 健康检查以及公网 `/api/ready`、`/healthz` 都通过才写 PASS。失败后只要还没有这份 PASS，就可以再跑 `recover-freeze`。停写范围是 backend、worker、agent、frontend 和 NocoDB bridge。不碰 Noco 界面和 Noco 的两个库，不碰 `it-shop-prod-*`、itsp、Caddy。不 `compose down`，不改 Caddyfile 里的 `shop.ybwznt.com`。`preflight` 执行候选树里的 `deploy/scripts/check-external-networks.sh`；frontend 起来之后执行 `deploy/scripts/rollback-networks.sh` 把 ingress 接回去。两份脚本的 sha256 钉在 manifest 里，脚本里若出现 `docker compose down` 则拒绝。
+新发布的 `PHASE` 依次为 `preflight`、`backup-old`、`migrate`、`backup-new`、`create`、`activate`、`verify`。`freeze` 已禁用。这项调整只适用于商城 `.deploy/shop_cycle_ops.py`，上面的 itsp 流程仍按原有阶段执行。
 
-部署期间 `CYCLE_SELL_TOKEN_SHA256` 必须为空。不改 `CATALOG_*` / `PN_MASTER_*`。不降级。0029 上若已经有名字里带 `cycle` 的表写入行，控制器拒绝再把旧程序指回这个库。
+1. **旧服务持续在线，先做在线备份。** `preflight` 核对原来的五个容器、候选镜像、网络、schema 与兼容性审查。`backup-old` 由 `pg_dump` 取得一个一致的 MVCC 快照，在无网络、无发布端口的 PostgreSQL 15 容器里真正恢复，核验 schema、表和恢复后的行数。在线请求可以正常写入，因此不把稍后查询到的生产行数与备份快照强行比较。备份回执记录恢复快照中的行数、dump 大小与 sha256；`migrate` 再次核对 dump 字节和恢复证明。
+2. **只执行已审查的兼容迁移。** 执行 0027 → 0028 → 0029 时旧程序继续服务。新 manifest 必须声明 `strategy=online-expand-v1` 和 `online_migration_review_sha256`，摘要指向同一目录的 `online-migration-review.json`。这份审查必须将 `release`、`source_sha256`、`app_image`、`frontend_image`、`old_head`、`intermediate_head`、`target_head` 与 manifest 完全绑定，并显式声明 `old_app_compatible=true`、`cycle_writes_disabled=true`。这些声明须来自该精确候选的迁移审查与兼容验证；控制器读取声明不等于自动证明任何未来迁移都向后兼容。
+3. **旁起候选，探测通过后才切流。** `create` 不重命名、删除或替换旧容器。候选使用发布专属名称和网络；新前端的 `backend:8000` 只解析到候选后端，不能复用旧栈的公共 DNS 别名。候选前端不发布宿主机端口。`activate` 先启动候选 backend/frontend，等待 Docker 健康检查并直接探测候选 `/api/health`、`/api/ready`、`/healthz`，通过后才继续。worker/agent 做单实例交接，避免两代后台进程同时消费；NocoDB bridge 保持原容器。
+4. **只切商城 route，保留旧栈。** 切流只改 `shop.ybwznt.com` 对应 route 的 upstream，使用 Caddy ETag 条件更新，不做 `POST /load`；Caddyfile 同步受内容、inode 和文件锁核验。itsp 的 route、DB 和容器保持原身份。文件与运行配置不是同一事务，发布窗口须暂停其他 Caddy 配置写者；忽略本控制器文件锁的写者仍能造成并发冲突。中断时保留 intent、计划及现场证据，用显式恢复阶段处理，不无条件覆盖整份配置。
+5. **显式恢复旧入口。** `recover-cutover` 在核验原容器、兼容 schema、Caddy 计划及循环表仍未写入后，还须通过旧 backend/frontend 的健康检查和直接 HTTP 探测。先把 HTTP 入口交回旧栈，再交接后台进程，避免等待 agent 退出延长故障。恢复只切应用，不 `downgrade`、不改写 `alembic_version`、不把 dump 覆盖回生产。新业务已经写入循环表时拒绝回切。恢复开始后该次发布停止向前推进；修复后另建发布。
+
+`preflight` 仍执行候选树中的 `deploy/scripts/check-external-networks.sh`，传入显式 `--env-file` 和 `--compose`。脚本摘要固定于 manifest，脚本出现 `docker compose down` 则拒绝。新前端以专属名称接入 ingress，不再用旧的 reconnect 脚本接管旧前端名称。安全检查按完整 argv 核对受审查的命令形态，`alembic upgrade head` 中的 `head` 是合法修订参数；`cat`、`head`、`tail` 等读取私有 env 的命令仍被拒绝。
+
+### 迁移重试与旧停机发布恢复
+
+新控制器在迁移子进程发出前，先持久化 `migration-dispatched-*.json`。`migrate.intent.json` 包含 manifest 摘要和 `dispatch_tracking=true`。若检查阶段拒绝命令，且没有任何 dispatch 记录、迁移容器或数据库迁移会话，schema 仍为 0027 时可以重试 `migrate`。只看 schema 仍是 0027 不足以证明命令从未执行；子进程超时、启动结果不明或已有 dispatch 记录时不能按“没执行过”重试。0028/0029 的续跑仍须先排除残留迁移进程和会话。
+
+`recover-freeze` 留作旧离线流程的恢复入口，允许 freeze 已完成但升级可证明尚未发出的情况。它核对原五个容器的 id、镜像、名称、旧 schema 和未改动入口，拉起原进程，并等待 backend/frontend 健康检查及公网 `/api/ready`、`/healthz` 通过才写 PASS；没有 PASS 的失败恢复可以重试。恢复不会恢复数据库或降级。
+
+**这次旧控制器留下的 intent 没有新的 dispatch 跟踪协议，不能凭“没有新日志”推导旧命令未执行。** 现场恢复须保留原 manifest、owner、回执及日志，以独立事故证据核对实际未发出升级、schema 和容器身份，再按经审查的恢复步骤处置。本修复没有连接生产，也没有替现场生成“未执行”证明。不得删除 intent、伪造新字段、重算旧 manifest/owner/回执摘要来绕过门禁。旧冻结发布不能原地改成在线发布；恢复后归档该次失败证据，按新控制器摘要、新 manifest 和新兼容性证据准备一次新的发布。
+
+部署期间 `CYCLE_SELL_TOKEN_SHA256` 必须为空。不改 `CATALOG_*` / `PN_MASTER_*`，不生成 token、不配置经办人、不打开 itsp 出站或商城 live。上述恢复和发布命令的存在不表示本 PR 已执行它们；生产恢复、重发时间和真实验收单独记录。
+
+### 本修复的开发验证
+
+- `python3 -m unittest discover -s .deploy/tests -p 'test_shop_cycle*.py'`：47 项通过。覆盖完整命令误拦、派发日志与超时、0027 重试门禁、在线备份、兼容审查绑定、恢复拒绝不污染 intent、候选 DNS 隔离、探测/交接顺序、Caddy CAS、并发漂移及回切。
+- `python3 -m unittest discover -s .deploy/tests -p test_cycle_pool_ops.py`：15 项通过。itsp 控制器及三个历史控制器的代码字节未改。
+- 本地 Docker 29.9.2 与真实 Caddy 2.11.4：通过 Docker API 创建隔离网络，确认旧网络 `backend` 只解析旧后端、候选网络只解析新后端；实际执行商城路由 ETag PATCH、持久化及反向切回，itsp 路由保持一致。官方测试镜像没有 curl，管理请求以宿主机 curl 访问本地映射端口，仍执行控制器的响应解析及条件更新逻辑。测试容器停止并保留，未删除已有资源。
+- Python 编译与 `git diff --check` 通过。独立代理复核发现的输入漂移、无效恢复污染 intent、重复商城路由和回切健康/顺序问题已修复；该复核为同模型，不代称跨模型复审。
+
+这些结果不是生产演练，也不是精确商城候选的迁移兼容性证明。重发前仍须生成上述绑定的兼容审查。备份或创建候选时若部分失败，旧 HTTP 继续服务；这两阶段的独占 intent/制品不自动清理，须保留现场并按审查后的步骤处置，不能删除标记直接重试。
 
 ## 非目标
 
