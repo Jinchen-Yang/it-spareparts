@@ -266,7 +266,8 @@ class Release:
         need(artifact(Path(__file__))["sha256"] == self.m["controller_sha256"], "controller changed")
         need(artifact(self.root / "source.tar.gz")["sha256"] == self.m["source_sha256"], "source archive changed")
         need(artifact(self.compose_file)["sha256"] == self.m["compose_sha256"], "compose file drifted")
-        self.run(["bash", str(self.script("check-external-networks.sh", "network_check_sha256"))])
+        self.run(["bash", str(self.script("check-external-networks.sh", "network_check_sha256")),
+                  "--env-file", ENV_FILE, "--compose", str(self.compose_file)])
         for key in ("app_image", "frontend_image"):
             image = self.inspect(self.m[key], True)
             need(image["Config"].get("Labels", {}).get("org.opencontainers.image.revision") == self.release, "candidate OCI revision differs")
@@ -453,7 +454,8 @@ class Release:
         else:
             raise RuntimeError("backend health timeout; forward-only repair required")
         self.run(["docker", "start", created[APPS[3]]])
-        self.run(["bash", str(self.script("rollback-networks.sh", "network_rollback_sha256"))])
+        self.run(["bash", str(self.script("rollback-networks.sh", "network_rollback_sha256")),
+                  "reconnect", "--env-file", ENV_FILE, "--compose", str(self.compose_file)])
         self.http("/api/ready")
         self.http("/healthz")
         for name in (APPS[1], APPS[2]):

@@ -116,6 +116,79 @@ class ShopBoundaryTests(unittest.TestCase):
         self.assertNotIn("next.env.read", text)
 
 
+class ShopNetworkArgvTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        root = Path(self.folder.name)
+        scripts = root / "deploy" / "scripts"
+        scripts.mkdir(parents=True)
+        self.check = scripts / "check-external-networks.sh"
+        self.rollback = scripts / "rollback-networks.sh"
+        self.check.write_text("echo check-external-networks\n", encoding="utf-8")
+        self.rollback.write_text("echo rollback-networks\n", encoding="utf-8")
+        compose = root / "prod.compose.yml"
+        compose.write_text("name: it-shop-next\n", encoding="utf-8")
+        source = root / "source.tar.gz"
+        source.write_bytes(b"source")
+        self.release = object.__new__(ops.Release)
+        self.release.root = root
+        self.release.release = "c" * 40
+        self.release.compose_file = compose
+        self.release.m = {
+            "controller_sha256": hashlib.sha256((DEPLOY / "shop_cycle_ops.py").read_bytes()).hexdigest(),
+            "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "compose_sha256": hashlib.sha256(compose.read_bytes()).hexdigest(),
+            "network_check_sha256": hashlib.sha256(self.check.read_bytes()).hexdigest(),
+            "network_rollback_sha256": hashlib.sha256(self.rollback.read_bytes()).hexdigest(),
+        }
+        self.seen = []
+
+        def run(argv, **kwargs):
+            self.seen.append(list(argv))
+            if argv[:1] == ["bash"]:
+                raise RuntimeError("captured network argv")
+            return b""
+
+        self.release.run = run
+
+    def test_preflight_check_passes_env_file_and_compose(self):
+        with self.assertRaisesRegex(RuntimeError, "captured network argv"):
+            ops.Release.preflight(self.release)
+        argv = self.seen[0]
+        self.assertEqual(argv, [
+            "bash", str(self.check),
+            "--env-file", "/root/IT-shop/private/next.env",
+            "--compose", str(self.release.compose_file),
+        ])
+        ops.refuse_compose_down(argv)
+        self.assertEqual(argv[argv.index("--env-file") + 1], ops.ENV_FILE)
+        self.assertNotIn("down", argv)
+
+    def test_activate_rollback_reconnects_with_env_file_and_compose(self):
+        self.release.mark = Mock(return_value={"created": {name: name + "-id" for name in ops.APPS}})
+        self.release.protected = Mock()
+        self.release.schema = Mock(return_value=ops.TARGET_HEAD)
+        self.release.posted_cycle_rows = Mock(return_value=0)
+        self.release.token_is_empty = Mock(return_value=True)
+        self.release.inspect = Mock(return_value={"State": {"Running": True, "Health": {"Status": "healthy"}}})
+        with self.assertRaisesRegex(RuntimeError, "captured network argv"):
+            ops.Release.activate(self.release)
+        self.assertEqual(self.seen[0], ["docker", "start", ops.APPS[0] + "-id"])
+        self.assertEqual(self.seen[1], ["docker", "start", ops.APPS[3] + "-id"])
+        argv = self.seen[2]
+        self.assertEqual(argv, [
+            "bash", str(self.rollback),
+            "reconnect",
+            "--env-file", "/root/IT-shop/private/next.env",
+            "--compose", str(self.release.compose_file),
+        ])
+        ops.refuse_compose_down(argv)
+        self.assertEqual(argv[argv.index("--env-file") + 1], ops.ENV_FILE)
+        self.assertNotIn("down", argv)
+
+
 class ShopRecoverTests(unittest.TestCase):
     def test_failed_recover_can_be_retried_until_pass(self):
         import tempfile
