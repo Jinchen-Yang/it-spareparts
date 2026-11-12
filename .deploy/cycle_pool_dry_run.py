@@ -243,10 +243,9 @@ def evaluate(snapshot, controller_bytes):
         current = snapshot.get("alembic_current") if isinstance(snapshot.get("alembic_current"), dict) else {}
         if current.get("code") != 0:
             return "alembic current exit code is not 0"
-        allowed = {ops.OLD_SCHEMA + " (head)", ops.OLD_SCHEMA + " (head) (mergepoint)"}
         lines = [line.strip() for line in str(current.get("stdout", "")).splitlines() if line.strip()]
-        if len(lines) != 1 or lines[0] not in allowed:
-            return "alembic current is not 98af with an optional mergepoint"
+        if lines != [ops.OLD_SCHEMA + " (mergepoint)"]:
+            return "alembic current is not 98af (mergepoint) under the c3e8 script head"
         return None
 
     def check_alembic_heads_and_upgrade_head():
@@ -353,6 +352,8 @@ def negative_report(snapshot, controller_bytes):
     add("heads_multiple", _mutate(snapshot, ("alembic_heads", "stdout"),
                                   "c3e8a1d94b27 (head)\n86f7486b9ed5 (head)"))
     add("current_already_target", _mutate(snapshot, ("alembic_current", "stdout"), "c3e8a1d94b27 (head)"))
+    add("current_ancestor_marked_head", _mutate(snapshot, ("alembic_current", "stdout"),
+                                                 "98afc0d2157b (head) (mergepoint)"))
     add("current_malformed", _mutate(snapshot, ("alembic_current", "stdout"),
                                       "98afc0d2157b (head) (mergepoint) extra"))
     drifted = copy.deepcopy(snapshot)

@@ -30,6 +30,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 import traceback
 import uuid
 
@@ -52,7 +53,7 @@ VISIBILITY_DIGEST = "6b2fe7287242ff6ce5dfcd785613877ef49dd80f13fb8ea15c4d244e93d
 SUCCESSOR_DIGEST = "2b2aa5ca2ca305b9f42574b50f505199169919323eea9d7c80ed90e3f19e2d1e"
 HELPER_DIGEST = "054e67d143a808e5672eea716573ac23a4ecf47ae6cd9a762a89901acfff5f16"
 SMOKE_DIGEST = "8b942cbbd5fcb70517f84647af6ad25de72a621ccc7c7befd3ad55191685d7d5"
-DRY_RUN_DIGEST = "3c3c6d608fe507da83ea75ed9f116e9ee49166fda1684c16aa2ceabe94ff295b"
+DRY_RUN_DIGEST = "073b33061b73c2fbd30d384d8f30f4357782fbc05f1169505d55f445538f8b6e"
 LOCKS = (".catalog-source-handoff.lock", ".itsp-production-deploy.lock")
 GATES = (
     "required_ci", "independent_review", "candidate_regression", "scope_review",
@@ -72,6 +73,15 @@ NEW_CYCLE_TABLES = (
     "maintenance_repair_record", "maintenance_repair_record_source",
     "maintenance_repair_command", "maintenance_cycle_sell_intent",
 )
+CYCLE_PAGE_KEYS = (
+    "page_cycle_recycle", "page_cycle_test", "page_cycle_repair",
+    "page_cycle_manage", "page_cycle_wip",
+)
+# 86f7486b9ed5._cycle_page_keys_false 会改这几列。其余列仍按冻结摘要逐字节比较。
+PERMISSION_COLUMNS = {
+    "sys_role_template": ("permissions",),
+    "sys_user": ("template_perms", "perm_overrides", "permissions"),
+}
 LEGACY_CYCLE_TABLES = ("maintenance_cycle_unit", "maintenance_cycle_event", "maintenance_cycle_sell_intent")
 
 VISIBILITY_PATH = Path(__file__).with_name("requirements_visibility_ops.py")
@@ -506,18 +516,20 @@ class Release(vis.Release):
         return lines[0]
 
     def current_revision(self):
+        """Match non-verbose ``alembic current`` when c3e8 is the only script head.
+
+        ``(head)`` is printed only for a script head. 98af is a merge ancestor, so
+        the candidate image prints ``98afc0d2157b (mergepoint)``. 86f7 is neither a
+        head nor a merge, so it prints the bare revision.
+        """
         lines = self.revision_lines(self.alembic(["current"]))
         h.need(len(lines) == 1, "database must have exactly one current revision")
-        head = self.schema()
-        if head == OLD_SCHEMA:
-            allowed = {OLD_SCHEMA + " (head)", OLD_SCHEMA + " (head) (mergepoint)"}
-        elif head == MID_SCHEMA:
-            allowed = {MID_SCHEMA + " (head)", MID_SCHEMA + " (head) (mergepoint)"}
-        elif head == TARGET:
-            allowed = {TARGET + " (head)", TARGET + " (head) (mergepoint)"}
-        else:
-            allowed = set()
-        h.need(lines[0] in allowed, "alembic current does not match the database head")
+        expected = {
+            OLD_SCHEMA: OLD_SCHEMA + " (mergepoint)",
+            MID_SCHEMA: MID_SCHEMA,
+            TARGET: TARGET + " (head)",
+        }.get(self.schema())
+        h.need(expected is not None and lines[0] == expected, "alembic current does not match the database revision")
         return lines[0]
 
     def parent_of(self, revision):
@@ -631,7 +643,81 @@ class Release(vis.Release):
         h.need(report.get("snapshot_sha256") == h.artifact(self.root / "dry-run-snapshot.json")["sha256"], "dry-run snapshot drifted")
         h.need(snapshot.get("release") == self.sha and snapshot.get("daily_backup_dir") == str(DAILY_BACKUP_DIR),
                "dry-run snapshot is not this release")
-        return vis.Release.freeze(self)
+        result = vis.Release.freeze(self)
+        full = result["data_fingerprints"]
+        reduced = {}
+        for table, spec in full.items():
+            skip = set(PERMISSION_COLUMNS.get(table, ()))
+            columns = [column for column in spec["columns"] if column not in skip]
+            if columns:
+                reduced[table] = columns
+        result["business_fingerprints"] = self.data_fingerprints(reduced)
+        result["permission_before"] = self.permission_hashes(False)
+        result["permission_after"] = self.permission_hashes(True)
+        return result
+
+    def _permission_expr(self, column, kind):
+        h.need(re.fullmatch(r"[a-z_]+", column), "permission column refused")
+        blob = "jsonb_build_object(" + ", ".join("'%s', false" % key for key in CYCLE_PAGE_KEYS) + ")"
+        if kind == "merge_always":
+            return ("(CASE WHEN jsonb_typeof(%s) = 'object' THEN %s ELSE '{}'::jsonb END || %s)"
+                    % (column, column, blob))
+        if kind == "merge_object":
+            return ("(CASE WHEN jsonb_typeof(%s) = 'object' THEN %s || %s ELSE %s END)"
+                    % (column, column, blob, column))
+        if kind == "remove_object":
+            removed = column
+            for key in CYCLE_PAGE_KEYS:
+                removed = "(%s - '%s')" % (removed, key)
+            return "(CASE WHEN jsonb_typeof(%s) = 'object' THEN %s ELSE %s END)" % (column, removed, column)
+        raise RuntimeError("unknown permission projection")
+
+    def _hash_rows(self, query):
+        h.need(query.lstrip().upper().startswith("SELECT") and ";" not in query, "projection must be one select")
+        h.need(not re.search(r"(?i)\b(insert|update|delete|truncate|drop|alter)\b", query), "projection must not write")
+        wrapped = ("COPY (SELECT encode(sha256(convert_to(row_to_json(t)::text,'UTF8')),'hex') AS fingerprint FROM ("
+                   + query + ") t ORDER BY fingerprint) TO STDOUT")
+        with tempfile.TemporaryFile(dir=self.root) as target:
+            self.run(["docker", "exec", "-e", "PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=120000",
+                      h.DB, "psql", "-U", "spareparts", "-d", "spareparts", "-X", "-q", "-v", "ON_ERROR_STOP=1",
+                      "-c", wrapped], stdout=target, timeout=150)
+            target.seek(0)
+            value, size = hashlib.sha256(), 0
+            for chunk in iter(lambda: target.read(1024 * 1024), b""):
+                value.update(chunk)
+                size += len(chunk)
+        return {"sha256": value.hexdigest(), "bytes": size}
+
+    def permission_hashes(self, transformed):
+        projections = (
+            ("sys_role_template", "id", "permissions", "merge_always"),
+            ("sys_user", "id", "template_perms", "merge_object"),
+            ("sys_user", "id", "permissions", "merge_object"),
+            ("sys_user", "id", "perm_overrides", "remove_object"),
+        )
+        result = {}
+        for table, key, column, kind in projections:
+            expr = self._permission_expr(column, kind) if transformed else column
+            query = "SELECT %s AS id, %s AS %s FROM public.%s" % (key, expr, column, table)
+            result[table + "." + column] = self._hash_rows(query)
+        return result
+
+    def unchanged_business(self):
+        """Keep every frozen column except the cycle page-key JSON the migration rewrites."""
+        frozen = self.marker("freeze")
+        business = frozen.get("business_fingerprints")
+        h.need(isinstance(business, dict) and business, "freeze is missing the business fingerprint")
+        current = self.data_fingerprints({table: spec["columns"] for table, spec in business.items()})
+        h.need(current == business, "business rows changed outside the cycle page-key update")
+        head = self.schema()
+        live = self.permission_hashes(False)
+        if head == OLD_SCHEMA:
+            h.need(live == frozen.get("permission_before"), "permissions changed before the cycle-key migration")
+        elif head in {MID_SCHEMA, TARGET}:
+            h.need(live == frozen.get("permission_after"), "cycle page keys are not the migration's false values")
+        else:
+            raise RuntimeError("unexpected schema for the permission check")
+        return True
 
     def restore(self, path, expected_head, expected_counts, label):
         extra = {}
@@ -713,7 +799,7 @@ class Release(vis.Release):
                 "path": [OLD_SCHEMA, MID_SCHEMA, TARGET], "maintenance_project": counted["maintenance_project"],
                 "maintenance_project_contract": counted["maintenance_project_contract"], "cycle_tables_zero": True}
 
-    def clone(self, name, old, image, frontend=False):
+    def clone(self, name, old, image, frontend=False, audit_name=None):
         if frontend:
             return super().clone(name, old, image, True)
         old = copy.deepcopy(old)
@@ -729,9 +815,9 @@ class Release(vis.Release):
                "cycle sell token checksum differs")
         h.need("CYCLE_SELL_CALLBACK_TOKEN_SHA256" not in prepared or prepared.get("CYCLE_SELL_CALLBACK_TOKEN_SHA256") == "",
                "callback token is out of scope")
-        return self.create_redacted(name, old, image)
+        return self.create_redacted(name, old, image, audit_name or name)
 
-    def create_redacted(self, name, old, image):
+    def create_redacted(self, name, old, image, audit_name=None):
         cfg, host = copy.deepcopy(old["Config"]), copy.deepcopy(old["HostConfig"])
         cfg.update(Hostname=name, Image=image)
         def provenance(key):
@@ -745,7 +831,7 @@ class Release(vis.Release):
         audit = copy.deepcopy(request)
         audit["Env"] = ["SHOP_CYCLE_SELL_TOKEN=<redacted>" if entry.startswith("SHOP_CYCLE_SELL_TOKEN=") else entry
                         for entry in audit.get("Env") or []]
-        h.save(self.root / (name + ".create.redacted.json"), audit)
+        h.save(self.root / ((audit_name or name) + ".create.redacted.json"), audit)
         response = json.loads(self.run(
             ["curl", "-fsS", "--unix-socket", "/var/run/docker.sock", "-H", "Content-Type: application/json",
              "--data-binary", "@-", "http://localhost/containers/create?name=" + name],
@@ -900,6 +986,12 @@ class Release(vis.Release):
         names = (self.front, h.DB, h.CADDY, "it-shop-next-frontend", "it-shop-next-backend", "it-shop-next-db")
         return {name: h.fingerprint(self.inspect(name)) for name in names}
 
+    def outbound_names(self, enabled):
+        label = "on" if enabled == "true" else "off"
+        stamp = h.stamp()
+        return ("%s-outbound-%s-%s" % (self.app, label, stamp),
+                "%s-before-%s-%s" % (self.app, label, stamp))
+
     def recreate_app(self, enabled):
         h.need((self.root / "exposure-started.json").is_file(), "outbound change before exposure is refused")
         h.need(self.schema() == TARGET, "schema is not c3e8")
@@ -913,13 +1005,16 @@ class Release(vis.Release):
                "cycle sell token checksum differs")
         h.need(not values.get("CYCLE_SELL_CALLBACK_TOKEN_SHA256"), "callback token is out of scope")
         h.need(environment_file_labels(current["Config"].get("Labels")) == [], "environment_file label refused")
+        audit_name, retired_name = self.outbound_names(enabled)
+        audit_path = self.root / (audit_name + ".create.redacted.json")
+        h.need(not audit_path.exists() and not audit_path.is_symlink(), "outbound audit path already exists")
         before = self.protected_fingerprints()
         caddy_before = self.caddyfile.read_bytes()
         prepared = copy.deepcopy(current)
         prepared["Config"]["Env"] = self.cycle_environment(current["Config"].get("Env"), enabled)
         self.run(["docker", "stop", "--time", "60", current["Id"]], timeout=90)
-        self.run(["docker", "rename", current["Id"], self.app + "-before-" + ("on" if enabled == "true" else "off")])
-        self.clone(self.app, prepared, self.m["app_image"], False)
+        self.run(["docker", "rename", current["Id"], retired_name])
+        self.clone(self.app, prepared, self.m["app_image"], False, audit_name=audit_name)
         self.run(["docker", "start", self.app])
         self.wait_http("http://127.0.0.1:" + str(self.m["port"]) + "/health/db")
         for name, expected in before.items():

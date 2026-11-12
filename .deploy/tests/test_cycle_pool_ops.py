@@ -57,7 +57,7 @@ def snapshot_for(controller):
         "manifest": body, "manifest_sha256": file_sha,
         "files": {"manifest.json": file_sha, "predecessor_owner": body["predecessor_owner_sha256"], "nginx": body["nginx_sha256"]},
         "alembic_heads": {"stdout": ops.TARGET + " (head)", "code": 0},
-        "alembic_current": {"stdout": ops.OLD_SCHEMA + " (head) (mergepoint)", "code": 0},
+        "alembic_current": {"stdout": ops.OLD_SCHEMA + " (mergepoint)", "code": 0},
         "route": route, "route_dial": dial, "mounts_a": mounts_a, "mounts_b": list(reversed(mounts_a)),
         "nginx_sha256": body["nginx_sha256"],
         "predecessor": {"path": ops.PREDECESSOR_OWNER, "release": ops.OLD_SHA, "rewritten": False},
@@ -148,8 +148,11 @@ class MigrationTests(unittest.TestCase):
             if args == ["heads"]:
                 return ops.TARGET + " (head)"
             if args == ["current"]:
-                suffix = " (head) (mergepoint)" if release._head == ops.OLD_SCHEMA else " (head)"
-                return release._head + suffix
+                if release._head == ops.OLD_SCHEMA:
+                    return ops.OLD_SCHEMA + " (mergepoint)"
+                if release._head == ops.MID_SCHEMA:
+                    return ops.MID_SCHEMA
+                return ops.TARGET + " (head)"
             if args == ["upgrade", "head"]:
                 release._head = ops.TARGET
                 return ""
@@ -189,9 +192,24 @@ class MigrationTests(unittest.TestCase):
     def test_current_accepts_98af_mergepoint_and_heads_stay_exact(self):
         release = object.__new__(ops.Release)
         release.schema = Mock(return_value=ops.OLD_SCHEMA)
-        release.alembic = Mock(side_effect=[ops.OLD_SCHEMA + " (head) (mergepoint)", ops.OLD_SCHEMA + " (head)"])
-        self.assertEqual(ops.Release.current_revision(release), ops.OLD_SCHEMA + " (head) (mergepoint)")
-        self.assertEqual(ops.Release.current_revision(release), ops.OLD_SCHEMA + " (head)")
+        release.alembic = Mock(side_effect=[
+            ops.OLD_SCHEMA + " (mergepoint)",
+            ops.MID_SCHEMA,
+            ops.TARGET + " (head)",
+        ])
+        self.assertEqual(ops.Release.current_revision(release), ops.OLD_SCHEMA + " (mergepoint)")
+        release.schema = Mock(return_value=ops.MID_SCHEMA)
+        self.assertEqual(ops.Release.current_revision(release), ops.MID_SCHEMA)
+        release.schema = Mock(return_value=ops.TARGET)
+        self.assertEqual(ops.Release.current_revision(release), ops.TARGET + " (head)")
+        release.schema = Mock(return_value=ops.OLD_SCHEMA)
+        release.alembic = Mock(return_value=ops.OLD_SCHEMA + " (head) (mergepoint)")
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            ops.Release.current_revision(release)
+        release.schema = Mock(return_value=ops.MID_SCHEMA)
+        release.alembic = Mock(return_value=ops.MID_SCHEMA + " (head)")
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            ops.Release.current_revision(release)
         release.alembic = Mock(return_value=ops.TARGET + " (head)")
         self.assertEqual(ops.Release.head_revision(release), ops.TARGET + " (head)")
         release.alembic = Mock(return_value=ops.TARGET + " (head) (mergepoint)")
@@ -206,6 +224,45 @@ class MigrationTests(unittest.TestCase):
             ops.Release.recover_gate(release)
         self.assertNotIn('["downgrade"', __import__("inspect").getsource(ops.Release.rollback))
         self.assertNotIn("UPDATE alembic_version", __import__("inspect").getsource(ops.Release.rollback))
+
+    def test_page_key_projection_is_the_only_allowed_row_change(self):
+        release = object.__new__(ops.Release)
+        role = ops.Release._permission_expr(release, "permissions", "merge_always")
+        user = ops.Release._permission_expr(release, "template_perms", "merge_object")
+        removed = ops.Release._permission_expr(release, "perm_overrides", "remove_object")
+        self.assertIn("ELSE '{}'::jsonb", role)
+        self.assertIn("'page_cycle_repair', false", role)
+        self.assertIn("ELSE template_perms", user)
+        self.assertNotIn("'{}'", user)
+        self.assertIn("- 'page_cycle_wip'", removed)
+        self.assertIn("ELSE perm_overrides", removed)
+        business = {"sys_user": {"columns": ["id", "username"], "sha256": "1" * 64, "bytes": 1}}
+        before = {"sys_user.permissions": {"sha256": "a" * 64, "bytes": 2}}
+        after = {"sys_user.permissions": {"sha256": "b" * 64, "bytes": 3}}
+        release.marker = Mock(return_value={
+            "business_fingerprints": business, "permission_before": before, "permission_after": after,
+        })
+        release.data_fingerprints = Mock(return_value=business)
+        release.permission_hashes = Mock(return_value=before)
+        release.schema = Mock(return_value=ops.OLD_SCHEMA)
+        self.assertTrue(ops.Release.unchanged_business(release))
+        release.schema = Mock(return_value=ops.MID_SCHEMA)
+        release.permission_hashes = Mock(return_value=after)
+        self.assertTrue(ops.Release.unchanged_business(release))
+        release.permission_hashes = Mock(return_value=before)
+        with self.assertRaisesRegex(RuntimeError, "cycle page keys"):
+            ops.Release.unchanged_business(release)
+        release.schema = Mock(return_value=ops.OLD_SCHEMA)
+        release.data_fingerprints = Mock(return_value={
+            "sys_user": {"columns": ["id", "username"], "sha256": "f" * 64, "bytes": 9},
+        })
+        release.permission_hashes = Mock(return_value=before)
+        with self.assertRaisesRegex(RuntimeError, "business rows changed"):
+            ops.Release.unchanged_business(release)
+        source = __import__("inspect").getsource(ops.Release.recreate_app)
+        self.assertLess(source.index("outbound_names"), source.index('["docker", "stop"'))
+        self.assertLess(source.index("create.redacted.json"), source.index('["docker", "stop"'))
+        self.assertLess(source.index("cycle_environment"), source.index('["docker", "stop"'))
 
 
 class CandidateEnvTests(unittest.TestCase):
@@ -279,6 +336,7 @@ class OutboundTests(unittest.TestCase):
         self.addCleanup(folder.cleanup)
         release.root = Path(folder.name)
         (release.root / "exposure-started.json").write_text("{}\n")
+        (release.root / (release.app + ".create.redacted.json")).write_text("{}\n")
         release.caddyfile = release.root / "Caddyfile"
         release.caddyfile.write_bytes(b"shop.ybwznt.com { reverse_proxy it-shop-next-frontend:80 }\n")
         base_env = [
@@ -331,6 +389,10 @@ class OutboundTests(unittest.TestCase):
         prepared = release.clone.call_args.args[1]["Config"]["Env"]
         self.assertIn("SHOP_CYCLE_SELL_ENABLED=true", prepared)
         self.assertIn("SHOP_CATALOG_SYNC_ENABLED=false", prepared)
+        audit_name = release.clone.call_args.kwargs["audit_name"]
+        self.assertNotEqual(audit_name, release.app)
+        self.assertTrue(audit_name.startswith(release.app + "-outbound-on-"))
+        self.assertTrue((release.root / (release.app + ".create.redacted.json")).is_file())
 
 
 if __name__ == "__main__":

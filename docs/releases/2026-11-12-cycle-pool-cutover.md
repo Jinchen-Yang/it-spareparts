@@ -16,7 +16,7 @@
 
 三个文件的字节都没有改。itsp 控制器在导入时核对可见性控制器 `6b2fe7287242ff6ce5dfcd785613877ef49dd80f13fb8ea15c4d244e93d37e9d` 和接续控制器 `2b2aa5ca2ca305b9f42574b50f505199169919323eea9d7c80ed90e3f19e2d1e`。商城控制器核对 `shop_pn_ops.py` 的 `beca271f1420981e5dcf21b78c7469710ce084efc75d0247b86712b567361c48`。
 
-itsp 的升级顺序继承可见性控制器：先证明无网络恢复出旧头，再比较冻结时的业务行，然后真正迁移，`alembic check`，再比较那些行。命令是 `alembic upgrade head`，不是接续发布的空迁移。接续发布的教训留在新文件里：Mounts 按目标/类型/源排序后再比较、`alembic current` 接受 `98afc0d2157b (head) (mergepoint)`、主站 route 接受 `terminal: true`、freeze 前必须有当次 live 快照的 dry-run、`exposure-started.json` 先于改 Caddyfile、切流不用 `POST /load`、暴露后不自动回滚。
+itsp 的升级顺序继承可见性控制器：先证明无网络恢复出旧头，再比较冻结时的业务行，然后真正迁移，`alembic check`，再比较那些行。命令是 `alembic upgrade head`，不是接续发布的空迁移。候选镜像的脚本头是 `c3e8a1d94b27`，所以升级前 `alembic current` 是 `98afc0d2157b (mergepoint)`（不再带 `(head)`），停在中间修订时是不带后缀的 `86f7486b9ed5`。`86f7486b9ed5` 会把五个循环页键写成 false，因此 `sys_role_template.permissions` 与 `sys_user` 的 `template_perms` / `perm_overrides` / `permissions` 允许按该迁移的投影变化；其余列仍与冻结摘要一致。接续发布的其余教训留在新文件里：Mounts 按目标/类型/源排序后再比较、主站 route 接受 `terminal: true`、freeze 前必须有当次 live 快照的 dry-run、`exposure-started.json` 先于改 Caddyfile、切流不用 `POST /load`、暴露后不自动回滚。出站重建使用单独的审计文件名，并在停掉正在跑的 app 之前完成环境与路径检查。
 
 ## itsp
 
