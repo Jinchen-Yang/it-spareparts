@@ -226,16 +226,43 @@ def evaluate(snapshot, controller_bytes):
         return "missing ETag was accepted"
 
     def check_mounts_normalized():
+        """Accept a stable 0/1-mount sample. Always prove >=2 normalization separately.
+
+        The live itsp app has one bind mount, so its order cannot vary. That is
+        not drift. Order normalization is proved with a synthetic two-mount
+        fixture, and again with the live samples when the container has two or
+        more mounts. Source changes remain drift at every count that has a mount.
+        """
         left = snapshot.get("mounts_a")
         right = snapshot.get("mounts_b")
-        if not isinstance(left, list) or not isinstance(right, list) or len(left) < 2 or left == right:
-            return "snapshot did not capture two mount orders"
+        if not isinstance(left, list) or not isinstance(right, list) or len(left) != len(right):
+            return "snapshot mount samples are not paired lists"
+        if any(not isinstance(item, dict) for item in (*left, *right)):
+            return "snapshot mount samples are not paired lists"
         base = {"Config": {"Image": "sha256:abc"}, "HostConfig": {"NetworkMode": "it-spareparts_default"}}
-        if ops.Release.config({**base, "Mounts": left}) != ops.Release.config({**base, "Mounts": right}):
+        if len(left) < 2:
+            if left != right:
+                return "mount sample changed with nothing to reorder"
+        else:
+            if left == right:
+                return "snapshot did not capture two mount orders"
+            if ops.Release.config({**base, "Mounts": left}) != ops.Release.config({**base, "Mounts": right}):
+                return "mount order was treated as drift"
+        if left:
+            drifted = copy.deepcopy(left)
+            drifted[0] = dict(drifted[0], Source=drifted[0].get("Source", "") + "-drift")
+            if ops.Release.config({**base, "Mounts": left}) == ops.Release.config({**base, "Mounts": drifted}):
+                return "mount source drift was ignored"
+        synthetic = [
+            {"Destination": "/app/data/raw", "Type": "bind", "Source": "/data/spareparts/uploads", "RW": True},
+            {"Destination": "/run/secrets/db", "Type": "bind", "Source": "/run/secrets/db", "RW": False},
+        ]
+        flipped = list(reversed(synthetic))
+        if ops.Release.config({**base, "Mounts": synthetic}) != ops.Release.config({**base, "Mounts": flipped}):
             return "mount order was treated as drift"
-        drifted = copy.deepcopy(left)
-        drifted[0] = dict(drifted[0], Source=drifted[0].get("Source", "") + "-drift")
-        if ops.Release.config({**base, "Mounts": left}) == ops.Release.config({**base, "Mounts": drifted}):
+        synthetic_drift = copy.deepcopy(synthetic)
+        synthetic_drift[0] = dict(synthetic_drift[0], Source=synthetic_drift[0]["Source"] + "-drift")
+        if ops.Release.config({**base, "Mounts": synthetic}) == ops.Release.config({**base, "Mounts": synthetic_drift}):
             return "mount source drift was ignored"
         return None
 
@@ -357,8 +384,12 @@ def negative_report(snapshot, controller_bytes):
     add("current_malformed", _mutate(snapshot, ("alembic_current", "stdout"),
                                       "98afc0d2157b (head) (mergepoint) extra"))
     drifted = copy.deepcopy(snapshot)
-    drifted["mounts_b"] = [dict(item) for item in drifted["mounts_b"]]
-    drifted["mounts_b"][0] = dict(drifted["mounts_b"][0], Source="/drift")
+    samples = drifted.get("mounts_b")
+    if isinstance(samples, list) and samples:
+        drifted["mounts_b"] = [dict(item) for item in samples]
+        drifted["mounts_b"][0] = dict(drifted["mounts_b"][0], Source="/drift")
+    else:
+        drifted["mounts_b"] = [{"Destination": "/drift", "Type": "bind", "Source": "/drift"}]
     add("mount_source_drift", drifted)
     add("nginx_mismatch", _mutate(snapshot, ("nginx_sha256",), "ab" * 32))
     add("predecessor_release", _mutate(snapshot, ("predecessor", "release"), "7e5f15e5" + "a" * 32))

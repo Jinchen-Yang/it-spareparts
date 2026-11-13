@@ -41,16 +41,20 @@ def manifest(**overrides):
     return result
 
 
-def snapshot_for(controller):
+def snapshot_for(controller, mounts_a=None, mounts_b=None):
     digest = hashlib.sha256(controller).hexdigest()
     body = manifest(controller_sha256=digest)
     dial = ops.OLD_PREFIX + "-frontend:80"
     route = {"match": [{"host": ["ybwznt.com", "www.ybwznt.com"]}],
              "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": dial}]}], "terminal": True}
-    mounts_a = [
-        {"Destination": "/data/files", "Type": "volume", "Source": "/vol", "RW": True},
-        {"Destination": "/run/secrets/db", "Type": "bind", "Source": "/sec", "RW": False},
-    ]
+    if mounts_a is None:
+        mounts_a = [
+            {"Destination": "/data/files", "Type": "volume", "Source": "/vol", "RW": True},
+            {"Destination": "/run/secrets/db", "Type": "bind", "Source": "/sec", "RW": False},
+        ]
+        mounts_b = list(reversed(mounts_a))
+    elif mounts_b is None:
+        mounts_b = [dict(item) for item in mounts_a]
     file_sha = "b" * 64
     return {
         "release": ops.APP_SHA, "captured_at": "2026-11-12T00:00:00+00:00", "controller_sha256": digest,
@@ -58,7 +62,7 @@ def snapshot_for(controller):
         "files": {"manifest.json": file_sha, "predecessor_owner": body["predecessor_owner_sha256"], "nginx": body["nginx_sha256"]},
         "alembic_heads": {"stdout": ops.TARGET + " (head)", "code": 0},
         "alembic_current": {"stdout": ops.OLD_SCHEMA + " (mergepoint)", "code": 0},
-        "route": route, "route_dial": dial, "mounts_a": mounts_a, "mounts_b": list(reversed(mounts_a)),
+        "route": route, "route_dial": dial, "mounts_a": mounts_a, "mounts_b": mounts_b,
         "nginx_sha256": body["nginx_sha256"],
         "predecessor": {"path": ops.PREDECESSOR_OWNER, "release": ops.OLD_SHA, "rewritten": False},
         "daily_backup_dir": "/data/backups/spareparts", "legacy_backup_dir_used": False,
@@ -289,11 +293,39 @@ class CandidateEnvTests(unittest.TestCase):
         self.assertEqual(ops.Release.config(base), ops.Release.config(flipped))
         drifted = dict(base, Mounts=[dict(base["Mounts"][0], Source="/evil"), base["Mounts"][1]])
         self.assertNotEqual(ops.Release.config(base), ops.Release.config(drifted))
+        empty = dict(base, Mounts=[])
+        self.assertEqual(ops.Release.config(empty), ops.Release.config(dict(empty)))
+        one = dict(base, Mounts=[{"Destination": "/app/data/raw", "Type": "bind", "Source": "/data/spareparts/uploads"}])
+        one_drift = dict(base, Mounts=[{"Destination": "/app/data/raw", "Type": "bind", "Source": "/other"}])
+        self.assertEqual(ops.Release.config(one), ops.Release.config(dict(one, Mounts=list(one["Mounts"]))))
+        self.assertNotEqual(ops.Release.config(one), ops.Release.config(one_drift))
         route = {"match": [{"host": ["www.ybwznt.com", "ybwznt.com"]}],
                  "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "old:80"}]}], "terminal": True}
         self.assertTrue(ops.route_is_main(route, "old:80"))
         self.assertFalse(ops.route_is_main(dict(route, terminal=False), "old:80"))
         self.assertFalse(ops.route_is_main(dict(route, group="g1"), "old:80"))
+
+    def test_paired_samples_keep_zero_and_one_and_vary_two_or_more(self):
+        upload = {"Destination": "/app/data/raw", "Type": "bind", "Source": "/data/spareparts/uploads", "RW": True}
+        secret = {"Destination": "/run/secrets/db", "Type": "bind", "Source": "/run/secrets/db", "RW": False}
+        self.assertEqual(ops.paired_mount_samples([], []), ([], []))
+        self.assertEqual(ops.paired_mount_samples([upload], [dict(upload)]), ([upload], [upload]))
+        with self.assertRaisesRegex(RuntimeError, "nothing to reorder"):
+            ops.paired_mount_samples([upload], [dict(upload, Source="/other")])
+        with self.assertRaisesRegex(RuntimeError, "length drifted"):
+            ops.paired_mount_samples([upload], [])
+        with self.assertRaisesRegex(RuntimeError, "not a list"):
+            ops.paired_mount_samples(None, None)
+        same = ops.paired_mount_samples([upload, secret], [dict(upload), dict(secret)])
+        self.assertEqual(same[0], [upload, secret])
+        self.assertEqual(same[1], [secret, upload])
+        already = ops.paired_mount_samples([upload, secret], [secret, upload])
+        self.assertEqual(already, ([upload, secret], [secret, upload]))
+        third = {"Destination": "/tmp/extra", "Type": "bind", "Source": "/tmp/extra", "RW": True}
+        triple = ops.paired_mount_samples([upload, secret, third], [dict(upload), dict(secret), dict(third)])
+        self.assertEqual(triple[1], [third, secret, upload])
+        with self.assertRaisesRegex(RuntimeError, "did not vary"):
+            ops.paired_mount_samples([upload, upload], [dict(upload), dict(upload)])
 
     def test_compose_down_is_refused(self):
         with self.assertRaisesRegex(RuntimeError, "compose down refused"):
@@ -320,6 +352,39 @@ class DryRunTests(unittest.TestCase):
         self.assertGreaterEqual(negatives["count"], 21)
         self.assertEqual(negatives["refused"], negatives["count"])
         self.assertEqual(len(dry.CHECKS), 19)
+
+    def test_zero_and_one_mount_snapshots_pass_and_two_still_needs_two_orders(self):
+        controller = (DEPLOY / "cycle_pool_ops.py").read_bytes()
+        upload = {"Destination": "/app/data/raw", "Type": "bind", "Source": "/data/spareparts/uploads", "RW": True}
+        for mounts in ([], [upload]):
+            snap = snapshot_for(controller, mounts, [dict(item) for item in mounts])
+            report = dry.evaluate(snap, controller)
+            self.assertEqual(report["passed"], 19, report["errors"])
+            self.assertEqual(report["failed"], 0)
+            negatives = dry.negative_report(snap, controller)
+            self.assertEqual(negatives["status"], "ALL_OK")
+            self.assertEqual(negatives["refused"], negatives["count"])
+        drifted = snapshot_for(controller, [upload], [dict(upload, Source="/other")])
+        refused = dry.evaluate(drifted, controller)
+        self.assertTrue(any(item["check"] == "mounts_normalized" for item in refused["errors"]))
+        paired = snapshot_for(controller)
+        paired["mounts_b"] = [dict(item) for item in paired["mounts_a"]]
+        same_order = dry.evaluate(paired, controller)
+        self.assertTrue(any(item["check"] == "mounts_normalized" and "two mount orders" in item["detail"]
+                            for item in same_order["errors"]))
+        live = dry._ops()
+        original = live.Release.config
+
+        def order_sensitive(row):
+            return live.vis.Release.config(dict(row))
+
+        live.Release.config = staticmethod(order_sensitive)
+        try:
+            one = snapshot_for(controller, [upload], [dict(upload)])
+            proved = dry.evaluate(one, controller)
+        finally:
+            live.Release.config = original
+        self.assertTrue(any(item["check"] == "mounts_normalized" for item in proved["errors"]))
 
 
 class OutboundTests(unittest.TestCase):
