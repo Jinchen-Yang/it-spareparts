@@ -307,7 +307,8 @@ class Expose:
                 observed = http("https://" + host + path)
                 need({k: observed[k] for k in ("status", "sha256")} == {k: expected[k] for k in ("status", "sha256")},
                      "public asset mismatch: " + host + path)
-        cut_time = row["time"]
+        cut_time = dt.datetime.strptime(row["time"], "%Y%m%dT%H%M%S.%fZ").replace(
+            tzinfo=dt.timezone.utc).isoformat()
         logs = {}
         for name in (APP, FRONT):
             raw = run(["docker", "logs", "--since", cut_time, name], timeout=120)
