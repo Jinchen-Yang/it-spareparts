@@ -247,3 +247,27 @@ python3 .deploy/shop_cycle_ops.py \
 - 不打开 `SHOP_CYCLE_SELL_ENABLED` 的默认值；`enable-outbound` 只是以后受控阶段的代码。
 - 不实现闲鱼/闲管家 live 发布，不装配真实发帖客户端。
 - 不改 HOLD 的 #520–#522，不改 `.deploy/restore_drill.sh`、`shop_pn_ops.py`、`requirements_successor_ops.py`、`requirements_visibility_ops.py`。
+
+## itsp 完成暴露（D-0060，2026-11-15）
+
+前次发布在 bluegreen 中止（`nginx.conf` O_EXCL 自碰撞；旧 app 被人工重启恢复服务后 preflight 指纹漂移，
+原控制器不可续跑）。完成步骤改用 `.deploy/cycle_pool_expose.py`（摘要记录在各回执的 `script_sha256`）：
+
+```text
+python3 .deploy/cycle_pool_expose.py \
+  /data/spareparts/releases/cycle-pool-ccefa17cc6446f613b7237ac0cd2121256969622/ \
+  prepare|expose|final-verify
+```
+
+- `prepare`：核验前序 PASS 回执与缺位回执、schema=c3e8、候选 app 身份/环境/token 摘要、
+  Caddyfile 未漂移；把 `nginx.conf`（manifest `nginx_sha256` 钉住的基线）的上游替换为候选 app 后
+  另存 `nginx-cycle.conf`；按冻结 inspect 克隆候选 frontend（端口 18105、挂载新配置、双网络），
+  健康探测通过后落 `expose-prepare.json`。
+- `expose`：候选再探测 → `caddy validate` → 先落 `exposure-started.json` → inode 保持写 Caddyfile
+  （只替换主站上游一处）→ `caddy reload` → 公网探测 → 停旧 app（保留旧 frontend 作回退参照）→
+  落 `expose-cutover.json`。
+- `final-verify`：双主机公网健康、候选与公网资产逐字节一致、候选日志无错误、旧 app 停止、
+  循环表行数与页键授权核查（应全 0）→ 落 `verify-*-expose.json`（满足原控制器
+  enable/disable-outbound 的 `verify-*.json` 门禁）。
+
+出站开关此后仍用原控制器单独执行：`python3 cycle_pool_ops.py <manifest> enable-outbound`。
