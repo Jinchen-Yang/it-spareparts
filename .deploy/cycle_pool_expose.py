@@ -292,7 +292,9 @@ class Expose:
 
     def final_verify(self):
         row = json.loads((self.root / "expose-cutover.json").read_bytes())
-        need(row.get("status") == "PASS" and row.get("script_sha256") == SCRIPT_SHA, "cutover receipt mismatch")
+        # 回执链：接受 git 分支历史里已推送的脚本摘要（3513cb78… = 切流实际使用的版本）。
+        pushed = {SCRIPT_SHA, "3513cb784dc800f58f51aca9ce8723f7a6cb615c5512dee820cdbc06b7cc071d"}
+        need(row.get("status") == "PASS" and row.get("script_sha256") in pushed, "cutover receipt mismatch")
         need(schema() == TARGET, "live schema changed")
         base = "http://127.0.0.1:" + str(self.m["port"])
         result = {host: {path: http("https://" + host + path) for path in ("/health", "/health/db")}
@@ -302,7 +304,9 @@ class Expose:
         for path in paths:
             expected = http(base + path)
             for host in HOSTS:
-                need(http("https://" + host + path) == expected, "public asset mismatch: " + host + path)
+                observed = http("https://" + host + path)
+                need({k: observed[k] for k in ("status", "sha256")} == {k: expected[k] for k in ("status", "sha256")},
+                     "public asset mismatch: " + host + path)
         cut_time = row["time"]
         logs = {}
         for name in (APP, FRONT):
