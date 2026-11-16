@@ -2450,6 +2450,26 @@ def _account_display_name(db: Session, username: str | None) -> str | None:
     return row or username
 
 
+def _account_display_names(db: Session, usernames: set[str | None]) -> dict[str, str]:
+    """批量：账号 → 显示人名（停用账号照常解析；无显示名不臆造，不入结果）。"""
+    valid = {u for u in usernames if u}
+    if not valid:
+        return {}
+    from app.models.system import SysUser
+
+    rows = db.execute(
+        select(SysUser.username, SysUser.display_name).where(SysUser.username.in_(valid))
+    ).all()
+    return {u: name.strip() for u, name in rows if name and name.strip()}
+
+
+def _account_with_name(account: str | None, name: str | None) -> str | None:
+    """导出统一口径：账号后附显示人名「账号（姓名）」（D-0062）；无显示名原样返回账号。"""
+    if not account:
+        return None
+    return f"{account}（{name}）" if name else account
+
+
 _EXAMPLE_FONT = Font(color="999999", italic=True)
 _EXAMPLE_FILL = PatternFill("solid", fgColor="F5F5F5")
 
@@ -3150,13 +3170,15 @@ def _v2_build_return_ledger(wb, db, project_id) -> str:
     for (_, order_no), qty in by_demand.items():
         ws.append(["需求单已返还", order_no or "来源需求单", str(qty)])
     ws.append([])
+    # 登记人统一「账号（姓名）」；RKD 导入占位账号 rkd_import 等无显示名时原样保留（D-0025 不臆造）。
+    registrant_names = _account_display_names(db, {row.created_by for row, _ in records})
     ws.append(["记录ID", "需求单", "PN", "描述", "数量", "件况", "收货时间", "来源", "来源单号", "备注", "登记人", "版本", "层级", "数量待审"])
     for row, order_no in records:
         ws.append([row.rkd_line_id, order_no or "未关联需求单", row.pn,
                    row.description, str(row.qty), row.test_result,
                    row.occurred_at.isoformat() if row.occurred_at else None,
                    "手工登记" if row.source == "manual" else "入库导入", row.head_no,
-                   row.note, row.created_by, row.version,
+                   row.note, _account_with_name(row.created_by, registrant_names.get(row.created_by)), row.version,
                    "整机（计1台，附属明细不计数）" if row.receipt_kind == "machine" else "备件",
                    "待审（保留源小数）" if row.review_required else "否"])
     for cells in ws:
