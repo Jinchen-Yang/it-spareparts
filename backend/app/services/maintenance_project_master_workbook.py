@@ -2464,7 +2464,7 @@ def _account_display_names(db: Session, usernames: set[str | None]) -> dict[str,
 
 
 def _account_with_name(account: str | None, name: str | None) -> str | None:
-    """导出统一口径：账号后附显示人名「账号（姓名）」；无显示名原样返回账号。"""
+    """导出统一口径：账号后附显示人名「账号（姓名）」（D-0062）；无显示名原样返回账号。"""
     if not account:
         return None
     return f"{account}（{name}）" if name else account

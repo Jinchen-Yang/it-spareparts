@@ -558,7 +558,7 @@ def _plan_rows(snapshot: Mapping[str, Any], *, export_id: str, key: bytes) -> li
 
 
 def _account_with_name(account: Any, name: Any) -> str:
-    """导出统一口径：账号后附显示人名「账号（姓名）」；无显示名原样返回账号。"""
+    """导出统一口径：账号后附显示人名「账号（姓名）」（D-0062）；无显示名原样返回账号。"""
     account = str(account or "")
     if not account:
         return ""
