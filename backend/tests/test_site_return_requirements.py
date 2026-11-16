@@ -201,3 +201,28 @@ def test_export_actual_receipts_separately_and_reject_edited_snapshot(db):
             db, project_id=project.project_id, data=_save(wb)
         )
     assert error.value.code == "readonly_field_changed"
+
+
+def test_return_ledger_registrant_renders_account_with_display_name(db):
+    """台账登记人导出口径：账号（姓名）；无显示名原样账号，不臆造（D-0025 口径）。"""
+    from app.models.system import SysUser
+
+    project, part, _, _ = _make_project_with_line(db)
+    _, line = _site_issue(db, project, part)
+    db.add(SysUser(username="receiver-named", password_hash="x", role="readonly",
+                   display_name="张收货"))
+    register_receipt(db, project_id=project.project_id, pn="LEDGER-PN-1", qty=1,
+                     operated_by="receiver-named")
+    register_receipt(db, project_id=project.project_id, pn="LEDGER-PN-2", qty=2,
+                     operated_by="ghost-no-user")
+    db.commit()
+    wb, _, _, _ = _download(db, project.project_id, line.issue_line_id)
+    ledger = wb[master.V2_SHEET_RETURN_LEDGER]
+    registrants = {
+        cell.value
+        for row in ledger for cell in row
+        if isinstance(cell.value, str)
+        and ("receiver-named" in cell.value or "ghost-no-user" in cell.value)
+    }
+    assert "receiver-named（张收货）" in registrants
+    assert "ghost-no-user" in registrants

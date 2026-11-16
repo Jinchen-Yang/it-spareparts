@@ -11,6 +11,7 @@ from openpyxl import load_workbook
 from app.config import get_settings
 from app.models.maintenance_project import MaintenanceProjectContract
 from app.models.maintenance_project_operations import MaintenanceCollectionSnapshot
+from app.models.system import SysUser
 from app.services import maintenance_project_export
 from tests.boss_board_helpers import boss_client, make_project
 
@@ -69,6 +70,33 @@ def test_project_note_is_optional_and_exported_as_independent_plain_text(db):
         rows = list(workbook["维保项目清单"].iter_rows(values_only=True))
         assert rows[0] == ("项目名称", "项目备注")
         assert rows[1][1] == "'=现场改造\n联系甲方"
+    finally:
+        workbook.close()
+
+
+def test_project_manager_account_column_appends_display_name(db):
+    """维保负责人账号列统一「账号（姓名）」；无显示名原样账号，不臆造（D-0025 口径）。"""
+    named = make_project(db, code="负责人有姓名", lifecycle="ongoing")
+    named.project_manager_id = "manager-named"
+    plain = make_project(db, code="负责人无姓名", lifecycle="ongoing")
+    plain.project_manager_id = "manager-ghost"
+    db.add(SysUser(username="manager-named", password_hash="x", role="readonly",
+                   display_name="李维保"))
+    db.commit()
+    client = boss_client(db, username="project-export-manager")
+    response = client.post("/api/maintenance/boss-board/projects/export", json={
+        "fields": ["project_name", "project_manager_id"], "lifecycle": "ongoing",
+    })
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(BytesIO(response.content), read_only=True)
+    try:
+        rows = {
+            row[0]: row[1]
+            for row in workbook["维保项目清单"].iter_rows(values_only=True)
+            if row[0] in {"负责人有姓名", "负责人无姓名"}
+        }
+        assert rows["负责人有姓名"] == "manager-named（李维保）"
+        assert rows["负责人无姓名"] == "manager-ghost"
     finally:
         workbook.close()
 

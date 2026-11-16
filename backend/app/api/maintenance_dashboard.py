@@ -927,10 +927,11 @@ def export(
         )
         header, columns = _receipt_export_columns(visible)
         for row in rows:
-            # 登记人：有显示名给「显示名（账号）」，否则账号原样。
+            # 登记人：账号后附显示名「账号（姓名）」，无显示名账号原样
+            # （与项目总表台账、项目清单导出统一）。
             name = row.get("created_by_name")
             row["_registrant"] = (
-                f"{name}（{row['created_by']}）" if name else row.get("created_by")
+                f"{row['created_by']}（{name}）" if name else row.get("created_by")
             )
         data = rows
     elif kind == "quantity_checks":

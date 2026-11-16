@@ -21,8 +21,16 @@ from sqlalchemy.orm import Session
 
 from app.services.excel_text_safety import ILLEGAL_EXCEL_CHARS
 from app.models.maintenance_project import MaintenanceProject
+from app.models.system import SysUser
 from app.security import UserContext
 from app.services import maintenance_boss_board as board
+
+
+def _with_display_name(account: str | None, name: str | None) -> str | None:
+    """导出统一口径：账号后附显示人名「账号（姓名）」；无显示名原样返回账号。"""
+    if not account:
+        return None
+    return f"{account}（{name}）" if name else account
 
 
 MAX_EXPORT_ROWS = 5_000
@@ -208,7 +216,9 @@ EXPORT_FIELDS: tuple[ExportField, ...] = (
     ExportField("business_type", "业务类型", "项目基础", lambda r: _value(r, "_master_business_type"), width=18),
     ExportField("cmo_name", "CMO名称", "项目基础", lambda r: _value(r, "_master_cmo_name"), width=20),
     ExportField("project_manager", "维保负责人", "项目基础", lambda r: _value(r, "project_manager"), width=16),
-    ExportField("project_manager_id", "维保负责人账号", "项目基础", lambda r: _value(r, "_master_project_manager_id"), width=20),
+    ExportField("project_manager_id", "维保负责人账号", "项目基础",
+                lambda r: _with_display_name(_value(r, "_master_project_manager_id"),
+                                             _value(r, "_master_project_manager_name")), width=30),
     ExportField("salesperson", "销售人员", "项目基础", lambda r: _value(r, "salesperson"), width=16),
     ExportField("no_return_default", "默认不返还", "项目基础", lambda r: _yes_no(r, "_master_no_return_default"), width=14),
     ExportField("no_return_note", "免返标注", "项目基础", lambda r: _value(r, "_master_no_return_note"), width=54),
@@ -303,6 +313,19 @@ def _merge_master_facts(db: Session, rows: list[dict]) -> None:
             )
         )
     }
+    # 维保负责人账号统一「账号（姓名）」；账号停用照常解析，无显示名不臆造。
+    manager_ids = {p.project_manager_id for p in projects.values() if p.project_manager_id}
+    manager_names: dict[str, str] = {}
+    if manager_ids:
+        manager_names = {
+            username: name.strip()
+            for username, name in db.execute(
+                select(SysUser.username, SysUser.display_name).where(
+                    SysUser.username.in_(manager_ids)
+                )
+            ).all()
+            if name and name.strip()
+        }
     for row in rows:
         project = projects.get(row["project_id"])
         if project is None:
@@ -311,6 +334,7 @@ def _merge_master_facts(db: Session, rows: list[dict]) -> None:
             "_master_business_type": project.business_type,
             "_master_cmo_name": project.cmo_name,
             "_master_project_manager_id": project.project_manager_id,
+            "_master_project_manager_name": manager_names.get(project.project_manager_id),
             "_master_no_return_default": project.no_return_default,
             "_master_no_return_note": project.no_return_note,
             "_master_project_note": project.project_note,

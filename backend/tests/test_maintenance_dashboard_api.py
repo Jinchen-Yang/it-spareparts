@@ -991,10 +991,18 @@ def test_receipts_registrant_filter_and_export_column(db, seeded):
     assert {row["created_by"] for row in response.json()["rows"]} == {target}
     summary = client.get(f"{BASE}/summary").json()
     assert summary["registrants"][0]["created_by"] == target
+    # 登记人导出统一「账号（姓名）」：给该账号配显示名后验证组合单元格。
+    user = db.scalar(select(SysUser).where(SysUser.username == target))
+    if user is None:
+        db.add(SysUser(username=target, password_hash="x", role="readonly",
+                       display_name="登记员甲"))
+    else:
+        user.display_name = "登记员甲"
+    db.commit()
     export = client.get(f"{BASE}/export", params={
         "kind": "receipts", "format": "csv", "created_by": target,
     })
     assert export.status_code == 200
     text = export.content.decode("utf-8-sig")
     assert "登记人" in text.splitlines()[0]
-    assert target in text
+    assert f"{target}（登记员甲）" in text
