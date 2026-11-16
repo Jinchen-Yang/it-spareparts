@@ -557,6 +557,15 @@ def _plan_rows(snapshot: Mapping[str, Any], *, export_id: str, key: bytes) -> li
     return rows
 
 
+def _account_with_name(account: Any, name: Any) -> str:
+    """导出统一口径：账号后附显示人名「账号（姓名）」；无显示名原样返回账号。"""
+    account = str(account or "")
+    if not account:
+        return ""
+    name = str(name or "").strip()
+    return f"{account}（{name}）" if name else account
+
+
 def _acceptance_rows(snapshot: Mapping[str, Any]) -> list[tuple[Any, ...]]:
     projects, _ = _snapshot_maps(snapshot)
     rows: list[tuple[Any, ...]] = []
@@ -572,7 +581,7 @@ def _acceptance_rows(snapshot: Mapping[str, Any]) -> list[tuple[Any, ...]]:
             int(acceptance.get("attachment_count") or 0),
             str(acceptance.get("approval_status") or "not_reviewed"),
             acceptance.get("approved_at"),
-            str(acceptance.get("approved_by") or ""),
+            _account_with_name(acceptance.get("approved_by"), acceptance.get("approved_by_name")),
             configuration,
             "附件载体待业务配置；外部链接不作为附件证据" if configuration != "configured" else "提交即生效，无需独立审批（2026-08-24 起）",
         ))

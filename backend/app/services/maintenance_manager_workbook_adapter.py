@@ -503,6 +503,20 @@ class MaintenanceManagerWorkbookAdapter:
                 acceptance_statement = acceptance_statement.with_for_update()
             acceptance_rows = list(self.db.scalars(acceptance_statement))
 
+        # 审批人导出统一「账号（姓名）」；停用账号照常解析，无显示名不臆造。
+        approver_names: dict[str, str] = {}
+        approver_ids = {row.approved_by for row in acceptance_rows if row.approved_by}
+        if approver_ids:
+            approver_names = {
+                username: name.strip()
+                for username, name in self.db.execute(
+                    select(SysUser.username, SysUser.display_name).where(
+                        SysUser.username.in_(approver_ids)
+                    )
+                ).all()
+                if name and name.strip()
+            }
+
         attachments_by_deliverable: dict[str, int] = defaultdict(int)
         deliverable_ids = [row.deliverable_id for row in acceptance_rows]
         if deliverable_ids:
@@ -610,6 +624,10 @@ class MaintenanceManagerWorkbookAdapter:
                         ),
                         "approved_at": deliverable.approved_at if deliverable else None,
                         "approved_by": deliverable.approved_by if deliverable else None,
+                        "approved_by_name": (
+                            approver_names.get(deliverable.approved_by)
+                            if deliverable else None
+                        ),
                         "attachment_count": (
                             attachments_by_deliverable[deliverable.deliverable_id]
                             if deliverable

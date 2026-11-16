@@ -207,6 +207,48 @@ class MaintenanceManagerWorkbookV3ContractTest(unittest.TestCase):
         self.assertEqual(change.completeness_state, "date_only")
         self.assertTrue(any(issue.code == "partial_plan_node" for issue in result.warnings))
 
+    def test_acceptance_approver_renders_account_with_display_name(self):
+        # 审批人导出口径：账号（姓名）；无显示名原样账号，不臆造（D-0025 口径）。
+        snapshot = _snapshot()
+        snapshot["projects"][0]["acceptance"].update({
+            "approved_by": "approver-named",
+            "approved_by_name": "王审批",
+        })
+        second = dict(snapshot["projects"][0])
+        second["project_id"] = "project-synthetic-2"
+        second["project_code"] = "PROJECT-SYNTHETIC-2"
+        second["project_name"] = "合成维保项目二号"
+        second["contracts"] = [
+            dict(
+                snapshot["projects"][0]["contracts"][0],
+                project_contract_id="project-contract-synthetic-2",
+                contract_no="CONTRACT-SYNTHETIC-2",
+                planned_milestones=[],
+            )
+        ]
+        second["acceptance"] = {"approved_by": "approver-ghost"}
+        snapshot["projects"].append(second)
+        artifact = workbook_v3.build_manager_workbook(snapshot, hmac_key=HMAC_KEY)
+
+        book = load_workbook(io.BytesIO(artifact.content), data_only=False)
+        try:
+            sheet = book[workbook_v3.ACCEPTANCE_SHEET]
+            table = sheet.tables[workbook_v3.ACCEPTANCE_TABLE]
+            min_col, min_row, max_col, max_row = range_boundaries(table.ref)
+            headers = [
+                sheet.cell(min_row, column).value
+                for column in range(min_col, max_col + 1)
+            ]
+            approver_col = headers.index("审批人（只读）") + 1
+            approvers = {
+                sheet.cell(row, approver_col).value
+                for row in range(min_row + 1, max_row + 1)
+            }
+            self.assertIn("approver-named（王审批）", approvers)
+            self.assertIn("approver-ghost", approvers)
+        finally:
+            book.close()
+
     def test_overview_has_no_acceptance_due_date_column(self):
         # 2026-08-25 拍板：验收无截止日概念，工作簿不再提供该列与对应变更。
         snapshot = _snapshot()
