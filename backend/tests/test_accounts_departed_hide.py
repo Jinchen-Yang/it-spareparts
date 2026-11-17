@@ -67,6 +67,15 @@ def orders_seed(db):
     so("D-R2", "SO-DEP-2", "张三")
     gone1 = so("D-R3", "SO-DEP-3", "李离职", ex="500")
     so("D-R4", "SO-DEP-4", "李离职", ex="700")
+    # NULL 三值语义对照：无销售（NULL）的单不受隐藏影响（not_in 对 NULL 的放行）
+    null_so = FSalesOrder(raw_order_id="D-R5", order_no="SO-DEP-5",
+                          order_date=date(2026, 10, 4), salesperson=None,
+                          business_type="备件销售", amount_ex_tax=Decimal("800"),
+                          amount_inc_tax=Decimal("800"),
+                          data_status=config.ACTIVE_STATUS,
+                          import_batch_id=batch.id)
+    db.add(null_so)
+    db.flush()
     db.add(FPurchaseOrder(
         raw_order_id="D-P1", order_no="CG-DEP-1", order_date=date(2026, 10, 2),
         purchaser="王采购", source_type="备件采购", source_type_raw="备件采购",
@@ -81,6 +90,13 @@ def orders_seed(db):
         tax_rate=Decimal("0.13"), amount_ex_tax=Decimal("400"),
         amount_inc_tax=Decimal("452"), data_status=config.ACTIVE_STATUS,
         import_batch_id=batch.id))
+    # 未关联销售单（NULL）的采购单不受隐藏影响
+    db.add(FPurchaseOrder(
+        raw_order_id="D-P3", order_no="CG-DEP-3", order_date=date(2026, 10, 4),
+        purchaser="王采购", source_type="备件采购", source_type_raw="备件采购",
+        is_tax_inclusive=True, tax_rate=Decimal("0.13"),
+        amount_ex_tax=Decimal("200"), amount_inc_tax=Decimal("226"),
+        data_status=config.ACTIVE_STATUS, import_batch_id=batch.id))
     db.commit()
 
 
@@ -148,7 +164,7 @@ def test_documents_preview_counts(db, admin_client, orders_seed):
     body = r.json()
     assert body["salesperson_name"] == "李离职"
     assert body["can_hide"] is True
-    assert body["sales_order_count"] == 2          # SO-DEP-3/4
+    assert body["sales_order_count"] == 2          # SO-DEP-3/4（预览只数李离职名下）
     assert body["linked_purchase_order_count"] == 1  # 仅 CG-DEP-1 挂李离职销售单
     # 无对应销售名：can_hide False、计数 0
     db.add(SysUser(username="dep-q", role="sales", password_hash=hash_password(PASSWORD)))
@@ -174,17 +190,17 @@ def test_deleted_listing_and_audit_action(db, admin_client, orders_seed):
 def test_sales_orders_list_and_export_exclude_hidden_but_kpi_keeps(db, orders_seed):
     _departed_account(db)
     assert departed_visibility.hidden_salespersons(db) == {"李离职"}
-    # 列表：只剩张三 2 单
+    # 列表：张三 2 单 + NULL 销售 1 单（NULL 放行）
     page = sales_analytics.orders(db, page=1, page_size=50)
-    assert page["total"] == 2
-    assert {r["order_no"] for r in page["items"]} == {"SO-DEP-1", "SO-DEP-2"}
+    assert page["total"] == 3
+    assert {r["order_no"] for r in page["items"]} == {"SO-DEP-1", "SO-DEP-2", "SO-DEP-5"}
     # 导出同源（同一函数）
     total, rows = sales_dashboard.export_orders(db, sort="order_date", order="desc")
-    assert total == 2
+    assert total == 3
     # 汇总照算：4 单金额全计（1000+1000+500+700=3200 未税）
     summary = sales_analytics.summary(db, date_from=date(2026, 9, 1),
                                       date_to=date(2026, 11, 1))
-    assert summary["kpi"]["orders"] == 4
+    assert summary["kpi"]["orders"] == 5   # 含 NULL 销售单，照算
     # 人员候选剔除李离职
     opts = sales_analytics.filter_options(db)
     names = [row["value"] for row in opts["salespeople"]]
@@ -201,13 +217,13 @@ def test_sales_groups_salesperson_dim_drops_hidden_other_dims_keep(db, orders_se
     # 其他维度（业务类型）照算 4 单
     bt = sales_dashboard.groups(db, group_by="business_type",
                                 date_from=date(2026, 9, 1), date_to=date(2026, 11, 1))
-    assert sum(item["orders"] for item in bt["groups"]) == 4
+    assert sum(item["orders"] for item in bt["groups"]) == 5
 
 
 def test_no_hidden_accounts_means_no_filter(db, orders_seed):
     assert departed_visibility.hidden_salespersons(db) == set()
     page = sales_analytics.orders(db, page=1, page_size=50)
-    assert page["total"] == 4   # 无人隐藏时行为与现状完全一致
+    assert page["total"] == 5   # 无人隐藏时行为与现状完全一致（含 NULL 销售单）
 
 
 # ---------- 采购分析读路径 ----------
@@ -216,17 +232,18 @@ def test_purchase_orders_exclude_linked_hidden_but_kpi_keeps(db, orders_seed):
     _departed_account(db)
     assert departed_visibility.hidden_sales_order_nos(db) == {"SO-DEP-3", "SO-DEP-4"}
     page = purchase_analytics.orders(db, page=1, page_size=50)
-    assert page["total"] == 1   # CG-DEP1（挂 SO-DEP-3）被隐藏，CG-DEP2 保留
-    assert page["items"][0]["order_no"] == "CG-DEP-2"
+    # CG-DEP1（挂 SO-DEP-3）被隐藏；CG-DEP2 保留；CG-DEP3（未关联 NULL）放行
+    assert page["total"] == 2
+    assert {r["order_no"] for r in page["items"]} == {"CG-DEP-2", "CG-DEP-3"}
     # 导出同源
     total, rows = purchase_analytics.export_orders(db)
-    assert total == 1
-    # KPI 照算：2 单都在
+    assert total == 2
+    # KPI 照算：3 单都在
     overview = purchase_analytics.summary(db, group_by="purchaser")
-    assert overview["kpi"]["orders"] == 2
-    # 采购员分组照算 2 单；按销售分组剔除李离职
+    assert overview["kpi"]["orders"] == 3
+    # 采购员分组照算 3 单；按销售分组剔除李离职
     by_purchaser = purchase_analytics.summary(db, group_by="purchaser")
-    assert sum(g["orders"] for g in by_purchaser["groups"]) == 2
+    assert sum(g["orders"] for g in by_purchaser["groups"]) == 3
     by_sales = purchase_analytics.summary(db, group_by="salesperson")
     sales_keys = [g["key"] for g in by_sales["groups"]]
     assert "李离职" not in sales_keys and "张三" in sales_keys

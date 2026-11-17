@@ -741,9 +741,13 @@ def delete_account(
 @router.get("/deleted")
 def list_deleted_accounts(
     db: Session = Depends(get_db),
-    _: None = Depends(_read_gate),
+    _: None = Depends(_write_gate),
 ) -> list[dict]:
-    """已删除账号（D-0063）：供恢复与单据显示切换；按删除时间倒序。"""
+    """已删除账号（D-0063）：供恢复与单据显示切换；按删除时间倒序。
+
+    权限与删除/恢复/切换同门（D-0063 §6「预览与已删除列表同门」= 写门），
+    前端入口本就仅管理员可见。
+    """
     users = db.execute(
         select(SysUser).where(SysUser.deleted_at.is_not(None))
         .order_by(desc(SysUser.deleted_at))
@@ -809,7 +813,7 @@ def set_documents_visibility(
 def documents_preview(
     username: str,
     db: Session = Depends(get_db),
-    _: None = Depends(_read_gate),
+    _: None = Depends(_write_gate),
 ) -> dict:
     """删除前预览（D-0063）：该账号对应销售名下已生效销售单与关联采购单数量。
 

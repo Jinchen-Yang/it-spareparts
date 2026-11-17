@@ -12,6 +12,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import config
 from app.models.sales import FSalesOrder
 from app.models.system import SysUser
 
@@ -37,9 +38,12 @@ def hidden_sales_order_nos(db: Session) -> set[str] | None:
     hidden = hidden_salespersons(db)
     if not hidden:
         return None
+    # 与账号删除弹窗的预览计数同口径（D-0063 §3）：只按已生效销售单隐藏，
+    # 作废/被取代的单不参与——预览数与实际隐藏数一致。
     nos = db.execute(
         select(FSalesOrder.order_no)
         .where(FSalesOrder.salesperson.in_(hidden),
-               FSalesOrder.order_no.is_not(None))
+               FSalesOrder.order_no.is_not(None),
+               FSalesOrder.data_status == config.ACTIVE_STATUS)
     ).scalars().all()
     return set(nos)

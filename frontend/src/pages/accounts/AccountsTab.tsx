@@ -1,7 +1,7 @@
 import { formatBusinessDateTime } from "../../utils/date";
 /** 账号列表页签：筛选（模板/角色/状态/关键词）+ 多选批量 + 单账号操作。 */
 import { useMemo, useState } from "react";
-import { App, Alert, Button, Checkbox, Descriptions, Drawer, Empty, Form, Input, List, Modal, Popconfirm, Select, Space, Table, Tag } from "antd";
+import { App, Alert, Button, Checkbox, Descriptions, Drawer, Empty, Form, Input, List, Modal, Popconfirm, Select, Space, Table, Tag, Typography } from "antd";
 import { PlusOutlined } from "@ant-design/icons";
 import ResizableTable from "../../components/ResizableTable";
 import type { Account, AccountsMeta, BulkOperation, DeletedAccount, DocumentsPreview } from "../../api/accounts";
@@ -43,6 +43,7 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
   const [pwForm] = Form.useForm();
   const [delT, setDelT] = useState<Account | null>(null);
   const [delPreview, setDelPreview] = useState<DocumentsPreview | null>(null);
+  const [delPreviewError, setDelPreviewError] = useState(false);
   const [delHide, setDelHide] = useState(false);
   const [delBusy, setDelBusy] = useState(false);
   const [deletedOpen, setDeletedOpen] = useState(false);
@@ -105,10 +106,14 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
     setDelT(u);
     setDelHide(false);
     setDelPreview(null);
+    setDelPreviewError(false);
     try {
       const r = await documentsPreview(u.username);
       setDelPreview(r.data);
-    } catch { /* 预览失败不阻塞删除，按无隐藏处理 */ }
+    } catch {
+      // 预览失败不阻塞删除，按无隐藏处理（D-0063 口径：无映射不隐藏）
+      setDelPreviewError(true);
+    }
   };
 
   const confirmDelete = async () => {
@@ -121,7 +126,7 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
         ? `已删除账号 ${delT.username}，其名下销售单已在销售/采购分析隐藏（可恢复）`
         : `已删除账号 ${delT.username}`);
       setDelT(null);
-      setDeletedRows(null);   // 已删除视图下次打开重取
+      if (deletedOpen) await refreshDeleted();   // 面板展开时保持数据新鲜
       onChanged();
     } catch (e) {
       message.error(explainApiError(e, "删除失败"));
@@ -330,18 +335,20 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
             </Descriptions.Item>
           )}
         </Descriptions>
-        <div style={{ marginBottom: 8, color: "#666" }}>
+        <Typography.Text type="secondary" style={{ display: "block", marginBottom: 8 }}>
           删除后该账号无法登录，历史记录保留；可在「已删除账号」里恢复。
-        </div>
+        </Typography.Text>
         {delPreview ? (delPreview.can_hide ? (
           <Checkbox checked={delHide} onChange={(e) => setDelHide(e.target.checked)}>
             同时隐藏其名下销售单（销售/采购分析不再显示，汇总金额不变）
           </Checkbox>
         ) : (
-          <div style={{ color: "#999" }}>
+          <Typography.Text type="secondary">
             该账号未配置「对应销售名」，无法定位其名下单据；如需隐藏请先在编辑中补配。
-          </div>
-        )) : <div style={{ color: "#999" }}>正在加载单据预览…</div>}
+          </Typography.Text>
+        )) : delPreviewError ? (
+          <Typography.Text type="secondary">单据预览加载失败；删除仍可进行，隐藏不可选。</Typography.Text>
+        ) : <Typography.Text type="secondary">正在加载单据预览…</Typography.Text>}
       </Modal>
 
       <BulkModal
