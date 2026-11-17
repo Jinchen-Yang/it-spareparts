@@ -33,6 +33,8 @@ export interface SalesAnalyticsOptions {
     amount_inc_tax_max: number | null;
     revenue_max: number | null;
   };
+  /** D-0063：被隐藏离职销售人数（列表/导出/人员维度已剔除，汇总照算）。 */
+  hidden_departed_salesperson_count?: number;
 }
 
 export type SalesAmountBasis = "amount_ex_tax" | "amount_inc_tax" | "revenue";

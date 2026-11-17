@@ -1,4 +1,6 @@
 """售前结构、只追加快照及权限默认值的数据库契约。"""
+import json
+
 import pytest
 from alembic import command
 from alembic.script import ScriptDirectory
@@ -68,13 +70,23 @@ def test_presales_migration_single_head_upgrade_downgrade_and_zero_drift(db):
                 for key in _KEYS:
                     assert conn.scalar(text(f"SELECT count(*) FROM {table} WHERE {column} ? :key"), {"key": key}) == 0
         # 在降级后种存量快照，确保默认值确实由 upgrade 写入，而非 fixture 预置。
-        for role in _EXPECTED.keys() - {"guest"}:
-            db.add(SysUser(
-                username=f"presales-migration-{role}", role=role, password_hash="unused",
-                template_perms={"page_parts": True}, permissions={"page_parts": True},
-                perm_overrides={"page_inventory": False},
-            ))
-        db.commit()
+        # 原生 INSERT（显式列清单）：降级 schema 没有后续迁移新增的 sys_user 列
+        # （如 D-0063 hide_documents），ORM 全列 INSERT 会炸——新应用停在旧 schema
+        # 不是受支持场景（部署纪律：先迁移后启镜像）。
+        with engine.begin() as conn:
+            for role in _EXPECTED.keys() - {"guest"}:
+                conn.execute(text("""
+                    INSERT INTO sys_user
+                        (username, role, password_hash, template_perms,
+                         permissions, perm_overrides)
+                    VALUES (:u, :r, 'unused',
+                            CAST(:tp AS jsonb), CAST(:p AS jsonb), CAST(:po AS jsonb))
+                """), {
+                    "u": f"presales-migration-{role}", "r": role,
+                    "tp": json.dumps({"page_parts": True}),
+                    "p": json.dumps({"page_parts": True}),
+                    "po": json.dumps({"page_inventory": False}),
+                })
         db.close()
         command.upgrade(cfg, "head")
         command.check(cfg)

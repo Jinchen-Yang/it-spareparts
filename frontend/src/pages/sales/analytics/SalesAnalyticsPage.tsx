@@ -355,6 +355,14 @@ export default function SalesAnalyticsPage() {
             : "销售单数与三金额（不含税 / 含税订单金额 / 营收）"
         }
       />
+      {(options?.hidden_departed_salesperson_count ?? 0) > 0 && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={`已隐藏离职销售 ${options?.hidden_departed_salesperson_count} 人的单据（列表、导出与人员维度不显示；汇总金额照算，可在账号管理恢复）`}
+        />
+      )}
       <Card>
         <FilterBar
           state={effectiveState}

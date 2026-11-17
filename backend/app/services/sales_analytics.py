@@ -45,6 +45,8 @@ from decimal import Decimal
 from sqlalchemy import and_, func, literal, or_, select, union_all
 from sqlalchemy.orm import Session
 
+from app.services import departed_visibility
+
 from app import config, security, tax_policy
 from app.business_time import business_today
 from app.models.dimensions import DimCustomer
@@ -168,6 +170,7 @@ def _order_query(
     order_no: str | None = None,
     with_recon_sort: bool = False,
     recon_returns: bool = False,
+    exclude_salespeople: list[str] | None = None,
 ):
     """销售分析订单基查询：一张销售订单一行（LEFT JOIN 明细聚营收/毛利，无明细行也保留）。
 
@@ -263,6 +266,11 @@ def _order_query(
     people = _clean_multi(salespeople)
     if people:
         inner = inner.where(_multi_match(so.salesperson, people))
+    # D-0063 离职隐藏（显示口径）：列表/导出排除被隐藏销售的整单；NULL/空白
+    # 销售的单不受影响（not_in 对 NULL 的三值语义须显式放行）。
+    if exclude_salespeople:
+        inner = inner.where(or_(so.salesperson.is_(None),
+                                so.salesperson.not_in(exclude_salespeople)))
     # GROUP BY 用原始列（SELECT 里的 nullif(btrim(...)) 是分组列上的表达式，
     # PG 允许；避免 SELECT/GROUP BY 各自渲染 _norm_dim 产生不同绑定参数导致
     # "must appear in the GROUP BY clause"）。
@@ -401,6 +409,11 @@ def filter_options(
         return [{"value": r.value, "orders": r.orders} for r in db.execute(stmt)]
 
     salespeople = _counts(so.salesperson)
+    # D-0063 离职隐藏：人员候选不出现被隐藏销售；响应附隐藏人数供前端提示条。
+    hidden_people = departed_visibility.hidden_salespersons(db)
+    if hidden_people:
+        salespeople = [row for row in salespeople
+                       if (row["value"] or "").strip() not in hidden_people]
     customer_types: list[dict] = []
     customers: list[dict] = []
     if customer_visible:
@@ -465,6 +478,7 @@ def filter_options(
         "customer_types": customer_types,
         "customers": customers,
         "amount_range": amount_range,
+        "hidden_departed_salesperson_count": len(hidden_people),
     }
 
 
@@ -645,7 +659,9 @@ def orders(
             and security.is_field_hidden(user_ctx, sort)):
         sort = "order_date"
     base, sort_cols = _order_query(
-        with_recon_sort=sort in RECON_SORTS, recon_returns=include_returns, **filters
+        with_recon_sort=sort in RECON_SORTS, recon_returns=include_returns,
+        exclude_salespeople=sorted(departed_visibility.hidden_salespersons(db)) or None,
+        **filters,
     )
     total = db.execute(select(func.count()).select_from(base.subquery())).scalar() or 0
     if order == "asc":

@@ -29,9 +29,11 @@ from pydantic import BaseModel
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
-from app import permissions
+from app import config, permissions
 from app.auth import current_identity, hash_password
 from app.db import get_db
+from app.models.purchase import FPurchaseOrder
+from app.models.sales import FSalesOrder
 from app.models.system import SysAccessLog, SysAuditLog, SysRoleTemplate, SysUser
 from app.security import require_action, require_page
 
@@ -76,6 +78,15 @@ class PasswordReset(BaseModel):
 
 class ActiveToggle(BaseModel):
     is_active: bool
+
+
+class DeleteAccountBody(BaseModel):
+    """D-0063：删除账号时可选「同时隐藏其名下销售单」（离职隐藏联动）。"""
+    hide_documents: bool = False
+
+
+class DocumentsVisibilityBody(BaseModel):
+    hidden: bool
 
 
 class BulkBody(BaseModel):
@@ -142,6 +153,7 @@ def _acct_snapshot(u: SysUser) -> dict:
     return {
         "username": u.username, "role": u.role, "display_name": u.display_name,
         "salesperson_name": u.salesperson_name, "is_active": u.is_active,
+        "hide_documents": u.hide_documents,
         "template_code": u.template_code, "template_version": u.template_version,
         "overrides": u.perm_overrides,
     }
@@ -686,11 +698,15 @@ def delete_account(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _: None = Depends(_write_gate),
+    body: DeleteAccountBody | None = None,
 ) -> dict:
     """删除账号（软删除，仅管理员）。
 
     安全护栏：内置 admin 不可删；不能删自己；不能删最后一个启用管理员；
     仅管理员可删 admin 角色账号（_write_gate 已保证，这里再明确拒绝普通账号删他人）。
+
+    D-0063：body.hide_documents=true 时同时隐藏其名下销售单（销售/采购分析
+    显示面过滤，可恢复）；账号未配置「对应销售名」时拒绝勾选——先补配再删。
     """
     u = _get(db, username, lock=True)
     if u.deleted_at is not None:
@@ -705,11 +721,124 @@ def delete_account(
         _lock_active_admin_roster(db)
         if _active_admin_count(db) <= 1:
             raise HTTPException(400, "这是最后一个启用状态的管理员，不能删除——请先增设另一位管理员")
+    hide_documents = bool(body and body.hide_documents)
+    if hide_documents and not (u.salesperson_name or "").strip():
+        raise HTTPException(
+            400, "该账号未配置「对应销售名」，无法定位其名下销售单；"
+                 "请先在编辑中补配对应销售名后再删除并勾选隐藏（D-0063）")
 
     before = _acct_snapshot(u)
     u.is_active = False
     u.deleted_at = datetime.now(timezone.utc)
+    u.hide_documents = hide_documents
     _bump_token(u)   # 立即吊销该账号全部旧 token
     _audit(db, u.id, "account_delete", before, _acct_snapshot(u), ident["sub"])
     db.commit()
-    return {"username": username, "deleted": True}
+    return {"username": username, "deleted": True,
+            "hide_documents": hide_documents}
+
+
+@router.get("/deleted")
+def list_deleted_accounts(
+    db: Session = Depends(get_db),
+    _: None = Depends(_write_gate),
+) -> list[dict]:
+    """已删除账号（D-0063）：供恢复与单据显示切换；按删除时间倒序。
+
+    权限与删除/恢复/切换同门（D-0063 §6「预览与已删除列表同门」= 写门），
+    前端入口本就仅管理员可见。
+    """
+    users = db.execute(
+        select(SysUser).where(SysUser.deleted_at.is_not(None))
+        .order_by(desc(SysUser.deleted_at))
+    ).scalars().all()
+    return [{
+        "username": u.username, "display_name": u.display_name, "role": u.role,
+        "salesperson_name": u.salesperson_name, "is_active": u.is_active,
+        "hide_documents": u.hide_documents, "deleted_at": u.deleted_at,
+    } for u in users]
+
+
+@router.post("/{username}/restore")
+def restore_account(
+    username: str,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _: None = Depends(_write_gate),
+) -> dict:
+    """恢复已删除账号（D-0063）：清除软删标记并默认恢复单据显示。
+
+    仅清除 deleted_at；is_active 保持删除时的 False，启用走既有 /active。
+    admin 角色账号仅管理员可恢复（与删除同门）。
+    """
+    u = _get(db, username, lock=True)
+    if u.deleted_at is None:
+        raise HTTPException(400, "该账号未处于删除状态")
+    if u.username == "admin":
+        raise HTTPException(400, "内置 admin 账号不可删除，也不存在恢复")
+    if not _op_is_admin(ident) and u.role == "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "仅管理员可恢复管理员账号")
+    before = _acct_snapshot(u)
+    u.deleted_at = None
+    u.hide_documents = False   # 恢复账号默认同时恢复单据显示（D-0063 决定 5）
+    _audit(db, u.id, "account_restore", before, _acct_snapshot(u), ident["sub"])
+    db.commit()
+    return {"username": username, "deleted": False, "hide_documents": False}
+
+
+@router.put("/{username}/documents-visibility")
+def set_documents_visibility(
+    username: str,
+    body: DocumentsVisibilityBody,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _: None = Depends(_write_gate),
+) -> dict:
+    """已删除账号独立切换「名下单据显示/隐藏」（D-0063 决定 5）。"""
+    u = _get(db, username, lock=True)
+    if u.deleted_at is None:
+        raise HTTPException(400, "仅已删除账号可切换单据显示；在职账号单据始终显示")
+    if body.hidden and not (u.salesperson_name or "").strip():
+        raise HTTPException(
+            400, "该账号未配置「对应销售名」，无法定位其名下销售单（D-0063）")
+    before = _acct_snapshot(u)
+    u.hide_documents = body.hidden
+    _audit(db, u.id, "account_documents_visibility", before, _acct_snapshot(u),
+           ident["sub"])
+    db.commit()
+    return {"username": username, "hide_documents": u.hide_documents}
+
+
+@router.get("/{username}/documents-preview")
+def documents_preview(
+    username: str,
+    db: Session = Depends(get_db),
+    _: None = Depends(_write_gate),
+) -> dict:
+    """删除前预览（D-0063）：该账号对应销售名下已生效销售单与关联采购单数量。
+
+    供删除弹窗人工核对姓名映射（fbef2eb4 指出的对齐风险由预览化解）。
+    """
+    u = _get(db, username)
+    name = (u.salesperson_name or "").strip()
+    sales_order_count = 0
+    linked_purchase_order_count = 0
+    if name:
+        active_sales = FSalesOrder.data_status == config.ACTIVE_STATUS
+        nos = select(FSalesOrder.order_no).where(
+            FSalesOrder.salesperson == name, active_sales,
+            FSalesOrder.order_no.is_not(None))
+        sales_order_count = db.scalar(
+            select(func.count()).select_from(FSalesOrder).where(
+                FSalesOrder.salesperson == name, active_sales)) or 0
+        linked_purchase_order_count = db.scalar(
+            select(func.count()).select_from(FPurchaseOrder).where(
+                FPurchaseOrder.linked_sales_order_no.in_(nos),
+                FPurchaseOrder.data_status == config.ACTIVE_STATUS)) or 0
+    return {
+        "username": u.username,
+        "salesperson_name": name or None,
+        "can_hide": bool(name),
+        "sales_order_count": sales_order_count,
+        "linked_purchase_order_count": linked_purchase_order_count,
+    }
