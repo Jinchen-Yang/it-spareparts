@@ -4,6 +4,8 @@
 （及随 _full() 同步的 admin）为 true、其余角色 fail-closed；真实 downgrade→upgrade
 往返——boss 存量账号补 true 并清覆盖，其余账号回填 false 不动覆盖层。
 """
+import json
+
 from sqlalchemy import text
 
 from app import permissions
@@ -61,18 +63,27 @@ def test_upgrade_backfills_and_downgrade_removes_key(db):
         alembic_command.downgrade(cfg, _PREV)
         # 存量账号形态：键尚不存在（pre-migration 模板快照不含该键）
         specs = [("boss", False), ("boss", True), ("readonly", True)]
-        for i, (role, override_val) in enumerate(specs):
-            base = permissions.effective(role, None)
-            base.pop(_KEY, None)                  # 模拟迁移前的快照
-            db.add(SysUser(
-                username=f"analytics-migration-{i}", role=role, display_name=role,
-                password_hash=hash_password("synthetic-migration-password"),
-                is_active=True, template_code=role, template_version=1,
-                template_perms=base,
-                perm_overrides={_KEY: override_val},
-                permissions=base,
-            ))
-        db.commit()
+        # 原生 INSERT（显式列清单）：降级 schema 没有后续迁移新增的 sys_user 列
+        # （如 D-0063 hide_documents），ORM 全列 INSERT 会炸——新应用停在旧 schema
+        # 不是受支持场景（部署纪律：先迁移后启镜像）。
+        with engine.begin() as conn:
+            for i, (role, override_val) in enumerate(specs):
+                base = permissions.effective(role, None)
+                base.pop(_KEY, None)              # 模拟迁移前的快照
+                conn.execute(text("""
+                    INSERT INTO sys_user
+                        (username, role, display_name, password_hash, is_active,
+                         template_code, template_version, template_perms,
+                         perm_overrides, permissions)
+                    VALUES (:u, :r, :d, :pw, true,
+                            :tc, 1, CAST(:tp AS jsonb), CAST(:po AS jsonb), CAST(:p AS jsonb))
+                """), {
+                    "u": f"analytics-migration-{i}", "r": role, "d": role,
+                    "pw": hash_password("synthetic-migration-password"), "tc": role,
+                    "tp": json.dumps(base),
+                    "po": json.dumps({_KEY: override_val}),
+                    "p": json.dumps(base),
+                })
         db.close()
         with engine.connect() as conn:
             # 降级后：模板表与账号快照（template_perms/permissions）均无该键；

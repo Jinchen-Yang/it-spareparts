@@ -44,7 +44,11 @@ def test_first_pool_read_close_and_explicit_price_after_real_production_schema_u
                 FROM presales_offer o JOIN presales_inquiry i ON i.id=o.inquiry_id WHERE o.id=:id"""), {"id": old_offer})
             original = conn.scalar(text("SELECT snapshot FROM presales_offer_revision WHERE offer_id=:id AND revision_no=:n"),
                                    {"id": old_offer, "n": old_revision})
-        command.upgrade(cfg, "e5a7c9d1f3b6")
+        # 升到 head 而非停在 e5a7c9d1f3b6：新应用配旧 schema 不是受支持场景
+        # （部署纪律：先 alembic upgrade head 再启镜像；D-0063 起 sys_user 在
+        # e5a7c9d1f3b6 之后又有加列，停在中间版本会让应用查询直接失败）。
+        # 本测试关注的是旧答复数据的隔离行为，升级终点不影响其意图。
+        command.upgrade(cfg, "head")
         path = f"/api/presales/inquiries/{doc_id}"
         row_path = f"/api/presales/pool/lines/{line_id}"
         def read_pool():

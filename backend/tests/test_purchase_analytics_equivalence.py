@@ -41,7 +41,7 @@ from app.models import (DimCustomer, DimPart, FPurchaseLine, FPurchaseOrder,
 from app.models.dimensions import DimSupplier
 from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
 from app.security import UserContext
-from app.services import purchase_analytics
+from app.services import departed_visibility, purchase_analytics
 from app.services.maintenance_project_assignments import maintenance_scope_project_ids
 from app.services.purchase_analytics import (NO_LINKED_LABEL, UNCATEGORIZED_LABEL,
                                              EMPTY_LABEL, _base_where,
@@ -100,6 +100,11 @@ def _ref_options(db: Session, user_ctx=None, *, customer_q="",
         .select_from(po).outerjoin(link, po.linked_sales_order_no == link.c.order_no)
         .where(active, link.c.salesperson.is_not(None), link.c.salesperson != "")
         .order_by(link.c.salesperson)).scalars()]
+    # D-0063：与正式实现同款隐藏集合语义（对拍两侧一致演进）。
+    hidden_people = departed_visibility.hidden_salespersons(db)
+    if hidden_people:
+        salespersons = [name for name in salespersons
+                        if (name or "").strip() not in hidden_people]
     pl = FPurchaseLine
     dp = DimPart
     cat_rows = db.execute(
@@ -142,6 +147,7 @@ def _ref_options(db: Session, user_ctx=None, *, customer_q="",
         "categories": categories,
         "uncategorized_label": UNCATEGORIZED_LABEL,
         "no_linked_label": NO_LINKED_LABEL,
+        "hidden_departed_salesperson_count": len(hidden_people),
     }
     if user_ctx is not None:
         data = security.apply_data_scope(data, user_ctx)
