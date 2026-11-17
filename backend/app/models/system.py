@@ -55,6 +55,11 @@ class SysUser(Base):
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # 软删除：删除账号置 is_active=false + deleted_at=now；历史外键引用保留
     deleted_at: Mapped[datetime | None] = mapped_column(TZDateTime, index=True)
+    # D-0063 离职隐藏：删除账号时勾选「同时隐藏其名下销售单」置 true。
+    # 隐藏集合 = deleted_at 非空且本位为真的账号的 salesperson_name；仅过滤
+    # 销售/采购分析的显示面，不参与任何汇总重算（显示口径，不改事实）。
+    hide_documents: Mapped[bool] = mapped_column(Boolean, nullable=False,
+                                                 default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
 

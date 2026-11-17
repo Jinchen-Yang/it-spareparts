@@ -1,12 +1,13 @@
 import { formatBusinessDateTime } from "../../utils/date";
 /** 账号列表页签：筛选（模板/角色/状态/关键词）+ 多选批量 + 单账号操作。 */
 import { useMemo, useState } from "react";
-import { App, Alert, Button, Descriptions, Drawer, Empty, Form, Input, List, Modal, Popconfirm, Select, Space, Tag } from "antd";
+import { App, Alert, Button, Checkbox, Descriptions, Drawer, Empty, Form, Input, List, Modal, Popconfirm, Select, Space, Table, Tag } from "antd";
 import { PlusOutlined } from "@ant-design/icons";
 import ResizableTable from "../../components/ResizableTable";
-import type { Account, AccountsMeta, BulkOperation } from "../../api/accounts";
+import type { Account, AccountsMeta, BulkOperation, DeletedAccount, DocumentsPreview } from "../../api/accounts";
 import {
-  createAccount, deleteAccount, explainApiError, getActivity, resetPassword, setAccountActive,
+  createAccount, deleteAccount, documentsPreview, explainApiError, getActivity,
+  listDeletedAccounts, resetPassword, restoreAccount, setAccountActive, setDocumentsVisibility,
 } from "../../api/accounts";
 import AccountDrawer from "./AccountDrawer";
 import BulkModal from "./BulkModal";
@@ -40,6 +41,12 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
   } | null>(null);
   const [cForm] = Form.useForm();
   const [pwForm] = Form.useForm();
+  const [delT, setDelT] = useState<Account | null>(null);
+  const [delPreview, setDelPreview] = useState<DocumentsPreview | null>(null);
+  const [delHide, setDelHide] = useState(false);
+  const [delBusy, setDelBusy] = useState(false);
+  const [deletedOpen, setDeletedOpen] = useState(false);
+  const [deletedRows, setDeletedRows] = useState<DeletedAccount[] | null>(null);
   // 删除账号仅管理员可见（后端仍强校验，前端只是隐藏入口）
   const isAdmin = localStorage.getItem("role") === "admin";
 
@@ -94,12 +101,66 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
   };
 
   const removeAccount = async (u: Account) => {
+    // D-0063：删除弹窗带单据量预览与「同时隐藏其名下销售单」勾选；可恢复。
+    setDelT(u);
+    setDelHide(false);
+    setDelPreview(null);
     try {
-      await deleteAccount(u.username);
-      message.success(`已删除账号 ${u.username}`);
+      const r = await documentsPreview(u.username);
+      setDelPreview(r.data);
+    } catch { /* 预览失败不阻塞删除，按无隐藏处理 */ }
+  };
+
+  const confirmDelete = async () => {
+    if (!delT) return;
+    setDelBusy(true);
+    try {
+      const hide = delHide && !!delPreview?.can_hide;
+      await deleteAccount(delT.username, hide);
+      message.success(hide
+        ? `已删除账号 ${delT.username}，其名下销售单已在销售/采购分析隐藏（可恢复）`
+        : `已删除账号 ${delT.username}`);
+      setDelT(null);
+      setDeletedRows(null);   // 已删除视图下次打开重取
       onChanged();
     } catch (e) {
       message.error(explainApiError(e, "删除失败"));
+    } finally {
+      setDelBusy(false);
+    }
+  };
+
+  const refreshDeleted = async () => {
+    try {
+      const r = await listDeletedAccounts();
+      setDeletedRows(r.data);
+    } catch (e) {
+      message.error(explainApiError(e, "已删除账号加载失败"));
+    }
+  };
+
+  const loadDeleted = (open: boolean) => {
+    setDeletedOpen(open);
+    if (open && deletedRows === null) void refreshDeleted();
+  };
+
+  const doRestore = async (u: DeletedAccount) => {
+    try {
+      await restoreAccount(u.username);
+      message.success(`已恢复账号 ${u.username}（单据显示一并恢复；启用请到列表操作）`);
+      await refreshDeleted();
+      onChanged();
+    } catch (e) {
+      message.error(explainApiError(e, "恢复失败"));
+    }
+  };
+
+  const toggleHidden = async (u: DeletedAccount) => {
+    try {
+      await setDocumentsVisibility(u.username, !u.hide_documents);
+      await refreshDeleted();
+    } catch (e) {
+      message.error(explainApiError(e, "切换失败"));
     }
   };
 
@@ -139,15 +200,7 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
             <Button type="link" size="small" danger={u.is_active}>{u.is_active ? "停用" : "启用"}</Button>
           </Popconfirm>
           {isAdmin && u.username !== "admin" && u.role !== "admin" && (
-            <Popconfirm
-              title={`删除账号 ${u.username}？`}
-              description="删除后该账号将无法登录，历史记录保留。此操作不可撤销。"
-              okText="删除"
-              okButtonProps={{ danger: true }}
-              onConfirm={() => removeAccount(u)}
-            >
-              <Button type="link" size="small" danger>删除</Button>
-            </Popconfirm>
+            <Button type="link" size="small" danger onClick={() => removeAccount(u)}>删除</Button>
           )}
         </Space>
       ) },
@@ -217,6 +270,79 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
           }),
         }}
       />
+
+      {isAdmin && (
+        <div style={{ marginTop: 16 }}>
+          <Button size="small" type={deletedOpen ? "primary" : "default"}
+            onClick={() => loadDeleted(!deletedOpen)}>
+            {deletedOpen ? "收起已删除账号" : "已删除账号"}
+          </Button>
+          {deletedOpen && (
+            <Table<DeletedAccount>
+              size="small" rowKey="username" style={{ marginTop: 8 }}
+              loading={deletedRows === null}
+              dataSource={deletedRows || []}
+              pagination={false}
+              locale={{ emptyText: "没有已删除账号" }}
+              columns={[
+                { title: "用户名", dataIndex: "username", render: (v: string) => <b>{v}</b> },
+                { title: "姓名", dataIndex: "display_name", render: (v: string | null) => v || "—" },
+                { title: "对应销售名", dataIndex: "salesperson_name",
+                  render: (v: string | null) => v || "—" },
+                { title: "删除时间", dataIndex: "deleted_at", render: fmt },
+                { title: "名下单据", dataIndex: "hide_documents",
+                  render: (v: boolean, u: DeletedAccount) => v
+                    ? <Tag color="orange">已隐藏（{u.salesperson_name || "—"}）</Tag>
+                    : <Tag>显示中</Tag> },
+                { title: "操作", key: "op", render: (_: unknown, u: DeletedAccount) => (
+                  <Space size="small">
+                    <Button type="link" size="small" onClick={() => doRestore(u)}>恢复账号</Button>
+                    {u.salesperson_name && (
+                      <Button type="link" size="small"
+                        onClick={() => toggleHidden(u)}>
+                        {u.hide_documents ? "恢复单据显示" : "隐藏其单据"}
+                      </Button>
+                    )}
+                  </Space>
+                ) },
+              ]}
+            />
+          )}
+        </div>
+      )}
+
+      <Modal
+        title={delT ? `删除账号 ${delT.username}` : ""}
+        open={!!delT}
+        confirmLoading={delBusy}
+        okText="删除" okButtonProps={{ danger: true }}
+        onCancel={() => setDelT(null)}
+        onOk={confirmDelete}
+      >
+        <Descriptions column={1} size="small" style={{ marginBottom: 12 }}>
+          <Descriptions.Item label="姓名">{delT?.display_name || "—"}</Descriptions.Item>
+          <Descriptions.Item label="对应销售名">
+            {delPreview ? (delPreview.salesperson_name || "未配置") : "…"}
+          </Descriptions.Item>
+          {delPreview?.can_hide && (
+            <Descriptions.Item label="名下单据（已生效）">
+              销售单 {delPreview.sales_order_count} 张、关联采购单 {delPreview.linked_purchase_order_count} 张
+            </Descriptions.Item>
+          )}
+        </Descriptions>
+        <div style={{ marginBottom: 8, color: "#666" }}>
+          删除后该账号无法登录，历史记录保留；可在「已删除账号」里恢复。
+        </div>
+        {delPreview ? (delPreview.can_hide ? (
+          <Checkbox checked={delHide} onChange={(e) => setDelHide(e.target.checked)}>
+            同时隐藏其名下销售单（销售/采购分析不再显示，汇总金额不变）
+          </Checkbox>
+        ) : (
+          <div style={{ color: "#999" }}>
+            该账号未配置「对应销售名」，无法定位其名下单据；如需隐藏请先在编辑中补配。
+          </div>
+        )) : <div style={{ color: "#999" }}>正在加载单据预览…</div>}
+      </Modal>
 
       <BulkModal
         meta={meta}

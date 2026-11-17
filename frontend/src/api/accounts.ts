@@ -134,8 +134,39 @@ export const resetPassword = (username: string, password: string) =>
   api.put(`/accounts/${username}/password`, { password });
 export const setAccountActive = (username: string, is_active: boolean) =>
   api.put(`/accounts/${username}/active`, { is_active });
-export const deleteAccount = (username: string) =>
-  api.delete<{ username: string; deleted: boolean }>(`/accounts/${username}`);
+export const deleteAccount = (username: string, hide_documents = false) =>
+  api.delete<{ username: string; deleted: boolean; hide_documents: boolean }>(
+    `/accounts/${username}`, { data: { hide_documents } });
+
+/** D-0063 已删除账号（供恢复与单据显示切换）。 */
+export interface DeletedAccount {
+  username: string;
+  display_name: string | null;
+  role: string;
+  salesperson_name: string | null;
+  is_active: boolean;
+  hide_documents: boolean;
+  deleted_at: string | null;
+}
+
+/** D-0063 删除前预览：对应销售名下单据量（人工核对姓名映射）。 */
+export interface DocumentsPreview {
+  username: string;
+  salesperson_name: string | null;
+  can_hide: boolean;
+  sales_order_count: number;
+  linked_purchase_order_count: number;
+}
+
+export const listDeletedAccounts = () => api.get<DeletedAccount[]>("/accounts/deleted");
+export const restoreAccount = (username: string) =>
+  api.post<{ username: string; deleted: false; hide_documents: boolean }>(
+    `/accounts/${username}/restore`);
+export const setDocumentsVisibility = (username: string, hidden: boolean) =>
+  api.put<{ username: string; hide_documents: boolean }>(
+    `/accounts/${username}/documents-visibility`, { hidden });
+export const documentsPreview = (username: string) =>
+  api.get<DocumentsPreview>(`/accounts/${username}/documents-preview`);
 export const getActivity = (username: string) => api.get(`/accounts/${username}/activity`);
 export const bulkAccounts = (body: BulkRequest) =>
   api.post<BulkPreview | BulkResult>("/accounts/bulk", body);

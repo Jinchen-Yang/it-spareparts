@@ -45,6 +45,8 @@ from sqlalchemy import String, and_, case, func, or_, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import Session
 
+from app.services import departed_visibility
+
 from app import config, security, tax_policy
 from app.business_time import business_today
 from app.models import DimCustomer, DimPart, FPurchaseLine, FPurchaseOrder, FSalesOrder
@@ -485,6 +487,11 @@ def options(db: Session, user_ctx=None, *, customer_q: str = "",
         customer_page=customer_page, customer_page_size=customer_page_size,
         selected_customer_ids=selected_customer_ids)).one()
     salespersons = candidates.salespersons or []
+    # D-0063 离职隐藏：关联销售候选不出现被隐藏销售；响应附隐藏人数供提示条。
+    hidden_people = departed_visibility.hidden_salespersons(db)
+    if hidden_people:
+        salespersons = [name for name in salespersons
+                        if (name or "").strip() not in hidden_people]
     rows = (candidates.customers or []) if customer_visible else []
     customers_has_more = len(rows) > customer_page_size
     customers = rows[:customer_page_size]
@@ -508,6 +515,7 @@ def options(db: Session, user_ctx=None, *, customer_q: str = "",
         "source_types": source_types,
         "purchasers": purchasers,
         "salespersons": salespersons,
+        "hidden_departed_salesperson_count": len(hidden_people),
         "categories": categories,
         "uncategorized_label": UNCATEGORIZED_LABEL,
         "no_linked_label": NO_LINKED_LABEL,
@@ -620,6 +628,12 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
         _apply_from(select(dim.label("key"), *measures), group_link)
         .where(*where).group_by(dim)
     )
+    # D-0063 离职隐藏（显示口径）：仅「按销售」分组剔除被隐藏人员；无关联/空
+    # 哨兵组键不在隐藏集自然保留；KPI 与其他维度分组不过滤（总额照算）。
+    if group_by == "salesperson":
+        hidden_people = departed_visibility.hidden_salespersons(db)
+        if hidden_people:
+            grp_base = grp_base.where(dim.not_in(hidden_people))
     grp_stmt = grp_base.order_by(*grp_order)
     # 只有 PN 分组分页送达（D-0055）。其他维度仍一次返回全部分组，响应形状不变。
     page_meta: dict | None = None
@@ -806,6 +820,13 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
                         order_no=order_no, linked_sales_order_no=linked_sales_order_no)
     if cat is not None:
         where.append(cat)
+    # D-0063 离职隐藏（显示口径）：关联销售单被隐藏的采购单不进列表与导出；
+    # 无关联（NULL）与未命中集合的单不受影响（not_in 的三值语义须显式放行 NULL）。
+    # 列表与导出同走本函数（export_orders 复用），KPI/分组/趋势照算不过滤。
+    hidden_nos = departed_visibility.hidden_sales_order_nos(db)
+    if hidden_nos:
+        where.append(or_(po.linked_sales_order_no.is_(None),
+                         po.linked_sales_order_no.not_in(hidden_nos)))
     # 下钻键与其余维度同一路径精确匹配（AND 交集）——不折进分类多选 OR 集合，
     # 否则「筛选电器件+机械件后下钻电器件组」会混进机械件行（对抗复审确认项）。
     # PN 键只按 SQL btrim 去掉普通空格，保留 tab / NBSP，才能命中列表发布的组键。

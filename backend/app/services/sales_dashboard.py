@@ -275,6 +275,15 @@ def groups(
         if security.is_field_hidden(user_ctx, basis):
             filters["amount_basis"] = basis = "revenue"
     rows = _group_rows(db, filters, group_by)
+    # D-0063 离职隐藏（显示口径）：仅「按销售」分组的排行剔除被隐藏人员
+    # （其行与占比一并消失，本维度合计=在职合计）；其他维度不过滤——
+    # 被隐藏人员的单据照常计入其他分组与 KPI（总额照算）。
+    if group_by == "salesperson":
+        from app.services import departed_visibility
+        hidden_people = departed_visibility.hidden_salespersons(db)
+        if hidden_people:
+            rows = [r for r in rows
+                    if (r.key or "").strip() not in hidden_people]
     total_basis = sum((getattr(r, basis) or 0) for r in rows) if rows else None
 
     items = [{"key": r.key, "is_empty": r.key is None, **_row_payload(r, basis)}

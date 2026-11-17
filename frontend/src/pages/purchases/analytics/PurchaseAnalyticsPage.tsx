@@ -405,6 +405,14 @@ export default function PurchaseAnalyticsPage() {
         subtitle={summary ? `三口径采购金额（含税 / 不含税 / 实付），数据截至 ${summary.as_of}` : "三口径采购金额（含税 / 不含税 / 实付）"}
         extra={<Button loading={exporting} onClick={onExport}>导出</Button>}
       />
+      {(options?.hidden_departed_salesperson_count ?? 0) > 0 && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={`已隐藏离职销售 ${options?.hidden_departed_salesperson_count} 人的关联采购单（列表与导出不显示；汇总金额照算，可在账号管理恢复）`}
+        />
+      )}
       <Card>
         <FilterBar
           state={effectiveState}

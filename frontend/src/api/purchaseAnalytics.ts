@@ -14,6 +14,8 @@ export interface PurchaseAnalyticsOptions {
   categories: string[];
   uncategorized_label: string;
   no_linked_label: string;
+  /** D-0063：被隐藏离职销售人数（关联销售候选与其关联采购单已剔除，汇总照算）。 */
+  hidden_departed_salesperson_count?: number;
 }
 
 /** 全部筛选（多选 = 精确匹配；日期闭区间，缺省 = 全部历史）。 */
