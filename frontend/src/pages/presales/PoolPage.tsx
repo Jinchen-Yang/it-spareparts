@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, App, Button, Checkbox, Collapse, Drawer, Input, InputNumber, Modal, Popover, Radio, Select, Space, Table, Tag, Timeline } from "antd";
+import { Alert, App, Button, Checkbox, Collapse, Drawer, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, Timeline } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { Link } from "react-router-dom";
 import { presales, type InquiryLine } from "../../api/presales";
@@ -19,36 +19,48 @@ import NewInquiryPanel from "./NewInquiryPanel";
 import InquiryVisibilityDialog from "./InquiryVisibility";
 import PartBinding, { canBindPresalesPart } from "./PartBinding";
 import WorkbookDialog from "./WorkbookDialog";
-import { isPresalesAdmin, isPresalesSupervisor, taxLabel, usePresalesError } from "./shared";
+import { isPresalesAdmin, taxLabel, usePresalesError } from "./shared";
+import { priceText } from "./answers";
 import "./presales.css";
 
 const PAGE_SIZE = 50;
 const STATE_LABEL = { pending: "待报价", quoted: "已报价", skip: "不报" } as const;
 const STATE_COLOR = { pending: "orange", quoted: "green", skip: undefined } as const;
-const CHANGED_LABEL: Record<string, string> = { qty: "数量", return_defective: "坏件返回", require_exact_pn: "PN 一致", notes: "备注", expected_delivery: "交期" };
+const CHANGED_LABEL: Record<string, string> = { qty: "数量", return_defective: "坏件返回", require_exact_pn: "PN 一致", notes: "备注", expected_delivery: "交期", description: "描述" };
 
 interface Draft {
   unit_price?: number | null; is_tax_inclusive?: boolean | null; price_basis?: PriceBasis;
   lead_time?: string; stock_location?: string; qty_available?: number | null; notes?: string; supplier_id?: number | null;
 }
-type CloseOutcome = "won" | "lost" | "cancelled";
 
 const priceOf = (row: PoolLine) => row.price?.unit_price == null ? null : Number(row.price.unit_price);
 const basisText = (basis?: PriceBasis) => basis === "cost" ? "成本价" : "售价";
 
 function sentence(row: PoolLine) {
-  return `${row.pn} × ${Number(row.qty)}：${moneyExact(priceOf(row))} ${taxLabel(row.price?.is_tax_inclusive)}（${basisText(row.price?.price_basis)}，坏件${row.return_defective ? "返回" : "不返回"}）`;
+  if (!row.price) return STATE_LABEL[row.answer_state];
+  const base = `${row.pn} × ${Number(row.qty)}：${priceText(row.price)}（${basisText(row.price.price_basis)}，坏件${row.return_defective ? "返回" : "不返回"}）`;
+  const note = row.price.notes?.trim();
+  return note ? `${base}（备注：${note}）` : base;
 }
 
-function SkipButton({ disabled, onConfirm }: { disabled: boolean; onConfirm: (reason: string) => void }) {
-  const [open, setOpen] = useState(false);
-  const [reason, setReason] = useState("无货源");
-  return <Popover trigger="click" open={open} onOpenChange={setOpen} content={<Space direction="vertical">
-    <Input aria-label="不报原因" value={reason} onChange={(event) => setReason(event.target.value)} style={{ width: 220 }} />
-    <Button type="primary" size="small" disabled={!reason.trim()} onClick={() => { setOpen(false); onConfirm(reason.trim()); }}>确定不报</Button>
-  </Space>}>
-    <Button size="small" disabled={disabled}>不报</Button>
-  </Popover>;
+function DescriptionEditDialog({ row, latest, busy, onClose, onSave }: {
+  row: PoolLine; latest: PoolLine; busy: boolean; onClose: () => void; onSave: (value: string | null) => void;
+}) {
+  const [text, setText] = useState(row.description ?? "");
+  const changed = latest.line_version !== row.line_version;
+  if (latest.inquiry_status === "closed") return <Modal open title={`描述：${row.pn}`} footer={null} onCancel={onClose}>
+    <p className="presales-description">{latest.description || "暂无描述"}</p>
+  </Modal>;
+  return <Modal open title={`描述：${row.pn}`} okText={changed ? "核对后保存" : "保存"} cancelText="取消" confirmLoading={busy}
+    cancelButtonProps={{ disabled: busy }} maskClosable={!busy} closable={!busy} keyboard={!busy} onCancel={onClose}
+    onOk={() => onSave(text.trim() ? text : null)}>
+    {changed && <Alert type="warning" message="这一行已更新，请核对最新描述后再保存"
+      description={<span className="presales-description">{latest.description || "（空）"}</span>} />}
+    <Form layout="vertical"><Form.Item label="描述（留空即清除）" extra="只改描述不影响当前报价；变更会记入本行历史。">
+      <Input.TextArea aria-label={`${row.pn} 描述`} value={text} disabled={busy} onChange={(event) => setText(event.target.value)}
+        autoSize={{ minRows: 2, maxRows: 8 }} />
+    </Form.Item></Form>
+  </Modal>;
 }
 
 function historyText(item: PoolHistoryItem) {
@@ -62,7 +74,6 @@ export default function PoolPage() {
   const { message, modal } = App.useApp();
   const handleError = usePresalesError();
   const canBind = canBindPresalesPart();
-  const supervisor = isPresalesSupervisor();
   const [tab, setTab] = useState<PoolTab>("pending");
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -78,9 +89,8 @@ export default function PoolPage() {
   const [history, setHistory] = useState<{ row: PoolLine; items?: PoolHistoryItem[] }>();
   const [importOpen, setImportOpen] = useState(false);
   const [direct, setDirect] = useState(false);
-  const [closing, setClosing] = useState<{ row: PoolLine; outcome: CloseOutcome }>();
+  const [descEdit, setDescEdit] = useState<PoolLine>();
   const [visibilityRow, setVisibilityRow] = useState<PoolLine>();
-  const [closeBusy, setCloseBusy] = useState(false);
   const [qtyNonce, setQtyNonce] = useState(0);
   const resetQty = () => setQtyNonce((value) => value + 1);
   const generation = useRef(0);
@@ -89,7 +99,7 @@ export default function PoolPage() {
   const clearProtectedData = useCallback(() => {
     historyGeneration.current += 1;
     setRows([]); setTotal(0); setCounts(undefined); setSelected([]); setDrafts({});
-    setBinding(undefined); setHistory(undefined); setClosing(undefined); setVisibilityRow(undefined); setImportOpen(false);
+    setBinding(undefined); setHistory(undefined); setDescEdit(undefined); setVisibilityRow(undefined); setImportOpen(false);
   }, []);
 
   const load = useCallback(async () => {
@@ -103,7 +113,7 @@ export default function PoolPage() {
       setSelected((previous) => previous.filter((id) => ids.has(id)));
       setHistory((previous) => previous && ids.has(previous.row.line_id) ? previous : undefined);
       setBinding((previous) => previous && ids.has(previous.line_id) ? previous : undefined);
-      setClosing((previous) => previous && ids.has(previous.row.line_id) ? previous : undefined);
+      setDescEdit((previous) => previous && ids.has(previous.line_id) ? previous : undefined);
       setVisibilityRow((previous) => previous && ids.has(previous.line_id) ? previous : undefined);
     } catch (error) {
       if (current === generation.current) { clearProtectedData(); setFailed(true); await handleError(error); }
@@ -141,7 +151,7 @@ export default function PoolPage() {
     || taxFor(row) !== row.price.is_tax_inclusive || basisFor(row) !== row.price.price_basis || detailChanged(row));
 
   /** 写入成功只换这一行，不重读整张表；冲突时显示最新内容并保留本人输入。 */
-  const write = async (row: PoolLine, target: "price" | "skip" | "inquiry", action: () => Promise<PoolLine>, success?: string) => {
+  const write = async (row: PoolLine, target: "price" | "inquiry", action: () => Promise<PoolLine>, success?: string) => {
     if (busy != null) return;
     setBusy(row.line_id);
     try {
@@ -153,6 +163,7 @@ export default function PoolPage() {
       // 这一行留在当前页不跳走，但筛选数量要跟上。
       void presalesPool.counts().then(setCounts).catch(() => undefined);
       if (success) void message.success(success);
+      return updated;
     } catch (error) {
       resetQty();
       const conflict = poolConflict(error);
@@ -180,36 +191,14 @@ export default function PoolPage() {
   };
 
   const edit = (row: PoolLine, patch: Omit<PoolLineEdit, "expected_version" | "confirm_reset">) => {
-    const send = (confirmReset: boolean) => void write(row, "inquiry", () => presalesPool.edit(row.line_id, { expected_version: row.line_version, ...patch, ...(confirmReset ? { confirm_reset: true } : {}) }));
+    const send = (confirmReset: boolean) => write(row, "inquiry", () => presalesPool.edit(row.line_id, { expected_version: row.line_version, ...patch, ...(confirmReset ? { confirm_reset: true } : {}) }));
     const changesConditions = ["qty", "return_defective", "require_exact_pn"].some((key) => key in patch);
-    if (!changesConditions || (row.answer_state === "pending" && !row.answer_requires_review)) { send(false); return; }
+    if (!changesConditions || (row.answer_state === "pending" && !row.answer_requires_review)) { return send(false); }
     const content = row.answer_requires_review
       ? `${row.pn} 的旧答复仍待核对。修改条件将解除与旧答复的关联，历史仍可查看，本行需要重新报价。确定修改吗？`
       : `${row.pn} 改条件后，原来的${row.answer_state === "quoted" ? "报价" : "不报记录"}会作废并留在历史中，这一行回到待报价。确定修改吗？`;
     modal.confirm({ title: "修改后原答复作废", content,
       okText: "确定修改", cancelText: "取消", onOk: () => send(true), onCancel: resetQty });
-  };
-
-  const closeInquiry = async () => {
-    if (!closing) return;
-    setCloseBusy(true);
-    try {
-      const { row, outcome } = closing;
-      await presales.closeInquiry(row.inquiry_id, { expected_version: row.inquiry_version, outcome,
-        ...(outcome === "won" && row.price ? { won_offer_id: row.price.offer_id, expected_offer_revision_no: row.price.revision_no } : {}) });
-      void message.success(`${row.inquiry_no} 已关单`);
-      setClosing(undefined);
-      notifyPoolChanged();
-      void load();
-    } catch (error) {
-      const info = parseApiError(error);
-      if (info.kind === "permission" || info.status === 404) { clearProtectedData(); await load(); }
-      if (info.code === "offer_revision_conflict") {
-        setClosing(undefined);
-        void message.warning("报价已更新，请核对最新价格后重新关单");
-        await load();
-      } else await handleError(error, load);
-    } finally { setCloseBusy(false); }
   };
 
   const showHistory = async (row: PoolLine) => {
@@ -246,7 +235,9 @@ export default function PoolPage() {
     </div> },
     { title: "PN / 描述", key: "pn", render: (_, row) => <div className="presales-cell">
       <Space>{row.part_id && <PartThumb partId={row.part_id} pn={row.pn} size={32} />}<b>{row.pn}</b></Space>
-      <span className="presales-muted presales-ellipsis" title={row.description ?? undefined}>{row.description || "—"}</span>
+      <button type="button" className="presales-link presales-ellipsis" title={row.description ?? "点击查看或补充描述"}
+        disabled={busy != null}
+        onClick={() => setDescEdit(row)}>{row.description || (row.inquiry_status === "closed" ? "暂无描述" : "点击补充描述")}</button>
       {row.notes && <span className="presales-muted presales-ellipsis" title={row.notes}>备注：{row.notes}</span>}
       {!row.part_id && <Space size={4}><Tag color="warning">待绑定型号</Tag>
         {canBind && row.inquiry_status !== "closed" && <Button type="link" size="small" disabled={busy != null} onClick={() => setBinding(row)}>绑定 / 建档</Button>}
@@ -272,6 +263,11 @@ export default function PoolPage() {
         onClick={() => change(row, { unit_price: Number(row.latest_same_pn!.unit_price), is_tax_inclusive: row.latest_same_pn!.is_tax_inclusive, price_basis: row.latest_same_pn!.price_basis })}>
         沿用 {moneyExact(Number(row.latest_same_pn.unit_price))}</Button>}
     </div> },
+    { title: "报价备注", key: "notes", width: 170, render: (_, row) => <div className="presales-cell">
+      {/* D-0068：报价备注上移行内（原展开行输入移除）；随本行「保存」生效，会随答复展示给销售。 */}
+      <Input aria-label={`${row.pn} 报价备注`} size="small" disabled={priceDisabled(row)} style={{ width: "100%" }} placeholder="如：无内存配置"
+        value={detailOf(row).notes} onChange={(event) => change(row, { notes: event.target.value })} />
+    </div> },
     { title: "税", key: "tax", width: 98, render: (_, row) => <Select aria-label={`${row.pn} 含税`} size="small" disabled={priceDisabled(row)} style={{ width: "100%" }} value={taxFor(row) == null ? "unknown" : taxFor(row) ? "inc" : "ex"}
       onSelect={(value) => change(row, { is_tax_inclusive: value === "unknown" ? null : value === "inc" })}
       options={[{ value: "inc", label: "含税" }, { value: "ex", label: "不含税" }, ...(taxFor(row) == null ? [{ value: "unknown", label: "未声明" }] : [])]} /> },
@@ -279,21 +275,20 @@ export default function PoolPage() {
       onSelect={(value) => change(row, { price_basis: value })} options={[{ value: "sale", label: "售价" }, { value: "cost", label: "成本价" }]} /> },
     { title: "状态 / 更新人", key: "state", width: 130, render: (_, row) => <div className="presales-cell">
       <Tag color={STATE_COLOR[row.answer_state]}>{STATE_LABEL[row.answer_state]}</Tag>
-      {row.answer_requires_review && <span className="presales-muted">旧答复对应的询价条件待核对，请按当前条件重新报价或填写不报原因。</span>}
+      {row.answer_requires_review && <span className="presales-muted">旧答复对应的询价条件待核对，请按当前条件重新报价（无货或不想做报价 0）。</span>}
       {row.answered_by && <span className="presales-muted">{row.answered_by} {formatBusinessDateTime(row.answered_at)}</span>}
       {row.answer_state === "skip" && row.answer_reason && <span className="presales-muted">{row.answer_reason}</span>}
     </div> },
     { title: "操作", key: "actions", width: 150, render: (_, row) => <Space size={4} wrap>
       <Button type="primary" size="small" loading={busy === row.line_id} disabled={priceDisabled(row) || !dirty(row)} onClick={() => save(row)}>保存</Button>
-      {row.inquiry_status !== "closed" && row.answer_state !== "skip" && <SkipButton disabled={busy != null} onConfirm={(reason) => void write(row, "skip", () => presalesPool.skip(row.line_id, { expected_version: row.line_version, reason }), `${row.pn} 已标为不报`)} />}
       <Button type="link" size="small" onClick={() => void showHistory(row)}>历史</Button>
-      {row.answer_state === "quoted" && <Button type="link" size="small" aria-label={`复制 ${row.pn} 报价给客户`} onClick={() => void copy(row)}>复制</Button>}
-      {(row.is_mine || supervisor) && row.inquiry_status !== "closed" && <Button type="link" size="small" aria-label={`关闭询价 ${row.inquiry_no}`} disabled={busy != null} onClick={() => setClosing({ row, outcome: "lost" })}>关单</Button>}
+      {row.answer_state === "quoted" && row.price?.unit_price != null && <Button type="link" size="small" aria-label={`复制 ${row.pn} 报价给客户`} onClick={() => void copy(row)}>复制</Button>}
     </Space> },
   ];
 
   const tabs: [PoolTab, string, number | undefined][] = [["pending", "待报价", counts?.pending], ["quoted", "已报价", counts?.quoted], ["skip", "不报", counts?.skip], ["mine", "我发起的", counts?.mine], ["all", "全部", counts?.all]];
   const exportIds = [...new Set(rows.filter((row) => selected.includes(row.line_id) && row.inquiry_status !== "closed").map((row) => row.inquiry_id))];
+  const latestDescriptionRow = descEdit && rows.find((row) => row.line_id === descEdit.line_id);
   return <section className="presales-page presales-stack">
     <PageHeader title="询价报价" subtitle="默认查看本人和指定给自己的询价，采购／报价人可查看全部已提交询价，管理员可查看全部询价" extra={<Space>
       <Link to="/presales/inquiries/new">Excel 询价</Link>
@@ -318,7 +313,7 @@ export default function PoolPage() {
         <span className="presales-muted">勾选行后，报价表按未关单的询价单导出可填行。旧版直接引用报价的行请在页面改价。上传后须预览并确认。</span>
       </div>
       {failed && <Alert type="error" message="询价报价加载失败" action={<Button onClick={() => void load()}>重试</Button>} />}
-      <Table aria-label="询价报价" rowKey="line_id" size="middle" dataSource={rows} columns={columns} tableLayout="fixed" scroll={{ x: 1260 }} loading={loading}
+      <Table aria-label="询价报价" rowKey="line_id" size="middle" dataSource={rows} columns={columns} tableLayout="fixed" scroll={{ x: 1490 }} loading={loading}
         rowSelection={{ selectedRowKeys: selected, onChange: (keys) => setSelected(keys as number[]),
           getCheckboxProps: (row) => ({ disabled: row.inquiry_status === "closed",
             "aria-label": `选择报价表来源 ${row.inquiry_no} ${row.pn}` }) }}
@@ -332,7 +327,6 @@ export default function PoolPage() {
             <label>可供数量<InputNumber aria-label={`${row.pn} 可供数量`} disabled={off} min={0} precision={3} style={{ width: "100%" }} value={detail.qty_available} onChange={(value) => change(row, { qty_available: value })} /></label>
             <label>供应商<CandidateSelect label="供应商" load={presales.suppliers} disabled={off} value={detail.supplier_id} onChange={(value) => change(row, { supplier_id: value ?? null })} />
               {row.price?.supplier_name && <span className="presales-muted">当前：{row.price.supplier_name}</span>}</label>
-            <label className="presales-wide">报价备注<Input aria-label={`${row.pn} 报价备注`} disabled={off} value={detail.notes} onChange={(event) => change(row, { notes: event.target.value })} /></label>
             <label className="presales-wide">询价备注（失焦保存）<Input key={`${row.line_id}:${row.line_version}`} aria-label={`${row.pn} 询价备注`} disabled={busy != null || row.inquiry_status === "closed"} defaultValue={row.notes ?? ""}
               onBlur={(event) => { const value = event.target.value.trim() || null; if (value !== (row.notes ?? null)) edit(row, { notes: value }); }} /></label>
             {row.inquiry_notes && <span className="presales-wide presales-muted">客户要求：{row.inquiry_notes}</span>}
@@ -343,14 +337,12 @@ export default function PoolPage() {
         locale={{ emptyText: loading ? "加载中" : "没有符合条件的询价行" }}
         pagination={{ current: page, pageSize: PAGE_SIZE, total, showSizeChanger: false, hideOnSinglePage: true, onChange: setPage, showTotal: (value) => `共 ${value} 行` }} />
     </div>
-    {closing && <Modal open title={`关闭询价 ${closing.row.inquiry_no}`} okText="确定关单" cancelText="取消" confirmLoading={closeBusy}
-      onOk={() => void closeInquiry()} onCancel={() => { if (!closeBusy) setClosing(undefined); }}>
-      <p>关单针对整张询价单，这张单的所有行都会离开待报价。价格和历史会保留。</p>
-      <Radio.Group aria-label="关单结果" value={closing.outcome} onChange={(event) => setClosing({ ...closing, outcome: event.target.value })} options={[
-        ...(closing.row.answer_state === "quoted" ? [{ value: "won", label: `已成交（${closing.row.pn} ${moneyExact(priceOf(closing.row))}）` }] : []),
-        { value: "lost", label: "未成交" }, { value: "cancelled", label: "已取消" },
-      ]} />
-    </Modal>}
+    {descEdit && latestDescriptionRow && <DescriptionEditDialog key={descEdit.line_id} row={descEdit} latest={latestDescriptionRow} busy={busy === descEdit.line_id}
+      onClose={() => { if (busy !== descEdit.line_id) setDescEdit(undefined); }}
+      onSave={(value) => {
+        if (value === latestDescriptionRow.description) { setDescEdit(undefined); return; }
+        void edit(latestDescriptionRow, { description: value })?.then((updated) => { if (updated) setDescEdit(undefined); });
+      }} />}
     {binding && <Modal open title={`绑定型号：${binding.pn}`} footer={null} destroyOnHidden onCancel={() => setBinding(undefined)}>
       <PartBinding compact line={{ id: binding.line_id, version: binding.line_version, pn_raw: binding.pn, description: binding.description } as InquiryLine}
         refresh={load} onBound={() => { setBinding(undefined); void load(); }} />

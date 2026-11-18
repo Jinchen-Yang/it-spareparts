@@ -1,5 +1,5 @@
 import type { Inquiry, InquiryLine, Offer } from "../../api/presales";
-import { moneyExact } from "../../utils/format";
+import { formatMoney } from "../../utils/format";
 import { formatBusinessDateTime } from "../../utils/date";
 import { taxLabel } from "./shared";
 export { basisLabel } from "./shared";
@@ -46,7 +46,7 @@ export function lineAnswer(inquiry: Inquiry, line: InquiryLine): LineAnswer {
 }
 
 export function priceText(offer: Pick<Offer, "unit_price" | "is_tax_inclusive">) {
-  return `${moneyExact(offer.unit_price == null ? null : Number(offer.unit_price))} ${taxLabel(offer.is_tax_inclusive)}`;
+  return `${formatMoney(offer.unit_price, { prefix: "¥" })} ${taxLabel(offer.is_tax_inclusive)}`;
 }
 
 /** 编辑只使用真实草稿或当前授权报价；历史引用快照不能提供编辑版本和字段。 */
@@ -68,9 +68,12 @@ export function ownedOfferForEdit(inquiry: Inquiry, line: InquiryLine, actor?: n
     .sort((a, b) => b.id - a.id)[0];
 }
 
-/** 一句可以直接转述给客户的话；价格性质是内部标注，不写进这句话。 */
+/** 一句可以直接转述给客户的话；价格性质是内部标注，不写进这句话。D-0068：报价备注是需及时告知的信息，随句附带。 */
 export function answerSentence(line: InquiryLine, answer: LineAnswer) {
-  if (answer.state === "quoted") return `${line.pn_raw} ${priceText(answer.offer)}，${answer.reporter} ${formatBusinessDateTime(answer.at)} 报价`;
+  if (answer.state === "quoted") {
+    const note = answer.offer.notes?.trim();
+    return `${line.pn_raw} ${priceText(answer.offer)}，${answer.reporter} ${formatBusinessDateTime(answer.at)} 报价${note ? `（备注：${note}）` : ""}`;
+  }
   if (answer.state === "skip") return `${line.pn_raw} 不报：${answer.reason}`;
   if (answer.state === "unavailable") return `${line.pn_raw} ${answer.reason}`;
   return `${line.pn_raw} 待报价`;

@@ -67,7 +67,7 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
   }, [hasChanges]);
   const back = () => {
     if (!hasChanges) { navigate("/presales/workbench"); return; }
-    modal.confirm({ title: "当前单据有未保存的修改", content: "返回列表会放弃尚未保存的报价、沿用选择和不报原因。",
+    modal.confirm({ title: "当前单据有未保存的修改", content: "返回列表会放弃尚未保存的报价和沿用选择。",
       okText: "放弃修改并返回", cancelText: "继续填写", onOk: () => navigate("/presales/workbench") });
   };
   useEffect(() => { onDirtyChange?.(Object.values(dirty).some(Boolean) || Object.keys(responses).length > 0); }, [dirty, responses, onDirtyChange]);
@@ -114,15 +114,23 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
   const ownOffers = actorId == null ? [] : (inquiry.offers ?? []).filter((offer) => offer.reporter?.id === actorId);
   const lines = inquiry.lines ?? [];
   const required = lines.filter((line) => !line.ref_offer_id);
+  const canProcess = inquiry.status === "submitted" && (proactive || (!!task && actorId != null)) && !paused;
+  const editable = canProcess && !refreshRequired;
   const savedResponse = (lineId: number) => inquiry.line_responses?.find((row) => row.line_id === lineId && row.created_by === actorId);
-  const responseFor = (lineId: number): LineResponseInput => responses[lineId] ?? savedResponse(lineId) ?? { line_id: lineId, mode: "quote" };
+  const responseFor = (lineId: number): LineResponseInput => {
+    if (responses[lineId]) return responses[lineId];
+    const saved = savedResponse(lineId);
+    // 待回复的行需填写新价或沿用；只读工作台仍回显当时的不报原因。
+    if (!saved || (active && canProcess && saved.mode === "skip")) return { line_id: lineId, mode: "quote" };
+    return saved;
+  };
   const reusedOffer = (line: InquiryLine) => {
     const response = responseFor(line.id);
     if (response.mode !== "reuse") return undefined;
     return (savedResponse(line.id)?.ref_offer_id === response.ref_offer_id ? savedResponse(line.id)?.offer : undefined)
       ?? flattenOffers(library[line.part_id!] ?? []).find((offer) => offer.id === response.ref_offer_id);
   };
-  const complete = required.length > 0 && required.every((line) => {
+  const handledRows = required.filter((line) => {
     const response = responseFor(line.id);
     if (response.mode === "skip") return !!response.reason?.trim();
     if (response.mode === "reuse") {
@@ -132,23 +140,23 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
     return !dirty[line.id] && ownOffers.some((offer) => offer.line_id === line.id && ["draft", "published"].includes(offer.status)
       && quoteComplete(offer) && !offer.no_stock && !!line.part_id);
   });
-  const canProcess = inquiry.status === "submitted" && (proactive || (!!task && actorId != null)) && !paused;
+  const complete = required.length > 0 && handledRows.length === required.length;
   const canBind = canBindPresalesPart() && (proactive ? inquiry.status === "draft"
     : inquiry.status === "submitted" || inquiry.status === "revising");
-  const editable = canProcess && !refreshRequired;
   const refreshAfterSuccess = (error: unknown, action: string) => {
     setRefreshRequired(true);
     handlePresalesError.afterSuccess(error, action);
   };
   const reply = async () => {
-    if (!complete || !task) return;
+    if (!active || !editable || !complete || !task) return;
     setBusy(true);
     let completed = false;
     try {
-      const lineResponses = required.map((line) => {
+      const lineResponses: LineResponseInput[] = required.map((line) => {
         const row = responseFor(line.id);
-        return { line_id: row.line_id, mode: row.mode, ...(row.mode === "reuse" ? { ref_offer_id: row.ref_offer_id } : {}),
-          ...(row.mode === "skip" ? { reason: row.reason?.trim() } : {}) };
+        return row.mode === "reuse"
+          ? { line_id: line.id, mode: "reuse", ref_offer_id: row.ref_offer_id }
+          : { line_id: line.id, mode: "quote" };
       });
       const choices: Record<number, ExistingChoice> = {};
       for (;;) {
@@ -207,7 +215,7 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
       const selected = line ? [line] : required.filter((item) => responseFor(item.id).mode === "quote" && quoteComplete(valueFor(item)) && !!item.part_id);
       for (const item of selected) await saveLine(item);
       completed = true;
-      message.success(line && currentFor(line)?.status === "published" ? "报价已更新，已保存历史版本" : "报价草稿已保存；沿用与不报将在回复时提交");
+      message.success(line && currentFor(line)?.status === "published" ? "报价已更新，已保存历史版本" : "报价草稿已保存；沿用选择将在回复时提交");
       await refresh();
     } catch (error) {
       if (completed) refreshAfterSuccess(error, "保存报价");
@@ -272,13 +280,6 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
         {current?.status === "published" && <Button size="small" danger disabled={busy} onClick={() => { setReason(""); setWithdrawOffer(current); }}>撤销报价</Button>}
       </span> };
   });
-  const handledRows = required.filter((line) => {
-    const response = responseFor(line.id);
-    if (response.mode === "skip") return !!response.reason?.trim();
-    if (response.mode === "reuse") return !!reusedOffer(line) && isOfferActive(reusedOffer(line)!, now);
-    return !dirty[line.id] && ownOffers.some((offer) => offer.line_id === line.id && ["draft", "published"].includes(offer.status)
-      && quoteComplete(offer) && !offer.no_stock && !!line.part_id);
-  });
   const count = (mode: LineResponseInput["mode"]) => handledRows.filter((line) => responseFor(line.id).mode === mode).length;
 
 
@@ -303,20 +304,20 @@ function QuoteProcessContent({ inquiryId, onTaskChange, onDirtyChange }: { inqui
         try { await refresh(); } catch (error) { refreshAfterSuccess(error, "之前的操作"); }
         finally { setBusy(false); }
       }}>刷新结果</Button>} />}
-    {libraryError && <Alert type="warning" message="已有有效报价加载失败，请刷新后重试；仍可报新价或不报" />}
+    {libraryError && <Alert type="warning" message="已有有效报价加载失败，请刷新后重试；仍可报新价或改用页面报价" />}
     <QuoteGrid id="presales-workbench-lines" rows={rows} now={now} proactive={proactive} onChange={changeValue}
       onResponse={(lineId, patch) => {
         setResponses((previous) => ({ ...previous, [lineId]: { ...(previous[lineId] ?? savedResponse(lineId) ?? { line_id: lineId, mode: "quote" as const }), ...patch } }));
       }} />
     </div>
-    <footer className="presales-footer"><span>填写完成 <b>{handledRows.length}</b> / {required.length} 行（报价 {count("quote")} · 沿用 {count("reuse")} · 不报 {count("skip")}）</span>
+    <footer className="presales-footer"><span>填写完成 <b>{handledRows.length}</b> / {required.length} 行（报价 {count("quote")} · 沿用 {count("reuse")}{count("skip") ? ` · 历史不报 ${count("skip")}` : ""}）</span>
       <div className="presales-toolbar"><Button size="small" onClick={() => setTimeline(!timeline)}>{timeline ? "隐藏动态" : "查看动态"}</Button>
         {active && <><Button disabled={busy || !editable || !task?.allowed_actions.includes("release")} onClick={() => { setReason(""); setReleaseOpen(true); }}>退回公共池</Button>
           <Button loading={busy} disabled={!editable || !required.some((line) => responseFor(line.id).mode === "quote" && quoteComplete(valueFor(line)) && !!line.part_id)} onClick={() => void save()}>保存草稿</Button>
           <Button type="primary" loading={busy} disabled={!complete || !editable} onClick={() => void reply()}>回复给销售</Button></>}
       </div>
     </footer>
-    {active && !complete && <div className="presales-muted">每行保存新报价、沿用有效报价或填写不报原因后，才能回复给销售。</div>}
+    {active && !complete && <div className="presales-muted">每行保存新报价或沿用有效报价后，才能回复给销售；无货或不想做的行报价 0。</div>}
     {dialog}
     <Modal title="撤销报价" open={!!withdrawOffer} okText="确认撤销" cancelText="取消" confirmLoading={busy}
       okButtonProps={{ disabled: !reason.trim() }} onCancel={() => setWithdrawOffer(undefined)} onOk={() => void withdraw()}>

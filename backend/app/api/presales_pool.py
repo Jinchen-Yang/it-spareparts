@@ -57,6 +57,8 @@ class EditLine(Input):
     require_exact_pn: bool | None = None
     notes: str | None = None
     expected_delivery: date | None = None
+    # D-0068：描述与备注同类，只改不作废当前答复；显式传 null 清空。
+    description: str | None = None
 
     @model_validator(mode="after")
     def _conditions_not_null(self):

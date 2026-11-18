@@ -7,7 +7,7 @@ import type { Inquiry, Offer } from "../../../api/presales";
 import InquiryDetailPage from "../InquiryDetailPage";
 
 const mocks = vi.hoisted(() => ({
-  getInquiry: vi.fn(), revisions: vi.fn(), withdrawInquiry: vi.fn(), copyInquiry: vi.fn(), closeInquiry: vi.fn(), library: vi.fn(),
+  getInquiry: vi.fn(), revisions: vi.fn(), withdrawInquiry: vi.fn(), copyInquiry: vi.fn(), library: vi.fn(),
 }));
 vi.mock("../../../api/presales", () => ({ presales: mocks }));
 vi.mock("../../../components/gallery/PartThumb", () => ({ default: ({ pn }: { pn: string }) => <span>{pn} 缩略图</span> }));
@@ -59,6 +59,16 @@ beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); mocks.library.mockR
 afterEach(() => { cleanup(); });
 
 describe("询价详情", () => {
+  it("点描述可在只读行详情查看全文", async () => {
+    const data = inquiry();
+    const description = "EMC 控制器，不含内存";
+    await openPage({ ...data, lines: data.lines!.map((line) => ({ ...line, description })) });
+    fireEvent.click(screen.getByRole("button", { name: description }));
+    const dialog = within(await screen.findByRole("dialog", { name: "PN-8 · 详情" }));
+    expect(dialog.getByText(description)).toBeVisible();
+    expect(dialog.queryByRole("textbox")).toBeNull();
+  });
+
   it.each(["admin", "boss"])("管理员 %s 可管理已关闭的他人询价可见人员", async (role) => {
     localStorage.setItem("role", role);
     await openPage(inquiry({ is_owner: false, status: "closed" }));
@@ -86,9 +96,10 @@ describe("询价详情", () => {
     const lines = data.lines!.map((line) => ({ ...line, answer_requires_review: true }));
     await openPage(inquiry({ lines, line_answers: [{ line_id: 11, state: "pending", responded: false }] }));
     expect(await screen.findByText("待核对，请按当前条件重新报价")).toBeVisible();
-    const oldPrice = screen.getByRole("button", { name: "采纳 PN-8 报价 1" });
-    expect(oldPrice).toBeDisabled();
-    expect(within(oldPrice).queryByText(/最低价/)).not.toBeInTheDocument();
+    // D-0068：报价格子不再承担采纳交互；旧报价只展示、不标最低价。
+    expect(screen.getAllByText(/¥100\.00/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("含税最低价")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /采纳/ })).toBeNull();
   });
 
   it("他人可以看已提交询价与报价，不能从详情追加行或代表发起人关单", async () => {
@@ -108,8 +119,9 @@ describe("询价详情", () => {
     const table = within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-8/ });
     const lowest = within(table).getAllByText(/最低价/);
     expect(lowest).toHaveLength(2);
-    expect(lowest[0].closest("button")).toHaveAttribute("aria-label", "采纳 PN-8 报价 2");
-    expect(lowest[1].closest("button")).toHaveAttribute("aria-label", "采纳 PN-8 报价 5");
+    // D-0068：格子为纯展示；含税最低 ¥90 与不含税最低 ¥80 各自标注。
+    expect(lowest[0].closest("div")).toHaveTextContent("¥90.00");
+    expect(lowest[1].closest("div")).toHaveTextContent("¥80.00");
     expect(within(table).getByText("基于旧版本")).toBeInTheDocument();
     expect(within(table).getByText("已失效")).toBeInTheDocument();
     expect(within(table).queryByText("采购4")).toBeNull();
@@ -141,9 +153,9 @@ describe("询价详情", () => {
     data.offers = [offer(1, { unit_price: "500.00" }), offer(2, { line_id: 12, unit_price: "10.00" }),
       offer(3, { line_id: 12, unit_price: null, no_stock: true })];
     await openPage(data);
-    expect(within(within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-8/ })).getByText("含税最低价").closest("button")).toHaveAttribute("aria-label", "采纳 PN-8 报价 1");
+    expect(within(within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-8/ })).getByText("含税最低价").closest("div")).toHaveTextContent("¥500.00");
     const second = within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-9/ });
-    expect(within(second).getByText("含税最低价").closest("button")).toHaveAttribute("aria-label", "采纳 PN-9 报价 2");
+    expect(within(second).getByText("含税最低价").closest("div")).toHaveTextContent("¥10.00");
     expect(within(second).getByText("无货")).toBeInTheDocument();
     expect(within(second).queryByText("已失效")).toBeNull();
   });
@@ -166,36 +178,23 @@ describe("询价详情", () => {
     expect(screen.getByRole("dialog", { name: "图库多选下载" })).toHaveTextContent("PN-8");
   });
 
-  it("关单成交可选择本单报价并携带询价版本", async () => {
-    const user = userEvent.setup();
-    mocks.closeInquiry.mockResolvedValue(inquiry({ status: "closed", closed_outcome: "won", won_offer_id: 2, version: 5 }));
+  it("D-0068：发起人也无成交/未成交关单入口，报价格子仅展示", async () => {
     await openPage();
-    await user.click(screen.getByRole("button", { name: "关单" }));
-    await user.click(screen.getByRole("combobox", { name: "采纳报价" }));
-    await user.click(await screen.findByText(/PN-8 · 报价 #2/));
-    await user.click(screen.getByRole("button", { name: "确认关单" }));
-    await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 2, expected_offer_revision_no: 1 }));
-    expect(await screen.findByText("已结束")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "关单" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "未成交关单" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /采纳/ })).toBeNull();
+    expect(screen.getAllByText(/¥100\.00/).length).toBeGreaterThan(0);
   });
 
-  it("整单引用外单有效报价可只读比价，成交关单可不采纳本单报价", async () => {
-    const user = userEvent.setup();
+  it("整单引用外单有效报价可只读比价，不补查报价库", async () => {
     const data = inquiry({ offers: [] });
     data.lines![0].ref_offer_id = 7;
     data.lines![0].ref_offer_revision_no = 1;
     data.lines![0].ref_offer = offer(7, { inquiry_id: 3, line_id: 99, unit_price: "120.00" });
-    mocks.closeInquiry.mockResolvedValue({ ...data, status: "closed", closed_outcome: "won", version: 5 });
     await openPage(data);
     expect(await screen.findByText("采购7")).toBeInTheDocument();
     expect(within(screen.getByRole("table", { name: "询价比价矩阵" })).getByRole("row", { name: /PN-8/ })).toHaveTextContent("¥120.00");
     expect(mocks.library).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "关单" }));
-    const dialog = screen.getByRole("dialog");
-    expect(within(dialog).getByText("采纳本单报价（可选）")).toBeInTheDocument();
-    await user.click(within(dialog).getByRole("combobox", { name: "采纳报价" }));
-    expect(screen.getByText(/PN-8 · 报价 #7/)).toBeInTheDocument();
-    await user.click(within(dialog).getByRole("button", { name: "确认关单" }));
-    await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won" }));
   });
 
   it("外单引用未返回授权快照时不补查当前报价或生成字段占位", async () => {
@@ -209,16 +208,6 @@ describe("询价详情", () => {
     expect(screen.queryByText("采购备注")).toBeNull();
     expect(screen.queryByText("过期报价备注")).toBeNull();
     expect(screen.queryByRole("button", { name: "采纳 PN-8 报价 7" })).toBeNull();
-  });
-
-  it.each([["未成交", "lost"], ["取消", "cancelled"]])("关单%s不携带采纳报价", async (label, outcome) => {
-    const user = userEvent.setup();
-    mocks.closeInquiry.mockResolvedValue(inquiry({ status: "closed" }));
-    await openPage();
-    await user.click(screen.getByRole("button", { name: "关单" }));
-    await user.click(screen.getByRole("radio", { name: label }));
-    await user.click(screen.getByRole("button", { name: "确认关单" }));
-    await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome }));
   });
 
   it("已提交询价不再提供撤回；复制已关单后进入新单编辑", async () => {
@@ -286,19 +275,17 @@ it("成交采用独立钉住快照并显示原报价撤销，未授权 latest �
   expect(screen.queryByText(/该报价已更新为/)).not.toBeInTheDocument();
 });
 
-it("采纳已更新的沿用报价时，下拉明确告知当前价格税基及版本后按报价ID成交", async () => {
-  const user = userEvent.setup();
-  const data = inquiry({ offers: [] });
+it("沿用报价被更新时展示当前价格与税基版本，报价格子仅作展示", async () => {
+  const latest = offer(7, { unit_price: "75.00", is_tax_inclusive: false, revision_no: 2, notes: "无内存配置" });
+  const data = inquiry({ offers: [], line_answers: [{ line_id: 11, state: "quoted", responded: true, offer: latest }] });
   data.line_responses = [{ line_id: 11, mode: "reuse", ref_offer_id: 7, ref_offer_revision_no: 1,
-    created_by: 3, work_item_id: 1, expired: false, offer: offer(7, { line_id: 99, inquiry_id: 9, unit_price: "120.00",
+    created_by: 3, work_item_id: 1, expired: false, offer: offer(7, { line_id: 99, inquiry_id: 9, unit_price: "120.00", notes: "原配置",
       latest: { unit_price: "75.00", is_tax_inclusive: false, revision_no: 2 } }) }];
-  mocks.closeInquiry.mockResolvedValue({ ...data, status: "closed", won_offer_id: 7, won_offer_revision_no: 2 });
   await openPage(data);
-  await user.click(screen.getByRole("button", { name: "关单" }));
-  await user.click(screen.getByRole("combobox", { name: "采纳报价" }));
-  await user.click(await screen.findByText(/PN-8 · 报价 #7 · 采购7 · 当前¥75.00 · 不含税 · 第 2 版/));
-  await user.click(screen.getByRole("button", { name: "确认关单" }));
-  await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 7, expected_offer_revision_no: 2 }));
+  expect(screen.getByText("该报价已更新为 ¥75 · 不含税")).toBeInTheDocument();
+  expect(screen.getByText(/PN-8 ¥75\.00 不含税.*报价（备注：无内存配置）/)).toBeVisible();
+  expect(screen.queryByText(/报价（备注：原配置）/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /采纳/ })).toBeNull();
 });
 
 it("同一报价ID在不同询价行钉住不同版本时，逐行使用各自快照比价", async () => {
@@ -314,21 +301,17 @@ it("同一报价ID在不同询价行钉住不同版本时，逐行使用各自�
   expect(screen.queryByText(/¥999.00/)).not.toBeInTheDocument();
 });
 
-it("点矩阵报价选择成交采纳，过期与旧版本不可选择，时间线可以隐藏", async () => {
+it("旧版本与过期报价如实标注，时间线可以隐藏", async () => {
   const user = userEvent.setup();
-  mocks.closeInquiry.mockResolvedValue(inquiry({ status: "closed", won_offer_id: 2 }));
   await openPage(inquiry({ offers: [offer(1, { status: "stale" }), offer(2), offer(3, { expired: true })] }));
-  expect(screen.getByRole("button", { name: "采纳 PN-8 报价 1" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "采纳 PN-8 报价 3" })).toBeDisabled();
-  await user.click(screen.getByRole("button", { name: "采纳 PN-8 报价 2" }));
-  expect(screen.getByRole("button", { name: "采纳 PN-8 报价 2" })).toHaveAttribute("aria-pressed", "true");
+  // D-0068：报价格子只展示，不再有选择成交交互。
+  expect(screen.getByText("基于旧版本")).toBeInTheDocument();
+  expect(screen.getByText("已失效")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /采纳/ })).toBeNull();
   await user.click(screen.getByRole("button", { name: "查看动态" }));
   expect(screen.getByText("时间线 presales_inquiry 5")).toBeInTheDocument();
   await closeLine();
   expect(screen.queryByText("时间线 presales_inquiry 5")).not.toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "关单" }));
-  await user.click(screen.getByRole("button", { name: "确认关单" }));
-  await waitFor(() => expect(mocks.closeInquiry).toHaveBeenCalledWith(5, { expected_version: 4, outcome: "won", won_offer_id: 2, expected_offer_revision_no: 1 }));
 });
 
 it("详情草稿沿用不进入可采纳报价，草稿不报与沿用均标为未回复", async () => {
