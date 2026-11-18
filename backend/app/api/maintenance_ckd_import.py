@@ -41,7 +41,7 @@ def _preflight(request: Request) -> None:
         )
 
 
-@router.post("/ckd-imports/preview")
+@router.post("/ckd-imports/preview", deprecated=True)
 async def preview_ckd_import(
     request: Request,
     response: Response,
@@ -118,7 +118,7 @@ async def preview_ckd_import(
     }
 
 
-@router.post("/ckd-imports/{batch_id}/apply")
+@router.post("/ckd-imports/{batch_id}/apply", deprecated=True)
 def apply_ckd_import(
     batch_id: str = Path(..., min_length=36, max_length=36),
     db: Session = Depends(get_db),
@@ -156,7 +156,7 @@ def apply_ckd_import(
     return {"batch_id": batch_id, **summary}
 
 
-@router.get("/ckd-imports/{batch_id}")
+@router.get("/ckd-imports/{batch_id}", deprecated=True)
 def get_ckd_import(
     batch_id: str = Path(..., min_length=36, max_length=36),
     response: Response = None,

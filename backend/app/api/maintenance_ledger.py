@@ -91,7 +91,7 @@ def _preview_preflight(request: Request) -> None:
         )
 
 
-@router.post("/ledger-imports/preview")
+@router.post("/ledger-imports/preview", deprecated=True)
 async def preview_ledger_import(
     request: Request,
     response: Response,
@@ -166,7 +166,7 @@ async def preview_ledger_import(
     }
 
 
-@router.post("/ledger-imports/{batch_id}/apply")
+@router.post("/ledger-imports/{batch_id}/apply", deprecated=True)
 def apply_ledger_import(
     batch_id: str = Path(..., min_length=36, max_length=36),
     db: Session = Depends(get_db),
@@ -192,7 +192,7 @@ def apply_ledger_import(
     return {"batch_id": batch_id, **summary}
 
 
-@router.get("/ledger-imports/{batch_id}")
+@router.get("/ledger-imports/{batch_id}", deprecated=True)
 def get_ledger_import(
     batch_id: str = Path(..., min_length=36, max_length=36),
     response: Response = None,

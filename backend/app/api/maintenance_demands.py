@@ -217,7 +217,7 @@ def void_fast(
         raise
 
 
-@beta_router.post("/delete-intents", status_code=status.HTTP_201_CREATED)
+@beta_router.post("/delete-intents", status_code=status.HTTP_201_CREATED, deprecated=True)
 def create_delete_intent(
     body: DeleteIntentCreateRequest,
     db: Session = Depends(get_db),
@@ -248,7 +248,7 @@ def create_delete_intent(
         raise
 
 
-@beta_router.get("/delete-intents/{intent_id}")
+@beta_router.get("/delete-intents/{intent_id}", deprecated=True)
 def get_delete_intent(
     intent_id: str = Path(..., min_length=36, max_length=36),
     db: Session = Depends(get_db),
@@ -311,7 +311,7 @@ def _intent_action(
         raise
 
 
-@beta_router.post("/delete-intents/{intent_id}/arm")
+@beta_router.post("/delete-intents/{intent_id}/arm", deprecated=True)
 def arm_delete_intent(
     body: DeleteIntentActionRequest,
     intent_id: str = Path(..., min_length=36, max_length=36),
@@ -331,7 +331,7 @@ def arm_delete_intent(
     )
 
 
-@beta_router.post("/delete-intents/{intent_id}/execute")
+@beta_router.post("/delete-intents/{intent_id}/execute", deprecated=True)
 def execute_delete_intent(
     body: DeleteIntentActionRequest,
     intent_id: str = Path(..., min_length=36, max_length=36),
@@ -354,7 +354,7 @@ def execute_delete_intent(
     )
 
 
-@beta_router.post("/delete-intents/{intent_id}/cancel")
+@beta_router.post("/delete-intents/{intent_id}/cancel", deprecated=True)
 def cancel_delete_intent(
     body: DeleteIntentActionRequest,
     intent_id: str = Path(..., min_length=36, max_length=36),

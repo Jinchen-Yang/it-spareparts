@@ -116,7 +116,7 @@ def _read_headers_and_samples(data: bytes, doc_type: str) -> tuple[list[str], li
         workbook.close()
 
 
-@router.post("/ai-fallback/propose")
+@router.post("/ai-fallback/propose", deprecated=True)
 async def propose_ai_mapping(
     doc_type: str = Query(...),
     request: Request = None,
@@ -202,7 +202,7 @@ async def propose_ai_mapping(
     return result
 
 
-@router.post("/ai-fallback/{proposal_id}/accept")
+@router.post("/ai-fallback/{proposal_id}/accept", deprecated=True)
 async def accept_ai_mapping(
     proposal_id: str = Path(..., min_length=36, max_length=36),
     request: Request = None,
@@ -268,7 +268,7 @@ async def accept_ai_mapping(
     return {"proposal_id": proposal_id, "batch_id": batch_id}
 
 
-@router.get("/ai-fallback/proposals")
+@router.get("/ai-fallback/proposals", deprecated=True)
 def list_ai_proposals(
     doc_type: str | None = Query(None),
     response: Response = None,

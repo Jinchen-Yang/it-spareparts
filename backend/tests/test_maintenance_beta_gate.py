@@ -1,5 +1,8 @@
 """Stable/Beta release boundary for the maintenance workspace."""
 
+import csv
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 from fastapi.routing import APIRoute
 
@@ -13,6 +16,28 @@ from app.models.system import SysUser
 
 
 _PASSWORD = "synthetic-beta-password-123"
+
+
+def test_maintenance_beta_openapi_matches_deprecation_scope():
+    manifest = Path(__file__).resolve().parents[2] / "docs/api-contract/maintenance-beta-routes.tsv"
+    with manifest.open(encoding="utf-8", newline="") as source:
+        expected = {
+            (row["method"], row["path"]): row["lifecycle"]
+            for row in csv.DictReader(source, delimiter="\t")
+        }
+
+    paths = app.openapi()["paths"]
+    actual = {}
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        if not any(dep.call is require_maintenance_beta for dep in route.dependant.dependencies):
+            continue
+        for method in route.methods:
+            operation = paths[route.path_format][method.lower()]
+            actual[method, route.path_format] = "deprecated" if operation.get("deprecated") else "retained"
+
+    assert actual == expected
 
 
 def _client(

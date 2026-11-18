@@ -85,7 +85,7 @@ def _rollback_file(db: Session, path: Path | None) -> None:
             pass
 
 
-@router.post("/acceptance-deliverables/search")
+@router.post("/acceptance-deliverables/search", deprecated=True)
 def search_acceptance_deliverables(
     body: AcceptanceSearchRequest,
     response: Response,

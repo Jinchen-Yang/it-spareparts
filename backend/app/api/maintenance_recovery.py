@@ -35,7 +35,7 @@ def _can_view_cost(db: Session, ctx: UserContext) -> bool:
     return bool(graph.get("data_purchase_cost", False))
 
 
-@router.get("/projects/stable/{project_id}/recovery-summary")
+@router.get("/projects/stable/{project_id}/recovery-summary", deprecated=True)
 def get_recovery_summary(
     project_id: str = Path(...),
     response: Response = None,

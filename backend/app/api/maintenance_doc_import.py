@@ -48,7 +48,7 @@ def _preflight(request: Request) -> None:
         )
 
 
-@router.post("/doc-imports/{doc_type}/preview")
+@router.post("/doc-imports/{doc_type}/preview", deprecated=True)
 async def preview_doc_import(
     doc_type: str = Path(...),
     request: Request = None,
@@ -132,7 +132,7 @@ async def preview_doc_import(
     }
 
 
-@router.post("/doc-imports/{batch_id}/apply")
+@router.post("/doc-imports/{batch_id}/apply", deprecated=True)
 def apply_doc_import(
     batch_id: str = Path(..., min_length=36, max_length=36),
     db: Session = Depends(get_db),
@@ -169,7 +169,7 @@ def apply_doc_import(
     return {"batch_id": batch_id, **summary}
 
 
-@router.get("/doc-imports/{batch_id}")
+@router.get("/doc-imports/{batch_id}", deprecated=True)
 def get_doc_import(
     batch_id: str = Path(..., min_length=36, max_length=36),
     response: Response = None,
@@ -212,7 +212,7 @@ def get_doc_import(
     }
 
 
-@router.post("/doc-imports/relink-projects")
+@router.post("/doc-imports/relink-projects", deprecated=True)
 def relink_doc_import_projects(
     response: Response = None,
     # M4-3 是本次发布新增的写端点：必须同受展示板总闸约束，否则「回滚=关 flag」

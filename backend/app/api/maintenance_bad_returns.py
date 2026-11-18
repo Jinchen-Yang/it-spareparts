@@ -181,7 +181,7 @@ def _enforce_return_obligation_access(
         enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
 
 
-@router.post("/return-obligations/search")
+@router.post("/return-obligations/search", deprecated=True)
 def search_return_obligations(
     body: ReturnObligationSearch,
     db: Session = Depends(get_db),
@@ -222,7 +222,7 @@ def search_return_obligations(
     return payload
 
 
-@router.get("/projects/stable/{project_id}/return-rate")
+@router.get("/projects/stable/{project_id}/return-rate", deprecated=True)
 def get_project_return_rate(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
@@ -252,7 +252,7 @@ def get_project_return_rate(
     return payload
 
 
-@router.get("/return-categories")
+@router.get("/return-categories", deprecated=True)
 def list_return_categories(
     db: Session = Depends(get_db),
     _page: None = Depends(require_page("page_maintenance")),
@@ -289,7 +289,7 @@ def list_return_categories(
     return payload
 
 
-@router.post("/bad-returns/search")
+@router.post("/bad-returns/search", deprecated=True)
 def search_bad_returns(
     body: BadReturnSearch,
     db: Session = Depends(get_db),
@@ -316,7 +316,7 @@ def search_bad_returns(
     return payload
 
 
-@router.post("/bad-returns", status_code=status.HTTP_201_CREATED)
+@router.post("/bad-returns", status_code=status.HTTP_201_CREATED, deprecated=True)
 def create_bad_return(
     body: BadReturnCreate,
     db: Session = Depends(get_db),
@@ -396,7 +396,7 @@ def _transition(
         raise
 
 
-@router.post("/bad-returns/{return_id}/submit")
+@router.post("/bad-returns/{return_id}/submit", deprecated=True)
 def submit_bad_return(
     body: BadReturnCommand,
     return_id: str = Path(..., min_length=1, max_length=36),
@@ -416,7 +416,7 @@ def submit_bad_return(
     )
 
 
-@router.post("/bad-returns/{return_id}/in-transit")
+@router.post("/bad-returns/{return_id}/in-transit", deprecated=True)
 def mark_bad_return_in_transit(
     body: BadReturnInTransit,
     return_id: str = Path(..., min_length=1, max_length=36),
@@ -437,7 +437,7 @@ def mark_bad_return_in_transit(
     )
 
 
-@router.post("/bad-returns/{return_id}/warehouse-confirm")
+@router.post("/bad-returns/{return_id}/warehouse-confirm", deprecated=True)
 def warehouse_confirm_bad_return(
     body: BadReturnWarehouseConfirm,
     return_id: str = Path(..., min_length=1, max_length=36),
@@ -459,7 +459,7 @@ def warehouse_confirm_bad_return(
     )
 
 
-@router.post("/bad-returns/{return_id}/void")
+@router.post("/bad-returns/{return_id}/void", deprecated=True)
 def void_bad_return(
     body: BadReturnCommand,
     return_id: str = Path(..., min_length=1, max_length=36),
@@ -479,7 +479,7 @@ def void_bad_return(
     )
 
 
-@router.post("/return-obligations/{obligation_id}/resolve-category")
+@router.post("/return-obligations/{obligation_id}/resolve-category", deprecated=True)
 def resolve_return_category(
     body: ResolveReturnCategory,
     obligation_id: str = Path(..., min_length=1, max_length=36),

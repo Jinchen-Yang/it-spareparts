@@ -35,7 +35,7 @@ def _can_view_cost(db: Session, ctx: UserContext) -> bool:
     return bool(_perm.runtime_safe(graph).get("data_purchase_cost", False))
 
 
-@router.get("/projects/stable/{project_id}/front-stock")
+@router.get("/projects/stable/{project_id}/front-stock", deprecated=True)
 def get_front_stock(
     project_id: str = Path(...),
     include_ledger: bool = Query(False, description="同时返回最近流水"),

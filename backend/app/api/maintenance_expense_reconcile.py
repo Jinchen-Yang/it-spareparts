@@ -18,7 +18,7 @@ from app.services import maintenance_expense_reconcile as reconcile
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
 
-@router.get("/reconcile/expenses")
+@router.get("/reconcile/expenses", deprecated=True)
 def get_expense_reconcile(
     limit: int = Query(500, ge=1, le=2000),
     offset: int = Query(0, ge=0),

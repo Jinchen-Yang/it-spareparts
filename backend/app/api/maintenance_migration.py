@@ -233,7 +233,7 @@ def _raise_service_error(exc: Exception) -> None:
     raise exc
 
 
-@router.post("/preview", status_code=status.HTTP_201_CREATED)
+@router.post("/preview", status_code=status.HTTP_201_CREATED, deprecated=True)
 def create_preview(
     body: MigrationPreviewRequest,
     db: Session = Depends(get_db),
@@ -256,7 +256,7 @@ def create_preview(
         _raise_service_error(exc)
 
 
-@router.post("/search")
+@router.post("/search", deprecated=True)
 def search_migration_runs(
     body: MigrationSearchRequest,
     db: Session = Depends(get_db),
@@ -281,7 +281,7 @@ def search_migration_runs(
         _raise_service_error(exc)
 
 
-@router.get("/{run_id}")
+@router.get("/{run_id}", deprecated=True)
 def get_migration_run(
     run_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
@@ -298,7 +298,7 @@ def get_migration_run(
         _raise_service_error(exc)
 
 
-@router.get("/{run_id}/projects/{project_id}/evidence")
+@router.get("/{run_id}/projects/{project_id}/evidence", deprecated=True)
 def get_migration_project_evidence(
     run_id: str = Path(..., min_length=1, max_length=36),
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -335,7 +335,7 @@ def get_migration_project_evidence(
         _raise_service_error(exc)
 
 
-@router.get("/{run_id}/manifest")
+@router.get("/{run_id}/manifest", deprecated=True)
 def get_migration_manifest(
     run_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
@@ -358,7 +358,7 @@ def get_migration_manifest(
         _raise_service_error(exc)
 
 
-@router.post("/{run_id}/reconcile")
+@router.post("/{run_id}/reconcile", deprecated=True)
 def reconcile_migration_run(
     body: MigrationReconcileRequest,
     run_id: str = Path(..., min_length=1, max_length=36),
@@ -386,7 +386,7 @@ def reconcile_migration_run(
         _raise_service_error(exc)
 
 
-@router.post("/{run_id}/approve")
+@router.post("/{run_id}/approve", deprecated=True)
 def approve_migration_run(
     body: MigrationApproveRequest,
     run_id: str = Path(..., min_length=1, max_length=36),

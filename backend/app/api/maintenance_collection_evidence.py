@@ -31,7 +31,7 @@ def _milestone_project(db: Session, milestone_id: str) -> str | None:
     )
 
 
-@router.get("/collection-milestones/{milestone_id}/evidence")
+@router.get("/collection-milestones/{milestone_id}/evidence", deprecated=True)
 def list_milestone_evidence(
     milestone_id: str = Path(..., min_length=1, max_length=36),
     response: Response = None,
@@ -59,6 +59,7 @@ def list_milestone_evidence(
 @router.post(
     "/collection-milestones/{milestone_id}/evidence",
     status_code=status.HTTP_201_CREATED,
+    deprecated=True,
 )
 async def upload_milestone_evidence(
     milestone_id: str = Path(..., min_length=1, max_length=36),

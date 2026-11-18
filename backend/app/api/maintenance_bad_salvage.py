@@ -91,7 +91,7 @@ def _raise_service_error(exc: Exception) -> None:
     raise exc
 
 
-@router.get("/projects/stable/{project_id}/salvages")
+@router.get("/projects/stable/{project_id}/salvages", deprecated=True)
 def list_salvages(
     project_id: str = Path(...),
     response: Response = None,
@@ -114,7 +114,9 @@ def list_salvages(
 
 
 @router.post(
-    "/projects/stable/{project_id}/salvages", status_code=status.HTTP_201_CREATED
+    "/projects/stable/{project_id}/salvages",
+    status_code=status.HTTP_201_CREATED,
+    deprecated=True,
 )
 def register_salvage(
     project_id: str = Path(...),
@@ -156,7 +158,7 @@ def register_salvage(
         raise
 
 
-@router.post("/salvages/{salvage_id}/void")
+@router.post("/salvages/{salvage_id}/void", deprecated=True)
 def void_salvage(
     salvage_id: str = Path(...),
     body: SalvageVoid = ...,

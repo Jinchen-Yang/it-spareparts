@@ -232,7 +232,7 @@ async def _run_validation_worker(**kwargs) -> dict:
         raise cancellation
     return result
 
-@router.get("/project-manager/workbooks/v3/status")
+@router.get("/project-manager/workbooks/v3/status", deprecated=True)
 def manager_workbook_status(
     response: Response,
     report_month: str | None = Query(default=None),
@@ -256,7 +256,7 @@ def manager_workbook_status(
     return payload
 
 
-@router.get("/project-manager/workbooks/v3")
+@router.get("/project-manager/workbooks/v3", deprecated=True)
 def export_manager_workbook(
     report_month: str | None = Query(default=None),
     db: Session = Depends(get_db),
@@ -293,7 +293,7 @@ def export_manager_workbook(
     )
 
 
-@router.post("/project-manager/workbooks/v3/validate")
+@router.post("/project-manager/workbooks/v3/validate", deprecated=True)
 async def validate_manager_workbook_upload(
     request: Request,
     response: Response,
@@ -330,7 +330,7 @@ async def validate_manager_workbook_upload(
             _VALIDATE_LIMITER.release()
 
 
-@router.post("/project-manager/workbooks/v3/apply")
+@router.post("/project-manager/workbooks/v3/apply", deprecated=True)
 def apply_manager_workbook(
     body: ManagerWorkbookApplyRequest,
     response: Response,

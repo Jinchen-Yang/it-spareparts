@@ -184,7 +184,7 @@ def _service_http_error(exc: Exception) -> HTTPException:
     raise exc
 
 
-@router.post("/warehouse-imports/preview")
+@router.post("/warehouse-imports/preview", deprecated=True)
 async def preview_warehouse_import(
     request: Request,
     response: Response,
@@ -244,7 +244,7 @@ def _apply_worker(
         db.close()
 
 
-@router.post("/warehouse-imports/{import_id}/apply")
+@router.post("/warehouse-imports/{import_id}/apply", deprecated=True)
 async def apply_warehouse_import(
     request: Request,
     response: Response,
@@ -290,7 +290,7 @@ async def apply_warehouse_import(
         _PARSE_LOCK.release()
 
 
-@router.post("/warehouse-documents/search")
+@router.post("/warehouse-documents/search", deprecated=True)
 def search_warehouse_documents(
     body: DocumentSearchRequest,
     response: Response,
@@ -324,7 +324,7 @@ def search_warehouse_documents(
         raise _service_http_error(exc) from exc
 
 
-@router.post("/warehouse-ambiguities/search")
+@router.post("/warehouse-ambiguities/search", deprecated=True)
 def search_warehouse_ambiguities(
     body: AmbiguitySearchRequest,
     response: Response,
@@ -366,7 +366,7 @@ def search_warehouse_ambiguities(
         raise _service_http_error(exc) from exc
 
 
-@router.post("/warehouse-ambiguities/{ambiguity_id}/resolve")
+@router.post("/warehouse-ambiguities/{ambiguity_id}/resolve", deprecated=True)
 def resolve_warehouse_ambiguity(
     body: AmbiguityResolveRequest,
     response: Response,
@@ -407,7 +407,7 @@ def resolve_warehouse_ambiguity(
         raise
 
 
-@router.post("/warehouse-integrations/reconcile")
+@router.post("/warehouse-integrations/reconcile", deprecated=True)
 def reconcile_warehouse_integrations(
     body: WarehouseIntegrationReconcileRequest,
     response: Response,

@@ -138,7 +138,7 @@ def _explicit_follow_up_action(
         )
 
 
-@router.post("/collection-reminders/search")
+@router.post("/collection-reminders/search", deprecated=True)
 def search_collection_reminders(
     body: SearchRequest,
     response: Response,
@@ -177,7 +177,7 @@ def search_collection_reminders(
     return DirectoryResponse(**payload)
 
 
-@router.get("/projects/stable/{project_id}/collection-milestones")
+@router.get("/projects/stable/{project_id}/collection-milestones", deprecated=True)
 def project_collection_milestones(
     response: Response,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -211,7 +211,7 @@ def project_collection_milestones(
     return ProjectDetailResponse(**payload)
 
 
-@router.post("/collection-milestones/{milestone_id}/follow-ups")
+@router.post("/collection-milestones/{milestone_id}/follow-ups", deprecated=True)
 def follow_up_collection_milestone(
     body: FollowUpRequest,
     milestone_id: str = Path(..., min_length=1, max_length=36),

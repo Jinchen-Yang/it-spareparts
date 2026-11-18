@@ -198,7 +198,7 @@ def _preview_upload_preflight(request: Request) -> None:
         )
 
 
-@router.post("/collection-plan-imports/preview")
+@router.post("/collection-plan-imports/preview", deprecated=True)
 async def preview_collection_plan_import(
     request: Request,
     response: Response,
@@ -299,7 +299,7 @@ async def preview_collection_plan_import(
     return PreviewResponse(**payload)
 
 
-@router.get("/collection-plan-imports/{batch_id}/binding-options")
+@router.get("/collection-plan-imports/{batch_id}/binding-options", deprecated=True)
 def collection_plan_binding_options(
     response: Response,
     batch_id: str = Path(..., min_length=1, max_length=64),
@@ -333,7 +333,7 @@ def collection_plan_binding_options(
     return BindingOptionsResponse(**payload)
 
 
-@router.post("/collection-plan-imports/{batch_id}/apply")
+@router.post("/collection-plan-imports/{batch_id}/apply", deprecated=True)
 def apply_collection_plan_import(
     body: ApplyRequest,
     response: Response,
@@ -387,7 +387,7 @@ def apply_collection_plan_import(
     return ApplyResponse(**payload)
 
 
-@router.get("/collection-plan-imports/{batch_id}/source-file")
+@router.get("/collection-plan-imports/{batch_id}/source-file", deprecated=True)
 def collection_plan_source_file(
     response: Response,
     batch_id: str = Path(..., min_length=1, max_length=64),

@@ -50,7 +50,7 @@ def _require_workbook_data(db: Session, ctx: UserContext) -> None:
         )
 
 
-@router.get("/projects/stable/{project_id}/workbook-v3.xlsx")
+@router.get("/projects/stable/{project_id}/workbook-v3.xlsx", deprecated=True)
 def export_project_workbook_v3(
     project_id: str = Path(...),
     db: Session = Depends(get_db),

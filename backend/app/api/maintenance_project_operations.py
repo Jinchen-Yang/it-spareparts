@@ -459,7 +459,11 @@ def _enforce_site_issue_access(
         enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
 
 
-@operations_beta_router.post("/{project_id}/contracts", status_code=status.HTTP_201_CREATED)
+@operations_beta_router.post(
+    "/{project_id}/contracts",
+    status_code=status.HTTP_201_CREATED,
+    deprecated=True,
+)
 def create_project_contract(
     body: ContractCreate,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -533,7 +537,7 @@ def _contract_write_result(
         raise
 
 
-@operations_beta_router.patch("/contracts/{project_contract_id}")
+@operations_beta_router.patch("/contracts/{project_contract_id}", deprecated=True)
 def patch_project_contract(
     body: ContractPatch,
     project_contract_id: str = Path(..., min_length=1, max_length=36),
@@ -563,7 +567,7 @@ def patch_project_contract(
     )
 
 
-@operations_beta_router.post("/contracts/{project_contract_id}/archive")
+@operations_beta_router.post("/contracts/{project_contract_id}/archive", deprecated=True)
 def archive_project_contract(
     body: ContractArchive,
     project_contract_id: str = Path(..., min_length=1, max_length=36),
@@ -790,7 +794,11 @@ def site_issue_demand_candidates(
     }
 
 
-@operations_beta_router.post("/{project_id}/site-issues", status_code=status.HTTP_201_CREATED)
+@operations_beta_router.post(
+    "/{project_id}/site-issues",
+    status_code=status.HTTP_201_CREATED,
+    deprecated=True,
+)
 def create_project_site_issue(
     body: SiteIssueCreate,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -1126,7 +1134,7 @@ def search_project_site_issues(
     return payload
 
 
-@operations_beta_router.patch("/site-issues/{issue_id}/status")
+@operations_beta_router.patch("/site-issues/{issue_id}/status", deprecated=True)
 def patch_project_site_issue_status(
     body: SiteIssueStatusPatch,
     issue_id: str = Path(..., min_length=1, max_length=36),
@@ -1178,7 +1186,7 @@ def patch_project_site_issue_status(
         raise
 
 
-@operations_beta_router.get("/{project_id}/cost-gaps")
+@operations_beta_router.get("/{project_id}/cost-gaps", deprecated=True)
 def project_cost_gaps(
     project_id: str = Path(..., min_length=1, max_length=36),
     page: int = Query(1, ge=1),
@@ -1213,7 +1221,7 @@ def project_cost_gaps(
     return payload
 
 
-@operations_beta_router.post("/{project_id}/cost-gaps/recompute")
+@operations_beta_router.post("/{project_id}/cost-gaps/recompute", deprecated=True)
 def recompute_project_cost_gaps(
     body: CostGapRecompute,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -1238,7 +1246,11 @@ def recompute_project_cost_gaps(
     )
 
 
-@operations_beta_router.post("/{project_id}/expenses", status_code=status.HTTP_201_CREATED)
+@operations_beta_router.post(
+    "/{project_id}/expenses",
+    status_code=status.HTTP_201_CREATED,
+    deprecated=True,
+)
 def create_project_expense(
     body: ExpenseCreate,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -1277,7 +1289,7 @@ def create_project_expense(
         raise
 
 
-@operations_beta_router.put("/{project_id}/expenses/readiness")
+@operations_beta_router.put("/{project_id}/expenses/readiness", deprecated=True)
 def mark_project_expense_readiness(
     body: ExpenseReadinessMark,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -1305,7 +1317,7 @@ def mark_project_expense_readiness(
     )
 
 
-@operations_beta_router.patch("/expenses/{expense_id}/status")
+@operations_beta_router.patch("/expenses/{expense_id}/status", deprecated=True)
 def patch_project_expense_status(
     body: ExpenseStatusPatch,
     expense_id: str = Path(..., min_length=1, max_length=64),
@@ -1357,7 +1369,7 @@ def patch_project_expense_status(
         raise
 
 
-@operations_beta_router.patch("/{project_id}/cost-gaps")
+@operations_beta_router.patch("/{project_id}/cost-gaps", deprecated=True)
 def patch_project_cost_gap(
     body: ManualCostPatch,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -1432,7 +1444,7 @@ def stable_project_workspace(
     return payload
 
 
-@operations_beta_router.get("/{project_id}/tasks")
+@operations_beta_router.get("/{project_id}/tasks", deprecated=True)
 def stable_project_tasks(
     project_id: str = Path(..., min_length=1, max_length=36),
     as_of: date | None = None,
@@ -1599,7 +1611,7 @@ def _stable_project_operations_response(
     return payload
 
 
-@operations_beta_router.get("/operations")
+@operations_beta_router.get("/operations", deprecated=True)
 def stable_project_operations(
     as_of: date | None = None,
     page: int = Query(1, ge=1),
@@ -1639,7 +1651,7 @@ def stable_project_operations(
     )
 
 
-@operations_beta_router.post("/site-issue-costs/backfill")
+@operations_beta_router.post("/site-issue-costs/backfill", deprecated=True)
 def backfill_site_issue_costs_endpoint(
     force: bool = Query(False, description="算法升级后全量重算"),
     db: Session = Depends(get_db),
@@ -1666,7 +1678,7 @@ def backfill_site_issue_costs_endpoint(
     return stats
 
 
-@operations_beta_router.post("/expense-attribution/backfill")
+@operations_beta_router.post("/expense-attribution/backfill", deprecated=True)
 def backfill_expense_attribution_endpoint(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
@@ -1691,7 +1703,7 @@ def backfill_expense_attribution_endpoint(
     return stats
 
 
-@operations_beta_router.post("/operations/search")
+@operations_beta_router.post("/operations/search", deprecated=True)
 def search_stable_project_operations(
     body: ProjectOperationsSearch,
     db: Session = Depends(get_db),

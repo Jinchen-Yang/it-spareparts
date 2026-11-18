@@ -206,7 +206,7 @@ async def _run_project_workbook_validation_worker(**kwargs) -> dict:
     return result
 
 
-@router.get("/projects/stable/{project_id}/workbook")
+@router.get("/projects/stable/{project_id}/workbook", deprecated=True)
 def export_project_workbook(
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
@@ -251,7 +251,7 @@ def export_project_workbook(
     )
 
 
-@router.post("/projects/stable/{project_id}/workbook/validate")
+@router.post("/projects/stable/{project_id}/workbook/validate", deprecated=True)
 async def validate_project_workbook_upload(
     request: Request,
     response: Response,
@@ -301,7 +301,7 @@ async def validate_project_workbook_upload(
             _PROJECT_WORKBOOK_VALIDATE_LIMITER.release()
 
 
-@router.post("/projects/stable/{project_id}/workbook/apply")
+@router.post("/projects/stable/{project_id}/workbook/apply", deprecated=True)
 def apply_project_workbook_plan(
     body: WorkbookApplyRequest,
     response: Response,
@@ -357,7 +357,7 @@ def apply_project_workbook_plan(
         raise
 
 
-@router.get("/workbook-validations/{validation_id}/errors.xlsx")
+@router.get("/workbook-validations/{validation_id}/errors.xlsx", deprecated=True)
 def download_project_workbook_errors(
     validation_id: str = Path(..., min_length=1, max_length=64),
     db: Session = Depends(get_db),
