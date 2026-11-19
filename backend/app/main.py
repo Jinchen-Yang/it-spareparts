@@ -72,6 +72,7 @@ from app.api import (
     presales_pool,
     presales_workbooks,
     purchases,
+    purchase_pool_analytics,
     replenishment,
     resale_export,
     resale_catalog_export,
@@ -164,6 +165,7 @@ app.include_router(data_quality_calibration.router, prefix=settings.api_prefix)
 app.include_router(agent.router, prefix=settings.api_prefix)
 app.include_router(chat_sessions.router, prefix=settings.api_prefix)
 app.include_router(purchases.router, prefix=settings.api_prefix)
+app.include_router(purchase_pool_analytics.router, prefix=settings.api_prefix)
 app.include_router(replenishment.router, prefix=settings.api_prefix)
 app.include_router(maintenance.router, prefix=settings.api_prefix)
 # 维保展示板（plan v1.3）：独立 flag 闸（router 自带 require_maintenance_boss），

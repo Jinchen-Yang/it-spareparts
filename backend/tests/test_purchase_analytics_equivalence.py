@@ -360,8 +360,12 @@ def _ref_display_context(db, order_ids, user_ctx=None, *, category=None,
             pn_key = (part.pn_std or "").strip(" ") or EMPTY_LABEL
             if group_pn and pn_key != group_pn:
                 continue
-            products.append({"line_id": line.id, "pn_std": part.pn_std,
-                             "description": line.description})
+            products.append({
+                "line_id": line.id, "pn_std": part.pn_std,
+                "description": line.description, "catalog_description": part.description,
+                "part_id": part.id, "qty": float(line.qty) if line.qty is not None else None,
+                "unit": line.unit, "category": part_category or UNCATEGORIZED_LABEL,
+            })
         result[po.id] = {
             "supplier": None if security.is_field_hidden(user_ctx, "supplier") else suppliers.get(po.supplier_id),
             "linked_sales_order_no": po.linked_sales_order_no,
@@ -529,7 +533,8 @@ def _ref_order_detail(db: Session, order_id: int, user_ctx=None, *,
     cat = _category_match(category)
     stmt = (
         select(pl.id, pl.line_no, pl.part_id, dp.pn_std, pl.description, pl.brand,
-               pl.qty, pl.unit_price, pl.line_amount, _category_dim(dp).label("category"))
+               pl.qty, pl.unit, pl.unit_price, pl.line_amount, dp.description.label("catalog_description"),
+               _category_dim(dp).label("category"))
         .select_from(pl)
         .join(dp, pl.part_id == dp.id)
         .where(pl.order_id == po.id, pl.import_batch_id == po.import_batch_id)
@@ -550,7 +555,8 @@ def _ref_order_detail(db: Session, order_id: int, user_ctx=None, *,
         lines.append({
             "line_id": r.id, "line_no": r.line_no, "part_id": r.part_id,
             "pn_std": r.pn_std, "description": r.description, "brand": r.brand,
-            "qty": _f(r.qty), "unit_price": _f(r.unit_price),
+            "qty": _f(r.qty), "unit": r.unit, "catalog_description": r.catalog_description,
+            "unit_price": _f(r.unit_price),
             "line_amount": _f(r.line_amount),
             "category": r.category,
             "line_amount_inc": _f(l_inc),
@@ -648,6 +654,8 @@ def eq(db):
               amount_inc=D("1130"))
     first_line = _line(db, "PA-L1", poa, p1, nb, line_no=1, amount=D("500"))
     first_line.description = "当前批次产品原文"
+    first_line.unit = "套"
+    p1.description = "与采购行原文不同的目录描述"
     _line(db, "PA-L2", poa, p2, nb, line_no=2, amount=D("630"))
     _line(db, "PA-OLD1-L1", poa, p1, ob1, line_no=1, amount=D("999"))   # 残留：同行号
     _line(db, "PA-OLD1-L3", poa, pres, ob1, line_no=3, amount=D("500"))  # 残留：多行号

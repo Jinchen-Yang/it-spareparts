@@ -23,7 +23,8 @@ from app.auth import current_role
 from app.db import get_db
 from app.security import (UserContext, apply_field_visibility, get_current_user_context,
                           is_field_hidden, is_scoped_sales, record_access_log, require_page)
-from app.services import purchase_analysis, purchase_analytics, purchase_query
+from app.services import purchase_analysis, purchase_analytics, purchase_buyer_ranks, purchase_query
+from app.services import purchase_analytics_cube as pcube
 
 router = APIRouter(prefix="/purchases", tags=["purchases"])
 
@@ -211,11 +212,126 @@ def analytics_summary(
     return apply_field_visibility(data, ctx)
 
 
+def _scope_guard(filters, ctx, raw_scope, axes=(), metric="orders"):
+    _guard_scoped(ctx)
+    _guard_customer_filter(filters, ctx)
+    scope = _run(lambda: pcube.parse_scope(raw_scope))
+    _run(lambda: pcube.guard_dimensions(ctx, axes, scope, metric))
+    return scope
+
+
+@router.get("/analytics/cube")
+def analytics_cube(
+    filters: dict = Depends(_analytics_common),
+    scope: str | None = Query(None, max_length=4096),
+    row: str | None = Query(None, max_length=32),
+    column: str | None = Query(None, max_length=32),
+    metric: str = Query("amount", max_length=16),
+    basis: str = Query("paid", pattern="^(paid|inc|ex)$"),
+    page: int = Query(1, ge=1, le=ANALYTICS_PAGE_MAX),
+    page_size: int = Query(10, ge=1, le=100),
+    column_page: int = Query(1, ge=1, le=ANALYTICS_PAGE_MAX),
+    column_size: int = Query(10, ge=1, le=30),
+    compare: bool = False,
+    sort: str = Query("desc", pattern="^(asc|desc|key|absolute|increase|decrease)$"),
+    value_max: float | None = Query(None, allow_inf_nan=False),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchase_analytics")),
+    ctx: UserContext = Depends(get_current_user_context),
+):
+    exact = _scope_guard(filters, ctx, scope, [k for k in (row, column) if k], metric)
+    record_access_log(
+        ctx, "analytics_cube", "purchases/analytics", {"row": row, "column": column, "metric": metric}
+    )
+    return _run(
+        lambda: pcube.cube(
+            db,
+            ctx,
+            filters,
+            exact,
+            row=row,
+            column=column,
+            metric=metric,
+            basis=basis,
+            page=page,
+            page_size=page_size,
+            column_page=column_page,
+            column_size=column_size,
+            compare=compare,
+            sort=sort,
+            value_max=value_max,
+        )
+    )
+
+
+@router.get("/analytics/buyer-ranks")
+def analytics_buyer_ranks(
+    filters: dict = Depends(_analytics_common),
+    scope: str | None = Query(None, max_length=4096),
+    metric: str = Query("orders", pattern="^(orders|amount|qty|lines|pns|suppliers)$"),
+    basis: str = Query("paid", pattern="^(paid|inc|ex)$"),
+    quantity_unit: str | None = Query(None, max_length=16),
+    page: int = Query(1, ge=1, le=ANALYTICS_PAGE_MAX),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchase_analytics")),
+    ctx: UserContext = Depends(get_current_user_context),
+):
+    exact = _scope_guard(filters, ctx, scope, ["buyer"], metric)
+    record_access_log(ctx, "analytics_buyer_ranks", "purchases/analytics", {"metric": metric, "page": page})
+    return _run(lambda: purchase_buyer_ranks.ranks(
+        db, ctx, filters, exact, metric=metric, basis=basis, quantity_unit=quantity_unit,
+        page=page, page_size=page_size,
+    ))
+
+
+@router.get("/analytics/shared-pns")
+def analytics_shared_pns(
+    supplier_id: DbId,
+    filters: dict = Depends(_analytics_common),
+    scope: str | None = Query(None, max_length=4096),
+    page: int = Query(1, ge=1, le=ANALYTICS_PAGE_MAX),
+    page_size: int = Query(25, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchase_analytics")),
+    ctx: UserContext = Depends(get_current_user_context),
+):
+    exact = _scope_guard(filters, ctx, scope, ["supplier"])
+    record_access_log(ctx, "analytics_shared_pns", "purchases/analytics", {})
+    return _run(lambda: pcube.shared_pns(db, ctx, filters, exact, supplier_id, page, page_size))
+
+
+@router.get("/analytics/concentration")
+def analytics_concentration(
+    filters: dict = Depends(_analytics_common),
+    scope: str | None = Query(None, max_length=4096),
+    unit: str | None = Query(None, max_length=16),
+    page: int = Query(1, ge=1, le=ANALYTICS_PAGE_MAX),
+    page_size: int = Query(10, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchase_analytics")),
+    ctx: UserContext = Depends(get_current_user_context),
+):
+    exact = _scope_guard(filters, ctx, scope, ["supplier"])
+    if unit is not None:
+        if "unit" in exact and exact["unit"] != unit:
+            raise HTTPException(422, "数量单位与选定范围不一致")
+        exact["unit"] = unit
+    record_access_log(ctx, "analytics_concentration", "purchases/analytics", {})
+    return _run(lambda: pcube.concentration(db, ctx, filters, exact, page, page_size))
+
+
 @router.get("/analytics/orders")
 def analytics_orders(
     filters: dict = Depends(_analytics_common),
-    group_by: str | None = Query(None, pattern=_GROUP_BY_PATTERN,
-                                 description="与上层分组维度同传，配合 group_key 下钻"),
+    scope: str | None = Query(None, max_length=4096),
+    group_by: str | None = Query(
+        None, pattern=_GROUP_BY_PATTERN, description="与上层分组维度同传，配合 group_key 下钻"
+    ),
     group_key: str | None = Query(None, description="分组值（哨兵值/月份 YYYY-MM/日 YYYY-MM-DD）"),
     sort: str = Query("order_date", pattern="^(order_date|amount_inc|amount_ex|amount_paid)$"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
@@ -227,13 +343,13 @@ def analytics_orders(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """分组下钻订单列表（分页+排序，同额/同日按 id 倒序稳定翻页）。"""
-    _guard_scoped(ctx)
+    exact = _scope_guard(filters, ctx, scope)
     _guard_customer_filter(filters, ctx, group_by=group_by)
     record_access_log(ctx, "analytics_orders", "purchases/analytics",
                       {**filters, "group_by": group_by, "group_key": group_key,
                        "sort": sort, "order": order, "page": page, "page_size": page_size})
     data = _run(lambda: purchase_analytics.orders(
-        db, ctx, group_by=group_by, group_key=group_key, sort=sort, order=order,
+        db, ctx, scope=exact, group_by=group_by, group_key=group_key, sort=sort, order=order,
         page=page, page_size=page_size, **filters))
     return apply_field_visibility(data, ctx)
 
@@ -276,6 +392,7 @@ def _purchase_csv(header: list, rows) -> StreamingResponse:
 @router.get("/analytics/orders/export")
 def analytics_orders_export(
     filters: dict = Depends(_analytics_common),
+    scope: str | None = Query(None, max_length=4096),
     group_by: str | None = Query(None, pattern=_GROUP_BY_PATTERN),
     group_key: str | None = Query(None),
     sort: str = Query("order_date", pattern="^(order_date|amount_inc|amount_ex|amount_paid)$"),
@@ -286,13 +403,13 @@ def analytics_orders_export(
     ctx: UserContext = Depends(get_current_user_context),
 ):
     """采购订单 CSV（D-0055）：与列表同筛选同有效排序；超限 413，不截断。"""
-    _guard_scoped(ctx)
+    exact = _scope_guard(filters, ctx, scope)
     _guard_customer_filter(filters, ctx, group_by=group_by)
     record_access_log(ctx, "analytics_orders_export", "purchases/analytics", {
         **filters, "group_by": group_by, "group_key": group_key, "sort": sort, "order": order,
     })
     total, items = _run(lambda: purchase_analytics.export_orders(
-        db, ctx, group_by=group_by, group_key=group_key, sort=sort, order=order, **filters))
+        db, ctx, scope=exact, group_by=group_by, group_key=group_key, sort=sort, order=order, **filters))
     if total > purchase_analytics.EXPORT_MAX_ORDERS:
         raise HTTPException(
             status_code=413,
@@ -358,6 +475,8 @@ def analytics_pn_boards(
 @router.get("/analytics/orders/{order_id}")
 def analytics_order_detail(
     order_id: int = Path(..., ge=1, le=PG_INT_MAX),
+    filters: dict = Depends(_analytics_common),
+    scope: str | None = Query(None, max_length=4096),
     category: list[str] = Query([], description="传入时行按分类过滤并附 category_matched 汇总"),
     pn: str | None = Query(None, max_length=200, description="PN 分组下钻键，与分组表达式同一真值"),
     db: Session = Depends(get_db),
@@ -366,10 +485,66 @@ def analytics_order_detail(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """订单明细（自有实现，不依赖 page_boss_board）：单头三口径 + 单头批次行。"""
-    _guard_scoped(ctx)
+    exact = _scope_guard(filters, ctx, scope)
     record_access_log(ctx, "analytics_order_detail", "purchases/analytics",
                       {"order_id": order_id, "category": category, "pn": pn})
-    data = purchase_analytics.order_detail(db, order_id, ctx, category=category, pn=pn)
+    data = _run(lambda: purchase_analytics.order_detail(db, order_id, ctx, category=category, pn=pn,
+        scope=exact, filters=filters if exact or any(v for k,v in filters.items() if k!="category") else None))
     if data is None:
         raise HTTPException(status_code=404, detail="订单不存在或不是已生效采购单")
     return apply_field_visibility(data, ctx)
+
+
+@router.get("/analytics/chart-sample")
+def analytics_chart_sample(
+    scope: str | None = Query(None, max_length=4096),
+    filters: dict = Depends(_analytics_common),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchase_analytics")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    from app.services.purchase_document_preview import chart_sample
+
+    exact = _scope_guard(filters, ctx, scope)
+    record_access_log(ctx, "analytics_chart_sample", "purchases/analytics", {})
+    return _run(lambda: chart_sample(db, filters, exact))
+
+
+@router.get("/analytics/document-preview")
+def analytics_document_preview(
+    order_id: DbId | None = None,
+    sales_no: str | None = Query(None, min_length=1, max_length=64),
+    scope: str | None = Query(None, max_length=4096),
+    filters: dict = Depends(_analytics_common),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchase_analytics")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """预览当前筛选范围内该单的可见采购货品、分类及各单位数量。"""
+    from app.services.purchase_document_preview import preview
+    _guard_scoped(ctx)
+    _guard_customer_filter(filters, ctx)
+    record_access_log(ctx, "analytics_document_preview", "purchases/analytics", {"order_id": order_id})
+    return apply_field_visibility(_run(lambda: preview(
+        db, ctx, filters, scope, order_id=order_id, sales_no=sales_no)), ctx)
+
+
+@router.get("/analytics/product-options")
+def analytics_product_options(
+    axis: str = Query(pattern="^(pn|pool|unit)$"),
+    q: str = Query("", max_length=200),
+    scope: str | None = Query(None, max_length=8192),
+    filters: dict = Depends(_analytics_common),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchase_analytics")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """查询当前经营范围的型号（含描述）、有效互通池或计量单位。"""
+    from app.services import purchase_analytics_cube, purchase_product_options
+    _guard_scoped(ctx)
+    _guard_customer_filter(filters, ctx)
+    return _run(lambda: purchase_product_options.choices(
+        db, ctx, filters, purchase_analytics_cube.parse_scope(scope), axis, q))
