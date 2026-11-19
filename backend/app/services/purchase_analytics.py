@@ -707,7 +707,7 @@ def summary(db: Session, user_ctx=None, *, date_from: date | None = None,
 # ---------------------------------------------------------------- orders 下钻
 
 def _page_context(db: Session, orders, user_ctx=None, *, category=None,
-                  group_category=None, group_pn=None) -> dict[int, dict]:
+                  group_category=None, group_pn=None, scoped_lines=None) -> dict[int, dict]:
     """页内批量读取产品/关联；一对多信息不参与单头金额查询。"""
     if not orders:
         return {}
@@ -736,12 +736,15 @@ def _page_context(db: Session, orders, user_ctx=None, *, category=None,
         "products": [],
     } for row in orders}
     po, pl, dp = FPurchaseOrder, FPurchaseLine, DimPart
-    stmt = (select(pl.order_id, pl.id, dp.pn_std, pl.description)
+    stmt = (select(pl.order_id, pl.id, dp.pn_std, pl.description, pl.part_id, pl.qty, pl.unit,
+                   dp.description.label("catalog_description"), _category_dim(dp).label("category"))
         .join(po, _batch_line_join(po, pl)).join(dp, pl.part_id == dp.id)
         .where(po.id.in_(ids)))
     cat = _category_match(category)
     if cat is not None:
         stmt = stmt.where(cat)
+    if scoped_lines is not None:
+        stmt = stmt.where(pl.id.in_(scoped_lines))
     if group_category:
         stmt = stmt.where(_category_dim(dp) == group_category)
     if group_pn:
@@ -749,6 +752,8 @@ def _page_context(db: Session, orders, user_ctx=None, *, category=None,
     for row in db.execute(stmt.order_by(pl.order_id, pl.line_no.asc().nulls_last(), pl.id)):
         result[row.order_id]["products"].append({
             "line_id": row.id, "pn_std": row.pn_std, "description": row.description,
+            "part_id": row.part_id, "qty": _f(row.qty), "unit": row.unit,
+            "catalog_description": row.catalog_description, "category": row.category,
         })
     return result
 
@@ -762,7 +767,7 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
            group_by: str | None = None, group_key: str | None = None,
            sort: str = "order_date", order: str = "desc",
            page: int = 1, page_size: int = 50,
-           allow_large_page: bool = False) -> dict:
+           allow_large_page: bool = False, scope: dict | None = None) -> dict:
     """分组下钻订单列表（分页 + 排序，同额/同日按 id 倒序稳定翻页）。
 
     group_by + group_key：把上一层分组值折成对应维度精确过滤（哨兵值
@@ -820,6 +825,25 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
                         order_no=order_no, linked_sales_order_no=linked_sales_order_no)
     if cat is not None:
         where.append(cat)
+    scoped_lines = None
+    if scope:
+        from app.services import purchase_analytics_cube as cube
+        simple_keys = set(scope) - {"_line"}
+        if not simple_keys.intersection(cube.LINE_AXES | cube.LINK_AXES | {"partId"}):
+            # Header dimensions can filter the same indexed header query directly. Building
+            # an independent fact subquery would add another pass over the active order set.
+            dims = cube.dimension_expressions()
+            where.extend(dims[key] == scope[key] for key in simple_keys)
+            line_mode = line_mode or "_line" in scope
+        else:
+            scoped, by_line = cube.facts({"date_from":date_from,"date_to":date_to}, scope, [], db=db)
+            fact = scoped.subquery()
+            if by_line:
+                line_mode = True
+                scoped_lines = select(fact.c.line_id)
+                where.append(pl.id.in_(scoped_lines))
+            else:
+                where.append(po.id.in_(select(fact.c.order_id)))
     # D-0063 离职隐藏（显示口径）：关联销售单被隐藏的采购单不进列表与导出；
     # 无关联（NULL）与未命中集合的单不受影响（not_in 的三值语义须显式放行 NULL）。
     # 列表与导出同走本函数（export_orders 复用），KPI/分组/趋势照算不过滤。
@@ -861,12 +885,13 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
             po, link).where(*where).group_by(*group_cols)
     else:
         ex_e, inc_e, paid_e, side = _order_amount_exprs(po)
+        # The page context already fetches all current-batch products for these orders.
+        # Page the headers first; counting their lines up front forces an unnecessary full
+        # join/group before both the total and LIMIT/OFFSET queries.
         base = _link_join(
-            select(*po_cols, side.label("nominal_side"), func.count(pl.id).label("lines"),
-                   inc_e.label("amount_inc"), ex_e.label("amount_ex"), paid_e.label("amount_paid"))
-            .select_from(po)
-            .outerjoin(pl, _batch_line_join(po, pl)),
-            po, link).where(*where).group_by(*group_cols)
+            select(*po_cols, side.label("nominal_side"), inc_e.label("amount_inc"),
+                   ex_e.label("amount_ex"), paid_e.label("amount_paid")).select_from(po),
+            po, link).where(*where)
 
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     if line_mode:
@@ -902,7 +927,7 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
     context = _page_context(
         db, rows, user_ctx, category=category,
         group_category=group_key if group_by == "category" else None,
-        group_pn=drill_key if group_by == "pn" else None)
+        group_pn=drill_key if group_by == "pn" else None, scoped_lines=scoped_lines)
     items = []
     for r in rows:
         if link is not None:
@@ -916,7 +941,7 @@ def orders(db: Session, user_ctx=None, *, date_from: date | None = None,
             "order_date": r.order_date.isoformat() if r.order_date else None,
             "source_type": r.source_type_raw, "purchaser": r.purchaser,
             "salesperson": sp, "customer_id": cid,
-            "customer": cname, "lines": r.lines,
+            "customer": cname, "lines": r.lines if line_mode else len(context[r.id]["products"]),
             # 名义侧随当前单头/行级金额口径取实际推算侧，与金额同组遮蔽
             "nominal_side": r.nominal_side,
             "amount_inc": _f(_round2(r.amount_inc)),
@@ -959,7 +984,8 @@ def _pn_detail_key(pn: str | None) -> str | None:
 
 
 def order_detail(db: Session, order_id: int, user_ctx=None, *,
-                 category: list[str] | None = None, pn: str | None = None) -> dict | None:
+                 category: list[str] | None = None, pn: str | None = None,
+                 scope: dict | None = None, filters: dict | None = None) -> dict | None:
     """采购模块自己的订单明细（不依赖 page_boss_board）：单头三口径 + **单头批次行**。
 
     残留旧批次行不出现在这里（D-39 补充决策）；订单不存在或不是已生效 → None。
@@ -969,6 +995,18 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
     po = db.get(FPurchaseOrder, order_id)
     if po is None or po.data_status != config.ACTIVE_STATUS:
         return None
+    hidden_nos = departed_visibility.hidden_sales_order_nos(db)
+    if hidden_nos and po.linked_sales_order_no in hidden_nos:
+        return None
+    scoped_lines = None
+    if scope or filters and any(filters.values()):
+        from app.services import purchase_analytics_cube as cube
+        scoped, by_line = cube.facts(filters or {}, scope or {}, [], db=db)
+        fact = scoped.where(FPurchaseOrder.id == order_id).subquery()
+        if db.scalar(select(fact.c.order_id).limit(1)) is None:
+            return None
+        if by_line:
+            scoped_lines = select(fact.c.line_id)
     category = _norm_categories(category)
     pn_key = _pn_detail_key(pn)
     ex, inc = order_amounts_reference(
@@ -993,13 +1031,16 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
     cat = _category_match(category)
     stmt = (
         select(pl.id, pl.line_no, pl.part_id, dp.pn_std, pl.description, pl.brand,
-               pl.qty, pl.unit_price, pl.line_amount, _category_dim(dp).label("category"))
+               pl.qty, pl.unit, pl.unit_price, pl.line_amount, dp.description.label("catalog_description"),
+               _category_dim(dp).label("category"))
         .select_from(pl)
         .join(dp, pl.part_id == dp.id)
         .where(pl.order_id == po.id, pl.import_batch_id == po.import_batch_id)
     )
     if cat is not None:
         stmt = stmt.where(cat)
+    if scoped_lines is not None:
+        stmt = stmt.where(pl.id.in_(scoped_lines))
     if pn_key:
         stmt = stmt.where(_group_dim("pn", po, None, dp) == pn_key)
     stmt = stmt.order_by(pl.line_no.asc().nullslast(), pl.id)
@@ -1007,7 +1048,7 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
     matched_paid = matched_inc = matched_ex = Decimal(0)
     # 只要带了 PN 键（含空白 PN 归一成「(空)」，以及 PN 再叠加分类），匹配金额与列表同一套：
     # 没有任何非空金额、或筛选后没有行，保持 null。只按分类打开的旧详情仍从 0 累加。
-    pn_scoped = pn_key is not None
+    pn_scoped = pn_key is not None or scoped_lines is not None
     saw_paid = saw_inc = saw_ex = False
     for r in db.execute(stmt):
         l_ex, l_inc = line_amounts_reference(r.line_amount, po.tax_rate, po.is_tax_inclusive)
@@ -1023,7 +1064,8 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
         lines.append({
             "line_id": r.id, "line_no": r.line_no, "part_id": r.part_id,
             "pn_std": r.pn_std, "description": r.description, "brand": r.brand,
-            "qty": _f(r.qty), "unit_price": _f(r.unit_price),
+            "qty": _f(r.qty), "unit": r.unit, "catalog_description": r.catalog_description,
+            "unit_price": _f(r.unit_price),
             "line_amount": _f(r.line_amount),
             "category": r.category,
             "line_amount_inc": _f(l_inc),
@@ -1042,14 +1084,14 @@ def order_detail(db: Session, order_id: int, user_ctx=None, *,
             po.tax_rate, po.is_tax_inclusive, po.amount_ex_tax, po.amount_inc_tax),
         "amount_ex": _f(ex), "amount_inc": _f(inc),
         "amount_paid": _f(po.amount_inc_tax),
-        **_page_context(db, [po], user_ctx, category=category, group_pn=pn_key)[po.id],
+        **_page_context(db, [po], user_ctx, category=category, group_pn=pn_key, scoped_lines=scoped_lines)[po.id],
         "salesperson": link_row.salesperson if link_row else None,
         "customer_id": link_row.customer_id if link_row else None,
         "customer": link_row.name_normalized if link_row else None,
         "lines_count": len(lines),
         "lines": lines,
     }
-    if cat is not None or pn_key:
+    if cat is not None or pn_key or scoped_lines is not None:
         if pn_scoped:
             data["category_matched"] = {
                 "lines": len(lines),
