@@ -1,0 +1,2107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light"><title>采购分析 · 备件管理</title>
+<style>
+
+:root{font-family:Inter,"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",Arial,"WenQuanYi Zen Hei",sans-serif;color:#193931;background:#f4f6f4;--ink:#163a31;--green:#087955;--mint:#e7f4ec;--muted:#5b6f67;--border:#dce4df;--soft:#f7f9f7;font-synthesis:weight}
+*{box-sizing:border-box}
+body{margin:0} button,select,input{font:inherit;color:inherit}button,select{cursor:pointer}button{background:transparent;border:0}a{color:var(--green)}
+button:focus-visible,select:focus-visible,input:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #158666;outline-offset:2px}button:hover{filter:brightness(.96)}.num,td,dd,.kval,.period,.stamp,.kmeta{font-variant-numeric:tabular-nums}
+.top{background:#10392e;color:#f4faf6}.top-inner,.wrap{max-width:1600px;margin:auto;padding:0 clamp(14px,3.15vw,54px)}.top-inner{height:50px;display:flex;align-items:center;gap:13px}.wordmark{font-weight:750;letter-spacing:.05em;font-size:15px}.brand-icon{height:29px;width:29px;display:grid;place-items:center;border:1px solid #75ac91;border-radius:7px;background:#235640}.brand-icon svg{width:19px;height:19px}.crumb{border-left:1px solid #537567;color:#c9ded2;padding-left:15px;font-size:12px}.stamp{margin-left:auto;color:#d4e6da;font-size:12px;display:flex;align-items:center;gap:8px}.stamp:before{content:'';width:7px;height:7px;border-radius:50%;background:#8bdaad}
+.intro{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:25px 0 18px}.intro-title{display:flex;align-items:center;gap:12px}.intro h1{font-size:clamp(27px,2.4vw,35px);line-height:1.25;letter-spacing:-.035em;margin:0;font-weight:760}.demo{border:1px solid #bacfc1;border-radius:5px;font-size:11px;font-weight:600;color:#456754;padding:3px 7px;white-space:nowrap}.period{color:var(--muted);font-size:12px;margin:7px 0 0}.mainbutton{background:#14553f;color:white;border:1px solid #134c39;border-radius:6px;padding:9px 14px;display:inline-flex;align-items:center;gap:9px;font-size:13px;font-weight:600}
+nav{display:flex;gap:23px;border-bottom:1px solid #cad7ce}.tab{display:flex;align-items:center;gap:8px;font-weight:620;font-size:14px;color:#50655c;padding:10px 3px 12px;border-bottom:3px solid transparent;margin-bottom:-1px;white-space:nowrap}.tab.active{border-color:#148057;color:#096946}.ico{display:inline-flex;width:17px;height:17px;vertical-align:middle}.ico svg{width:100%;height:100%}
+.filters{display:flex;align-items:center;gap:12px 18px;flex-wrap:wrap;padding:12px 15px;background:white;border:1px solid var(--border);border-radius:8px;margin:15px 0 12px;font-size:12px}.filter{display:inline-flex;align-items:center;gap:7px;color:#52655d;white-space:nowrap}.filter select{height:30px;font-size:12px;font-weight:570;padding:0 23px 0 9px;background:#fafcfb;border:1px solid #d1ddd5;border-radius:5px;max-width:165px;color:#203e31}.basis-filter{margin-left:auto}.reset{font-size:12px;color:var(--green);padding:6px 3px}.reset:disabled{color:#738179;cursor:default}
+.metrics{display:grid;grid-template-columns:1.18fr 1fr 1fr 1fr;gap:12px}.kpi{position:relative;background:#fff;border-radius:9px;border:1px solid var(--border);padding:14px 17px 13px;overflow:hidden;min-width:0}.kpi.lead{background:#154e3d;border-color:#154e3d;color:white}.khead{display:flex;align-items:center;justify-content:space-between;font-size:12px;font-weight:630;color:#4c6457}.lead .khead,.lead .kmeta{color:#d5ebdb}.kicon{display:grid;place-items:center;border-radius:6px;color:#4c8066;background:#f0f5f0;width:25px;height:25px}.lead .kicon{background:#2c6550;color:#cbe9d6}.kval{margin:5px 0 7px;font-family:Inter,Arial,"Microsoft YaHei",sans-serif;font-weight:680;line-height:1.15;letter-spacing:-.045em;font-size:clamp(25px,2vw,33px)}.kunit{font-size:13px;letter-spacing:0;font-weight:530;margin-left:6px}.kmeta{color:#597063;font-size:11px}.spark{position:absolute;right:12px;bottom:12px;width:54px;height:21px;opacity:.8}
+.grid-main{display:grid;grid-template-columns:minmax(0,1.53fr) minmax(0,1fr);gap:14px;align-items:stretch}.grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.view-area{padding:15px 0 30px}.view-area> * + *{margin-top:15px}.panel{background:white;border:1px solid var(--border);border-radius:9px;min-width:0;overflow:hidden}.panel-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:17px 17px 13px}.panel h2{font-size:16px;line-height:1.4;letter-spacing:-.02em;margin:0;font-weight:720}.sub{margin:4px 0 0;font-size:12px;color:var(--muted);line-height:1.5}.section-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.band{background:var(--soft);color:var(--muted);padding:9px 16px;font-size:12px}.muted{color:var(--muted)}.num{text-align:right}.table-wrap{width:100%;overflow:auto}table{width:100%;border-collapse:collapse;font-size:12px;line-height:1.45}td,th{text-align:left;white-space:nowrap;padding:10px 12px;border-bottom:1px solid #e9eeeb}th{font-size:11px;color:#5c7064;background:#f6f8f5;font-weight:600}tbody tr:last-child td{border-bottom:0}tbody tr:hover{background:#f8fbf8}.ranktable th:first-child,.ranktable td:first-child{padding-left:17px}.ranktable td{padding-top:9px;padding-bottom:9px}.nameline{display:flex;align-items:center;gap:9px}.rankno{color:#75867b;width:15px;font-size:11px}.avatar{border-radius:5px;font-size:12px;width:25px;height:25px;display:inline-grid;place-items:center;font-weight:660}.link-btn{color:var(--green);padding:2px 0;font-weight:620;font-size:inherit;text-align:inherit}.link-btn:hover,.text-link:hover{text-decoration:underline}.tooltip-btn{border-bottom:1px dotted #98b4a3}.workbar{display:inline-block;width:clamp(22px,4.6vw,78px);height:5px;border-radius:4px;background:#eaf1eb;margin-right:7px;vertical-align:middle;overflow:hidden}.workbar i{display:block;height:100%;background:#55a87c;border-radius:4px}.seg{display:inline-flex;border-radius:5px;padding:2px;background:#eef3ee;gap:2px;align-items:center}.seg button,.seg-btn{color:#506658;white-space:nowrap;padding:4px 8px;font-size:11px;border-radius:4px;font-weight:580}.seg button.active,.seg-btn.active{background:white;box-shadow:0 1px 3px #203d2b25;color:#176847}.mini-btn{font-size:12px;background:#fff;border:1px solid #d5e0d8;border-radius:5px;padding:5px 9px}.dot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px}.empty{padding:36px 15px;text-align:center;color:var(--muted);font-size:13px}.chart-wrap{padding:3px 15px 12px}.chart-legend{display:flex;align-items:center;gap:7px;color:#526b5b;font-size:11px}.chart-legend .dot{background:#51a47b;margin:0}.chart{display:flex;gap:6px;height:152px;margin:12px 0 4px}.axis{display:flex;flex-direction:column;justify-content:space-between;text-align:right;font-size:10px;color:#76877d;padding-bottom:2px;min-width:27px}.plot{flex:1;display:flex;gap:clamp(1px,.34vw,5px);align-items:end;padding:0 3px;border-bottom:1px solid #cddacf;min-width:0;background:repeating-linear-gradient(to top,transparent 0,transparent calc(25% - 1px),#e3eae4 calc(25% - 1px),#e3eae4 25%)}.column{position:relative;align-self:stretch;display:flex;align-items:end;justify-content:center;flex:1;min-width:0;padding:0}.column i{display:block;width:82%;max-width:22px;min-height:0;background:#66b28d;border-radius:3px 3px 0 0}.column.peak i,.column:hover i{background:#176446}.column:hover{background:#61947518}.xticks{display:flex;justify-content:space-between;padding-left:36px;color:#63796b;font-size:10px}.chart-foot,.panel-foot{display:flex;justify-content:space-between;align-items:center;gap:12px;border-top:1px solid #e5ece6;padding:10px 16px;font-size:11px;color:#5a7060}.panel-foot b,.chart-foot b{font-weight:650;color:#284c36}.chart-foot{margin-top:7px}.recent-table th:first-child,.recent-table td:first-child{padding-left:17px}.recent-table td{padding-top:9px;padding-bottom:9px}.tag{display:inline-flex;align-items:center;color:#345c46;background:#edf4ef;border-radius:4px;font-size:11px;padding:2px 6px}.text-link{color:var(--green);font-size:12px;white-space:nowrap}.bottom-note{padding:0 0 20px;font-size:11px;color:#576a61}
+dialog{margin:0 0 0 auto;padding:0;width:min(735px,100vw);max-width:100vw;height:100dvh;max-height:100dvh;border:0;border-left:1px solid var(--border);color:var(--ink);box-shadow:-12px 0 48px #0e322c22}dialog::backdrop{background:#0f28265c}.drawer-head{padding:21px 22px 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);background:#f9fbf9}.drawer-head h2{margin:0;font-size:20px}.close{font-size:24px;line-height:1;width:32px;height:32px;background:white;border:1px solid var(--border);border-radius:5px}.drawer-body{padding:16px 20px}.drawer-meta{font-size:13px;line-height:1.8;color:#526957;margin:0 0 10px}.receipt{margin:9px 0;border:1px solid var(--border);border-radius:6px;overflow:hidden}.receipt summary{display:grid;grid-template-columns:1.2fr 1.1fr 1fr;align-items:center;gap:6px;cursor:pointer;padding:10px 11px;font-size:12px;list-style:none}.receipt summary::-webkit-details-marker{display:none}.receipt summary strong{font-size:13px}.receipt small{display:block;color:var(--muted);font-size:11px;margin-top:4px}.receipt[open] summary{background:#eff6ef}.receipt .sumarrow{color:#28764e}.receipt[open] .sumarrow{display:inline-block;transform:rotate(90deg)}.receipt .table-wrap table{font-size:11px}.receipt .table-wrap td,.receipt .table-wrap th{padding:7px 8px}
+@media(min-width:1450px){.chart{height:168px}table{font-size:13px}.kmeta,.chart-foot,.panel-foot{font-size:12px}}
+@media(max-width:1030px){.grid-main{grid-template-columns:minmax(0,1.35fr) minmax(0,1fr)}.spark{display:none}.filters{gap:8px 11px}.basis-filter{margin-left:0}.ranktable td,.ranktable th{padding-left:7px;padding-right:7px}.workbar{width:25px}}
+@media(max-width:820px){.grid-main,.grid-2{grid-template-columns:minmax(0,1fr)}.metrics{grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}.kpi{padding:11px}.kval{font-size:24px}.kunit{font-size:11px}.panel-head{padding:14px}.chart{height:140px}.workbar{width:50px}.intro{padding:18px 0 13px}.tabs{gap:15px}.filter select{max-width:145px}}
+@media(max-width:620px){.stamp{font-size:10px}.top-inner{height:44px;gap:9px}.crumb{display:none}.mainbutton{padding:7px 9px;font-size:12px}.intro-title{gap:7px}.metrics{grid-template-columns:1fr 1fr;gap:8px}.kpi{padding:10px 12px}.kval{font-size:25px;margin:2px 0 4px}.khead{font-size:11px}.kicon{height:21px;width:21px}.kmeta{font-size:10px}.filters{display:grid;grid-template-columns:1fr 1fr;padding:9px;gap:7px 8px;margin:10px 0}.filter{justify-content:space-between;font-size:11px;gap:3px}.filter select{min-width:0;flex:1;max-width:120px;padding-right:1px}.reset{text-align:right}.tab{font-size:12px;gap:4px;padding:9px 1px}.tab .ico{height:14px;width:14px}nav{justify-content:space-between;gap:4px}.view-area{padding:10px 0 18px}.spark{display:block;width:36px;height:15px;opacity:.63}.grid-main,.grid-2{gap:10px}.panel-head{gap:6px;flex-wrap:wrap}.panel h2{font-size:15px}.sub{font-size:11px}.ranktable{min-width:505px}.table-wrap{overscroll-behavior-x:contain}.recent-table{min-width:640px}.chart-foot,.panel-foot{flex-wrap:wrap;gap:5px}.drawer-body{padding:12px 8px}.drawer-head{padding:14px}.receipt summary{grid-template-columns:1.24fr 1fr auto;padding:8px 6px}.workbar{width:24px}}
+@media(prefers-reduced-motion:no-preference){.view-area{animation:enter .18s ease-out}@keyframes enter{from{opacity:.75;transform:translateY(2px)}to{opacity:1;transform:none}}}
+.grid-main>.panel:nth-child(2){display:flex;flex-direction:column}.grid-main .chart-wrap{flex:1;display:flex;flex-direction:column}.grid-main .chart{flex:1;min-height:140px}.grid-main .chart-foot{margin-top:auto}
+@media(min-width:821px){.ranktable td{padding-top:6px;padding-bottom:6px}.intro{padding:19px 0 14px}.grid-main .chart{min-height:150px}}
+
+.structure-view { display:grid; gap:16px; min-width:0 }
+.structure-view > *, .structure-scroll { min-width:0; max-width:100% }
+.structure-scroll { overflow-x:auto; overscroll-behavior-inline:contain }
+.structure-scroll table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums }
+.structure-scroll th, .structure-scroll td { white-space:nowrap; text-align:left }
+.structure-scroll .num { text-align:right }
+.structure-scroll th[scope=row] { font-weight:560 }
+.structure-scroll tfoot th, .structure-scroll tfoot td { background:#f0f6f3; border-top:1px solid #cbded6; font-weight:650; color:#294e45 }
+.structure-scroll tfoot .structure-share i { visibility:hidden }
+.structure-money, .structure-total { font-weight:650 }
+.structure-share { display:inline-flex; align-items:center; justify-content:flex-end; gap:8px }
+.structure-share i { width:52px; height:5px; border-radius:5px; background:#e7efea; overflow:hidden }
+.structure-share b { display:block; height:100%; background:#38a17f; border-radius:5px }
+.structure-sources { display:flex; flex-wrap:wrap; gap:4px 16px; align-items:center; min-width:180px }
+.structure-sources button { display:inline-flex; align-items:center; gap:4px }
+.structure-badge { color:#537066; font-size:.86em; font-weight:500 }
+.structure-zero { color:#788980 }
+.structure-mode { white-space:nowrap }
+.structure-composition { padding:12px 18px 15px; background:#f9fbfa; border-block:1px solid #e8eeea }
+.structure-band-label { margin-bottom:8px; font-size:12px; font-weight:650; color:#3e5c51 }
+.structure-band { display:flex; width:100%; height:19px; overflow:hidden; border-radius:4px; background:#ebf1ed }
+.structure-band button { display:block; min-width:0; border:0; border-right:1px solid white; padding:0; cursor:pointer }
+.structure-band button:hover, .structure-band button:focus-visible { filter:brightness(1.16); outline:2px solid #0f3028; outline-offset:-2px }
+.structure-legend { display:flex; flex-wrap:wrap; gap:2px 16px; margin-top:7px }
+.structure-legend button { display:inline-flex; gap:6px; align-items:center; padding:3px 0; color:#31483e; border:0; background:none; font:inherit; font-size:12px; cursor:pointer }
+.structure-legend button:hover { text-decoration:underline }
+.structure-legend i { width:8px; height:8px; border-radius:2px }
+.structure-legend b { font-weight:600; font-variant-numeric:tabular-nums }
+.structure-note { color:#65756d; font-size:12px }
+.structure-cell { background-color:rgba(31,136,94,var(--cell-opacity)) }
+.structure-cell:hover { box-shadow:inset 0 0 0 1px #8db4a3 }
+.structure-tabs { justify-self:start; max-width:100%; flex-wrap:wrap }
+.structure-picker { padding:12px 16px; border-block:1px solid #e5ede8; display:flex; align-items:baseline; gap:10px; flex-wrap:wrap }
+.structure-picker > span { color:#567268; font-size:12px; white-space:nowrap }
+.structure-picker > div { display:flex; flex-wrap:wrap; gap:6px }
+.structure-picker button { border:1px solid #d4e2d9; border-radius:5px; padding:5px 9px; color:#305547; background:#fff; font:inherit; font-size:12px; cursor:pointer }
+.structure-picker button:hover { border-color:#4d876c }
+.structure-picker button.active { border-color:#2a795c; color:#164e3a; background:#e3f1e8; font-weight:650 }
+.structure-pair-start { border-top:1px solid #d7e4db }
+.structure-pair-start [rowspan] { vertical-align:top }
+
+.pool-filters,.pool-selection{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.pool-selection{font-size:12px}
+.pool-selection>span{margin-right:2px}
+.pool-filter,.pool-select,.pool-pn{font:inherit;cursor:pointer}
+.pool-filter{background:#fff;color:#425851;border:1px solid #d6e1db;border-radius:6px;font-size:12px;font-weight:600;padding:6px 9px}
+.pool-filter b{font-variant-numeric:tabular-nums;margin-left:3px;opacity:.8}
+.pool-filter.active{color:#fff;background:#1d5848;border-color:#1d5848}
+.pool-select,.pool-pn{background:none;border:0;padding:3px 5px;color:#466057;border-radius:4px}
+.pool-select.active{color:#12533f;background:#dceee5;font-weight:700}
+.pool-pn{padding:3px 0;font-weight:700;white-space:nowrap;color:#146d52}
+.pool-pn:hover,.pool-pn.active{text-decoration:underline;text-underline-offset:3px}
+.pool-price-table .pool-picked{background:#eef7f2}
+.pool-price-table td small,.pool-source small{display:block;font-size:11px;color:#536c62;font-weight:400}
+.pool-price-table td,.pool-members td{white-space:nowrap}
+.pool-above{color:#96521a}
+.pool-alert{padding:2px 5px;background:#fff0d9;color:#824114;border-radius:4px;font-size:10px;font-weight:700}
+.pool-evidence{margin-top:16px}
+.pool-detail-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin:0 0 9px}
+.pool-detail-head h3{margin:0;color:#21463b;font-size:16px}
+.pool-detail-head small{font-size:12px;font-weight:400;color:#5d6d66}
+.pool-source{display:grid;grid-template-columns:minmax(100px,1.2fr) minmax(30px,1fr) minmax(60px,auto);align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #e3e9e6}
+.pool-source:last-child{border-bottom:0}
+.pool-source strong{font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
+.pool-bar{height:5px;border-radius:2px;background:#edf2ee}
+.pool-bar i{display:block;height:100%;background:#56a386;border-radius:2px}
+.pool-search{display:flex;align-items:center;gap:8px;max-width:100%;color:#526c61;font-size:12px;white-space:nowrap}
+.pool-search input{min-width:0;width:158px;max-width:100%;padding:6px 9px;border:1px solid #b9cfc3;border-radius:5px;background:white;color:#21463b;font:inherit}
+.pool-search input:focus-visible{outline:2px solid #247d5c;outline-offset:2px}
+.pool-scope{margin-bottom:10px;font-size:12px;color:#426355;background:#edf5ef;border-radius:5px;padding:7px 10px}
+@media(max-width:650px){.panel-head:has(.pool-search){flex-wrap:wrap}.pool-search{width:100%}.pool-search input{flex:1}}
+
+nav{overflow-x:auto;scrollbar-width:thin}.tab.active{background:linear-gradient(to top,#e8f3eb,transparent 68%)}.tab{padding-inline:8px}
+.product-fields,.filter-chips,.custom-dates,.follow-scope{display:flex;gap:8px 14px;align-items:center;flex-wrap:wrap}.product-fields,.filter-chips{flex-basis:100%;padding-top:7px;border-top:1px solid var(--border)}
+.products-toggle,.product-toggle,.scope-chip,.follow-scope button{font-size:12px;color:var(--green);font-weight:600}.product-toggle{border:1px dashed #bbcebf;border-radius:5px;padding:6px 9px}.custom-dates{gap:5px}.custom-dates label{font-size:12px}.custom-dates input{font-size:12px;width:120px;min-height:28px;border:1px solid var(--border);border-radius:4px}
+.scope-chip,.follow-scope button{background:#eaf4eb;border-radius:4px;padding:4px 8px}.follow-scope{margin-bottom:14px;font-size:12px;color:var(--muted)}
+.matrix-switch,.board-switch{margin-bottom:10px}.view-area>:is(.matrix-switch,.board-switch)+*{margin-top:0}:is(.matrix-switch,.board-switch) .seg button{font-size:12px;padding:5px 12px}
+@media(min-width:821px){
+body:is([data-view=matrix],[data-view=boards],[data-view=compare]) .intro{padding:15px 0 7px}
+body:is([data-view=matrix],[data-view=boards],[data-view=compare]) .intro>div:first-child{display:flex;align-items:baseline;gap:15px}
+body:is([data-view=matrix],[data-view=boards],[data-view=compare]) .intro h1{font-size:29px}
+body:is([data-view=matrix],[data-view=boards],[data-view=compare]) .filters{margin:11px 0 8px;padding:8px 12px}
+body:is([data-view=matrix],[data-view=boards],[data-view=compare]) .metrics{gap:8px;grid-template-columns:repeat(4,minmax(0,1fr))}
+body:is([data-view=matrix],[data-view=boards],[data-view=compare]) .kpi{padding:9px 14px;display:grid;grid-template-columns:auto auto;align-items:center;gap:3px 5px}
+body:is([data-view=matrix],[data-view=boards],[data-view=compare]) .kval{font-size:24px;text-align:right;margin:0}
+body:is([data-view=matrix],[data-view=boards],[data-view=compare]) .kmeta{grid-column:1/3;text-align:right}
+body:is([data-view=matrix],[data-view=boards],[data-view=compare]) :is(.spark,.kicon){display:none}
+}
+@media(max-width:820px){nav{flex-wrap:wrap;justify-content:flex-start;gap:0 10px}.tab{padding:7px 4px}.product-fields,.filter-chips,.custom-dates{grid-column:1/-1}.product-fields{display:grid;grid-template-columns:1fr 1fr}.product-toggle{font-size:11px}.filters .custom-dates{grid-row:auto}.custom-dates input{width:110px}.filters .reset{text-align:left}}
+@media(max-width:620px){.filters{grid-template-columns:repeat(2,minmax(0,1fr))}nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px}.tab{justify-content:center;margin-bottom:0}.intro{padding-top:12px}.matrix-switch{margin-bottom:7px}}
+@media(max-width:820px){.filters .product-fields{grid-template-columns:repeat(2,minmax(0,1fr));min-width:0}.product-fields .filter,.product-fields select{min-width:0;max-width:100%}}
+
+.boards-view{display:grid;gap:11px;min-width:0}
+.boards-heading,.boards-tools,.board-limit,.board-select,.board-card-head,.board-footer{display:flex;align-items:center}
+.boards-heading{justify-content:space-between;gap:10px;flex-wrap:wrap;padding:2px 1px}
+.boards-heading h2,.board-card h3{margin:0;color:var(--ink)}
+.boards-heading h2{font-size:17px}.boards-heading p{margin:4px 0 0;font-size:12px;color:var(--muted)}
+.boards-tools{flex-wrap:wrap;gap:8px 12px}.board-select{gap:5px;font-size:12px;color:var(--muted)}
+.board-select select,.board-limit{border:1px solid var(--border);border-radius:5px;background:white}
+.board-select select{padding:5px;color:#234639;max-width:130px}.board-limit{padding:2px}
+.board-limit button{padding:4px 7px;font-size:11px;border-radius:3px}
+.board-limit button.active{background:#195a43;color:white}
+.boards-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.board-card{position:relative;min-width:0;display:flex;flex-direction:column;border:1px solid var(--border);border-radius:7px;background:white;overflow:hidden}
+.board-card-head,.board-footer{justify-content:space-between;gap:8px}
+.board-card-head{padding:10px 12px 5px}.board-card-head h3{display:flex;align-items:center;gap:6px;font-size:14px}
+.board-card-head h3:before{content:'';width:4px;height:13px;border-radius:2px;background:var(--board-color)}
+.board-card-head span,.board-footer{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.board-list{list-style:none;margin:0;padding:1px 11px 5px}
+.board-row{width:100%;min-width:0;display:grid;grid-template-columns:17px minmax(0,1fr) auto;gap:0 7px;align-items:center;padding:3px 1px 2px;text-align:left;line-height:1.25;font-size:12px;border-radius:3px}
+.board-row:hover{background:#f2f7f3}.board-no{grid-row:1/3;font-variant-numeric:tabular-nums;color:var(--board-color);font-size:11px;text-align:center}
+.board-key{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.board-row strong{font-size:12px;font-variant-numeric:tabular-nums}
+.board-track{margin-top:2px;grid-column:2/4;display:block;background:#f2f5f2;height:2px}
+.board-track i{display:block;height:100%;background:var(--board-color);border-radius:2px}
+.board-footer{margin-top:auto;padding:6px 12px;background:#fafbf9;border-top:1px solid #e7ece7}
+.board-footer b{color:#385443}.boards-subhead{margin-top:6px}.boards-grid.board-pair{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media(max-width:1000px){.boards-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.boards-grid,.boards-grid.board-pair{grid-template-columns:minmax(0,1fr)}.board-row{padding:6px 1px}.boards-tools{gap:5px}.board-limit button{padding:4px 6px}}
+
+.special-card .special-rule{margin:0 12px 6px;color:var(--muted);font-size:11px;line-height:1.4}
+.special-card .board-row{padding:5px 1px 3px}
+.special-card .board-no{grid-row:1/4}
+.special-detail{grid-column:2/4;color:var(--muted);font-size:10px;line-height:1.45;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.special-card .board-track{grid-column:2/4}
+
+.mx-settings { background:#f8fbf9; border-block:1px solid #dce7e0; padding:12px 16px; display:grid; gap:12px }
+.mx-presets,.mx-fields { display:flex; flex-wrap:wrap; align-items:center; gap:6px }
+.mx-presets button,.mx-swap { appearance:none; background:white; border:1px solid #ccdcd1; color:#40594e; border-radius:5px; cursor:pointer; padding:5px 11px; font:inherit; font-size:12px }
+.mx-presets button.active { color:#114c36; background:#e2f2e9; border-color:#599177; font-weight:650 }
+.mx-presets button:hover,.mx-swap:hover { border-color:#4c7f64 }
+.mx-field { display:inline-flex; align-items:center; gap:6px; padding-right:6px; color:#476256; font-size:12px; white-space:nowrap }
+.mx-field select { max-width:140px; min-height:31px; border:1px solid #d0ded5; background:#fff; color:#193a2b; border-radius:5px; padding:2px 5px; font:inherit }
+.mx-swap { font-size:17px; line-height:1.1; padding:4px 7px; margin-inline:-4px 2px }
+.mx-mode { margin-left:auto }
+.mx-mode button:disabled { opacity:.5; cursor:default }
+.mx-meta { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; padding:10px 16px; color:#64786d; font-size:12px }
+.mx-meta>div,.mx-legend { display:flex; align-items:center; gap:10px; flex-wrap:wrap }
+.mx-meta strong { color:#224737; font-size:13px }
+.mx-legend i { width:48px; height:7px; border-radius:2px; border:1px solid #d4e3da; background:linear-gradient(90deg,#fafcfb,#ade0c7) }
+.mx-no-record { padding-left:6px; border-left:1px solid #d8e4db }
+.mx-scroll { position:relative; isolation:isolate; overflow:auto; max-height:62vh; max-width:100%; overscroll-behavior:contain; scrollbar-width:thin }
+.mx-scroll:focus-visible { outline:2px solid #368061; outline-offset:-2px }
+.mx-grid { width:100%; border-collapse:separate; border-spacing:0; font-variant-numeric:tabular-nums; font-size:12px }
+.mx-grid :is(td,th) { padding:0; text-align:right; white-space:nowrap; border:0; border-bottom:1px solid #e3ebe6; border-right:1px solid #e0eae3; background-color:#fff; color:#263e31 }
+.mx-grid thead th { position:sticky; top:0; z-index:2; text-align:right; color:#3c5447; font-weight:600; background-color:#f0f5f1 }
+.mx-grid tr>:first-child { position:sticky; left:0; z-index:1; text-align:left; background:#fbfdfb; box-shadow:1px 0 0 #d4e1d7 }
+.mx-grid thead tr>:first-child { z-index:3; background:#e7efe8 }
+.mx-grid .mx-axis-title,.mx-grid .mx-total:is(th),.mx-grid tfoot th { padding:9px 12px }
+.mx-axis-title small { font-weight:450;color:#67786d }
+.mx-grid tbody td { background:rgba(15,135,79,var(--mx-heat,0)) }
+.mx-grid tbody tr:hover th { background:#edf6f0 }
+.mx-grid .mx-total,.mx-grid tfoot :is(td,th) { background:#f1f6f2; font-weight:650 }
+.mx-grid .mx-grand { background:#e6f1e9 }
+.mx-drill { display:block; width:100%; background:transparent; color:inherit; font:inherit; cursor:pointer; text-align:inherit; padding:9px 11px; border:0; white-space:nowrap; line-height:1.3 }
+.mx-drill:hover,.mx-drill:focus-visible { background:#20774912; color:#105c38; text-decoration:underline; outline:1px solid #659c7d; outline-offset:-1px }
+.mx-drill small { display:block; color:#577064; font-size:10px; margin-top:2px }
+.mx-grid .mx-no-data { color:#839287; padding:7px 11px }
+.mx-note { margin:0; padding:9px 16px; font-size:12px; color:#577064 }
+@media(max-width:650px) {
+  .mx-settings { gap:10px; padding:10px }
+  .mx-fields { align-items:flex-end }
+  .mx-field { flex-direction:column; align-items:flex-start; gap:2px; padding:0 }
+  .mx-field select { max-width:105px; min-height:33px }
+  .mx-mode { margin:2px 0 0 }
+  .mx-swap { min-height:32px; margin:0 }
+  .mx-drill { padding:8px; min-height:34px }
+  .mx-grid tr>:first-child .mx-drill { max-width:120px; overflow:hidden; text-overflow:ellipsis }
+  .mx-meta { align-items:flex-start; padding:8px 10px }
+}
+
+.wall-title,.wall-controls,.wall-setting,.wall-card-head,.wall-card-meta,.wall-legend,.wall-legend>span,.wall-ramp{display:flex;align-items:center}.wall-title,.wall-card-head,.wall-card-meta,.wall-legend{justify-content:space-between;gap:10px}.wall-title{flex-wrap:wrap;margin:3px 0 12px}.wall-title h2,.wall-card h3{margin:0}.wall-title h2{font-size:18px}.wall-title p{margin:4px 0 0;color:var(--muted);font-size:12px}.wall-controls,.wall-setting{gap:8px;flex-wrap:wrap}.wall-setting{font-size:12px;color:var(--muted)}.wall-setting select{padding:5px 8px;background:white;color:var(--ink);border:1px solid var(--border);border-radius:5px;font:inherit}.wall-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.wall-card{min-width:0;border:1px solid var(--border);border-radius:8px;background:white;padding:13px}.wall-card-head h3{font-size:15px}.wall-card-meta{margin:6px 0;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}.wall-scroll{overflow-x:auto;overscroll-behavior-x:contain}.wall-table{table-layout:fixed;width:100%;min-width:320px;border-spacing:3px;border-collapse:separate;font-weight:500;font-size:12px;line-height:1.25}.wall-table th,.wall-table td{border:0;padding:0;vertical-align:middle;text-align:center}.wall-table th{font-size:11px;background:transparent;color:#495f52;font-weight:550;overflow-wrap:anywhere;padding:4px 1px}.wall-table th:first-child{width:20%;text-align:left}.wall-table td{height:29px;border-radius:3px;font-size:12px;font-variant-numeric:tabular-nums}.wall-table .wall-cell button{display:block;width:100%;height:100%;padding:3px 0;border:0;border-radius:inherit;background:transparent;font:inherit;color:inherit;text-align:center}.wall-table .wall-cell button:hover,.wall-table .wall-cell button:focus-visible{outline:2px solid #235746;outline-offset:-2px}.wall-absent{background:#f4f6f4;color:#6e8076}.wall-heat-0,.wall-heat-1{background:#e4f2eb;color:#244f3c}.wall-heat-2{background:#c3e3d2;color:#244f3c}.wall-heat-3{background:#82bd9e;color:#153425}.wall-heat-4{background:#428569;color:white}.wall-heat-5{background:#245b45;color:white}.wall-legend{margin-top:8px;font-size:10px;color:var(--muted);font-variant-numeric:tabular-nums}.wall-legend>span,.wall-ramp{gap:3px}.wall-ramp i{display:block;width:12px;height:7px}
+@media(max-width:850px){.wall-grid{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:520px){.wall-card{padding:10px}.wall-table{min-width:298px;font-size:11px}.wall-controls{gap:5px}}
+
+.compare-dates,.compare-controls{display:flex;flex-wrap:wrap;align-items:center;gap:12px 24px;padding:10px 16px;background:#f5f8f5;border-block:1px solid var(--border)}.compare-dates>span{display:inline-flex;gap:9px;align-items:center;font-size:13px;font-variant-numeric:tabular-nums}.compare-dates small,.compare-setting,.compare-card div>span{color:var(--muted)}.compare-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;padding:15px 16px}.compare-card{min-width:0;border-right:1px solid var(--border);padding-right:18px}.compare-card:last-child{border:0}.compare-card h3{margin:0 0 9px;font-size:14px}.compare-card div{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:3px 0;font-variant-numeric:tabular-nums;font-size:13px}.compare-card div>span,.compare-card small{font-size:11px}.compare-card .compare-delta{margin-top:6px;border-top:1px dashed var(--border);padding-top:7px}.compare-setting{display:inline-flex;align-items:center;gap:7px;font-size:12px}.compare-setting select{padding:4px 6px;font:inherit;color:var(--ink);background:#fff;border:1px solid var(--border);border-radius:5px}.compare-table{min-width:560px}.compare-table tbody th{font-weight:550;background:transparent}.compare-status{display:inline-block;font-size:10px;color:#46634e;border:1px solid var(--border);padding:1px 4px;border-radius:3px;margin-left:7px}.compare-track{display:block;position:relative;height:10px;background:linear-gradient(to right,transparent calc(50% - 1px),#8c9a92 calc(50% - 1px),#8c9a92 50%,transparent 50%);min-width:48px}.compare-track i{position:absolute;top:2px;height:6px}.compare-track .up{left:50%;background:#377b62}.compare-track .down{right:50%;background:#a58957}
+@media(max-width:750px){.compare-cards{grid-template-columns:1fr;gap:9px}.compare-card,.compare-card:last-child{display:grid;grid-template-columns:minmax(68px,.7fr) repeat(3,minmax(0,1fr));gap:6px;align-items:center;border:0;border-bottom:1px solid var(--border);padding:0 0 7px}.compare-card h3{margin:0;font-size:12px}.compare-card div{display:block;font-size:11px}.compare-card div>span{display:block}.compare-card .compare-delta{border:0;margin:0;padding:0}.compare-card small{display:block;font-size:10px}.compare-dates,.compare-controls{gap:6px 12px}.compare-card .link-btn{font-size:11px}.compare-card strong,.compare-card b{overflow-wrap:anywhere}}
+
+.id-pn{display:inline-flex;min-width:0;max-width:100%;flex-direction:column;vertical-align:middle;line-height:1.23;text-align:left}
+.id-pn>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.id-pn small{display:block!important;margin:1px 0 0!important;min-width:0;max-width:100%;font-weight:400!important;font-size:10px!important;line-height:1.2!important;color:#516a60;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wall-table .id-pn,.mx-grid .id-pn{max-width:12em}
+.id-sales,.id-touch-preview{color:#225a47;text-decoration:underline dotted;text-underline-offset:3px;padding:2px 0}
+.id-touch-preview{display:none;font-weight:500;font-size:11px}
+.id-preview{position:fixed;z-index:10000;background:#fff;border:1px solid #abc6b5;border-radius:8px;box-shadow:0 5px 24px #10392931;color:#244236;width:min(355px,calc(100vw - 12px));max-height:min(75dvh,425px);overflow:auto;overscroll-behavior:contain;text-align:left;font-size:12px;line-height:1.35}
+.id-preview header{padding:11px 12px 8px;background:#f2f7f3}.id-preview header b,.id-preview header small{display:block}.id-preview header small{color:#536a5e;margin-top:3px;font-size:11px}
+.id-preview ul{list-style:none;padding:1px 12px;margin:0}.id-preview li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;align-items:center;padding:6px 0;border-bottom:1px solid #e6eee7}
+.id-preview li .id-pn small{white-space:normal}.id-preview li b{font-variant-numeric:tabular-nums}.id-preview footer,.id-preview p{padding:7px 12px;color:#4d6558;font-size:11px}
+@media(hover:none),(pointer:coarse){.id-touch-preview{display:inline-block;margin-inline-start:5px;min-height:27px}.id-preview-row{position:relative;padding-right:35px}.id-preview-row>.id-touch-preview{position:absolute;right:0;top:2px}}
+.id-desc-tag{font-size:9px;color:#516a60;display:inline-block;margin-left:4px;font-weight:400}
+
+.links-view{display:grid;gap:10px}.links-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.links-controls,.links-setting,.links-coverage,.links-legend,.links-legend button,.sales-context{display:flex;align-items:center;flex-wrap:wrap;gap:7px}.links-controls,.links-coverage,.links-legend,.sales-context{padding:8px 13px}.links-controls,.links-coverage,.sales-context{background:#f5f8f6;color:var(--muted);font-size:11px}.links-setting select{border:1px solid var(--border);background:white;border-radius:4px;padding:3px;color:var(--ink);font:inherit}.links-coverage,.sales-context{gap:6px 18px}.sales-context b{color:var(--ink)}.links-stacks{padding:9px 13px 3px}.links-stack{display:grid;grid-template-columns:4.5em minmax(40px,1fr) 96px;align-items:center;gap:5px;font-size:11px;margin-bottom:6px}.links-stack b{text-align:right;font-variant-numeric:tabular-nums}.links-strip{display:flex;height:16px;overflow:hidden;border-radius:3px}.links-strip button{display:block;padding:0;border:0;box-shadow:inset -1px 0 #ffffff60}.links-strip button:focus-visible{outline:2px solid #12362c;outline-offset:-2px}.links-legend{gap:5px 10px}.links-legend button{padding:0;font-size:11px;gap:3px}.links-legend i,.links-legend b{width:9px;height:9px;display:inline-block;border-radius:2px}.links-points-key b{height:15px;width:15px;color:white;font-size:10px;line-height:15px;border-radius:50%;text-align:center}.links-scatter{padding:9px 26px 0 10px;display:grid;grid-template-columns:36px minmax(0,1fr);gap:5px;font-size:10px;font-variant-numeric:tabular-nums;color:var(--muted)}.links-y-axis,.links-x-axis{display:flex;justify-content:space-between}.links-y-axis{flex-direction:column;text-align:right;padding:17px 0}.links-plot{position:relative;height:145px;margin:7px 0;border-left:1px solid #a9b9af;border-bottom:1px solid #a9b9af;background-image:linear-gradient(to top,#dce7df 1px,transparent 1px),linear-gradient(to right,#e5ede8 1px,transparent 1px);background-size:25% 25%}.links-point{position:absolute;transform:translate(-50%,50%);border:1px solid white;border-radius:50%;height:21px;width:21px;color:white;font-weight:650;font-size:11px;padding:0;z-index:1}.links-point:hover,.links-point:focus-visible{outline:2px solid #163d2e;z-index:2}.links-orders{min-width:920px}.links-products summary{cursor:pointer;color:#27614b}.links-product{display:block}.links-product b,.links-product small{display:block}.links-product small{color:var(--muted);font-size:10px}.links-products[open] .links-product{margin-top:6px}.links-purchases .link-btn{display:inline-block;margin:2px 6px 2px 0}.links-orders th[scope=row]{font-family:monospace}.links-coverage b{color:var(--ink)}
+@media(max-width:825px){.links-pair{grid-template-columns:1fr}}
+
+.view-trail { display:flex; flex-wrap:wrap; align-items:center; gap:6px; font-size:11px; color:#5c7165; margin-top:6px; line-height:1.3 }
+.view-trail strong { font-weight:570; color:#355345 }
+.view-trail i { font-style:normal; color:#889d90 }
+.view-trail button { border-radius:4px; padding:4px 8px; margin-right:3px; border:1px solid #c7d8cc; background:#f6faf7; color:#216747; font:inherit; font-weight:600 }
+.view-trail button:hover { background:#e4f1e8 }
+
+.view-trail .trail-parent{margin:0;padding:1px 0;background:none;border:0;font-weight:500;text-underline-offset:2px}.view-trail .trail-parent:hover{text-decoration:underline}
+
+.view-purpose{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 22px;padding:8px 12px;border:1px solid #d0e3d7;border-left:3px solid #498666;background:#f1f7f2;border-radius:5px;color:#345248;font-size:12px;line-height:1.6}
+.view-purpose b,.chart-note b{font-size:11px;font-weight:650;color:#276b4a;margin-right:8px;white-space:nowrap}
+.view-area>.view-purpose+*{margin-top:10px}
+.board-card-head,.wall-card-head,.panel-head{flex-wrap:wrap}
+.board-card-head h3,.wall-card-head h3,.panel-head>div:first-child{margin-right:auto}
+.chart-info{display:contents}.chart-info>summary{display:inline-block;align-self:center;cursor:pointer;list-style:none;color:#476558;border:1px solid #d4e1d7;border-radius:4px;font-size:10px;line-height:1.2;padding:3px 5px;font-weight:500}.chart-info>summary::-webkit-details-marker{display:none}
+.chart-info[open]>summary{color:#14563d;border-color:#7da78b}.chart-note{display:grid;gap:3px;flex:0 0 100%;width:100%;margin-top:4px;background:#f2f7f2;border-radius:4px;padding:7px 9px;text-align:left;font-size:12px;line-height:1.5;color:#355143}.chart-note>span{display:block}
+@media(max-width:620px){.view-purpose{font-size:11px;gap:2px;padding:7px 9px}.view-purpose>span{width:100%}.chart-note{font-size:11px}}
+.range-table{min-width:610px}.range-table th:first-child{padding-left:16px}.price-axis-cell{width:30%}.price-axis{position:relative;height:12px;margin:0 5px;background:linear-gradient(#e3eae4,#e3eae4) center/100% 1px no-repeat}.price-axis i{position:absolute;top:4px;height:4px;border-radius:3px;background:#76b797}.price-axis em{position:absolute;top:1px;transform:translateX(-50%);width:10px;height:10px;border-radius:50%;background:#126446;border:1.5px solid white;box-shadow:0 0 0 1px #3b8263}
+
+.pool-filters,.pool-selection{padding:0 16px}.pool-sources{padding:0 16px 10px}.pool-evidence{scroll-margin-top:12px}
+</style>
+</head>
+<body>
+<header class="top"><div class="top-inner"><span class="brand-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="m12 2 9 5v10l-9 5-9-5V7z M3 7l9 5 9-5 M12 12v10 M7.5 4.5l9 5"/></svg></span><span class="wordmark">备件管理</span><span class="crumb">经营分析中心</span><span class="stamp">样例截至 2026.11.19</span></div></header>
+<main class="wrap"><div class="intro"><div><div class="intro-title"><h1>采购分析</h1><span class="demo">模拟数据</span></div><p class="period" id="period"></p></div><button class="mainbutton" data-inspect="{}">查看采购单 <span aria-hidden="true">↗</span></button></div>
+<nav id="navigation" aria-label="分析视角"></nav>
+<div id="view-trail" class="view-trail" aria-label="当前位置"></div>
+<div class="filters" id="filters" aria-label="采购筛选"></div>
+<section class="metrics" id="metrics" aria-label="当前筛选摘要"></section>
+<div class="view-area" id="active-view"></div>
+</main>
+<dialog id="orders-dialog" aria-labelledby="drawer-heading"><div class="drawer-head"><div><h2 id="drawer-heading">采购单据</h2><div id="drawer-scope" class="sub"></div></div><button aria-label="关闭采购单据" class="close" autofocus>×</button></div><div class="drawer-body" id="drawer-body"></div></dialog>
+<script>
+
+// 全部为评审用合成数据。所有视角从同一组逐单明细汇总。
+const buyers = ['林乔', '沈川', '唐悦', '许澄', '陆宁', '周予'];
+const types = ['销售订单', '维保需求', '批量采购', '指定采购', '采购申请', '委外维修', '回收采购', '其他采购'];
+const suppliers = ['青禾存储', '栖川数科', '松屿配件', '星桥网络', '云岫机电', '棠舟集成', '砾石工坊'];
+const customers = ['泊云信息', '鹭川互联', '常青机房', '观澜数服', '海棠算力', '知禾系统'];
+const salespersons = ['韩言', '姚夏', '纪远', '宋青'];
+const poolCaps = { '32G 服务器内存': 635, '1.92T 企业固态盘': 1780, '750W 热插拔电源': 580 };
+const catalog = [
+  ['MEM-R32-A', '32GB DDR4 ECC 内存 A 型', '32G 服务器内存', '件', 470, '内存'],
+  ['MEM-R32-B', '32GB DDR4 ECC 内存 B 型', '32G 服务器内存', '件', 580, '内存'],
+  ['MEM-R32-C', '32GB DDR4 ECC 内存 C 型', '32G 服务器内存', '件', 730, '内存'],
+  ['SSD-192-A', '1.92TB 企业级固态盘 A 型', '1.92T 企业固态盘', '件', 1440, '固态硬盘'],
+  ['SSD-192-B', '1.92TB 企业级固态盘 B 型', '1.92T 企业固态盘', '件', 1660, '固态硬盘'],
+  ['SSD-192-C', '1.92TB 企业级固态盘 C 型', '1.92T 企业固态盘', '件', 1890, '固态硬盘'],
+  ['PSU-750-A', '750W 热插拔电源 A 型', '750W 热插拔电源', '件', 410, '电源'],
+  ['PSU-750-B', '750W 热插拔电源 B 型', '750W 热插拔电源', '件', 525, '电源'],
+  ['RAIL-2U-A', '2U 滑轨组件 A 型', '2U 滑轨', '套', 202, '导轨'],
+  ['RAIL-2U-B', '2U 滑轨组件 B 型', '2U 滑轨', '套', 254, '导轨'],
+  ['NIC-25G-2P', '双口 25GbE 网络适配卡', null, '件', 930, '网卡'],
+  ['KIT-FAN-04', '四风扇更换套装', null, '套', 312, '散热组件'],
+  ['DIMM-64-E', '64GB 服务器备用内存', null, '件', 935, '内存'],
+].map(([pn, name, pool, unit, base, category]) => ({ pn, name, pool, unit, base, category }));
+
+const orders = (() => {
+  // 固定种子使评审时的截图、筛选、下钻与再次打开后的结果一致。
+  let seed = 261119;
+  function random() {
+    seed = (Math.imul(1664525, seed) + 1013904223) >>> 0;
+    return seed / 4294967296;
+  }
+  const choose = values => values[Math.floor(random() * values.length)];
+  const round = value => Math.round(value * 100) / 100;
+  const typeMix = [0,0,0,0,0,1,1,1,1,2,2,2,3,3,4,5,6,7];
+  const supplierMix = [[0,0,1,2,3], [2,2,3,4,5], [0,0,0,1,4], [1,3,5], [2,4,5], [4,6,6], [1,5,6], [1,2,4,6]];
+  const buyerMix = [[0,0,0,1,2], [1,1,2,3], [2,2,4], [0,3,3], [0,2,5], [1,5], [4,4,5], [0,1,3,5]];
+  const suppliedParts = [[0,0,1,3,3,4], [0,1,3,4,5,12], [0,2,2,6,8], [1,6,8,10,10], [6,7,7,11], [4,7,8,9,10], [0,6,9,11]];
+  const generated = [];
+  for (let offset = 0; offset < 50; offset++) {
+    const day = new Date(Date.UTC(2026, 9, 1 + offset));
+    const date = day.toISOString().slice(0, 10);
+    const weekend = [0, 6].includes(day.getUTCDay());
+    const count = (weekend ? 3 : 8) + Math.floor(random() * 5);
+    for (let index = 1; index <= count; index++) {
+      const typeId = choose(typeMix);
+      const supplierId = choose(supplierMix[typeId]);
+      const buyer = buyers[choose(buyerMix[typeId])];
+      const taxRate = typeId === 5 ? 0.06 : 0.13;
+      const taxInclusive = random() < 0.62;
+      const id = 'CG-' + date.slice(2).replaceAll('-', '') + '-' + String(index).padStart(3, '0');
+      const order = { id, date, buyer, type: types[typeId], supplier: suppliers[supplierId], taxRate, taxInclusive, lines: [] };
+      const lineCount = choose([1,1,1,1,2,2,2,3,3,4]);
+      const candidates = [...suppliedParts[supplierId]];
+      for (let i = 0; i < lineCount && candidates.length; i++) {
+        const partId = choose(candidates);
+        const part = catalog[partId];
+        // 同一订单内一个 PN 只出一行；每个供应商可供的 PN 不同。
+        for (let j = candidates.length - 1; j >= 0; j--) {
+          if (candidates[j] === partId) candidates.splice(j, 1);
+        }
+        const qty = (typeId === 2 ? 5 : 1) + Math.floor(random() * (typeId === 2 ? 15 : 5));
+        const unitNet = round(part.base * (0.94 + random() * 0.12));
+        const net = round(qty * unitNet);
+        const inc = round(net * (1 + taxRate));
+        order.lines.push({ pn: part.pn, qty, unit: part.unit, net, inc, paid: taxInclusive ? inc : net });
+      }
+      // 销采关系使用独立的确定性编号，保持采购样例和抽样顺序稳定。
+      const customerIndex = (supplierId * 3 + typeId + index + Math.floor(offset / 4)) % customers.length;
+      const linked = (typeId === 0 && index % 6 !== 0) || (typeId !== 2 && (offset + index + typeId) % 4 === 0);
+      const named = linked || (typeId !== 2 && (offset + index) % 3 !== 0);
+      order.customer = named ? customers[customerIndex] : null;
+      order.salesperson = named ? salespersons[customerIndex % salespersons.length] : null;
+      order.linkedSalesOrderNo = linked ? 'XS-26-' + String(Math.floor(offset / 7) * customers.length + customerIndex + 1).padStart(4, '0') : null;
+      // 模拟只读项目关联；同一销售单可对应多个项目名称。
+      const projectGroup = Math.floor(offset / 7);
+      order.projectNames = linked && projectGroup % 3 !== 0
+        ? [customerIndex % 2 ? '机房备件更新' : '存储节点扩容', ...(projectGroup % 3 === 1 ? ['维保备件补充'] : [])]
+        : [];
+      generated.push(order);
+    }
+  }
+  return generated;
+})();
+
+const demoPeriods = {
+  '30d': ['近 30 天', '2026-10-21', '2026-11-19'],
+  month: ['本月', '2026-11-01', '2026-11-19'], week: ['近 7 天', '2026-11-13', '2026-11-19'],
+  day: ['今天', '2026-11-19', '2026-11-19'], last: ['上月', '2026-10-01', '2026-10-31'],
+  all: ['全部样例', '2026-10-01', '2026-11-19'], custom: ['自选日期', '2026-10-21', '2026-11-19'],
+};
+const bases = {paid:'实付金额', net:'不含税金额', inc:'含税金额'};
+const tabs = {boards:['多框 Top 榜','boards'],matrix:['紧凑矩阵','matrix'],compare:['期间对比','compare'],work:['人员工作量','people'], structure:['采购结构','source'], pool:['PN 互通池','pool']};
+const defaults = {period:'30d',buyer:'',type:'',supplier:'',category:'',pn:'',pool:'',unit:'',customer:'',salesperson:'',linkedSalesOrderNo:'',basis:'paid'};
+function routeSegments(){
+  return location.hash.slice(1).split('?')[0].split('/');
+}
+function tabFromUrl(){
+  const tab=routeSegments()[0];
+  return Object.hasOwn(tabs,tab)?tab:'boards';
+}
+let state = {...defaults, tab:tabFromUrl()};
+const viewOptions = {};
+const sectionsByTab = {
+  boards: ['boardDisplay', {dimensions:'维度排行', special:'专题榜组'}],
+  matrix: ['matrixDisplay', {wall:'四矩阵联览', pivot:'自选交叉表'}],
+  structure: ['structureSection', {types:'采购类型', matrix:'供应商矩阵', relations:'供应商关系', links:'销采关联'}]
+};
+function applyRoute() {
+  const mode=routeSegments()[1];
+  const params=new URLSearchParams(location.hash.split('?')[1] || '');
+  const period=params.get('period');
+  if(Object.hasOwn(demoPeriods,period)) {
+    if(period==='custom') {
+      const from=params.get('from'), to=params.get('to');
+      const validDay=value=>/^\d{4}-\d{2}-\d{2}$/.test(value) && value>=demoPeriods.all[1] && value<=demoPeriods.all[2] && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0,10)===value;
+      if(validDay(from) && validDay(to) && from<=to) {
+        demoPeriods.custom=['自选日期',from,to];
+        state.period=period;
+      }
+    } else state.period=period;
+  }
+  state.tab=tabFromUrl();
+  const entry=sectionsByTab[state.tab];
+  if(entry) viewOptions[entry[0]]=Object.hasOwn(entry[1],mode)?mode:Object.keys(entry[1])[0];
+}
+function routePath() {
+  const entry=sectionsByTab[state.tab];
+  const mode=entry && viewOptions[entry[0]];
+  const sub=entry && Object.hasOwn(entry[1],mode) && mode!==Object.keys(entry[1])[0] ? '/'+mode : '';
+  return '#'+state.tab+sub;
+}
+applyRoute();
+const partsByPn = new Map(catalog.map(part=>[part.pn,part]));
+const moneyFormat = new Intl.NumberFormat('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2});
+const numberFormat = new Intl.NumberFormat('zh-CN',{maximumFractionDigits:2});
+const oneDecimal = new Intl.NumberFormat('zh-CN',{minimumFractionDigits:1,maximumFractionDigits:1});
+const fmt = n => numberFormat.format(n);
+const yuan = n => '¥' + moneyFormat.format(n);
+const sum = (items, getter) => items.reduce((total,item)=>total+getter(item),0);
+const lineAmount = line => line[state.basis];
+const amount = order => sum(order.lines,lineAmount);
+const amountLabel = () => bases[state.basis];
+const esc = str => String(str).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const attrs = filter => 'data-inspect="' + esc(JSON.stringify(filter)) + '"';
+const empty = text => '<div class="empty">'+esc(text)+'</div>';
+const id = key => document.getElementById(key);
+const totalLines = rows => sum(rows,order=>order.lines.length);
+function qtyText(rows) {
+  const byUnit = new Map();
+  for (const {lines} of rows) for (const line of lines) byUnit.set(line.unit,(byUnit.get(line.unit)||0)+line.qty);
+  return [...byUnit].sort(([a],[b])=>a.localeCompare(b,'zh')).map(([unit,total])=>fmt(total)+' '+unit).join(' / ') || '—';
+}
+function panel(title, subtitle, body, action='') {
+  return '<section class="panel"><div class="panel-head"><div><h2>'+esc(title)+'</h2><p class="sub">'+subtitle+'</p></div>'+action+'</div>'+body+'</section>';
+}
+function icon(name) {
+  const paths={
+    people:'<circle cx="9" cy="8" r="3"/><path d="M2.5 20v-2c0-3 2.7-5 6.5-5s6.5 2 6.5 5v2 M16 5a3 3 0 0 1 0 6 M18 14a4.5 4.5 0 0 1 3 4v2"/>',
+    boards:'<rect x="3" y="3" width="7" height="18" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+    compare:'<path d="M3 20h18 M5 17v-5h3v5 M11 17V7h3v10 M17 17V3h3v14"/>',
+    matrix:'<rect x="3" y="3" width="7" height="7" rx="1.4"/><rect x="14" y="3" width="7" height="7" rx="1.4"/><rect x="3" y="14" width="7" height="7" rx="1.4"/><rect x="14" y="14" width="7" height="7" rx="1.4"/>',
+    pool:'<path d="m12 2 9 5-9 5-9-5z M3 12l9 5 9-5 M3 17l9 5 9-5"/>',
+    money:'<path d="m6 4 6 7 6-7 M6 12h12 M6 16h12 M12 12v8"/>',
+    order:'<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 8h8 M8 12h8 M8 16h4"/>',
+    lines:'<path d="M8 6h13 M8 12h13 M8 18h13 M3 6h1 M3 12h1 M3 18h1"/>',
+    source:'<path d="M3 20V9l8 4V8l6 3V4h3l1 16z M7 16v1 M12 16v1 M17 16v1"/>'
+  };
+  return '<span class="ico" aria-hidden="true"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">'+paths[name]+'</svg></span>';
+}
+function currentRows(){
+  const [,start,end] = demoPeriods[state.period];
+  return filteredInRange(start,end);
+}
+function dateLabels(){
+  const [,start,end] = demoPeriods[state.period];
+  const days=[];
+  for (let t=Date.parse(start+'T00:00:00Z');t<=Date.parse(end+'T00:00:00Z');t+=86400000) days.push(new Date(t).toISOString().slice(0,10));
+  return days;
+}
+function dailySeries(rows){
+  const byDay=new Map(dateLabels().map(date=>[date,{date,amount:0,orders:0,lines:0,sources:new Set()}]));
+  for(const order of rows) {
+    const bucket=byDay.get(order.date);
+    bucket.amount+=amount(order);bucket.orders++;bucket.lines+=order.lines.length;bucket.sources.add(order.supplier);
+  }
+  return [...byDay.values()];
+}
+function segmented(key, pairs, active){
+  return '<div class="seg">'+pairs.map(([value,label])=>'<button data-option="'+key+'" data-value="'+value+'" class="'+(value===active?'active':'')+'" aria-pressed="'+(value===active)+'">'+label+'</button>').join('')+'</div>';
+}
+
+// 七个分析维度共享单据、单头批次行及钻取条件。样例中每张采购单的金额等于其明细金额之和。
+const dims = {buyer:'采购员', type:'采购类型', supplier:'供应商', category:'商品大类', pn:'PN', pool:'互通池', week:'采购周'};
+const metrics = {amount:'采购金额', orders:'采购单数', lines:'明细行数', qty:'采购量', avgOrder:'单均金额'};
+const lineKeys=['category','pn','pool','unit'];
+const weekStarts = new Map();
+function weekOf(date){
+  if(!weekStarts.has(date)){
+    const monday=new Date(date+'T00:00:00Z');
+    monday.setUTCDate(monday.getUTCDate()-(monday.getUTCDay()+6)%7);
+    weekStarts.set(date,monday.toISOString().slice(0,10));
+  }
+  return weekStarts.get(date);
+}
+function dimension(key,order,line){
+  if(key==='week') return weekOf(order.date);
+  if(key==='pool') return partsByPn.get(line.pn)?.pool || '未入池';
+  if(key==='category') return partsByPn.get(line.pn)?.category || '未分类';
+  if(key==='pn'||key==='unit') return line[key];
+  if (['customer', 'salesperson', 'linkedSalesOrderNo'].includes(key)) return order[key] || '__empty__';
+  return order[key];
+}
+function selectRecords(rows,filter){
+  const criteria=Object.entries(filter).filter(([,value])=>value!==undefined&&value!==null&&value!=='');
+  if(!criteria.length) return rows;
+  const lineTerms=criteria.filter(([key])=>lineKeys.includes(key));
+  const headers=criteria.filter(([key])=>!lineKeys.includes(key));
+  const found=[];
+  for(const order of rows){
+    if(!headers.every(([key,value])=>{
+      if(key==='from') return order.date>=value;
+      if(key==='to') return order.date<=value;
+      return dimension(key,order)===value;
+    })) continue;
+    if(!lineTerms.length){found.push(order);continue}
+    const lines=order.lines.filter(l=>lineTerms.every(([key,value])=>dimension(key,order,l)===value));
+    if(lines.length) found.push({...order,lines});
+  }
+  return found;
+}
+function currentScope(){
+  return {buyer:state.buyer,type:state.type,supplier:state.supplier,category:state.category,pn:state.pn,pool:state.pool,unit:state.unit,customer:state.customer,salesperson:state.salesperson,linkedSalesOrderNo:state.linkedSalesOrderNo};
+}
+function filteredInRange(from,to){
+  return selectRecords(orders,{...currentScope(),from,to});
+}
+function cube(rows, axes, metric, unit='件', baseFilter={}){
+  const filter=metric==='qty'?{...baseFilter,unit}:baseFilter;
+  const matched=selectRecords(rows,filter);
+  const groups=new Map();
+  const makeBucket=(key,criteria)=>({key,filter:criteria,ids:new Set(),lines:0,cents:0,qty:0});
+  const total=makeBucket([],filter);
+  function add(bucket,order,line){
+    bucket.ids.add(order.id);
+    bucket.lines++;
+    bucket.cents+=Math.round(lineAmount(line)*100);
+    bucket.qty+=line.qty;
+  }
+  for(const order of matched){
+    for(const line of order.lines){
+      add(total,order,line);
+      if(!axes.length) continue;
+      const values=axes.map(key=>dimension(key,order,line));
+      const groupKey=JSON.stringify(values);
+      let bucket=groups.get(groupKey);
+      if(!bucket){
+        bucket=makeBucket(values,{...filter,...Object.fromEntries(axes.map((key,i)=>[key,values[i]]))});
+        groups.set(groupKey,bucket);
+      }
+      add(bucket,order,line);
+    }
+  }
+  function finish(bucket){
+    const orders=bucket.ids.size;
+    const value={amount:bucket.cents/100,orders,lines:bucket.lines,qty:bucket.qty,avgOrder:orders?bucket.cents/(100*orders):null}[metric];
+    return {key:bucket.key,filter:bucket.filter,value,orders,lines:bucket.lines};
+  }
+  return {groups:[...groups.values()].map(finish),total:finish(total)};
+}
+function cubeValue(value,metric,unit='件'){
+  if(value===null||!Number.isFinite(value)) return '—';
+  if(metric==='amount'||metric==='avgOrder') return yuan(value);
+  return fmt(value)+(metric==='orders'?' 单':metric==='lines'?' 行':' '+unit);
+}
+
+function renderBoards(rows) {
+  const availableMetrics = ['amount', 'orders', 'lines', 'qty'];
+  const metric = availableMetrics.includes(viewOptions.boardMetric) ? viewOptions.boardMetric : 'amount';
+  const top = [3, 5, 10].includes(Number(viewOptions.boardTop)) ? Number(viewOptions.boardTop) : 5;
+  const observedUnits = [...new Set(rows.flatMap(order => order.lines.map(line => line.unit)))].filter(Boolean);
+  const units = state.unit ? [state.unit] : observedUnits.length ? observedUnits : ['件', '套'];
+  const unit = units.includes(viewOptions.boardUnit) ? viewOptions.boardUnit : state.unit || units[0] || '件';
+  const metricLabel = metric === 'amount' ? amountLabel() : metrics[metric];
+  const selectedMetric = metric === 'qty' ? metricLabel + '（' + unit + '）' : metricLabel;
+  function select(key, label, options, current) {
+    return '<label class="board-select">' + esc(label) + '<select data-setting="' + key + '">'
+      + options.map(([id, text]) => '<option value="' + esc(id) + '"' + (String(id) === String(current) ? ' selected' : '') + '>' + esc(text) + '</option>').join('')
+      + '</select></label>';
+  }
+  const controls = '<div class="boards-tools">'
+    + select('boardMetric', '排名指标', availableMetrics.map(key => [key, key === 'amount' ? amountLabel() : metrics[key]]), metric)
+    + (metric === 'qty' ? select('boardUnit', '数量单位', units.map(value => [value, value]), unit) : '')
+    + '<div class="board-limit" aria-label="榜单行数">' + [3, 5, 10].map(n =>
+      '<button type="button" data-option="boardTop" data-value="' + n + '" class="' + (n === top ? 'active' : '')
+      + '" aria-pressed="' + (n === top) + '">Top ' + n + '</button>').join('') + '</div></div>';
+
+  function rankCard(dim, color, title, base = {}) {
+    const { groups, total } = cube(rows, [dim], metric, unit, base);
+    const ordered = [...groups].sort((a, b) => b.value - a.value || String(a.key[0]).localeCompare(String(b.key[0]), 'zh'));
+    const visible = ordered.slice(0, top);
+    const max = Math.max(0, ...visible.map(group => group.value));
+    const filteredOut = base.type && state.type && base.type !== state.type;
+    const noData = filteredOut ? '当前采购类型筛选未包含「' + base.type + '」。'
+      : metric === 'qty' ? '当前筛选没有以「' + unit + '」计量的采购记录。' : '当前筛选没有采购记录。';
+    const items = visible.map((group, i) => {
+      const label = group.key[0] == null || group.key[0] === '' ? '未填写' : String(group.key[0]);
+      const value = cubeValue(group.value, metric, unit);
+      const fraction = max ? Math.max(0, Math.min(100, 100 * group.value / max)) : 0;
+      const filter = { ...base, ...group.filter };
+      if (metric === 'qty') filter.unit = unit;
+      return '<li><button type="button" class="board-row" ' + attrs(filter)
+        + ' aria-label="' + esc(title + '第 ' + (i + 1) + ' 名，' + (dim === 'pn' ? identifierText(label) : label) + '，' + selectedMetric + ' ' + value + '，查看采购订单') + '">'
+        + '<span class="board-no">' + (i + 1) + '</span><span class="board-key" title="' + esc(dim === 'pn' ? identifierText(label) : label) + '">' + (dim === 'pn' ? pnLabel(label) : esc(label))
+        + '</span><strong>' + esc(value) + '</strong><span class="board-track" aria-hidden="true"><i style="width:'
+        + fraction.toFixed(2) + '%"></i></span></button></li>';
+    }).join('');
+    const topSum = visible.reduce((result, group) => result + group.value, 0);
+    const share = metric !== 'orders' && total.value > 0
+      ? '<span class="board-share" title="' + esc(cubeValue(topSum, metric, unit) + ' ÷ ' + cubeValue(total.value, metric, unit))
+        + '">前 ' + visible.length + ' 项占 <b>' + (100 * topSum / total.value).toFixed(1) + '%</b></span>'
+      : '';
+    return '<section class="board-card" style="--board-color:' + color + '"><div class="board-card-head"><h3>'
+      + esc(title) + '</h3><span>显示 ' + visible.length + ' / ' + ordered.length + ' 项</span></div>'
+      + (visible.length ? '<ol class="board-list">' + items + '</ol>' : empty(noData))
+      + '<div class="board-footer"><span>全集 <b>' + esc(cubeValue(total.value, metric, unit)) + '</b></span>' + share + '</div></section>';
+  }
+  const cards = [
+    ['buyer', '#247b62'], ['type', '#558054'], ['supplier', '#487a92'],
+    ['category', '#8f7547'], ['pn', '#747492'], ['pool', '#387f84'],
+  ].map(([dim, color]) => rankCard(dim, color, dims[dim] + '排行')).join('');
+  const typeBoards = ['维保需求', '销售订单'].map((type, i) =>
+    rankCard('pn', ['#468677', '#547992'][i], type + ' · PN', { type })).join('');
+  return '<div class="boards-view"><div class="boards-heading"><div><h2>多维 Top 榜</h2>'
+    + '<p>横条以各榜首位为 100%。' + (metric === 'orders' ? '订单按组内去重，同单可计入多个 PN。' : '') + '</p></div>' + controls + '</div>'
+    + '<div class="boards-grid">' + cards + '</div>'
+    + '<div class="boards-heading boards-subhead"><h2>采购类型内 PN 排行</h2></div>'
+    + '<div class="boards-grid board-pair">' + typeBoards + '</div></div>';
+}
+
+function renderSpecial(rows) {
+  const top = [3, 5, 10].includes(Number(viewOptions.boardTop)) ? Number(viewOptions.boardTop) : 5;
+  const scopedLines = lineKeys.some(key => state[key]);
+  const orderScope = scopedLines ? '匹配行' : '整单';
+  const large = rows.map(order => {
+    const value = amount(order);
+    return { label: order.id, value, display: yuan(value), info: order.buyer + ' · ' + order.supplier + ' · ' + order.lines.length + ' 行',
+      filter: {id:order.id} };
+  });
+  const buyers = cube(rows, ['buyer'], 'lines').groups.map(group => ({
+    label: group.key[0], value: group.value, display: fmt(group.value) + ' 行', info: '涉及 ' + fmt(group.orders) + ' 张采购单', filter: group.filter,
+  }));
+  const suppliers = new Map();
+  const parts = new Map();
+  const pools = new Map();
+  for (const order of rows) {
+    for (const line of order.lines) {
+      if (!line.pn) continue;
+      if (order.supplier) {
+        if (!suppliers.has(order.supplier)) suppliers.set(order.supplier, {pns: new Set(), ids: new Set()});
+        const s = suppliers.get(order.supplier);
+        s.pns.add(line.pn);
+        s.ids.add(order.id);
+      }
+      if (!line.unit || !(line.qty > 0)) continue;
+      const key = JSON.stringify([line.pn, line.unit]);
+      if (!parts.has(key)) parts.set(key, {pn:line.pn, unit:line.unit, qty:0, sources:new Map(), pricedQty:0, cents:0, pricedIds:new Set()});
+      const part = parts.get(key);
+      part.qty += line.qty;
+      if (order.supplier) part.sources.set(order.supplier, (part.sources.get(order.supplier) || 0) + line.qty);
+      const member = partsByPn.get(line.pn);
+      if (!member?.pool || member.unit !== line.unit || !Number.isFinite(line.net) || line.net <= 0) continue;
+      const cents = Math.round(line.net * 100);
+      part.pricedQty += line.qty;
+      part.cents += cents;
+      part.pricedIds.add(order.id);
+      part.pool = member.pool;
+      part.poolKey = JSON.stringify([member.pool, line.unit]);
+      if (!pools.has(part.poolKey)) pools.set(part.poolKey, {qty:0, cents:0});
+      const pool = pools.get(part.poolKey);
+      pool.qty += line.qty;
+      pool.cents += cents;
+    }
+  }
+  const coverage = [...suppliers].map(([name, s]) => ({
+    label:name, value:s.pns.size, display:fmt(s.pns.size) + ' 个 PN', info:'涉及 ' + fmt(s.ids.size) + ' 张采购单', filter:{supplier:name},
+  }));
+  const concentrated = [];
+  const premium = [];
+  const overLimit = [];
+  for (const part of parts.values()) {
+    if (part.sources.size) {
+      const leadQty = Math.max(...part.sources.values());
+      const leaders = [...part.sources].filter(([,quantity]) => quantity === leadQty).map(([name]) => name);
+      const ratio = leadQty / part.qty;
+      concentrated.push({
+        label:part.pn, value:ratio, display:(ratio * 100).toFixed(1) + '%', filter:{pn:part.pn, unit:part.unit},
+        info:leaders.join(' / ') + (leaders.length > 1 ? ' 各 ' : ' ') + fmt(leadQty) + ' / ' + fmt(part.qty) + ' ' + part.unit,
+      });
+    }
+    if (!part.pricedQty) continue;
+    const average = part.cents / (100 * part.pricedQty);
+    const pool = pools.get(part.poolKey);
+    function addPremium(items, reference, name) {
+      if (!(reference > 0) || average - reference <= 0.000001) return;
+      const ratio = (average - reference) / reference;
+      items.push({
+        label:part.pn, value:ratio, display:'+' + (ratio * 100).toFixed(1) + '%', comparePn:part.pn,
+        info: 'PN ' + yuan(average) + ' / ' + name + ' ' + yuan(reference) + ' · ' + part.pricedIds.size + ' 单 · ' + fmt(part.pricedQty) + ' ' + part.unit,
+      });
+    }
+    addPremium(premium, pool.cents / (100 * pool.qty), '池');
+    addPremium(overLimit, poolCaps[part.pool], '上限');
+  }
+
+  function card(title, description, color, items, noData) {
+    items.sort((a, b) => b.value - a.value || a.label.localeCompare(b.label, 'zh'));
+    const visible = items.slice(0,top);
+    const peak = visible[0]?.value || 0;
+    return '<section class="board-card special-card" style="--board-color:' + color + '"><div class="board-card-head"><h3>' + esc(title)
+      + '</h3><span>显示 ' + visible.length + ' / ' + items.length + ' 项</span></div><p class="special-rule">' + esc(description) + '</p>'
+      + (visible.length ? '<ol class="board-list">' + visible.map((item, i) => {
+        const hasPn = item.comparePn || item.filter?.pn;
+        const identity = hasPn ? identifierText(item.label) : item.label;
+        const preview = item.filter?.id ? ' data-order-preview="' + esc(item.filter.id) + '"' : '';
+        const action = item.comparePn ? 'data-compare-pn="' + esc(item.comparePn) + '"' : attrs(item.filter);
+        const width = peak > 0 ? Math.max(0, Math.min(100, 100 * item.value / peak)) : 0;
+        return '<li><button type="button" class="board-row" ' + action + preview + ' aria-label="' + esc(identity + '，' + item.display
+          + '，' + (item.comparePn ? '对照同池采购记录' : '查看采购订单')) + '"><span class="board-no">' + (i + 1) + '</span><span class="board-key">' + (hasPn ? pnLabel(item.label) : esc(item.label))
+          + '</span><strong>' + esc(item.display) + '</strong><span class="special-detail" title="' + esc(item.info) + '">' + esc(item.info)
+          + '</span><span class="board-track" aria-hidden="true"><i style="width:' + width.toFixed(2) + '%"></i></span></button></li>';
+      }).join('') + '</ol>' : empty(noData)) + '</section>';
+  }
+  const controls = '<div class="board-limit" aria-label="专题榜行数">' + [3,5,10].map(n =>
+    '<button type="button" data-option="boardTop" data-value="' + n + '" class="' + (n === top ? 'active' : '')
+      + '" aria-pressed="' + (n === top) + '">Top ' + n + '</button>').join('') + '</div>';
+  return '<div class="boards-view"><div class="boards-heading"><div><h2>采购专题榜</h2><p>按各榜指标降序，横条以本榜首位为 100%。</p></div>'
+    + controls + '</div><div class="boards-grid">'
+    + card('大额采购单', '按' + orderScope + amountLabel() + '排序。', '#28775c', large, '当前范围没有采购单。')
+    + card('采购员处理行数', '逐人统计采购明细行，多行采购单按实际行数计。', '#587e58', buyers, '当前范围没有采购明细。')
+    + card('供应商覆盖 PN 数', '同一供应商重复采购同一 PN 只计一次。', '#467891', coverage, '当前范围没有已登记供应商的 PN。')
+    + card('PN 主供应商数量占比', '最大供货量 ÷ 同 PN 同单位采购量。' + (state.supplier ? '当前仅含所选供应商。' : ''), '#916f44', concentrated, '当前范围没有可按供应商比较的采购数量。')
+    + card('高于同池均价', '（PN 均价 − 池均价）÷ 池均价。两者均按同单位采购量加权，取未税价。', '#447c80', premium, '当前样本没有高于同池加权均价的 PN。')
+    + card('均价超过人工上限', '（PN 加权均价 − 池人工上限）÷ 上限。仅列已设未税上限且超限的 PN。', '#927041', overLimit, '当前样本没有均价超过已设人工上限的 PN。')
+    + '</div></div>';
+}
+
+const matrixPresets = {
+  team: ['人员分工', 'buyer', 'type'],
+  sourcing: ['供应结构', 'supplier', 'category'],
+  pools: ['池内货源', 'pool', 'supplier'],
+  weekly: ['每周采购', 'week', 'buyer'],
+  parts: ['PN 货源', 'pn', 'supplier']
+}
+
+function matrixAxes() {
+  const row = Object.hasOwn(dims, viewOptions.mxRows) ? viewOptions.mxRows : 'buyer'
+  const preferredColumn = Object.hasOwn(dims, viewOptions.mxColumns) ? viewOptions.mxColumns : 'type'
+  const column = preferredColumn !== row ? preferredColumn : (row === 'type' ? 'buyer' : 'type')
+  return [row, column]
+}
+
+function handleMatrixClick(button) {
+  if (button.hasAttribute('data-matrix-swap')) {
+    const [row, column] = matrixAxes()
+    viewOptions.mxRows = column
+    viewOptions.mxColumns = row
+    return true
+  }
+  const preset = matrixPresets[button.dataset.matrixPreset]
+  if (!Array.isArray(preset)) return false
+  viewOptions.mxRows = preset[1]
+  viewOptions.mxColumns = preset[2]
+  return true
+}
+
+function renderMatrix(rows) {
+  const [rowDim, columnDim] = matrixAxes()
+  const metric = Object.hasOwn(metrics, viewOptions.mxMetric) ? viewOptions.mxMetric : 'amount'
+  const units = [...new Set(rows.flatMap(order => order.lines.map(line => line.unit)).filter(Boolean))].sort()
+  const unit = units.includes(viewOptions.mxUnit) ? viewOptions.mxUnit
+    : units.includes('件') ? '件' : (units[0] || '件')
+  const supportsShare = ['amount', 'lines', 'qty'].includes(metric)
+  const shareMode = supportsShare && viewOptions.mxMode === 'share'
+  const metricName = metric === 'amount' ? amountLabel() : metrics[metric]
+  const showValue = n => cubeValue(n, metric, unit)
+  const keyText = value => value == null || value === '' ? '未填写' : String(value)
+  const filterFor = obj => metric === 'qty' ? {...obj, unit} : obj
+  function selectSetting(name, key, current, choices, reserved) {
+    const options = choices.map(([value, text]) => '<option value="' + esc(value) + '"'
+      + (value === current ? ' selected' : '') + (value === reserved ? ' disabled' : '')
+      + '>' + esc(text) + '</option>').join('')
+    return '<label class="mx-field"><span>' + esc(name) + '</span><select data-setting="'
+      + key + '" aria-label="' + esc(name) + '">' + options + '</select></label>'
+  }
+  const dimensionChoices = Object.entries(dims)
+  const presets = Object.entries(matrixPresets).map(([id, [name, row, col]]) => {
+    const active = row === rowDim && col === columnDim
+    return '<button type="button" data-matrix-preset="' + id + '" aria-pressed="' + active
+      + '" class="' + (active ? 'active' : '') + '" title="' + esc(dims[row] + ' × ' + dims[col])
+      + '">' + name + '</button>'
+  }).join('')
+  const modeButton = (mode, text) => {
+    const isShare = mode === 'share'
+    const active = isShare === shareMode
+    const disabled = isShare && !supportsShare
+    return '<button type="button" data-option="mxMode" data-value="' + mode + '"'
+      + (disabled ? ' disabled title="此指标跨组不可相加"' : '')
+      + ' aria-pressed="' + active + '" class="' + (active ? 'active' : '') + '">' + text + '</button>'
+  }
+  const settings = '<div class="mx-settings"><div class="mx-presets" role="group" aria-label="矩阵预设">' + presets
+    + '</div><div class="mx-fields">' + selectSetting('行维度', 'mxRows', rowDim, dimensionChoices, columnDim)
+    + '<button type="button" class="mx-swap" data-matrix-swap aria-label="交换行列" title="交换行列">⇄</button>'
+    + selectSetting('列维度', 'mxColumns', columnDim, dimensionChoices, rowDim)
+    + selectSetting('指标', 'mxMetric', metric, Object.entries(metrics))
+    + (metric === 'qty' ? selectSetting('数量单位', 'mxUnit', unit, (units.length ? units : [unit]).map(v => [v,v])) : '')
+    + '<div class="seg mx-mode" role="group" aria-label="单元格显示方式">' + modeButton('actual', '实绩')
+    + modeButton('share', '行内占比') + '</div></div></div>'
+
+  const matrix = cube(rows, [rowDim, columnDim], metric, unit)
+  const title = dims[rowDim] + ' × ' + dims[columnDim]
+  if (!matrix.groups.length) return panel(title, '点击交叉格或合计查看采购明细', settings + empty('当前筛选范围没有可展示的交叉记录。'))
+
+  const rowTotals = cube(rows, [rowDim], metric, unit).groups
+  const columnTotals = cube(rows, [columnDim], metric, unit).groups
+  function axisOrder(dimension, left, right) {
+    const byName = keyText(left.key[0]).localeCompare(keyText(right.key[0]), 'zh', {numeric:true})
+    return dimension === 'week' ? byName : right.value - left.value || byName
+  }
+  rowTotals.sort((a,b) => axisOrder(rowDim, a,b))
+  columnTotals.sort((a,b) => axisOrder(columnDim, a,b))
+  const byRow = new Map()
+  const hasNegative = new Set()
+  let maxValue = 0
+  for (const g of matrix.groups) {
+    const [r, c] = g.key
+    if (!byRow.has(r)) byRow.set(r, new Map())
+    byRow.get(r).set(c,g)
+    if (g.value < 0) hasNegative.add(r)
+    maxValue = Math.max(maxValue, g.value)
+  }
+  const legend = '<div class="mx-legend"><span>低</span><i aria-hidden="true"></i><span>高</span>'
+    + '<span class="mx-no-record">— 无记录</span></div>'
+  const drill = (group, context, body) => '<button type="button" class="mx-drill" ' + attrs(filterFor(group.filter))
+    + ' aria-label="' + esc(context + '，' + metricName + ' ' + showValue(group.value) + '，查看订单')
+    + '" title="' + esc(context + ' · ' + showValue(group.value) + ' · ' + fmt(group.orders) + ' 单') + '">' + body + '</button>'
+  const textValue = group => esc(showValue(group.value))
+  const head = '<tr><th scope="col" class="mx-axis-title"><span>' + esc(dims[rowDim])
+    + '</span> <small>／ ' + esc(dims[columnDim]) + '</small></th>'
+    + columnTotals.map(total => '<th scope="col">' + drill(total, dims[columnDim] + ' · ' + keyText(total.key[0]),
+      (columnDim === 'pn' ? pnLabel(total.key[0]) : esc(keyText(total.key[0])))) + '</th>').join('') + '<th scope="col" class="mx-total">行合计</th></tr>'
+  const body = rowTotals.map(total => {
+    const rowKey = total.key[0]
+    const rowName = keyText(rowKey)
+    const rowMap = byRow.get(rowKey)
+    const ratioAllowed = total.value > 0 && !hasNegative.has(rowKey)
+    const rowCells = columnTotals.map(col => {
+      const g = rowMap?.get(col.key[0])
+      if (!g) return '<td class="mx-no-data" aria-label="无记录">—</td>'
+      const ratio = ratioAllowed ? g.value / total.value : null
+      const scale = shareMode ? ratio : (maxValue > 0 && g.value > 0 ? g.value / maxValue : null)
+      const alpha = scale > 0 ? Math.min(1, scale) * 0.3 + 0.035 : 0
+      const content = shareMode ? '<strong>' + (ratio === null ? '—' : (ratio * 100).toFixed(1) + '%')
+        + '</strong><small>' + textValue(g) + '</small>' : textValue(g)
+      return '<td style="--mx-heat:' + alpha + '">' + drill(g, rowName + ' × ' + keyText(col.key[0]), content) + '</td>'
+    }).join('')
+    return '<tr><th scope="row">' + drill(total, dims[rowDim] + ' · ' + rowName, rowDim === 'pn' ? pnLabel(rowKey) : esc(rowName))
+      + '</th>' + rowCells + '<td class="mx-total">' + drill(total, rowName + '合计', textValue(total)) + '</td></tr>'
+  }).join('')
+  const grand = {...matrix.total, filter:{}}
+  const foot = '<tr><th scope="row">列合计</th>' + columnTotals.map(col => '<td>' + drill(col, keyText(col.key[0]) + '合计',
+    textValue(col)) + '</td>').join('') + '<td class="mx-grand">' + drill(grand, '全部采购', textValue(grand)) + '</td></tr>'
+  const density = fmt(matrix.groups.length) + ' 个成交组合'
+  const hint = shareMode ? '行内占比按同一行计算，合计保留实绩。'
+    + (hasNegative.size || rowTotals.some(g => g.value <= 0) ? '含负值或合计非正的行显示金额或数量原值。' : '')
+    : metric === 'orders' || metric === 'avgOrder' ? '合计按当前范围重新计算，订单去重。' : '颜色越深，单元格的数值越大。'
+  const meta = '<div class="mx-meta"><div><strong>' + esc(metricName) + (metric === 'qty' ? ' · ' + esc(unit) : '') + '</strong>'
+    + '<span>' + fmt(rowTotals.length) + ' 行 × ' + fmt(columnTotals.length) + ' 列</span><span>' + density + '</span></div>'
+    + legend + '</div>'
+  const grid = '<div class="mx-scroll" tabindex="0" role="region" aria-label="' + esc(title) + '可滚动矩阵">'
+    + '<table class="mx-grid"><thead>' + head + '</thead><tbody>' + body + '</tbody><tfoot>' + foot + '</tfoot></table></div>'
+  return panel(title, '点击交叉格或合计查看采购明细', settings + meta + grid + '<p class="mx-note">' + hint + '</p>')
+}
+
+function renderMatrixWall(rows) {
+  const availableMetrics = ['amount', 'orders', 'lines', 'qty'];
+  const metric = availableMetrics.includes(viewOptions.wallMetric) ? viewOptions.wallMetric : 'amount';
+  const units = [...new Set(rows.flatMap(o => o.lines.map(l => l.unit)).filter(Boolean))].sort();
+  const unit = units.includes(viewOptions.wallUnit) ? viewOptions.wallUnit :
+    (units.includes('件') ? '件' : units[0] || state.unit || '件');
+  const displayUnit = { amount: '万元', orders: '单', lines: '行', qty: unit }[metric];
+  const caption = (metric === 'amount' ? amountLabel() : metrics[metric]) + '（' + displayUnit + '）';
+  const short = n => metric === 'amount' ? (n / 10000).toFixed(2) : fmt(n);
+  const label = value => value == null || value === '' ? '未填写' : String(value);
+  const controls = '<div class="wall-controls">' + select('联览指标', 'wallMetric', availableMetrics.map(key =>
+    [key, key === 'amount' ? amountLabel() : metrics[key]]), metric) + (metric === 'qty' && units.length ?
+      select('联览数量单位', 'wallUnit', units.map(key => [key, key]), unit) : '') + '</div>';
+  function select(title, key, choices, selected) {
+    return '<label class="wall-setting">' + title + '<select data-setting="' + key + '">' +
+      choices.map(([v, text]) => '<option value="' + esc(v) + '" ' + (v === selected ? 'selected' : '') +
+        '>' + esc(text) + '</option>').join('') + '</select></label>';
+  }
+  const topByDim = new Map();
+  function axisRanking(dim) {
+    if (!topByDim.has(dim)) {
+      const sorted = cube(rows, [dim], metric, unit).groups.sort((a, b) =>
+        b.value - a.value || label(a.key[0]).localeCompare(label(b.key[0]), 'zh'));
+      topByDim.set(dim, { total: sorted.length, values: sorted.slice(0, 5).map(group => group.key[0]) });
+    }
+    return topByDim.get(dim);
+  }
+  function matrix(row, col) {
+    const r = axisRanking(row);
+    const c = axisRanking(col);
+    const groups = cube(rows, [row, col], metric, unit).groups;
+    const byCell = new Map(groups.map(group => [JSON.stringify(group.key), group]));
+    const visibleValues = groups.filter(({key}) => r.values.includes(key[0]) && c.values.includes(key[1]));
+    const max = Math.max(0, ...visibleValues.map(g => g.value));
+    const sectionLabel = dims[row] + ' × ' + dims[col];
+    const countLabel = r.values.length + '/' + r.total + ' 行 · ' + c.values.length + '/' + c.total + ' 列';
+    const header = '<div class="wall-card-head"><h3>' + sectionLabel + '</h3><button class="link-btn" data-expand-row="' +
+      row + '" data-expand-col="' + col + '" aria-label="展开' + sectionLabel + '全表">展开全表 ↗</button></div>';
+    const meta = '<div class="wall-card-meta"><span>' + esc(caption) + '</span><span>' + countLabel + '</span></div>';
+    if (!r.total || !c.total) return '<section class="wall-card">' + header + meta + empty('当前筛选无采购记录。') + '</section>';
+    function cell(rValue, cValue) {
+      const group = byCell.get(JSON.stringify([rValue, cValue]));
+      if (!group) return '<td class="wall-absent" title="当前范围无成交">—</td>';
+      const intensity = max > 0 ? Math.ceil(5 * Math.max(0, group.value) / max) : 0;
+      const hint = dims[row] + ' ' + label(rValue) + ' · ' + dims[col] + ' ' + label(cValue) + ' · ' +
+        (metric === 'amount' ? amountLabel() : metrics[metric]) + ' ' + cubeValue(group.value, metric, unit);
+      return '<td class="wall-cell wall-heat-' + intensity + '"><button ' + attrs(group.filter) + ' title="' +
+        esc(hint) + '" aria-label="' + esc(hint + '，查看采购单') + '">' + short(group.value) + '</button></td>';
+    }
+    const table = '<div class="wall-scroll"><table class="wall-table" aria-label="' + sectionLabel + '"><thead><tr><th scope="col">' +
+      dims[row] + '</th>' + c.values.map(v => '<th scope="col">' + (col === 'pn' ? pnLabel(v) : esc(label(v))) + '</th>').join('') + '</tr></thead><tbody>' +
+      r.values.map(v => '<tr><th scope="row">' + (row === 'pn' ? pnLabel(v) : esc(label(v))) + '</th>' + c.values.map(w => cell(v, w)).join('') + '</tr>').join('') +
+      '</tbody></table></div>';
+    const ramp = [1, 2, 3, 4, 5].map(n => '<i class="wall-heat-' + n + '"></i>').join('');
+    const legend = '<div class="wall-legend"><span>— 无成交</span><span title="按本图已展示单元格最大值等分五档">0 <span class="wall-ramp" aria-hidden="true">' +
+      ramp + '</span> ' + cubeValue(max, metric, unit) + '</span></div>';
+    return '<section class="wall-card">' + header + meta + table + legend + '</section>';
+  }
+  return '<section class="wall-view"><div class="wall-title"><div><h2>采购交叉分布</h2><p>各图横纵轴独立按指标取前 5，颜色从浅到深表示本图数值从低到高。</p></div>' +
+    controls + '</div><div class="wall-grid">' +
+    [['buyer', 'type'], ['supplier', 'type'], ['buyer', 'supplier'], ['pn', 'supplier']].map(([r, c]) => matrix(r, c)).join('') +
+    '</div></section>';
+}
+
+function renderCompare(rows) {
+  const [, from, to] = demoPeriods[state.period];
+  const duration = (Date.parse(to) - Date.parse(from)) / 86400000 + 1;
+  const shiftDate = (date, days) => new Date(Date.parse(date) + days * 86400000).toISOString().slice(0, 10);
+  const priorFrom = shiftDate(from, -duration);
+  const priorTo = shiftDate(from, -1);
+  const available = priorFrom >= '2026-10-01' && priorTo <= '2026-11-19';
+  const previous = available ? filteredInRange(priorFrom, priorTo) : [];
+  const currentPeriod = { from, to };
+  const previousPeriod = { from: priorFrom, to: priorTo };
+  const dateRange = (start, end) => start === end ? start : start + ' 至 ' + end;
+  const metrics = { amount: amountLabel(), orders: '去重单数', lines: '明细行数' };
+  const axes = { type: '采购类型', buyer: '采购员', supplier: '供应商', pn: 'PN', category: '品类' };
+  const sorting = { largest: '增量优先', smallest: '降量优先', absolute: '变动幅度优先' };
+  const selected = (options, key, fallback) => Object.hasOwn(options, viewOptions[key]) ? viewOptions[key] : fallback;
+  const axis = selected(axes, 'compareAxis', 'type');
+  const metric = selected(metrics, 'compareMetric', 'amount');
+  const sort = selected(sorting, 'compareSort', 'absolute');
+  function setting(key, label, options, active) {
+    return '<label class="compare-setting">' + label + '<select data-setting="' + key + '">' +
+      Object.entries(options).map(([value, text]) => '<option value="' + value + '" ' +
+        (active === value ? 'selected' : '') + '>' + esc(text) + '</option>').join('') + '</select></label>';
+  }
+  const valueText = (n, m) => m === 'amount' ? yuan(n) : fmt(n) + (m === 'orders' ? ' 单' : ' 行');
+  function drill(value, kind, hasOrders, period, filter = {}, description = metrics[kind]) {
+    const display = valueText(value, kind);
+    return hasOrders ? '<button class="link-btn" ' + attrs({...filter, ...period}) +
+      ' aria-label="' + esc(dateRange(period.from, period.to) + ' ' + description + ' ' + display + '，查看采购单') +
+      '">' + display + '</button>' : display;
+  }
+  function signed(n, kind) {
+    return (n > 0 ? '+' : n < 0 ? '−' : '') + valueText(Math.abs(n), kind);
+  }
+  function rate(current, prior) {
+    if (prior <= 0) return '—';
+    const percent = (current - prior) / prior * 100;
+    return (percent > 0 ? '+' : percent < 0 ? '−' : '') + Math.abs(percent).toFixed(1) + '%';
+  }
+  function totals(list) {
+    return { amount: sum(list, amount), orders: list.length, lines: totalLines(list) };
+  }
+  const a = totals(rows);
+  const b = totals(previous);
+  const dates = '<div class="compare-dates"><span><small>本期</small><b>' + dateRange(from, to) +
+    '</b></span><span><small>上期</small><b>' + dateRange(priorFrom, priorTo) + '</b></span></div>';
+  const cards = Object.entries(metrics).map(([key, title]) => '<section class="compare-card"><h3>' + esc(title) +
+    '</h3><div><span>本期</span><strong>' + drill(a[key], key, a.orders, currentPeriod) +
+    '</strong></div><div><span>上期</span><b>' + (available ? drill(b[key], key, b.orders, previousPeriod) : '—') +
+    '</b></div><div class="compare-delta"><span>变化</span><b>' + (available ?
+      signed(a[key] - b[key], key) + ' <small>（' + rate(a[key], b[key]) + '）</small>' : '—') + '</b></div></section>').join('');
+  const summary = panel('两期采购对比', '取紧邻的上一段 ' + duration + ' 天作比较，两期沿用相同采购筛选。', dates +
+    '<div class="compare-cards">' + cards + '</div>');
+  if (!available) {
+    return summary + panel('分组变动', '', empty('上期超出样例覆盖范围（2026-10-01 至 2026-11-19）。可切换「本月」「近 7 天」或「今天」查看完整对比。'));
+  }
+
+  function index(list) {
+    return new Map(cube(list, [axis], metric).groups.map(group => [group.key[0], group]));
+  }
+  const nowGroups = index(rows);
+  const thenGroups = index(previous);
+  const groups = [...new Set([...nowGroups.keys(), ...thenGroups.keys()])].map(name => {
+    const now = nowGroups.get(name);
+    const then = thenGroups.get(name);
+    const current = now?.value ?? 0;
+    const prior = then?.value ?? 0;
+    const delta = metric === 'amount' ? Math.round((current - prior) * 100) / 100 : current - prior;
+    return { name, now, then, current, prior, delta, filter: (now || then).filter };
+  });
+  function score(delta) {
+    return sort === 'largest' ? delta : sort === 'smallest' ? -delta : Math.abs(delta);
+  }
+  groups.sort((l, r) => score(r.delta) - score(l.delta) || String(l.name).localeCompare(String(r.name), 'zh'));
+  const maxDelta = Math.max(0, ...groups.map(g => Math.abs(g.delta)));
+  function changeBar(delta) {
+    const width = maxDelta ? Math.abs(delta) * 50 / maxDelta : 0;
+    return '<span class="compare-track" aria-hidden="true"><i class="' + (delta < 0 ? 'down' : 'up') +
+      '" style="width:' + width.toFixed(2) + '%"></i></span>';
+  }
+  const lines = groups.map(g => {
+    const name = g.name || '未填写';
+    const tag = !g.then ? '上期无单' : !g.now ? '本期无单' : '';
+    return '<tr><th scope="row">' + (axis === 'pn' ? pnLabel(name) : esc(name)) + (tag ? '<small class="compare-status">' + tag + '</small>' : '') + '</th>' +
+      '<td class="num">' + drill(g.current, metric, !!g.now, currentPeriod, g.filter, name) + '</td><td class="num">' +
+      drill(g.prior, metric, !!g.then, previousPeriod, g.filter, name) + '</td><td class="num">' + signed(g.delta, metric) +
+      '</td><td>' + changeBar(g.delta) + '</td><td class="num">' + rate(g.current, g.prior) + '</td></tr>';
+  }).join('');
+  const controls = '<div class="compare-controls">' + setting('compareAxis', '按', axes, axis) +
+    setting('compareMetric', '指标', metrics, metric) + setting('compareSort', '排序', sorting, sort) + '</div>';
+  const table = '<div class="table-wrap"><table class="compare-table"><thead><tr><th>' + axes[axis] +
+    '</th><th class="num">本期</th><th class="num">上期</th><th class="num">增减值</th><th>变化幅度</th><th class="num">变动率</th></tr></thead><tbody>' +
+    lines + '</tbody></table></div>';
+  const note = metric === 'orders' && ['pn', 'category'].includes(axis) ?
+    '一张采购单可涉及多个' + axes[axis] + '，各组单数独立去重。' : '增减值为本期减上期，变动率以上期为基数。';
+  return summary + panel('分组变动', note + ' 上期为零时变动率留空。', controls +
+    (groups.length ? table : empty('这两期均无符合筛选条件的采购记录。')));
+}
+
+function renderMetrics(rows,days){
+  const distinct = key=>new Set(rows.map(o=>o[key])).size;
+  const volume=sum(rows,amount),lines=totalLines(rows);
+  function spark(values) {
+    if (values.length<2 || !values.some(n=>n>0)) return '';
+    const max=Math.max(...values), min=Math.min(...values);
+    const coords=values.map((n,i)=>(1+i*52/(values.length-1)).toFixed(1)+','+(18-15*(n-min)/(max-min||1)).toFixed(1));
+    return '<svg class="spark" viewBox="0 0 55 21" fill="none" aria-hidden="true"><polyline points="'+coords.join(' ')+'" stroke="currentColor" opacity=".55" stroke-width="1.4" stroke-linejoin="round"/></svg>';
+  }
+  const figures=[
+    [amountLabel(),(volume/10000).toFixed(2),'万元',yuan(volume),'money',days.map(d=>d.amount)],
+    ['采购单数',fmt(rows.length),'单','经手采购员 '+distinct('buyer')+' 人','order',days.map(d=>d.orders)],
+    ['采购明细',fmt(lines),'行','平均 '+(rows.length?oneDecimal.format(lines/rows.length):'—')+' 行 / 单','lines',days.map(d=>d.lines)],
+    ['成交供应商',fmt(distinct('supplier')),'家','涉及 '+new Set(rows.flatMap(o=>o.lines.map(l=>l.pn))).size+' 个 PN','source',days.map(d=>d.sources.size)],
+  ];
+  return figures.map(([label,value,unit,meta,ico,values],i)=>'<article class="kpi '+(i===0?'lead':'')+'"><div class="khead">'+label+'<span class="kicon">'+icon(ico)+'</span></div><div class="kval">'+value+'<span class="kunit">'+unit+'</span></div><div class="kmeta">'+meta+'</div>'+spark(values)+'</article>').join('');
+}
+function renderWork(rows, days){
+  if(!rows.length) return panel('人员工作量','',empty('当前条件下没有采购记录，可调整筛选或重置。'));
+  const rankBy=viewOptions.workMetric || 'orders';
+  const byBuyer=buyers.map(name=>{
+    const list=rows.filter(o=>o.buyer===name);
+    return {name,orders:list.length,lines:totalLines(list),sources:new Set(list.map(o=>o.supplier)).size,amount:sum(list,amount)};
+  }).filter(b=>b.orders).sort((a,b)=>b[rankBy]-a[rankBy]||a.name.localeCompare(b.name,'zh'));
+  const colors=[['#deefe5','#31754e'],['#e7eaf6','#546797'],['#fbedd7','#846028'],['#dfedee','#407376'],['#f1e8ed','#82546c'],['#e9ede0','#617936']];
+  const max=byBuyer[0][rankBy];
+  function measure(n, key){
+    const bar=rankBy===key?'<span class="workbar" aria-hidden="true"><i style="width:'+n/max*100+'%"></i></span>':'';
+    return '<td class="num">'+bar+(key===rankBy?'<b>'+fmt(n)+'</b>':fmt(n))+'</td>';
+  }
+  const tableRows=byBuyer.map((b,i)=>{
+    const [bg,fg]=colors[buyers.indexOf(b.name)%colors.length];
+    return '<tr><td><div class="nameline"><span class="rankno">'+String(i+1).padStart(2,'0')+'</span><span class="avatar" aria-hidden="true" style="background:'+bg+';color:'+fg+'">'+b.name[0]+'</span><button class="link-btn" '+attrs({buyer:b.name})+'>'+b.name+'</button></div></td>'+measure(b.orders,'orders')+measure(b.lines,'lines')+'<td class="num">'+oneDecimal.format(b.lines/b.orders)+'</td><td class="num">'+b.sources+'</td><td class="num">'+yuan(b.amount)+'</td></tr>';
+  }).join('');
+  const rankControl=segmented('workMetric',[['orders','按单数'],['lines','按行数']],rankBy);
+  const workload=panel('采购员工作量','按经手人比较单数与行数，点击姓名查看单据',
+    '<div class="table-wrap"><table class="ranktable"><thead><tr><th>采购员</th><th class="num">采购单数</th><th class="num">明细行数</th><th class="num">行 / 单</th><th class="num">供应商数</th><th class="num">'+amountLabel()+'</th></tr></thead><tbody>'+tableRows+'</tbody></table></div><div class="panel-foot"><span>本期 <b>'+byBuyer.length+'</b> 位采购员</span><span>采购量合计 <b>'+qtyText(rows)+'</b></span></div>',rankControl);
+  const metric=viewOptions.trendMetric || 'orders';
+  const monetary=metric==='amount';
+  const unit=monetary?'万元':'单';
+  const metricName=monetary?amountLabel():'采购单数';
+  const values=days.map(d=>monetary?d.amount/10000:d.orders);
+  const step=Math.max(monetary?.05:1,Math.ceil(Math.max(...values)/(monetary?.2:4))*(monetary?.05:1));
+  const ceiling=4*step;
+  const peaks=days.filter((_,i)=>values[i]===Math.max(...values));
+  const peak=peaks[0];
+  const col=days.map((d,i)=>{
+    const label=d.date+' · '+(monetary?yuan(d.amount):d.orders+' 单');
+    return '<button class="column '+(peaks.includes(d)?'peak':'')+'" '+attrs({date:d.date})+' aria-label="'+label+'" title="'+label+'"><i style="height:'+100*values[i]/ceiling+'%"></i></button>';
+  }).join('');
+  const ticks=[0,1,2,3,4].map(t=>'<span>'+fmt(ceiling-t*step)+'</span>').join('');
+  const labels=[...new Set([0,Math.floor((days.length-1)/2),days.length-1])].map(i=>'<span>'+days[i].date.slice(5).replace('-','/')+'</span>').join('');
+  const trend=panel('采购节奏','按采购日期汇总，点击柱形查看当日采购单',
+    '<div class="chart-wrap"><div class="chart-legend"><span class="dot"></span>'+metricName+'（'+unit+'）</div><div class="chart"><div class="axis">'+ticks+'</div><div class="plot">'+col+'</div></div><div class="xticks">'+labels+'</div></div><div class="chart-foot"><span>单日峰值 <b>'+peak.date.slice(5).replace('-','/')+(peaks.length>1?' 等 '+peaks.length+' 天':'')+'</b></span><b>'+(monetary?yuan(peak.amount):peak.orders+' 单')+'</b></div>',segmented('trendMetric',[['orders','单数'],['amount','金额']],metric));
+  const ordered=[...rows].sort((a,b)=>b.id.localeCompare(a.id));
+  const recent=ordered.slice(0,5).map(o=>'<tr><td><button class="link-btn" data-order-preview="'+esc(o.id)+'" '+attrs({id:o.id})+'>'+o.id+'</button></td><td>'+salesPreviewButton(o.linkedSalesOrderNo)+'</td><td>'+o.date+'</td><td>'+o.buyer+'</td><td><span class="tag">'+o.type+'</span></td><td>'+o.supplier+'</td><td class="num">'+o.lines.length+'</td><td class="num">'+yuan(amount(o))+'</td></tr>').join('');
+  const last=panel('最近采购单','按采购日期从近到远，展示当前范围内最近 '+Math.min(5,rows.length)+' 单',
+    '<div class="table-wrap"><table class="recent-table"><thead><tr><th>采购单号</th><th>销售单号</th><th>采购日期</th><th>采购员</th><th>采购类型</th><th>供应商</th><th class="num">明细行数</th><th class="num">'+amountLabel()+'</th></tr></thead><tbody>'+recent+'</tbody></table></div>',
+    '<button class="text-link" '+attrs({})+'>全部 '+rows.length+' 单 →</button>');
+  return '<div class="grid-main">'+workload+trend+'</div>'+last;
+}
+
+function renderStructure(rows) {
+  const sections = [['types', '采购类型'], ['matrix', '供应商矩阵'], ['relations', '供应商关系'], ['links', '销采关联']]
+  const selectedSection = sections.some(([key]) => key === viewOptions.structureSection)
+    ? viewOptions.structureSection : 'types'
+  function option(key, value, text, active) {
+    return '<button type="button" data-option="' + key + '" data-value="' + esc(value)
+      + '" aria-pressed="' + active + '" class="' + (active ? 'active' : '') + '">' + esc(text) + '</button>'
+  }
+  const tabs = '<div class="seg structure-tabs" role="group" aria-label="管理分析维度">'
+    + sections.map(([key, name]) => option('structureSection', key, name, key === selectedSection)).join('') + '</div>'
+  const wrap = html => '<div class="structure-view">' + tabs + html + '</div>'
+  if (selectedSection === 'links') return wrap(renderLinks(rows))
+  if (!rows.length) {
+    return wrap(panel('采购类型与供应商', '当前筛选范围', empty('当前筛选范围没有采购订单。')))
+  }
+
+  const byType = new Map()
+  const bySupplier = new Map()
+  const pnSources = new Map()
+  function bucket(map, key) {
+    if (!map.has(key)) map.set(key, [])
+    return map.get(key)
+  }
+  const sortAmounts = (a, b) => sum(b[1], amount) - sum(a[1], amount)
+    || b[1].length - a[1].length || (a[0] || '').localeCompare(b[0] || '', 'zh')
+  for (const order of rows) {
+    bucket(byType, order.type).push(order)
+    bucket(bySupplier, order.supplier).push(order)
+    if (selectedSection !== 'relations' || !order.supplier) continue
+    const pns = new Set(order.lines.map(line => line.pn).filter(Boolean))
+    for (const pn of pns) {
+      if (!pnSources.has(pn)) pnSources.set(pn, new Map())
+      bucket(pnSources.get(pn), order.supplier).push(order)
+    }
+  }
+  const types = [...byType].sort(sortAmounts)
+  const suppliers = [...bySupplier].sort(sortAmounts)
+  const totalAmount = sum(rows, amount)
+  const label = value => esc(value || '未填写')
+  const drill = (filter, text, accessibleText) => '<button type="button" class="link-btn" '
+    + attrs(filter) + ' aria-label="' + esc(accessibleText) + '">' + text + '</button>'
+
+  function heading(text, numeric = false) {
+    return '<th scope="col"' + (numeric ? ' class="num"' : '') + '>' + text + '</th>'
+  }
+  const table = (head, body, footer = '') => '<div class="table-wrap structure-scroll"><table><thead><tr>'
+    + head + '</tr></thead><tbody>' + body + '</tbody>' + (footer && '<tfoot>' + footer + '</tfoot>') + '</table></div>'
+
+  const palette = ['#176853', '#4279a8', '#c18a39', '#756992', '#4f969b', '#8f9d74', '#b9808e', '#768898']
+  const typeAmounts = types.map(([type, orders]) => ({type, money: sum(orders, amount)}))
+  const hasNegativeType = typeAmounts.some(({money}) => money < 0)
+  const usableShares = !hasNegativeType && totalAmount > 0
+  function typeBand() {
+    if (!usableShares) {
+      const reason = hasNegativeType ? '部分采购类型的合计为负，金额分列于下表。' : '合计为零，暂无金额构成。'
+      return '<div class="structure-composition structure-note">' + reason + '</div>'
+    }
+    const positive = typeAmounts.filter(({money}) => money > 0)
+    const segments = positive.map(({type, money}, i) => {
+      const share = money / totalAmount * 100
+      const hint = (type || '未填写类型') + ' · ' + yuan(money) + ' · ' + share.toFixed(1) + '%'
+      return '<button type="button" ' + attrs({type}) + ' title="' + esc(hint)
+        + '" aria-label="' + esc(hint) + '，查看订单" style="background:' + palette[i % palette.length]
+        + ';width:' + share + '%"></button>'
+    }).join('')
+    const labels = positive.slice(0, 3).map(({type, money}, i) =>
+      '<button type="button" ' + attrs({type}) + '><i aria-hidden="true" style="background:' + palette[i]
+      + '"></i>' + label(type) + ' <b>' + (money / totalAmount * 100).toFixed(1) + '%</b></button>'
+    ).join('')
+    return '<div class="structure-composition"><div class="structure-band-label">' + esc(amountLabel()) + '构成</div>'
+      + '<div class="structure-band">' + segments + '</div><div class="structure-legend">' + labels + '</div></div>'
+  }
+
+  const linesCount = orders => sum(orders, o => o.lines.length)
+  function typeBody(type, orders, total = false) {
+    const money = sum(orders, amount)
+    const share = usableShares ? 100 * money / totalAmount : null
+    const suppliersCount = new Set(orders.map(o => o.supplier).filter(Boolean)).size
+    const title = total ? '合计' : drill({type}, label(type), '查看' + (type || '未填写类型') + '的采购订单')
+    const shareCell = share === null ? '—' : '<span class="structure-share"><i aria-hidden="true"><b style="width:'
+      + Math.max(0, Math.min(100, share)) + '%"></b></i>' + share.toFixed(1) + '%</span>'
+    return '<tr><th scope="row">' + title + '</th><td class="num">' + fmt(orders.length)
+      + '</td><td class="num">' + fmt(linesCount(orders)) + '</td><td>' + esc(qtyText(orders))
+      + '</td><td class="num">' + fmt(suppliersCount) + '</td><td class="num structure-money">' + yuan(money)
+      + '</td><td class="num">' + shareCell + '</td></tr>'
+  }
+  if (selectedSection === 'types') {
+    return wrap(panel('采购类型结构', '按采购类型原文汇总，数量按单位列示',
+    typeBand() + table(heading('采购类型') + heading('订单', true) + heading('明细行', true) + heading('采购数量')
+      + heading('供应商数', true) + heading(esc(amountLabel()), true) + heading('金额占比', true),
+    types.map(([type, orders]) => typeBody(type, orders)).join(''), typeBody(null, rows, true))))
+  }
+
+  if (selectedSection === 'matrix') {
+    const countMode = viewOptions.matrixMetric === 'orders'
+    const switchButton = (key, text, active) => '<button type="button" data-option="matrixMetric" data-value="'
+      + key + '" class="' + (active ? 'active' : '') + '" aria-pressed="' + active + '">' + text + '</button>'
+    const controls = '<div class="seg structure-mode" aria-label="矩阵指标">'
+      + switchButton('amount', '金额', !countMode) + switchButton('orders', '单数', countMode) + '</div>'
+    const metric = orders => countMode ? fmt(orders.length) : yuan(sum(orders, amount))
+    const supplierCells = new Map()
+    let maxCell = 0
+    function cellValue(orders) {
+      return countMode ? orders.length : sum(orders, amount)
+    }
+    for (const [supplier, orders] of suppliers) {
+      const cells = new Map()
+      for (const order of orders) bucket(cells, order.type).push(order)
+      supplierCells.set(supplier, cells)
+      for (const hits of cells.values()) maxCell = Math.max(maxCell, cellValue(hits))
+    }
+    const supplierMatrix = suppliers.map(([supplier, orders]) => {
+      const cells = supplierCells.get(supplier)
+      return '<tr><th scope="row">' + drill({supplier}, label(supplier), '查看' + (supplier || '未填写供应商') + '的采购订单') + '</th>'
+        + types.map(([type]) => {
+          const hits = cells.get(type)
+          if (!hits) return '<td class="num"><span class="structure-zero" aria-label="无成交">—</span></td>'
+          const value = cellValue(hits)
+          const opacity = value > 0 && maxCell > 0 ? 0.035 + 0.19 * value / maxCell : 0
+          const shown = metric(hits)
+          const hint = (supplier || '未填写供应商') + ' · ' + (type || '未填写类型')
+            + ' · ' + (countMode ? '订单数' : amountLabel()) + ' ' + shown + ' · 查看 ' + fmt(hits.length) + ' 张订单'
+          return '<td class="num structure-cell" style="--cell-opacity:' + opacity + '" title="' + esc(hint) + '">'
+            + drill({type, supplier}, shown, hint) + '</td>'
+        }).join('') + '<td class="num structure-total">' + metric(orders) + '</td></tr>'
+    }).join('')
+    return wrap(panel('供应商 × 采购类型', countMode ? '单元格显示去重订单数，点击查看对应订单' :
+      '单元格显示' + amountLabel() + '，点击查看对应订单',
+      table(heading('供应商') + types.map(([type]) => heading(label(type), true)).join('') + heading('合计', true),
+        supplierMatrix, '<tr><th scope="row">合计</th>' + types.map(([, orders]) => '<td class="num">'
+          + metric(orders) + '</td>').join('') + '<td class="num">' + metric(rows) + '</td></tr>'), controls))
+  }
+
+  const known = suppliers.map(([supplier]) => supplier).filter(Boolean)
+  if (!known.length) return wrap(panel('共同供货关系', '', empty('当前筛选范围内未填写供应商。')))
+  const focus = known.includes(viewOptions.relationshipSupplier) ? viewOptions.relationshipSupplier : known[0]
+  const picker = '<div class="structure-picker"><span>选择供应商</span><div role="group" aria-label="关系中心供应商">'
+    + known.map(name => option('relationshipSupplier', name, name, name === focus)).join('') + '</div></div>'
+  const common = new Map()
+  for (const [pn, sources] of pnSources) {
+    const focusOrders = sources.get(focus)
+    if (!focusOrders) continue
+    for (const [other, otherOrders] of sources) {
+      if (other !== focus) bucket(common, other).push({pn, focusOrders, otherOrders})
+    }
+  }
+  const peers = [...common].sort((a,b) => b[1].length - a[1].length || a[0].localeCompare(b[0], 'zh'))
+  function evidence(supplier, pn, orders) {
+    const name = supplier + ' · ' + pn + ' · ' + fmt(orders.length) + ' 单'
+    return drill({pn, supplier}, fmt(orders.length) + ' 单', name + '，查看订单')
+  }
+  const relationRows = peers.map(([other, pns]) => pns.sort((a,b) => a.pn.localeCompare(b.pn)).map((item, i) => {
+    const group = i === 0 ? '<th scope="rowgroup" rowspan="' + pns.length + '">' + esc(other) + '</th>'
+      + '<td class="num" rowspan="' + pns.length + '">' + fmt(pns.length) + '</td>' : ''
+    return '<tr' + (i === 0 ? ' class="structure-pair-start"' : '') + '>' + group + '<th scope="row">'
+      + esc(item.pn) + '</th><td class="num">' + evidence(focus, item.pn, item.focusOrders)
+      + '</td><td class="num">' + evidence(other, item.pn, item.otherOrders) + '</td></tr>'
+  }).join('')).join('')
+  const relationship = relationRows ? table(heading('另一家供应商') + heading('共同 PN 数', true) + heading('共同 PN')
+    + heading(esc(focus) + ' · 订单', true) + heading('另一家 · 订单', true), relationRows)
+    : empty('当前筛选范围内，没有其他供应商与该供应商成交过同一 PN。')
+  return wrap(panel('共同供货关系', '两家供应商在所选期间均向本公司供应过同一 PN。点击单数核对各自订单。', picker + relationship))
+}
+
+function renderPool(rows) {
+  const byPn = new Map(catalog.map(part => [part.pn, {
+    ...part, orders: new Set(), qty: 0, value: 0, sampleQty: 0,
+    suppliers: new Map(),
+  }]));
+  const pools = new Map();
+  for (const order of rows) {
+    for (const line of order.lines) {
+      const part = byPn.get(line.pn);
+      if (!part || line.unit !== part.unit) continue;
+      part.orders.add(order.id);
+      part.qty += line.qty;
+      const comparable = Number.isFinite(line.net) && line.net > 0 && line.qty > 0;
+      if (comparable) {
+        part.sampleQty += line.qty;
+        part.value += line.net;
+      }
+      if (order.supplier) {
+        const supplier = part.suppliers.get(order.supplier) || { orders: new Set(), qty: 0, value: 0, sampleQty: 0 };
+        supplier.orders.add(order.id);
+        supplier.qty += line.qty;
+        if (comparable) {
+          supplier.sampleQty += line.qty;
+          supplier.value += line.net;
+        }
+        part.suppliers.set(order.supplier, supplier);
+      }
+    }
+  }
+  for (const part of byPn.values()) {
+    part.avg = part.sampleQty > 0 ? part.value / part.sampleQty : null;
+    if (!part.pool) continue;
+    const bucket = pools.get(part.pool) || { name: part.pool, members: [], value: 0, qty: 0 };
+    bucket.members.push(part);
+    bucket.value += part.value;
+    bucket.qty += part.sampleQty;
+    pools.set(part.pool, bucket);
+  }
+  const allParts = [...byPn.values()];
+  const active = allParts.filter(part => part.orders.size);
+  const price = n => n == null ? '—' : yuan(n);
+  const deltaText = n => n == null ? '—' : (n > 0 ? '+' : n < 0 ? '−' : '') + price(Math.abs(n));
+  const poolAvg = part => {
+    const bucket = pools.get(part.pool);
+    return bucket?.qty ? bucket.value / bucket.qty : null;
+  };
+  const delta = part => part.avg != null && poolAvg(part) != null ? part.avg - poolAvg(part) : null;
+  const overCap = part => part.pool && poolCaps[part.pool] != null && part.avg != null && part.avg - poolCaps[part.pool] > 0.000001;
+  const focusOptions = [
+    ['all', '全部 PN', part => part.orders.size > 0],
+    ['single', '单一供应商', part => part.suppliers.size === 1],
+    ['over', '均价超人工上限', overCap],
+    ['none', '尚未入池', part => !part.pool && part.orders.size > 0],
+  ];
+  const focus = focusOptions.find(([key]) => key === viewOptions.pnFocus) || focusOptions[0];
+  const opt = (key, value, label, on, cls = '') => `<button type="button" class="${cls} ${on ? 'active' : ''}" data-option="${key}" data-value="${esc(value)}" aria-pressed="${!!on}">${label}</button>`;
+  const poolFilter = viewOptions.poolName && pools.has(viewOptions.poolName) ? viewOptions.poolName : '';
+  const queryText = viewOptions.pnQuery || '';
+  const query = queryText.trim().toLowerCase();
+  const scopedParts = active.filter(part =>
+    (!poolFilter || part.pool === poolFilter)
+    && (!query || part.pn.toLowerCase().includes(query) || part.name.toLowerCase().includes(query)));
+  const search = '<label class="pool-search"><span>查找 PN / 型号</span><input data-search="pnQuery" type="search" placeholder="输入 PN 或型号" value="' + esc(queryText) + '"></label>';
+  const sourceScope = state.supplier
+    ? '<div class="pool-scope">当前仅统计「' + esc(state.supplier) + '」的成交记录。查看该 PN 的其他来源，可 <button type="button" class="link-btn" data-clear-supplier>清除供应商筛选</button>。</div>'
+    : '';
+  if (!active.length) return panel('PN 与通用池', '当前筛选范围内的采购记录', sourceScope + empty('当前筛选没有 PN 采购记录，请调整日期或采购条件。'));
+  const focusControl = `<div class="pool-filters" aria-label="PN 观察项">${focusOptions.map(([key, label, matches]) => opt('pnFocus', key, esc(label) + ' <b>' + fmt(scopedParts.filter(matches).length) + '</b>', key === focus[0], 'pool-filter')).join('')}</div>`;
+  const poolControl = `<div class="pool-selection" aria-label="选择通用池"><span class="muted">所属池</span>${opt('poolName', '', '全部', !poolFilter, 'pool-select')}${[...pools.keys()].map(name => opt('poolName', name, esc(name), name === poolFilter, 'pool-select')).join('')}</div>`;
+  const visible = scopedParts.filter(focus[2])
+    .sort((a, b) => b.orders.size - a.orders.size || a.pn.localeCompare(b.pn));
+  const selected = visible.find(part => part.pn === viewOptions.poolPart) || visible[0];
+  const orderButton = (text, filter) => `<button type="button" class="link-btn" ${attrs(filter)}>${esc(text)}</button>`;
+  const qty = part => fmt(part.qty) + ' ' + esc(part.unit);
+  const tableHead = '<thead><tr><th>PN / 型号</th><th>所属池</th><th class="num">采购量</th><th class="num">订单</th><th class="num">供应商</th><th class="num">PN 均价</th><th class="num">池均价</th><th class="num">较池均价</th><th>人工上限</th></tr></thead>';
+  const priceTable = visible.length ? `<div class="table-wrap"><table class="pool-price-table">${tableHead}<tbody>${visible.map(part => {
+    const diff = delta(part);
+    const cap = part.pool ? poolCaps[part.pool] : null;
+    return `<tr class="${selected.pn === part.pn ? 'pool-picked' : ''}"><td>${opt('poolPart', part.pn, esc(part.pn), selected.pn === part.pn, 'pool-pn')}<small>${esc(part.name)}<span class="id-desc-tag">目录</span></small></td><td>${esc(part.pool || '未入池')}</td><td class="num">${qty(part)}</td><td class="num">${part.orders.size}</td><td class="num">${part.suppliers.size}</td><td class="num">${price(part.avg)}</td><td class="num">${price(poolAvg(part))}</td><td class="num ${diff > 0 ? 'pool-above' : ''}">${deltaText(diff)}</td><td>${overCap(part) ? '<span class="pool-alert">均价超限</span> ' : ''}${cap != null ? price(cap) : part.pool ? '未设置' : '—'}</td></tr>`;
+  }).join('')}</tbody></table></div>` : empty('没有匹配的 PN，请调整搜索词、所属池或观察项。');
+  const overview = panel('PN 采购对照',
+    '同池未税单价按采购量加权。人工上限与本 PN 的期间均价比较。供应商数取当前筛选内的成交来源。',
+    (state.pn?'<div class="pool-scope">当前基准只含选定 PN 的成交记录。<button class="link-btn" data-pn-peers>'+(partsByPn.get(state.pn)?.pool?'查看同池成员':'清除 PN 筛选')+'</button></div>':'') + sourceScope + focusControl + poolControl + priceTable, search);
+  if (!selected) return overview;
+
+  const supplierRows = [...selected.suppliers.entries()].sort((a,b) => b[1].qty - a[1].qty || a[0].localeCompare(b[0]));
+  const maxQty = Math.max(1, ...supplierRows.map(([,s]) => s.qty));
+  const sources = supplierRows.length ? `<div class="pool-sources">${supplierRows.map(([name, s]) => `<div class="pool-source"><div><span>${orderButton(name, {pn:selected.pn,supplier:name})}</span><small>${s.orders.size} 单 · ${fmt(s.qty)} ${esc(selected.unit)}</small></div><div class="pool-bar"><i style="width:${Math.max(0, s.qty / maxQty * 100)}%"></i></div><strong>${price(s.sampleQty ? s.value/s.sampleQty : null)}</strong></div>`).join('')}</div>` : empty('当前 PN 没有已登记的供应商。');
+  const bucket = pools.get(selected.pool);
+  const members = bucket ? `<div class="table-wrap"><table class="pool-members"><thead><tr><th>成员 PN</th><th class="num">单数</th><th class="num">采购数量</th><th class="num">未税均价</th></tr></thead><tbody>${[...bucket.members].sort((a,b) => b.orders.size-a.orders.size || a.pn.localeCompare(b.pn)).map(member => `<tr><td>${member.orders.size ? '<button type="button" class="link-btn" ' + attrs({pn:member.pn}) + '>' + pnLabel(member.pn) + '</button>' : pnLabel(member.pn)}</td><td class="num">${member.orders.size}</td><td class="num">${qty(member)}</td><td class="num">${member.avg == null ? '暂无样本' : price(member.avg)}</td></tr>`).join('')}</tbody></table></div>` : empty('该 PN 尚未加入通用池。');
+  const detail = `<section class="pool-evidence"><div class="section-head pool-detail-head"><div><h3>${esc(selected.pn)} <small>${esc(selected.name)}<span class="id-desc-tag">目录</span></small></h3></div>${orderButton('查看采购订单（' + selected.orders.size + '）', {pn:selected.pn})}</div><div class="grid-2">${panel('采购来源', '当前 PN 的供应商、采购数量与未税均价', sources)}${panel('同池成员', bucket ? esc(bucket.name) + ' · ' + bucket.members.length + ' 个 PN' : '尚未入池', members)}</div></section>`;
+  return overview + detail + renderPriceRanges(rows, selected.pn);
+}
+
+// 价格比较按可比采购行计算；均价以实际采购数量加权。
+function renderPriceRanges(rows,pn){
+  const part=partsByPn.get(pn);
+  if(!part) return '';
+  const bySupplier=new Map();
+  for(const order of rows){
+    for(const line of order.lines){
+      if(line.pn!==pn||line.unit!==part.unit||!(line.qty>0&&line.net>0)) continue;
+      const price=line.net/line.qty;
+      const group=bySupplier.get(order.supplier)||{supplier:order.supplier,min:price,max:price,net:0,qty:0,ids:new Set()};
+      group.min=Math.min(group.min,price);group.max=Math.max(group.max,price);
+      group.net+=line.net;group.qty+=line.qty;group.ids.add(order.id);bySupplier.set(order.supplier,group);
+    }
+  }
+  const groups=[...bySupplier.values()].sort((a,b)=>a.net/a.qty-b.net/b.qty);
+  const title='供应商成交价区间';
+  if(!groups.length) return panel(title,'按当前选中 PN 和单位比较',empty('当前筛选没有单价和数量均为正的可比采购行。'));
+  const min=Math.min(...groups.map(g=>g.min)),max=Math.max(...groups.map(g=>g.max));
+  const pos=value=>max===min?50:100*(value-min)/(max-min);
+  const body=groups.map(g=>{
+    const avg=g.net/g.qty,lo=pos(g.min),hi=pos(g.max);
+    return '<tr><th scope="row"><button class="link-btn" '+attrs({pn,unit:part.unit,supplier:g.supplier})+'>'+esc(g.supplier)+'</button></th>'+
+      '<td class="price-axis-cell"><div class="price-axis" aria-hidden="true"><i style="left:'+lo+'%;width:'+(hi-lo)+'%"></i><em style="left:'+pos(avg)+'%"></em></div></td>'+
+      '<td class="num">'+yuan(g.min)+'</td><td class="num"><b>'+yuan(avg)+'</b></td><td class="num">'+yuan(g.max)+'</td><td class="num">'+fmt(g.ids.size)+' 单 · '+fmt(g.qty)+' '+esc(part.unit)+'</td></tr>';
+  }).join('');
+  const table='<div class="table-wrap"><table class="range-table"><thead><tr><th>供应商</th><th>共同刻度 · '+yuan(min)+' 至 '+yuan(max)+'</th><th class="num">最低</th><th class="num">加权均价</th><th class="num">最高</th><th class="num">样本</th></tr></thead><tbody>'+body+'</tbody></table></div>';
+  return panel(title,esc(part.name)+' · 每'+esc(part.unit)+'未税单价。线段表示最低至最高成交价，圆点表示加权均价。',table);
+}
+
+function renderOrderContext(order) {
+  const linked = order.linkedSalesOrderNo;
+  return '<div class="sales-context"><span>关联销售单 ' + (linked ? salesPreviewButton(linked) : '<b>未关联</b>') +
+    '</span><span>客户 <b>' + esc(order.customer || '未填写') + '</b></span><span>销售人员 <b>' +
+    esc(order.salesperson || '未填写') + '</b></span>' +
+    (order.projectNames.length ? '<span>关联项目 <b>' + order.projectNames.map(esc).join('、') + '</b></span>' : '') +
+    '<span>单据录入 <b>' + (order.taxInclusive ? '含税' : '未税') + ' · 税率 ' + fmt(order.taxRate * 100) + '%</b></span></div>';
+}
+
+function renderLinks(rows) {
+  const missing = '__empty__';
+  const name = key => key === missing ? '未填客户' : key;
+  const pick = (title, key, choices, selected) => '<label class="links-setting">' + title + '<select data-setting="' + key + '">' +
+    choices.map(([id, text]) => '<option value="' + esc(id) + '" ' + (id === selected ? 'selected' : '') + '>' + esc(text) + '</option>').join('') +
+    '</select></label>';
+  if (!rows.length) return panel('销采关联', '', empty('当前范围没有可核对的采购单。'));
+  const units = [...new Set(rows.flatMap(o => o.lines.map(l => l.unit)))].sort();
+  const unit = units.includes(viewOptions.linksUnit) ? viewOptions.linksUnit : units.includes('件') ? '件' : units[0];
+  const metric = viewOptions.linksMetric === 'qty' ? 'qty' : 'amount';
+  const metricName = metric === 'qty' ? '采购量（' + unit + '）' : amountLabel();
+  const audience = cube(rows, ['customer'], 'amount').groups.sort((a, b) => b.value - a.value);
+  const colors = ['#25725a','#456793','#805c26','#76517c','#326e73','#934d4d'];
+  const customerColor = c => c === missing ? '#606d65' : colors[Math.max(0, customers.indexOf(c)) % colors.length];
+  const drill = (filter, text, hint, extra = '') => '<button type="button" class="link-btn" ' + attrs(filter) +
+    ' aria-label="' + esc(hint) + '" ' + extra + '>' + esc(text) + '</button>';
+  const pairs = cube(rows, ['type', 'customer'], metric, unit).groups;
+  const types = cube(rows, ['type'], metric, unit).groups.sort((a, b) => b.value - a.value);
+  const stacks = types.map(type => {
+    const key = type.key[0];
+    const cells = pairs.filter(cell => cell.key[0] === key).sort((a, b) => customers.indexOf(a.key[1]) - customers.indexOf(b.key[1]));
+    return '<div class="links-stack"><span>' + esc(key) + '</span><div class="links-strip">' +
+      cells.filter(cell => cell.value > 0).map(cell => {
+        const customer = cell.key[1];
+        const hint = key + ' · ' + name(customer) + ' · ' + cubeValue(cell.value, metric, unit) +
+          ' · 该类型占比 ' + (100 * cell.value / type.value).toFixed(1) + '%';
+        return '<button style="width:' + 100 * cell.value / type.value + '%;background:' + customerColor(customer) + '" ' +
+          attrs(cell.filter) + ' title="' + esc(hint) + '" aria-label="' + esc(hint + '，查看采购单') + '"></button>';
+      }).join('') + '</div><b>' + esc(cubeValue(type.value, metric, unit)) + '</b></div>';
+  }).join('');
+  const inStacks = new Set(pairs.map(cell => cell.key[1]));
+  const customerLegend = audience.filter(group => inStacks.has(group.key[0])).map(({key:[key]}) => '<button type="button" ' +
+    attrs(metric === 'qty' ? {customer:key, unit} : {customer:key}) + '><i style="background:' +
+    customerColor(key) + '"></i>' + esc(name(key)) + '</button>').join('');
+  const controls = '<div class="links-controls">' +
+    pick('结构指标', 'linksMetric', [['amount', amountLabel()], ['qty', '采购量']], metric) +
+    (metric === 'qty' ? pick('单位', 'linksUnit', units.map(u => [u,u]), unit) : '') + '</div>';
+  const composition = panel('各采购类型对应哪些客户？','每条代表一个采购类型，色段占该类型' + metricName + '的比例。点色段可核对采购单。',
+    controls + '<div class="links-stacks">' + stacks + '</div><div class="links-legend">' + customerLegend + '</div>');
+
+  const pointDim = viewOptions.linksPointDimension === 'salesperson' ? 'salesperson' : 'customer';
+  const pointTitle = pointDim === 'customer' ? '客户' : '销售人员';
+  const pointName = key => key === missing ? '未填' + pointTitle : key;
+  const pointColor = key => pointDim === 'customer' ? customerColor(key) :
+    key === missing ? '#606d65' : colors[Math.max(0, salespersons.indexOf(key)) % colors.length];
+  const pointsData = pointDim === 'customer' ? audience : cube(rows, [pointDim], 'amount').groups.sort((a, b) => b.value - a.value);
+  const maxX = Math.max(4, Math.ceil(Math.max(...pointsData.map(g => g.orders)) / 4) * 4);
+  const maxY = Math.max(1, Math.ceil(Math.max(...pointsData.map(g => g.value)) / 10000) * 10000);
+  const points = pointsData.map((group, i) => {
+    const key = group.key[0];
+    const hint = pointName(key) + ' · ' + group.orders + ' 单 · ' + amountLabel() + ' ' + yuan(group.value);
+    return '<button class="links-point" style="left:' + 100 * group.orders / maxX + '%;bottom:' +
+      100 * group.value / maxY + '%;background:' + pointColor(key) + '" ' + attrs(group.filter) + ' title="' +
+      esc(hint) + '" aria-label="' + esc(hint + '，查看采购单') + '">' + (i + 1) + '</button>';
+  }).join('');
+  const cloudLegend = pointsData.map((g, i) => '<button type="button" ' + attrs(g.filter) + ' title="' +
+    esc(g.orders + ' 单 · ' + yuan(g.value)) + '"><b style="background:' + pointColor(g.key[0]) + '">' +
+    (i + 1) + '</b>' + esc(pointName(g.key[0])) + '</button>').join('');
+  const pointControls = '<div class="links-controls">' + pick('散点分组', 'linksPointDimension',
+    [['customer', '客户'], ['salesperson', '销售人员']], pointDim) + '</div>';
+  const cloud = panel('采购频次和支出集中在哪些' + pointTitle + '？','横轴为去重采购单数，纵轴为' + amountLabel() + '。每个' + pointTitle + '对应一个点，点选可核对采购记录。',
+    pointControls + '<div class="links-scatter"><div class="links-y-axis"><span>' + fmt(maxY / 10000) + '</span><span>' +
+    fmt(maxY / 20000) + '</span><span>0</span></div><div><div class="links-axis-label">' + amountLabel() +
+    '（万元）</div><div class="links-plot">' + points + '</div><div class="links-x-axis"><span>0</span><span>' +
+    fmt(maxX/2) + '</span><span>' + maxX + ' 单</span></div></div></div><div class="links-legend links-points-key">' + cloudLegend + '</div>');
+
+  const sales = new Map();
+  for (const order of rows) {
+    const key = order.linkedSalesOrderNo || missing;
+    if (!sales.has(key)) sales.set(key, []);
+    sales.get(key).push(order);
+  }
+  const absent = sales.get(missing) || [];
+  sales.delete(missing);
+  const sorted = [...sales].sort((a, b) => sum(b[1], amount) - sum(a[1], amount) || a[0].localeCompare(b[0]));
+  const all = viewOptions.linksLimit === 'all';
+  const visible = all ? sorted : sorted.slice(0, 8);
+  const tableRows = visible.map(([salesNo, list]) => {
+    const filter = { linkedSalesOrderNo:salesNo };
+    const context = list[0];
+    const recent = [...list].sort((a,b) => b.id.localeCompare(a.id));
+    const purchases = recent.slice(0, 2).map(o => drill({id:o.id}, o.id, '查看采购单 ' + o.id, 'data-order-preview="' +
+      esc(o.id) + '"')).join(' ');
+    const pns = [...new Set(list.flatMap(order => order.lines.map(line => line.pn)))];
+    const product = pn => '<span class="links-product"><b>' + esc(pn) + '</b><small>' + esc(partsByPn.get(pn)?.name || '描述未填写') + '</small></span>';
+    const productList = pns.length > 1 ? '<details class="links-products"><summary>' + pnLabel(pns[0]) + ' 等 ' + pns.length +
+      ' 个型号</summary>' + pns.map(product).join('') + '</details>' : product(pns[0]);
+    return '<tr><th scope="row">' + drill(filter, salesNo, '查看与 ' + salesNo + ' 关联的采购记录',
+      'data-sales-preview="' + esc(salesNo) + '"') + '</th><td class="links-purchases">' + purchases +
+      (recent.length > 2 ? drill(filter, '等 ' + list.length + ' 单', '查看 ' + salesNo + ' 所有关联采购单') : '') +
+      '</td><td>' + esc(context.customer || '未填写') + '</td><td>' + esc(context.salesperson || '未填写') +
+      '</td><td>' + productList + '</td><td class="num">' + fmt(list.length) + '</td><td class="num">' + totalLines(list) + '</td><td>' +
+      esc(qtyText(list)) + '</td><td class="num">' + yuan(sum(list, amount)) + '</td></tr>';
+  }).join('');
+  const note = '<div class="links-coverage"><span>有销售单号 <b>' + fmt(rows.length - absent.length) +
+    ' 单</b> · 对应 ' + fmt(sales.size) + ' 张销售单</span><span>未关联销售单 ' +
+    (absent.length ? drill({linkedSalesOrderNo:missing}, fmt(absent.length) + ' 单 · ' + yuan(sum(absent, amount)),
+      '查看未关联销售单的采购记录') : '0 单') + '</span></div>';
+  const more = sorted.length > 8 ? '<button class="text-link" data-option="linksLimit" data-value="' + (all ? 'eight' : 'all') +
+    '">' + (all ? '仅看前 8 张' : '查看全部 ' + sorted.length + ' 张') + '</button>' : '';
+  const records = panel('一张销售单关联了哪些采购单？','以已记录销售单号精确归集，按关联采购金额排序。所列金额属于模拟采购支出。',
+    note + (tableRows ? '<div class="table-wrap"><table class="links-orders"><thead><tr><th>销售单号</th><th>关联采购单</th><th>客户</th><th>销售人员</th><th>采购产品</th><th class="num">采购单数</th><th class="num">明细行</th><th>采购数量</th><th class="num">' + amountLabel() +
+    '</th></tr></thead><tbody>' + tableRows + '</tbody></table></div>' : empty('当前范围没有带销售单号的采购记录。')), more);
+  return '<div class="links-view"><div class="links-pair">' + composition + cloud + '</div>' + records + '</div>';
+}
+
+function identifierText(pn) {
+  const name = partsByPn.get(pn)?.name;
+  return name ? pn + ' · 目录描述：' + name : String(pn || '未填写');
+}
+
+function pnLabel(pn) {
+  const part = partsByPn.get(pn);
+  if (!part) return esc(pn || '未填写');
+  return '<span class="id-pn" title="' + esc(identifierText(pn)) + '"><span>' + esc(pn)
+    + '</span><small>目录 · ' + esc(part.name) + '</small></span>';
+}
+
+function purchaseGoodsLabel(pn, description) {
+  const text = String(description || '').trim();
+  if (!text) return pnLabel(pn);
+  return '<span class="id-pn" title="' + esc(pn + ' · 行描述：' + text) + '"><span>' + esc(pn)
+    + '</span><small>行描述 · ' + esc(text) + '</small></span>';
+}
+
+function salesPreviewButton(no) {
+  return no ? '<button type="button" class="id-sales" data-sales-preview="' + esc(no)
+    + '" aria-label="' + esc(no + '，查看关联采购产品') + '">' + esc(no) + '</button>' : '—';
+}
+
+// Only enrich identity labels owned by the filter and drawer; never rewrite a metric or a chart.
+function decorateIdentifiers(root = document) {
+  const find = selector => [...(root.matches?.(selector) ? [root] : []), ...root.querySelectorAll(selector)];
+  for (const option of find('select[data-filter="pn"] option,select[data-setting="relationPn"] option')) {
+    if (partsByPn.has(option.value)) option.textContent = identifierText(option.value);
+  }
+  for (const chip of find('[data-unpin="pn"]')) {
+    chip.textContent = 'PN · ' + identifierText(state.pn) + ' ×';
+    chip.setAttribute('aria-label', '移除 PN ' + identifierText(state.pn));
+  }
+  for (const cell of find('.structure-view th,.structure-scroll th')) {
+    if (cell.childElementCount) continue;
+    const pn = cell.textContent.trim();
+    if (partsByPn.has(pn)) cell.innerHTML = pnLabel(pn);
+  }
+  for (const scope of find('#drawer-scope')) {
+    const pn = inspectedScope?.criteria.pn;
+    if (pn && !scope.textContent.includes(identifierText(pn))) {
+      scope.textContent = scope.textContent.replace('PN ' + pn, 'PN ' + identifierText(pn));
+    }
+  }
+  for (const chip of find('[data-unpin="linkedSalesOrderNo"]')) {
+    if (state.linkedSalesOrderNo && state.linkedSalesOrderNo !== '__empty__') chip.dataset.salesPreview = state.linkedSalesOrderNo;
+  }
+  for (const el of find('[data-order-preview],[data-sales-preview]')) {
+    if (el.dataset.goodsReady || el.classList.contains('id-touch-preview')) continue;
+    el.dataset.goodsReady = '1';
+    const purchase = el.dataset.orderPreview;
+    if (!el.matches('button,a[href]')) {
+      el.tabIndex = 0;
+      el.setAttribute('role','button');
+    }
+    if (!purchase && !el.hasAttribute('data-inspect') && !el.hasAttribute('data-unpin')) continue;
+    const touch = document.createElement('button');
+    touch.type = 'button';
+    touch.className = 'id-touch-preview';
+    if (purchase) touch.dataset.orderPreview = purchase;
+    else touch.dataset.salesPreview = el.dataset.salesPreview;
+    touch.dataset.previewOnly = '1';
+    touch.setAttribute('aria-label', purchase ? '预览采购单 ' + purchase + ' 的产品' : '预览销售单 ' + el.dataset.salesPreview + ' 的关联采购');
+    touch.textContent = '货品';
+    el.insertAdjacentElement('afterend', touch);
+    if (el.classList.contains('board-row')) el.parentElement.classList.add('id-preview-row');
+  }
+  ensureIdentifierPreview();
+}
+
+let identifierPreviewReady = false;
+function ensureIdentifierPreview() {
+  if (identifierPreviewReady) return;
+  identifierPreviewReady = true;
+  let target = null;
+  let tip = null;
+  let timer = 0;
+  const selector = '[data-order-preview],[data-sales-preview]';
+  function hide() {
+    clearTimeout(timer);
+    if (tip && target) {
+      const ids = (target.getAttribute('aria-describedby') || '').split(/\s+/).filter(id => id && id !== tip.id);
+      if (ids.length) target.setAttribute('aria-describedby', ids.join(' ')); else target.removeAttribute('aria-describedby');
+    }
+    tip?.remove(); tip = null; target = null;
+  }
+  function scheduleHide() {
+    clearTimeout(timer); timer = setTimeout(hide, 180);
+  }
+  function position() {
+    const rect = target.getBoundingClientRect();
+    const w = document.documentElement.clientWidth, h = window.innerHeight;
+    const width = tip.offsetWidth, height = tip.offsetHeight;
+    const left = Math.max(6,Math.min(rect.left,w-width-6));
+    const below = h-rect.bottom, above = rect.top;
+    const y = below >= height+8 || below >= above ? rect.bottom + 5 : rect.top - height - 5;
+    tip.style.left = left + 'px'; tip.style.top = Math.max(6,Math.min(y,h-height-6)) + 'px';
+  }
+  function show(el) {
+    clearTimeout(timer);
+    if (target === el && tip?.isConnected) return;
+    hide();
+    const sale = el.dataset.salesPreview, no = sale || el.dataset.orderPreview;
+    if (!no) return;
+    const drawer = el.closest('dialog[open]');
+    const scope = drawer ? inspectedScope : null;
+    const criteria = scope ? {...scope.criteria,from:scope.from,to:scope.to} : currentScope();
+    const from = scope?.from || demoPeriods[state.period][1];
+    const to = scope?.to || demoPeriods[state.period][2];
+    const candidate = sale ? orders.filter(order => order.linkedSalesOrderNo === sale) : [fullOrderById.get(no)].filter(Boolean);
+    const matched = selectRecords(candidate, {...criteria,from,to});
+    const lineMode = lineKeys.some(key => criteria[key]);
+    const productQty = new Map(), categoryQty = new Map();
+    function quantity(map, key, unit, qty, description = '') {
+      const id = JSON.stringify([key, unit, description]);
+      const entry = map.get(id) || {key,unit,description,qty:0};
+      entry.qty += qty; map.set(id, entry);
+    }
+    for (const order of matched) for (const line of order.lines) {
+      quantity(productQty,line.pn,line.unit,line.qty,line.description?.trim() || '');
+      quantity(categoryQty,partsByPn.get(line.pn)?.category || '未分类',line.unit,line.qty);
+    }
+    const products = [...productQty.values()].sort((a,b) => String(a.key).localeCompare(String(b.key)));
+    const categories = [...categoryQty.values()].sort((a,b) => String(a.key).localeCompare(String(b.key)));
+    target = el; tip = document.createElement('div'); tip.id = 'identifier-goods-preview';
+    tip.setAttribute('role','tooltip'); tip.className = 'id-preview';
+    const productRows = products.map(({key,unit,qty,description}) => '<li><span>' + purchaseGoodsLabel(key,description) + '</span><b>' + fmt(qty) + ' ' + esc(unit || '单位未填') + '</b></li>').join('');
+    tip.innerHTML = '<header><b>' + (sale ? '销售单 ' : '采购单 ') + esc(no) + '</b><small>' + (sale ? '关联采购' : '采购产品') + ' · '
+      + (lineMode ? '当前匹配行' : '整单') + ' · ' + matched.length + ' 张采购单</small><small>' + esc(from === to ? from : from + ' 至 ' + to) + '</small></header>'
+      + (productRows ? '<ul>' + productRows + '</ul><footer><b>按大类</b> ' + categories.map(i => esc(i.key) + ' ' + fmt(i.qty) + ' ' + esc(i.unit || '单位未填')).join(' · ') + '</footer>'
+        : '<p>当前范围没有匹配的采购行。</p>');
+    (drawer || document.body).append(tip);
+    target.setAttribute('aria-describedby', [target.getAttribute('aria-describedby'),tip.id].filter(Boolean).join(' '));
+    position();
+  }
+  document.addEventListener('pointerover', e => {
+    if (e.pointerType === 'touch') return;
+    if (tip?.contains(e.target)) {clearTimeout(timer); return;}
+    const el = e.target.closest?.(selector);
+    if (el) show(el);
+  });
+  document.addEventListener('pointerout', e => {
+    if (e.pointerType === 'touch' || !target) return;
+    if ((target.contains(e.target) || tip?.contains(e.target)) && !target.contains(e.relatedTarget) && !tip?.contains(e.relatedTarget)) scheduleHide();
+  });
+  document.addEventListener('focusin', e => {
+    const el = e.target.closest?.(selector);
+    if (el) show(el); else hide();
+  });
+  document.addEventListener('focusout', e => {if (target?.contains(e.target)) scheduleHide();});
+  document.addEventListener('click', e => {
+    const el = e.target.closest?.(selector);
+    if (el?.hasAttribute('data-preview-only') || (el?.hasAttribute('data-sales-preview') && !el.hasAttribute('data-inspect') && !el.hasAttribute('data-unpin'))) {
+      e.preventDefault(); e.stopPropagation(); show(el); return;
+    }
+    if (!tip?.contains(e.target)) hide();
+  },true);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && tip) {e.preventDefault();e.stopPropagation();hide();return;}
+    if (['Enter',' '].includes(e.key) && e.target.matches('[data-sales-preview]:not(button):not(a),[data-order-preview]:not(button):not(a)')) {e.preventDefault();e.stopPropagation();show(e.target);}
+  },true);
+  document.addEventListener('scroll', e => {
+    if (!target || !tip || tip.contains(e.target)) return;
+    const r = target.getBoundingClientRect();
+    if (!target.isConnected || r.bottom <= 0 || r.top >= window.innerHeight || r.right <= 0 || r.left >= window.innerWidth) hide();
+    else position();
+  },true);
+  document.addEventListener('close',hide,true);
+  window.addEventListener('resize',hide);
+}
+
+// 当前看板的问题始终可见；单图读数说明在图标题旁展开。
+const readingGuides={
+  'boards/dimensions':['采购支出集中在谁、哪类货和哪些 PN？换成单量或工作量，排在前面的还是同一批吗？','在相同日期和筛选下对照各榜的排名、全集和前 N 项占比。'],
+  'boards/special':['先复核哪张大单、哪个供货来源或哪条价格记录？','组合看单笔金额、人员行数、来源数量占比、同池均价与人工上限。'],
+  'matrix/wall':['谁在采购哪类货？同一类货主要由谁供应？','对照四组交叉格，各图取行、列前五。颜色在本图内比较，展开可看全量。'],
+  'matrix/pivot':['哪两个维度一起看才能解释这笔采购？一个采购员或供应商内部如何分布？','按所选行列查看交叉实绩、可加指标的行内占比和重新计算的合计。'],
+  compare:['本期比上期多买了什么、少买了什么？变化集中在哪些人或型号？','对照相邻等长期间的金额、去重单数、行数，按分组的增减值追查两期采购单。'],
+  work:['单数最多的人，也处理了最多的明细吗？工作量集中在哪几天？','并看采购员经手单数、明细行数和行/单，再用每日趋势和最近采购单核对。'],
+  'structure/types':['资金和采购量分别花在哪些采购类型上？','对照原始采购类型的金额与占比、单数、明细行数及按单位拆开的采购量。'],
+  'structure/matrix':['同一种采购由哪几家供应商承接？一家供应商主要承接哪些采购类型？','从行或列比较供应商 × 采购类型的去重单数和金额；点交叉格核对单据。'],
+  'structure/relations':['还有谁供过这家供应商成交的 PN？双方各有哪些订单可以核对？','按两家供应商共同成交的 PN 数找交集，再看双方对应的采购单。'],
+  'structure/links':['一张销售单牵涉几张采购单？哪些客户、哪些销售人员对应的采购更频繁或金额较大？','追溯关联销售单号、客户、销售人员及采购单，查看采购金额、频次和未关联记录。'],
+  pool:['这个 PN 由谁供应、价格波动有多大？和同池型号及人工上限相比处在什么位置？','看同单位未税加权均价、供货家数、逐家成交价区间和样本单数。'],
+};
+const rankQuestions={
+  '采购员排行':'按当前指标，哪几位采购员经手最多？',
+  '采购类型排行':'当前采购主要是哪几种业务？',
+  '供应商排行':'本期采购主要交给了哪几家供应商？',
+  '商品大类排行':'支出、数量和处理行数分别集中在哪类商品上？',
+  'PN排行':'采购最集中在哪些具体型号？',
+  '互通池排行':'哪些互通池的采购最集中？未入池型号占多少？',
+  '维保需求 · PN':'维保需求的采购主要涉及哪些型号？',
+  '销售订单 · PN':'销售订单带来的采购主要涉及哪些型号？',
+};
+const chartGuides={
+  '大额采购单':['哪些采购单值得先点开看产品和数量？','按当前金额口径排单；选中产品条件时，只累计匹配行。'],
+  '采购员处理行数':['谁经手的采购明细最多？','按采购员累计明细行数，点人可核对这些行分属哪些单。'],
+  '供应商覆盖 PN 数':['哪家供货的型号最多？','在每家供应商内部对实际成交 PN 去重。'],
+  'PN 主供应商数量占比':['哪些型号的采购量集中于一家供应商？','用最大单家供货量除以该 PN 同单位采购量，点开核对全部来源。'],
+  '高于同池均价':['哪些型号的采购均价高于同池水平？','均价以未税金额除以同单位采购量，排名比较相对池均价的正差额。'],
+  '均价超过人工上限':['哪些型号的期间均价已经超过已设上限？','逐 PN 比较未税加权均价与该池的人工单价上限。'],
+  '采购员 × 采购类型':['谁主要负责哪种类型的采购？','按采购员和采购类型交叉归集当前指标，点格查看该组合的采购单。'],
+  '供应商 × 采购类型':['每种采购类型依赖哪些供货方？','按实际成交供应商与采购类型归集单量、金额或所选指标。'],
+  '采购员 × 供应商':['一个采购员经常向谁采购？一家供应商由几人经手？','交叉查看经手人和供货方；每个非空格对应一批采购单。'],
+  'PN × 供应商':['同一型号有哪些已成交货源？','只计算该 PN 与该供应商都匹配的采购行，比较所选指标。'],
+  '两期采购对比':['整体采购规模和工作量比上期变了多少？','同一业务筛选、相邻等长期间，比较金额、去重单数和明细行数。'],
+  '分组变动':['哪一组拉高或拉低了本期指标？','逐组对照两期实绩、增减绝对值和变动率，分别打开两期记录。'],
+  '采购员工作量':['单量和明细量是否由同一批人承担？','按单数或行数排序，同时核对行/单、供应商数和经手金额。'],
+  '采购节奏':['哪几天业务集中，是单量多还是金额大？','按采购日期统计去重单数或金额。点柱形查看当天实际单据。'],
+  '最近采购单':['最近发生了哪些采购？具体购买了什么？','采购日期、经手人、供应商和单据金额；指向单号可预览商品数量。'],
+  '采购类型结构':['哪种采购占用金额最多？同类采购的数量有多少？','类型取源字段原文，金额同口径汇总，数量按单位分别统计。'],
+  '共同供货关系':['还可以从哪家公司找到相同型号的历史成交记录？','列出已选供应商与其他供应商共同采购过的 PN 及双方各自单数。'],
+  'PN 采购对照':['一个 PN 价格偏高，还是整个互通池价格都高？','对照 PN 与同池加权未税单价、人工上限、样本单数与来源数。'],
+  '采购来源':['该型号实际从谁手里买过？各家的量与价如何？','对照供应商、采购量、成交单数和未税加权均价。'],
+  '同池成员':['还有哪些同池型号可用于比价？','列出池内成员的描述、去重单数、数量和未税均价，缺样本单列。'],
+  '供应商成交价区间':['同一型号在各家的成交价是否重叠？均价背后有多少样本？','同一 PN、同一计量单位，比较最低、最高和按采购量加权的未税单价。'],
+};
+function activeReadingKey(){
+  if(state.tab==='boards') return 'boards/'+(viewOptions.boardDisplay||'dimensions');
+  if(state.tab==='matrix') return 'matrix/'+(viewOptions.matrixDisplay||'wall');
+  if(state.tab==='structure') return 'structure/'+(viewOptions.structureSection||'types');
+  return state.tab;
+}
+function readingText(pair){
+  return '<span><b>要回答</b>'+esc(pair[0])+'</span><span><b>看什么</b>'+esc(pair[1])+'</span>';
+}
+function attachGuides(root){
+  const guide=readingGuides[activeReadingKey()];
+  if(!guide) return;
+  if(!root.querySelector('.view-purpose')){
+    const aside=document.createElement('aside');
+    aside.className='view-purpose';aside.setAttribute('aria-label','当前看板的需求与数据');
+    aside.innerHTML=readingText(guide);
+    root.prepend(aside);
+  }
+  for(const header of root.querySelectorAll('.board-card-head,.wall-card-head,.panel-head')){
+    if(header.querySelector('.chart-info')) continue;
+    const heading=header.querySelector('h2,h3');
+    if(!heading) continue;
+    const title=heading.textContent.trim();
+    let pair=chartGuides[title];
+    if(Object.hasOwn(rankQuestions,title)){
+      const metric=viewOptions.boardMetric||'amount';
+      const metricName=metric==='amount'?amountLabel():metrics[metric];
+      pair=[rankQuestions[title],'按'+metricName+'从高到低排列，横条相对本榜首位。'+(metric==='orders'?'各组分别对订单去重。':'前 N 项占比的分母是本榜全部匹配记录。')];
+    } else if(state.tab==='matrix'&&viewOptions.matrixDisplay==='pivot'){
+      const [row,col]=matrixAxes();
+      pair=['每个'+dims[row]+'在不同'+dims[col]+'上的采购有何差异？','交叉格显示选定指标；边际合计在匹配范围内重新计算，订单独立去重。'];
+    }
+    if(!pair) continue; // 关联分析的两幅图在各自标题下直接列出业务问题与指标。
+    const disclosure=document.createElement('details');
+    disclosure.className='chart-info';
+    disclosure.innerHTML='<summary aria-label="'+esc(title)+'读图说明">读图</summary><div class="chart-note">'+readingText(pair)+'</div>';
+    header.append(disclosure);
+  }
+}
+function decorateAnalysis(root){
+  if(!root) return;
+  decorateIdentifiers(root);
+  if(root===id('active-view')){
+    decorateIdentifiers(id('filters'));
+    attachGuides(root);
+  } else if(root===id('drawer-body')){
+    decorateIdentifiers(id('drawer-scope'));
+  }
+}
+
+// 每个分析入口、下钻及抽屉是一页。筛选、排序和滚动仅更新其所在页。
+const navVersion = 'purchase-demo.2026.11.nav1';
+let navDepth = 0;
+let navRendering = false;
+let navReady = false;
+let navTimer;
+const scrollBoxes = '#active-view .table-wrap,#active-view .mx-scroll,#active-view .wall-scroll,#active-view .structure-scroll';
+
+function focusAddress() {
+  const node = document.activeElement;
+  if (!node || !node.matches('button,select,input,summary,[tabindex]')) return '';
+  if (node.id) return '#' + CSS.escape(node.id);
+  for (const key of ['data-inspect','data-explore','data-tab','data-option','data-setting','data-filter','data-date',
+    'data-matrix-preset','data-matrix-swap','data-expand-row','data-search','data-compare-pn']) {
+    if (!node.hasAttribute(key)) continue;
+    let selector = '['+key+'="'+CSS.escape(node.getAttribute(key))+'"]';
+    if (node.dataset.value) selector += '[data-value="'+CSS.escape(node.dataset.value)+'"]';
+    if (node.dataset.expandCol) selector += '[data-expand-col="'+CSS.escape(node.dataset.expandCol)+'"]';
+    return selector;
+  }
+  return '';
+}
+
+function navigationEntry() {
+  const open = dialog.open;
+  const drawer = open ? {
+    filter:inspectedScope.filter, count:dialog.querySelectorAll('.receipt').length,
+    expanded:[...dialog.querySelectorAll('.receipt[open] [data-order-preview]')].map(node=>node.dataset.orderPreview),
+    scroll:dialog.scrollTop, bodyScroll:id('drawer-body').scrollTop
+  } : null;
+  return {
+    app:navVersion, depth:navDepth, state:{...state}, options:{...viewOptions}, dates:[...demoPeriods.custom], drawer,
+    scroll:window.scrollY, boxes:[...document.querySelectorAll(scrollBoxes)].map(el=>[el.scrollLeft,el.scrollTop]),
+    focus:focusAddress()
+  };
+}
+function navUrl() {
+  const url=routePath()+(dialog.open?'/orders':'');
+  if(state.period===defaults.period) return url;
+  const params=new URLSearchParams({period:state.period});
+  if(state.period==='custom') {
+    params.set('from',demoPeriods.custom[1]);
+    params.set('to',demoPeriods.custom[2]);
+  }
+  return url+'?'+params;
+}
+function saveNavigation() {
+  clearTimeout(navTimer);
+  if (navReady && !navRendering) history.replaceState(navigationEntry(), '', navUrl());
+}
+function scheduleNavigationSave() {
+  if (!navReady || navRendering) return;
+  clearTimeout(navTimer);
+  navTimer = setTimeout(saveNavigation, 140);
+}
+function renderTrail() {
+  const entry=sectionsByTab[state.tab];
+  const section=entry && (entry[1][viewOptions[entry[0]]] || Object.values(entry[1])[0]);
+  const deeper=entry && viewOptions[entry[0]]!==Object.keys(entry[1])[0] && viewOptions[entry[0]];
+  const canReturn=navDepth>0 || state.tab!=='boards' || deeper;
+  id('view-trail').innerHTML=(canReturn ? '<button type="button" data-analysis-back>← 返回</button>' : '') +
+    (state.tab!=='boards'||deeper ? '<button class="trail-parent" data-nav-parent="root">采购分析</button>' : '<span>采购分析</span>')+
+    '<i aria-hidden="true">/</i>' +
+    (deeper ? '<button class="trail-parent" data-nav-parent="section">'+esc(tabs[state.tab][0])+'</button>' : '<strong>'+esc(tabs[state.tab][0])+'</strong>') +
+    (section ? '<i aria-hidden="true">/</i><strong>'+esc(section)+'</strong>' : '');
+  id('view-trail').setAttribute('aria-label','当前看板路径');
+}
+function navigateAnalysis(change, paint=render) {
+  saveNavigation();
+  navRendering=true;
+  try {
+    navDepth++;
+    change();
+    paint();
+    renderTrail();
+    history.pushState(navigationEntry(), '', navUrl());
+  } finally {navRendering=false}
+}
+function restoreNavigation(record) {
+  clearTimeout(navTimer);
+  navRendering=true;
+  try {
+    if (dialog.open) dialog.close();
+    if (record?.app===navVersion) {
+      navDepth=record.depth;
+      state={...defaults,...record.state};
+      Object.keys(viewOptions).forEach(key=>delete viewOptions[key]);
+      Object.assign(viewOptions,record.options);
+      demoPeriods.custom=[...record.dates];
+    } else {
+      navDepth=0;
+      state={...defaults,tab:tabFromUrl()};
+      Object.keys(viewOptions).forEach(key=>delete viewOptions[key]);
+      applyRoute();
+    }
+    render();
+    const stale=record?.app!==navVersion;
+    const drawer=stale ? (routeSegments().at(-1)==='orders'?{filter:{}}:null) : record.drawer;
+    if(drawer) inspect(drawer.filter,drawer);
+    if(!stale){
+      document.querySelectorAll(scrollBoxes).forEach((el,i)=>{
+        const pos=record.boxes[i]; if(pos) el.scrollTo(pos[0],pos[1]);
+      });
+      window.scrollTo(0,record.scroll);
+      if(record.focus) document.querySelector(record.focus)?.focus({preventScroll:true});
+    }
+    renderTrail();
+  } finally {navRendering=false}
+  saveNavigation();
+}
+function backInAnalysis() {
+  if(navDepth>0){history.back();return}
+  // 从直接链接打开时，返回该视角的默认子页，再回采购总览。
+  if(dialog.open){dialog.close()}
+  else {
+    const entry=sectionsByTab[state.tab];
+    if(entry && viewOptions[entry[0]] && viewOptions[entry[0]]!==Object.keys(entry[1])[0]) {
+      viewOptions[entry[0]]=Object.keys(entry[1])[0];
+    } else { state.tab='boards';viewOptions.boardDisplay='dimensions' }
+    render();
+    window.scrollTo(0,0);
+  }
+  renderTrail();saveNavigation();
+}
+function startNavigation() {
+  history.scrollRestoration='manual';
+  navReady=true;
+  restoreNavigation(history.state);
+  window.addEventListener('popstate',event=>restoreNavigation(event.state));
+  document.addEventListener('scroll',scheduleNavigationSave,true);
+  document.addEventListener('click',scheduleNavigationSave);
+  document.addEventListener('change',scheduleNavigationSave);
+  document.addEventListener('toggle',scheduleNavigationSave,true);
+  document.addEventListener('input',scheduleNavigationSave);
+  window.addEventListener('pagehide',saveNavigation);
+}
+
+const dialog=id('orders-dialog');
+let remainingReceipts=[];
+const drawerPageSize=20;
+function filterSelect(key,label,options){
+  return '<label class="filter '+(key==='basis'?'basis-filter':'')+'"><span>'+label+'</span><select data-filter="'+key+'" aria-label="'+label+'">'+options.map(([value,text])=>'<option value="'+esc(value)+'" '+(state[key]===value?'selected':'')+'>'+esc(text)+'</option>').join('')+'</select></label>';
+}
+let visibleRows=[], visibleDays=[];
+function render(){
+  const rows=visibleRows=currentRows();
+  const days=visibleDays=dailySeries(rows);
+  const [,start,end]=demoPeriods[state.period];
+  const dateText=start===end?start.replaceAll('-','.'):start.replaceAll('-','.')+' — '+end.replaceAll('-','.');
+  id('period').textContent='统计区间　'+dateText;
+  id('navigation').innerHTML=Object.entries(tabs).map(([key,[label,ico]])=>'<button class="tab '+(state.tab===key?'active':'')+'" data-tab="'+key+'" aria-pressed="'+(state.tab===key)+'">'+icon(ico)+label+'</button>').join('');
+  const pick=(list,label)=>[['','全部'+label],...list.map(n=>[n,n])];
+  document.body.dataset.view=state.tab;
+  const productKeys=['category','pool','pn','unit'];
+  const productFiltersOpen=viewOptions.productsOpen==='yes';
+  const customDates=state.period==='custom'?'<div class="custom-dates">'+['from','to'].map((key,i)=>'<label>'+['从','至'][i]+' <input type="date" aria-label="'+['起始日','结束日'][i]+'" data-date="'+key+'" min="2026-10-01" max="2026-11-19" value="'+[start,end][i]+'"></label>').join('')+'</div>':'';
+  const productOptions={
+    category:[...new Set(catalog.map(p=>p.category))],pool:[...new Set(catalog.map(p=>p.pool||'未入池'))],
+    pn:catalog.map(p=>p.pn),unit:[...new Set(catalog.map(p=>p.unit))]
+  };
+  const productFields=productFiltersOpen?'<div class="product-fields">'+productKeys.map(key=>filterSelect(key,selectorLabels[key],pick(productOptions[key],''))).join('')+'</div>':'';
+  const chips=[...productKeys,'customer','salesperson','linkedSalesOrderNo'].filter(key=>state[key]).map(key=>'<button class="scope-chip" data-unpin="'+key+'" aria-label="移除'+esc(selectorLabels[key]+' '+scopeLabel(key,state[key]))+'">'+esc(selectorLabels[key]+' · '+scopeLabel(key,state[key]))+' ×</button>').join('');
+  id('filters').innerHTML=filterSelect('period','日期',Object.entries(demoPeriods).map(([k,v])=>[k,v[0]]))+customDates+filterSelect('buyer','采购员',pick(buyers,'人员'))+filterSelect('type','采购类型',pick(types,'类型'))+filterSelect('supplier','供应商',pick(suppliers,'供应商'))+'<button class="product-toggle" aria-expanded="'+productFiltersOpen+'" data-option="productsOpen" data-value="'+(productFiltersOpen?'no':'yes')+'">产品筛选 '+(productFiltersOpen?'−':'+')+'</button>'+filterSelect('basis','金额口径',Object.entries(bases))+'<button class="reset" data-reset>重置</button>'+productFields+(chips?'<div class="filter-chips">'+chips+'</div>':'');
+  id('metrics').innerHTML=renderMetrics(rows,days);
+  renderActiveView();
+}
+function renderActiveView(){
+  const rows=visibleRows,days=visibleDays;
+  const views={work:()=>renderWork(rows,days),structure:()=>renderStructure(rows),pool:()=>renderPool(rows),
+    boards:()=>boardView(rows),compare:()=>renderCompare(rows),matrix:()=>matrixView(rows)};
+  const root=id('active-view');
+  root.innerHTML=views[state.tab]();
+  if(typeof decorateAnalysis==='function') decorateAnalysis(root);
+  renderTrail();
+}
+function boardView(rows){
+  const mode=viewOptions.boardDisplay||'dimensions';
+  return '<div class="board-switch">'+segmented('boardDisplay',[['dimensions','维度排行'],['special','专题榜组']],mode)+'</div>'+
+    (mode==='special'?renderSpecial(rows):renderBoards(rows));
+}
+function matrixView(rows){
+  const mode=viewOptions.matrixDisplay||'wall';
+  return '<div class="matrix-switch">'+segmented('matrixDisplay',[['wall','四矩阵联览'],['pivot','自选交叉表']],mode)+'</div>'+
+    (mode==='wall'?renderMatrixWall(rows):renderMatrix(rows));
+}
+const selectorLabels={...dims,id:'采购单',date:'采购日期',unit:'数量单位',customer:'客户',salesperson:'销售人员',linkedSalesOrderNo:'关联销售单'};
+function scopeLabel(key,value){return value==='__empty__' ? (key==='linkedSalesOrderNo'?'未关联':'未填写') : value;}
+let inspectedScope=null;
+const fullOrderById=new Map(orders.map(o=>[o.id,o]));
+function dateScope(filter){
+  const [,start,end]=demoPeriods[state.period];
+  let from=filter.from||start,to=filter.to||end;
+  if(filter.date) from=to=filter.date;
+  if(filter.week){
+    const sunday=new Date(filter.week+'T00:00:00Z');
+    sunday.setUTCDate(sunday.getUTCDate()+6);
+    from=from<filter.week?filter.week:from;
+    const limit=sunday.toISOString().slice(0,10);
+    to=to>limit?limit:to;
+  }
+  return {from,to};
+}
+function inspect(filter, savedDrawer=null) {
+  const {from,to}=dateScope(filter);
+  const matched=selectRecords(filteredInRange(from,to),filter).slice();
+  matched.sort((a,b)=>b.id.localeCompare(a.id));
+  const criteria={...currentScope(),...filter};
+  const scope=Object.entries(criteria).filter(([key,v])=>selectorLabels[key]&&v).map(([k,v])=>selectorLabels[k]+' '+scopeLabel(k,v));
+  id('drawer-scope').textContent=[from+(from===to?'':' 至 '+to),...scope].join(' · ');
+  const lineMode=lineKeys.some(key=>criteria[key]);
+  const amountTitle=(lineMode?'匹配行':'')+amountLabel();
+  inspectedScope={from,to,criteria,filter};
+  const sumText='<p class="drawer-meta"><b>'+matched.length+' 单</b> · '+totalLines(matched)+' 行 · '+qtyText(matched)+' · '+amountTitle+' <b>'+yuan(sum(matched,amount))+'</b>'+(matched.length?' · 单均 '+yuan(sum(matched,amount)/matched.length):'')+'</p>';
+  const nextActions=matched.length&&!criteria.id?'<div class="follow-scope"><span>沿用此范围</span><button data-explore="matrix">看矩阵 ↗</button><button data-explore="boards">看排行 ↗</button><button data-explore="compare">比上期 ↗</button></div>':'';
+  const renderReceipt=(o,i)=>{
+    const lineRows=o.lines.map(l=>'<tr><td>'+purchaseGoodsLabel(l.pn,l.description)+'</td><td class="num">'+fmt(l.qty)+' '+l.unit+'</td><td class="num">'+yuan(l.net/l.qty)+'</td><td class="num">'+yuan(lineAmount(l))+'</td></tr>').join('');
+    return '<details class="receipt" '+(i===0?'open':'')+'><summary><span><strong><span aria-hidden="true" class="sumarrow">›</span> <span tabindex="0" data-order-preview="'+esc(o.id)+'">'+esc(o.id)+'</span></strong><small>'+o.date+' · '+o.buyer+'</small></span><span>'+o.supplier+'<small>'+o.type+'</small></span><span class="num">'+yuan(amount(o))+'<small>'+o.lines.length+' 行</small></span></summary><div class="table-wrap"><table><thead><tr><th>采购产品</th><th class="num">数量</th><th class="num">未税单价</th><th class="num">行'+amountLabel()+'</th></tr></thead><tbody>'+lineRows+'</tbody></table></div>'+(lineMode?'<div class="panel-foot">整单'+amountLabel()+' '+yuan(amount(fullOrderById.get(o.id)))+'<span>上方仅列匹配行</span></div>':'')+(typeof renderOrderContext==='function'?renderOrderContext(o):'')+'</details>';
+  };
+  const visibleCount=Math.max(drawerPageSize,savedDrawer?.count || 0);
+  const receipts=matched.slice(0,visibleCount).map(renderReceipt).join('');
+  remainingReceipts=matched.slice(visibleCount);
+  id('drawer-body').innerHTML=sumText+nextActions+(receipts||empty('当前交叉条件下没有采购单。'));
+  if(remainingReceipts.length){
+    const more=document.createElement('button');
+    more.className='mini-btn';
+    more.textContent='再显示 '+Math.min(drawerPageSize,remainingReceipts.length)+' 单';
+    more.addEventListener('click',()=>{
+      const batch=remainingReceipts.splice(0,drawerPageSize);
+      more.insertAdjacentHTML('beforebegin',batch.map(o=>renderReceipt(o,1)).join(''));
+      if(remainingReceipts.length) more.textContent='再显示 '+Math.min(drawerPageSize,remainingReceipts.length)+' 单';
+      else more.remove();
+      if(typeof decorateAnalysis==='function') decorateAnalysis(id('drawer-body'));
+    });
+    id('drawer-body').append(more);
+  }
+  if(typeof decorateAnalysis==='function') decorateAnalysis(id('drawer-body'));
+  if(savedDrawer?.expanded){
+    const expanded=new Set(savedDrawer.expanded);
+    dialog.querySelectorAll('.receipt').forEach(el=>{el.open=expanded.has(el.querySelector('[data-order-preview]')?.dataset.orderPreview)});
+  }
+  if(!dialog.open) dialog.showModal();
+  dialog.scrollTop=savedDrawer?.scroll || 0;
+  id('drawer-body').scrollTop=savedDrawer?.bodyScroll || 0;
+  document.body.style.overflow='hidden';
+}
+dialog.querySelector('.close').onclick=backInAnalysis;
+dialog.addEventListener('cancel',e=>{e.preventDefault();backInAnalysis()});
+dialog.addEventListener('click',e=>{if(e.target===dialog && e.clientX<dialog.getBoundingClientRect().left)backInAnalysis()});
+dialog.addEventListener('close',()=>{if(!dialog.open) document.body.style.overflow=''});
+document.addEventListener('change',e=>{
+  const setting=e.target.closest('[data-setting]');
+  if(setting){
+    const key=setting.dataset.setting;
+    viewOptions[key]=setting.value;renderActiveView();
+    document.querySelector('[data-setting="'+key+'"]')?.focus({preventScroll:true});return;
+  }
+  const dateField=e.target.closest('[data-date]');
+  if(dateField){
+    const value=dateField.value;
+    if(!value||value<'2026-10-01'||value>'2026-11-19'){render();return}
+    const slot=dateField.dataset.date==='from'?1:2;
+    demoPeriods.custom[slot]=value;
+    if(demoPeriods.custom[1]>demoPeriods.custom[2]) demoPeriods.custom[3-slot]=value;
+    render();document.querySelector('[data-date="'+dateField.dataset.date+'"]').focus({preventScroll:true});return;
+  }
+  const control=e.target.closest('[data-filter]');
+  if(!control) return;
+  const key=control.dataset.filter;
+  state[key]=control.value;
+  render();
+  document.querySelector('[data-filter="'+key+'"]').focus({preventScroll:true});
+});
+function updateSearch(input){
+  viewOptions.pnQuery=input.value;
+  const cursor=input.selectionStart;
+  id('active-view').innerHTML=renderPool(currentRows());
+  if(typeof decorateAnalysis==='function') decorateAnalysis(id('active-view'));
+  const replacement=document.querySelector('[data-search="pnQuery"]');
+  replacement.focus({preventScroll:true});
+  replacement.setSelectionRange(cursor,cursor);
+}
+document.addEventListener('input',e=>{
+  if(e.target.matches('[data-search="pnQuery"]') && !e.isComposing) updateSearch(e.target);
+});
+document.addEventListener('compositionend',e=>{
+  if(e.target.matches('[data-search="pnQuery"]')) updateSearch(e.target);
+});
+
+document.addEventListener('click',e=>{
+  const button=e.target.closest('button');
+  if(!button)return;
+  if(button.dataset.navParent){
+    navigateAnalysis(()=>{
+      if(button.dataset.navParent==='root') state.tab='boards';
+      const section=sectionsByTab[state.tab];
+      if(section) viewOptions[section[0]]=Object.keys(section[1])[0];
+      window.scrollTo(0,0);
+    });document.querySelector('[data-tab="'+state.tab+'"]').focus({preventScroll:true});return;
+  }
+  if(button.hasAttribute('data-analysis-back')){backInAnalysis();return}
+  if(button.dataset.explore&&inspectedScope){
+    const {from,to,criteria}=inspectedScope;
+    navigateAnalysis(()=>{
+      const range=demoPeriods[state.period];
+      if(from!==range[1]||to!==range[2]){
+        demoPeriods.custom=['自选日期',from,to];state.period='custom';
+      }
+      for(const key of Object.keys(currentScope())) state[key]=criteria[key]||'';
+      dialog.close();state.tab=button.dataset.explore;
+    });
+    document.querySelector('[data-tab="'+state.tab+'"]').focus({preventScroll:true});window.scrollTo(0,0);return;
+  }
+  if(button.dataset.comparePn){
+    const pn=button.dataset.comparePn;
+    navigateAnalysis(()=>{
+      state.tab='pool';Object.assign(viewOptions,{pnFocus:'all',pnQuery:'',poolName:partsByPn.get(pn)?.pool||'',poolPart:pn});
+    });
+    document.querySelector('.pool-pn.active')?.focus();return;
+  }
+  if(button.dataset.expandRow){
+    navigateAnalysis(()=>Object.assign(viewOptions,{matrixDisplay:'pivot',mxRows:button.dataset.expandRow,mxColumns:button.dataset.expandCol,
+      mxMetric:viewOptions.wallMetric||'amount',mxUnit:viewOptions.wallUnit||state.unit||'件',mxMode:'actual'}),renderActiveView);
+    document.querySelector('[data-setting="mxRows"]').focus();return;
+  }
+  if(handleMatrixClick(button)){
+    const selector=button.hasAttribute('data-matrix-swap')?'[data-matrix-swap]':'[data-matrix-preset="'+button.dataset.matrixPreset+'"]';
+    renderActiveView();document.querySelector(selector)?.focus({preventScroll:true});return;
+  }
+  if(button.hasAttribute('data-pn-peers')){
+    const selected=partsByPn.get(state.pn);
+    state.pn='';
+    if(selected?.pool){
+      state.pool=selected.pool;Object.assign(viewOptions,{poolName:selected.pool,poolPart:selected.pn,pnFocus:'all',pnQuery:''});
+    }
+    render();document.querySelector('.product-toggle').focus({preventScroll:true});return;
+  }
+  if(button.dataset.unpin){
+    state[button.dataset.unpin]='';render();document.querySelector('.product-toggle').focus({preventScroll:true});return;
+  }
+  if(button.hasAttribute('data-inspect')){
+    navigateAnalysis(()=>inspect(JSON.parse(button.dataset.inspect)),()=>{});return
+  }
+  if(button.hasAttribute('data-reset')){
+    state={...defaults,tab:state.tab};
+    for(const key of Object.keys(viewOptions)) delete viewOptions[key];
+    demoPeriods.custom=['自选日期',...demoPeriods[defaults.period].slice(1)];
+    render();saveNavigation(); document.querySelector('[data-reset]').focus({preventScroll:true});return;
+  }
+  if(button.hasAttribute('data-clear-supplier')){
+    state.supplier='';render();id('filters').querySelector('[data-filter="supplier"]').focus({preventScroll:true});return;
+  }
+  if(button.dataset.tab){
+    if(state.tab!==button.dataset.tab) navigateAnalysis(()=>{state.tab=button.dataset.tab});
+    document.querySelector('[data-tab="'+state.tab+'"]').focus({preventScroll:true});
+  } else if(button.dataset.option){
+    const {option,value}=button.dataset;
+    const routeOption=Object.values(sectionsByTab).some(([key])=>key===option) || option==='poolPart';
+    if(routeOption&&viewOptions[option]!==value){
+      navigateAnalysis(()=>{viewOptions[option]=value},renderActiveView);
+    }else {
+      viewOptions[option]=value;
+      if(option==='productsOpen') render();else renderActiveView();
+    }
+    const newButton=[...document.querySelectorAll('[data-option]')].find(b=>b.dataset.option===option&&b.dataset.value===value);
+    (newButton || (option==='productsOpen' && document.querySelector('.product-toggle')))?.focus?.({preventScroll:true});
+    if(option==='poolPart') {
+      const detail=document.querySelector('.pool-evidence');
+      const entry=detail?.querySelector('button');
+      detail?.scrollIntoView({block:'start'});
+      entry?.focus({preventScroll:true});
+    }
+  }
+});
+startNavigation();
+
+</script>
+</body>
+</html>
