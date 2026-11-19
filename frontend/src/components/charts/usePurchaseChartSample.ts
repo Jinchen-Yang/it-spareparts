@@ -54,7 +54,7 @@ export function usePurchaseChartSample(context?: PurchaseChartSampleContext): Sa
     timer.current = setTimeout(() => {
       if (!accept()) return;
       void cache.get(JSON.stringify([queryKey, key]), async () => {
-        const response = await fetchPurchaseAnalyticsOrders({ ...owner.filters, group_by: owner.groupBy,
+        const response = await fetchPurchaseAnalyticsOrders({ ...owner.filters, scope: { _line: "1" }, group_by: owner.groupBy,
           group_key: key, page: 1, page_size: 1, sort: "order_date", order: "desc" });
         return sampleHtml(response.data.items[0]);
       }).then(html => { if (accept()) callback(ticket, append(html)); })

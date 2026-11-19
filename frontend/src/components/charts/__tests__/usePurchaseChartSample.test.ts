@@ -22,7 +22,7 @@ describe("legacy chart document samples", () => {
     expect(result.current(key, "坐标", "ticket", done)).toContain("正在读取");
     expect(fetchOrders).not.toHaveBeenCalled();
     await act(() => vi.advanceTimersByTimeAsync(220));
-    expect(fetchOrders).toHaveBeenCalledWith({ ...ctx.filters, group_by: "salesperson", group_key: key,
+    expect(fetchOrders).toHaveBeenCalledWith({ ...ctx.filters, scope: { _line: "1" }, group_by: "salesperson", group_key: key,
       page: 1, page_size: 1, sort: "order_date", order: "desc" });
     expect(done).toHaveBeenCalledWith("ticket", expect.stringContaining("CG-&lt;1&gt;"));
     expect(done.mock.calls[0][1]).toContain("&lt;PN&gt; · 真实行描述");
