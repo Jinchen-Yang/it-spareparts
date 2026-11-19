@@ -1,5 +1,5 @@
 // 采购分析页 URL 状态（D-39）：筛选、日期预设、口径多选、group_by、下钻层全部写进
-// URL，可分享/可刷新/可后退。默认值不落 URL（零参数 = 今天 + 采购类型分组 + 三口径并排）。
+// URL，可分享/可刷新/可后退。默认值不落 URL（零参数 = 近 30 天 + 采购类型分组 + 三口径并排）。
 // 多值格式与旧链接兼容规则统一见 utils/analyticsUrlState。
 import type { SetURLSearchParams } from "react-router-dom";
 import type { Dayjs } from "dayjs";
@@ -19,6 +19,7 @@ import {
 } from "../../../utils/analyticsUrlState";
 
 export type AmountBasis = "inc" | "ex" | "paid";
+export const PURCHASE_DEFAULT_DATE_PRESET = "30d";
 
 export const AMOUNT_BASIS_OPTIONS: { value: AmountBasis; label: string }[] = [
   { value: "inc", label: "含税" },
@@ -79,7 +80,7 @@ export function parseAnalyticsUrl(sp: URLSearchParams): AnalyticsUrlState {
   const sortRaw = sp.get("sort");
   const selected = parseUrlSelection(sp, "basis", ALL_BASES);
   return {
-    ...parseAnalyticsDates(sp),
+    ...parseAnalyticsDates(sp, PURCHASE_DEFAULT_DATE_PRESET),
     sourceType: parseUrlList(sp, "source_type"),
     purchaser: parseUrlList(sp, "purchaser"),
     salesperson: parseUrlList(sp, "salesperson"),
@@ -119,7 +120,7 @@ function basisIsDefault(basis: AmountBasis[]): boolean {
 export function serializeAnalyticsState(
   next: Partial<AnalyticsUrlState>,
 ): UrlPatch {
-  const out: UrlPatch = serializeAnalyticsDates(next);
+  const out: UrlPatch = serializeAnalyticsDates(next, PURCHASE_DEFAULT_DATE_PRESET);
   if (next.supplier !== undefined) out.supplier = next.supplier || undefined;
   if (next.purchaseOrderNo !== undefined) out.purchase_order_no = next.purchaseOrderNo || undefined;
   if (next.salesOrderNo !== undefined) out.sales_order_no = next.salesOrderNo || undefined;
@@ -181,15 +182,21 @@ export function useAnalyticsPatch(sp: URLSearchParams, setSp: SetURLSearchParams
     const patch = serializeAnalyticsState(
       opts?.resetPage ? { ...next, page: 1, groupsPage: 1 } : next,
     );
+    if (next.preset !== undefined && (sp.has("drill_from") || sp.has("drill_to"))) {
+      // The user chose a new window while inspecting a comparison period.
+      patch.drill_from = undefined;
+      patch.drill_to = undefined;
+      patch.drill_name = undefined;
+    }
     writeAnalyticsUrlPatch(sp, setSp, patch, opts, ["source_type", "purchaser", "salesperson", "customer", "category", "basis"]);
   };
 }
 
 // ---------------------------------------------------------------- 请求参数（状态 → API）
 
-/** 日期部分：「全部」不传日期；自定义非法回退今天（与组件内展示口径一致）。 */
+/** 「全部」不传日期；自定义非法时沿用采购页默认窗口。 */
 export function resolveAnalyticsRange(state: AnalyticsUrlState, today: Dayjs): DateRange | null {
-  return resolveDateRange(state.preset, state.from, state.to, today);
+  return resolveDateRange(state.preset, state.from, state.to, today, PURCHASE_DEFAULT_DATE_PRESET);
 }
 
 export function toAnalyticsApiFilters(

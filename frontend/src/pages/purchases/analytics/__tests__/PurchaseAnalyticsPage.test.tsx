@@ -1,4 +1,4 @@
-// 采购分析页集成（D-39 PR-4a）：URL 单一真值 —— 默认今天零参数、直开链接恢复筛选与
+// 采购分析页集成（D-39 PR-4a）：URL 单一真值 —— 零参数默认近 30 天、直开链接恢复筛选与
 // 下钻层、切换口径不重新请求、脱敏账号（金额/客户）控件门控与「—」占位、
 // 排序保护回显（ranking_restricted 禁用金额排序）、错误与空态。
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
@@ -73,6 +73,7 @@ import PurchaseAnalyticsPage from "../PurchaseAnalyticsPage";
 // ---------------------------------------------------------------- 假数据（对齐 PR-3a 响应形态）
 
 const TODAY = "2026-10-17";
+const LAST_30_START = "2026-09-18";
 
 const OPTIONS = {
   customers: [{ customer_id: 12, customer: "客户甲" }, { customer_id: 30, customer: "客户乙" }],
@@ -87,7 +88,7 @@ const OPTIONS = {
 };
 
 const echo = (over: Record<string, unknown> = {}) => ({
-  date_from: TODAY, date_to: TODAY,
+  date_from: LAST_30_START, date_to: TODAY,
   source_type: [], purchaser: [], salesperson: [], customer_id: [], category: [],
   group_by: "source_type", group_key: null, ...over,
 });
@@ -228,12 +229,12 @@ afterEach(() => {
 // ---------------------------------------------------------------- 用例
 
 describe("采购分析页：URL 单一真值", () => {
-  it("默认渲染：零参数 URL，默认今天（date_from = date_to = 今天），采购类型分组", async () => {
+  it("默认渲染：零参数 URL，默认含今天的 30 天，采购类型分组", async () => {
     renderPage();
     // 分组表出现 = 汇总已回填
     expect(await screen.findByRole("row", { name: /备件采购/ })).toBeInTheDocument();
     expect(viewSummaryCalls()).toEqual([
-      { date_from: TODAY, date_to: TODAY, group_by: "source_type" },
+      { date_from: LAST_30_START, date_to: TODAY, group_by: "source_type" },
     ]);
     expect(locationSearch).toBe("");
     // KPI：单数/行数/三口径并排（默认全选）——KPI 卡与分组列同名列并存，用 role 区分
@@ -245,6 +246,26 @@ describe("采购分析页：URL 单一真值", () => {
     // 名义占比角标按侧分开（D-39 名义侧裁定）：含税/不含税 KPI 各自的推算占比
     expect(screen.getByText(/名义含税占比/)).toBeInTheDocument();
     expect(screen.getByText(/名义不含税占比/)).toBeInTheDocument();
+  });
+
+  it("显式今天仅查一日，重置后恢复滚动 30 天", async () => {
+    renderPage("/purchases/analytics?preset=today");
+    await waitFor(() => expect(viewSummaryCalls()).toContainEqual({
+      date_from: TODAY, date_to: TODAY, group_by: "source_type",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: /^重\s*置$/ }));
+    await waitFor(() => expect(viewSummaryCalls()).toContainEqual({
+      date_from: LAST_30_START, date_to: TODAY, group_by: "source_type",
+    }));
+    expect(new URLSearchParams(locationSearch).has("preset")).toBe(false);
+  });
+
+  it("无效自定义链接提示实际使用的 30 天范围", async () => {
+    renderPage("/purchases/analytics?preset=custom&from=2026-02-31&to=2026-03-01");
+    expect(await screen.findByText(/自定义区间无效.*30\s*天/)).toBeInTheDocument();
+    expect(viewSummaryCalls()).toContainEqual({
+      date_from: LAST_30_START, date_to: TODAY, group_by: "source_type",
+    });
   });
 
   it("名义侧说明按实际推算方向表述，包含历史缺口翻转", async () => {
@@ -388,7 +409,7 @@ describe("采购分析页：URL 单一真值", () => {
     ).toBe(false);
     // 客户筛选从请求里剔除（带 customer=12 的链接不会打出 403 循环）
     expect(viewSummaryCalls()[0]).toEqual({
-      date_from: TODAY, date_to: TODAY, group_by: "source_type",
+      date_from: LAST_30_START, date_to: TODAY, group_by: "source_type",
     });
     // 下钻层连同抽屉一并收敛：不打订单/明细请求，直接回分组视图
     expect(fetchPurchaseAnalyticsOrders).not.toHaveBeenCalled();
@@ -699,12 +720,12 @@ describe("图表层（Q-A-01 / D-39 补图表）", () => {
     expect(fetchPurchaseAnalyticsSummary).toHaveBeenCalledTimes(1);
   });
 
-  it("默认今天（1 天）趋势按日：同端点第二次请求 group_by=day；切按月再请求 group_by=month", async () => {
+  it("默认 30 天趋势按日：同端点第二次请求 group_by=day；切按月再请求 group_by=month", async () => {
     renderPage();
     expect(await screen.findByRole("row", { name: /备件采购/ })).toBeInTheDocument();
     await waitFor(() => expect(fetchPurchaseAnalyticsSummary.mock.calls.some(
       ([q]) => (q as Record<string, unknown>).group_by === "day"
-        && (q as Record<string, unknown>).date_from === TODAY
+        && (q as Record<string, unknown>).date_from === LAST_30_START
         && (q as Record<string, unknown>).date_to === TODAY,
     )).toBe(true));
     // 手动切按月：趋势层按月再拉（表格主请求不受影响）

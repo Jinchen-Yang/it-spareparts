@@ -8,15 +8,19 @@ import { App } from "antd";
 import { fmt, fmtMoney } from "../shared";
 import {
   fetchPurchaseAnalyticsOrderDetail,
-  type PurchaseAnalyticsOrderDetail,
+  type PurchaseAnalyticsOrderDetail, type PurchaseScope, type PurchaseAnalyticsFilters,
 } from "../../../api/purchaseAnalytics";
 import { readSessionToken, SESSION_EXPIRED_MESSAGE, sessionStale } from "../../../utils/session";
+import DocumentPreview from "./DocumentPreview";
 import type { AmountBasis } from "./urlState";
 
 export interface OrderDetailDrawerProps {
   orderId: number | null;
   category: string[];
   pn?: string | null;
+  scope?: PurchaseScope;
+  previewScope?: PurchaseScope;
+  filters?: PurchaseAnalyticsFilters;
   basis: AmountBasis[];
   /** 所属会话 owner（页级下传，DL-010 返工）：失效时请求前拒发；迟到响应落地 /
    * finally 前比对 localStorage token，换账号后不作废不作数。 */
@@ -70,17 +74,18 @@ function NominalAmountNote({ side, kind, amount }: {
   );
 }
 
-export default function OrderDetailDrawer({ orderId, category, pn, basis, ownerToken, onOwnerStale, onClose }: OrderDetailDrawerProps) {
+export default function OrderDetailDrawer({ orderId, category, pn, scope, previewScope, filters, basis, ownerToken, onOwnerStale, onClose }: OrderDetailDrawerProps) {
   const { message } = App.useApp();
   const [detail, setDetail] = useState<PurchaseAnalyticsOrderDetail | null>(null);
   const [loading, setLoading] = useState(false);
+  const scopeKey = JSON.stringify([scope, filters]);
   const seqRef = useRef(0);
   // onClose 存 ref：父页每次渲染会传新的内联函数，进 effect 依赖会造成重复请求
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const onOwnerStaleRef = useRef(onOwnerStale);
   onOwnerStaleRef.current = onOwnerStale;
-  const categoryKey = category.join(",");
+  const categoryKey = JSON.stringify(category);
 
   useEffect(() => {
     if (orderId == null) {
@@ -99,8 +104,8 @@ export default function OrderDetailDrawer({ orderId, category, pn, basis, ownerT
     const token = readSessionToken();
     setLoading(true);
     setDetail(null);
-    const categories = categoryKey ? categoryKey.split(",") : [];
-    const request = pn
+    const categories = JSON.parse(categoryKey) as string[];
+    const request = scope ? fetchPurchaseAnalyticsOrderDetail(orderId, categories, pn, scope, filters) : pn
       ? fetchPurchaseAnalyticsOrderDetail(orderId, categories, pn)
       : fetchPurchaseAnalyticsOrderDetail(orderId, categories);
     request
@@ -121,7 +126,7 @@ export default function OrderDetailDrawer({ orderId, category, pn, basis, ownerT
         if (sessionStale(token)) { onOwnerStaleRef.current?.(); return; }
         setLoading(false);
       });
-  }, [orderId, categoryKey, pn, ownerToken]);
+  }, [orderId, categoryKey, pn, scopeKey, ownerToken]);
 
   // 行金额只有一列，按含税标记解释；不能复用可能已因单头缺列翻转的 nominal_side。
   // 金额为 null 时不显示标签（包含权限遮蔽），0 则仍是可展示的金额。
@@ -133,10 +138,10 @@ export default function OrderDetailDrawer({ orderId, category, pn, basis, ownerT
     { title: "型号", dataIndex: "pn_std", width: 130, render: (v: string | null) => (
       <span style={{ fontFamily: "monospace", fontSize: 12.5 }}>{v || "—"}</span>
     ) },
-    { title: "描述", dataIndex: "description", ellipsis: true, render: (v: string | null) => v || "—" },
+    { title: "描述", dataIndex: "description", ellipsis: true, render: (v: string | null, row) => v?.trim() || (row.catalog_description ? `目录 · ${row.catalog_description}` : "暂无描述") },
     { title: "品牌", dataIndex: "brand", width: 90, render: (v: string | null) => v || "—" },
     { title: "分类", dataIndex: "category", width: 90, render: (v: string | null) => v || "—" },
-    { title: "数量", dataIndex: "qty", width: 70, align: "right", render: (v: number | null) => fmt(v) },
+    { title: "数量", dataIndex: "qty", width: 95, align: "right", render: (v: number | null, r) => `${fmt(v)} ${r.unit || ""}` },
     { title: "单价", dataIndex: "unit_price", width: 90, align: "right", render: (v: number | null) => fmtMoney(v) },
     { title: "行金额（实付）", dataIndex: "line_amount", width: 110, align: "right", render: (v: number | null) => fmtMoney(v) },
     ...(basis.includes("inc")
@@ -175,7 +180,10 @@ export default function OrderDetailDrawer({ orderId, category, pn, basis, ownerT
               { key: "purchaser", label: "采购员", children: detail.purchaser || "—" },
               { key: "sales", label: "销售人员", children: detail.salesperson || "—" },
               { key: "customer", label: "客户", children: detail.customer || "—" },
-              { key: "linked", label: "关联销售单号", children: detail.linked_sales_order_no || "—" },
+              { key: "linked", label: "关联销售单号", children: detail.linked_sales_order_no && filters
+                ? <DocumentPreview kind="sale" number={detail.linked_sales_order_no} filters={filters}
+                    scope={previewScope ?? scope} ownerToken={ownerToken} onOwnerStale={onOwnerStale}/>
+                : detail.linked_sales_order_no || "—" },
               { key: "supplier", label: "供应商", children: detail.supplier || "/" },
               { key: "projects", label: "项目名称", children: detail.project_names?.join("、") || "/" },
               { key: "tax", label: "税率口径", children: <TaxTag detail={detail} /> },
@@ -200,7 +208,7 @@ export default function OrderDetailDrawer({ orderId, category, pn, basis, ownerT
               message={<>
                 {pn
                   ? `匹配 PN 行合计（${pn}）`
-                  : `匹配分类行合计（${category.join("、")}）`}
+                  : scope ? "当前下钻范围的匹配行合计" : `匹配分类行合计（${category.join("、")}）`}
                 ：{matched.lines} 行
                 {" · "}实付 {fmtMoney(matched.amount_paid)}
                 {" · "}含税 {fmtMoney(matched.amount_inc)}

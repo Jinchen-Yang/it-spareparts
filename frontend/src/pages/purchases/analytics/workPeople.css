@@ -1,0 +1,66 @@
+.pw-people {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.pw-people > .pw-card + .pw-card {
+  margin-top: 0;
+}
+.pw-people-caption,
+.pw-people-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.pw-people-caption {
+  font-size: 12px;
+  margin-bottom: 6px;
+  color: var(--wb-muted);
+}
+.pw-people-caption strong {
+  color: var(--mb-text);
+}
+.pw-people-table th:nth-child(2),
+.pw-person-detail th:nth-child(2) {
+  text-align: left;
+}
+.pw-people-table th button:not(.pw-link) {
+  cursor: pointer;
+  font: inherit;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 4px 0;
+}
+.pw-people-table [aria-sort="descending"],
+.pw-people-table td[data-current] {
+  color: var(--wb-green);
+  background: var(--mb-tag-success-background);
+  font-weight: 650;
+}
+.pw-people-table tbody th,
+.pw-person-detail tbody th {
+  background: transparent;
+}
+.pw-people .pw-controls:has(> .pw-small) {
+  margin-top: 8px;
+}
+.pw-person-detail .pw-name {
+  display: block;
+}
+.pw-people-nav {
+  margin: 4px 0 0;
+}
+.pw-person-tools {
+  justify-content: flex-end;
+}
+@media (max-width: 700px) {
+  .pw-people-table :is(td, th):nth-child(2) {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--mb-surface);
+    border-right: 1px solid var(--wb-line);
+  }
+}

@@ -1,7 +1,7 @@
 // 采购分析图表纯函数（Q-A-01 / D-39 补图表）：趋势粒度推荐、日/月桶排序
 // （「(空)」恒末位）、趋势 / 排行 option（null 断点不画 0、负值换色 + 0 轴参考线）。
 // 约定同 charts/README：null ≠ 0；颜色只从 CHART_COLORS 取。
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   PURCHASE_EMPTY_KEY,
   buildPurchaseRankOption,
@@ -16,6 +16,21 @@ const g = (over: Partial<PurchaseAnalyticsGroup> & { key: string }): PurchaseAna
   label: null, orders: 1, lines: 1,
   amount_inc: null, amount_ex: null, amount_paid: null,
   ...over,
+});
+
+it("both chart tooltips enrich the exact plotted group without substituting its display label", () => {
+  const sample = vi.fn(() => "单据样本");
+  const callback = vi.fn();
+  const group = g({ key: "（无关联销售单）", orders: 2 });
+  const options = [
+    buildPurchaseTrendOption([group], "orders", "采购日期", sample),
+    buildPurchaseRankOption([{ label: "展示名", group }], "orders", "销售人员", sample),
+  ];
+  for (const option of options) {
+    const tooltip = option.tooltip as { formatter: (p: unknown, ticket: string, cb: typeof callback) => string };
+    expect(tooltip.formatter([{ dataIndex: 0 }], "ticket", callback)).toBe("单据样本");
+    expect(sample).toHaveBeenLastCalledWith(group.key, expect.stringContaining("2 单"), "ticket", callback);
+  }
 });
 
 describe("趋势粒度推荐（Q-A-01）", () => {

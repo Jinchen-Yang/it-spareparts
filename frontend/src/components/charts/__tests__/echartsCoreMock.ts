@@ -20,6 +20,7 @@ class FakeZr {
 
 export class FakeChart {
   setOption = vi.fn();
+  dispatchAction = vi.fn();
   resize = vi.fn();
   dispose = vi.fn();
   containPixel = vi.fn(() => true);

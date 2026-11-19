@@ -7,6 +7,7 @@ import AmountBasisSelect from "../../../components/AmountBasisSelect";
 import {
   AMOUNT_BASIS_OPTIONS,
   DEFAULT_BASES,
+  PURCHASE_DEFAULT_DATE_PRESET,
   GROUP_BY_OPTIONS,
   type AnalyticsUrlState,
   type AmountBasis,
@@ -33,6 +34,7 @@ export interface FilterBarProps {
   /** data_customer=false：客户筛选/分组不可用（后端 fail-closed 403）。 */
   customerRestricted: boolean;
   supplierRestricted?: boolean;
+  legacyControls?: boolean;
   onReset: () => void;
 }
 
@@ -58,6 +60,7 @@ export default function FilterBar({
   costRestricted,
   customerRestricted,
   supplierRestricted = false,
+  legacyControls = true,
   onReset,
 }: FilterBarProps) {
   const change = (next: Partial<AnalyticsUrlState>) =>
@@ -84,6 +87,7 @@ export default function FilterBar({
     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
       <DateRangePresets
         preset={state.preset}
+        defaultPreset={PURCHASE_DEFAULT_DATE_PRESET}
         from={state.from}
         to={state.to}
         onChange={({ preset, from, to }) => change({ preset, from, to })}
@@ -127,7 +131,7 @@ export default function FilterBar({
         options={categories.map((v) => ({ value: v, label: v }))}
         onChange={(v: string[]) => change({ category: v })}
       />
-      <Select
+      {legacyControls && <Select
         aria-label="分组维度"
         style={{ width: 116 }}
         value={state.groupBy}
@@ -137,13 +141,13 @@ export default function FilterBar({
           disabled: o.value === "customer" && customerRestricted,
         }))}
         onChange={(v: string) => change({ groupBy: v, groupKey: null, groupsPage: 1 })}
-      />
-      <AmountBasisSelect
+      />}
+      {legacyControls && <AmountBasisSelect
         options={AMOUNT_BASIS_OPTIONS}
         value={costRestricted ? DEFAULT_BASES : state.basis}
         onChange={(v: string[]) => patch({ basis: v as AmountBasis[] })}
         hidden={costRestricted}
-      />
+      />}
       <LookupInput label="供应商" value={state.supplier || ""} disabled={supplierRestricted} onSearch={value => locate({ supplier: value })} />
       <LookupInput label="采购单号" value={state.purchaseOrderNo || ""} onSearch={value => locate({ purchaseOrderNo: value })} />
       <LookupInput label="销售单号" value={state.salesOrderNo || ""} onSearch={value => locate({ salesOrderNo: value })} />

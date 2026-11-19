@@ -1,7 +1,7 @@
 /** EChartContainer 生命周期测试：init/dispose、监听不残留、option 引用门控、
  * 事件桥（绑定一次 + 回调取最新 + zr: 前缀）、三态覆盖层。echarts 全程 mock，不碰 canvas。 */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 vi.mock("../echartsCore", async () => (await import("./echartsCoreMock")).mockModule);
 
@@ -139,4 +139,28 @@ describe("EChartContainer", () => {
     expect(canvasHost.style.width).toBe("100%");
     expect(canvasHost.style.height).toBe("300px");
   });
+});
+
+
+it("键盘聚焦读到提示、方向键查相邻点，回车传回实际图元，Escape 收起", () => {
+  const drill = vi.fn();
+  render(<EChartContainer option={{}} keyboardPoints={[
+    { dataIndex: 0, label: "11月，3单" }, { dataIndex: 2, label: "1月，8单" }
+  ]} onKeyboardActivate={drill} ariaLabel="采购趋势" />);
+  const chart = lastChart(), el = screen.getByRole("img");
+  fireEvent.focus(el);
+  expect(chart.dispatchAction).toHaveBeenLastCalledWith({ type: "showTip", seriesIndex: 0, dataIndex: 0 });
+  fireEvent.keyDown(el, { key: "ArrowRight" });
+  expect(screen.getByRole("status")).toHaveTextContent("1月，8单");
+  expect(chart.dispatchAction).toHaveBeenLastCalledWith({ type: "showTip", seriesIndex: 0, dataIndex: 2 });
+  fireEvent.keyDown(el, { key: "Enter" });
+  expect(drill).toHaveBeenCalledWith(2);
+  fireEvent.keyDown(el, { key: "Escape" });
+  expect(chart.dispatchAction).toHaveBeenLastCalledWith({ type: "hideTip" });
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  fireEvent.keyDown(el, { key: "ArrowRight" });
+  expect(screen.getByRole("status")).toHaveTextContent("11月，3单");
+  expect(chart.dispatchAction).toHaveBeenLastCalledWith({ type: "showTip", seriesIndex: 0, dataIndex: 0 });
+  fireEvent.keyDown(el, { key: "Enter" });
+  expect(drill).toHaveBeenLastCalledWith(0);
 });

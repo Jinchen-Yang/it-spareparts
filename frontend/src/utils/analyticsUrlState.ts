@@ -3,7 +3,7 @@
  * 新链接 url_version=2 使用重复键，值中的逗号原样保留，避免单选时产生歧义。
  */
 import type { SetURLSearchParams } from "react-router-dom";
-import { DEFAULT_DATE_PRESET, isDatePreset } from "../components/DateRangePresets";
+import { DEFAULT_DATE_PRESET, isDatePreset, type DefaultDatePreset } from "../components/DateRangePresets";
 
 /** 与 backend/app/api/query_bounds.py 的分析分页上界一致。 */
 export const ANALYTICS_PAGE_MAX = 10_000;
@@ -49,21 +49,24 @@ export function serializeUrlList(values: (string | number)[]): string[] | undefi
   return unique.length ? unique : undefined;
 }
 
-export function parseAnalyticsDates(sp: URLSearchParams) {
+export function parseAnalyticsDates(sp: URLSearchParams, defaultPreset: DefaultDatePreset = DEFAULT_DATE_PRESET) {
   const preset = sp.get("preset");
   const from = sp.get("from");
   const to = sp.get("to");
   return {
-    preset: isDatePreset(preset) ? preset : DEFAULT_DATE_PRESET,
+    preset: isDatePreset(preset) ? preset : defaultPreset,
     from: preset === "custom" && from && to ? from : null,
     to: preset === "custom" && from && to ? to : null,
   };
 }
 
-export function serializeAnalyticsDates(next: Partial<ReturnType<typeof parseAnalyticsDates>>): UrlPatch {
+export function serializeAnalyticsDates(
+  next: Partial<ReturnType<typeof parseAnalyticsDates>>,
+  defaultPreset: DefaultDatePreset = DEFAULT_DATE_PRESET,
+): UrlPatch {
   if (next.preset === undefined) return {};
   return {
-    preset: next.preset === DEFAULT_DATE_PRESET ? undefined : next.preset,
+    preset: next.preset === defaultPreset ? undefined : next.preset,
     from: next.preset === "custom" ? next.from || undefined : undefined,
     to: next.preset === "custom" ? next.to || undefined : undefined,
   };

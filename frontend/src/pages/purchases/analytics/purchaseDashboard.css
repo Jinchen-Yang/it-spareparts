@@ -1,0 +1,23 @@
+.purchase-dashboard-nav {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+  padding: 5px;
+  border: 1px solid var(--mb-border);
+  border-radius: 8px;
+  background: var(--mb-surface);
+}
+.purchase-dashboard-filter {
+  margin-bottom: 12px;
+}
+.purchase-dashboard-filter .ant-card-body > div:first-child {
+  margin-bottom: 0 !important;
+}
+.purchase-product-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}

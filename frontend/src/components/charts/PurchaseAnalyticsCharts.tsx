@@ -1,9 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import EChartContainer from "./EChartContainer";
 import type { ECOption } from "./echartsCore";
 import { CHART_COLORS } from "./chartTheme";
 import { escapeHtml, moneyAxis, moneyExact } from "../../utils/format";
 import type { PurchaseAnalyticsGroup } from "../../api/purchaseAnalytics";
+import { usePurchaseChartSample, type PurchaseChartSampleContext, type SampleTooltip } from "./usePurchaseChartSample";
 
 /**
  * 采购分析图表（Q-A-01 / D-39 补图表）：日 / 月趋势柱图 + 当前分组维度排行横条图。
@@ -35,6 +36,32 @@ function valueOf(g: PurchaseAnalyticsGroup, metric: PurchaseChartMetric): number
   return v == null || !Number.isFinite(Number(v)) ? null : Number(v);
 }
 
+function pointText(group: PurchaseAnalyticsGroup, axis: string, label: string, metric: PurchaseChartMetric, horizontal: boolean) {
+  const dimension = `${horizontal ? "纵轴" : "横轴"} · ${axis}　${label}`;
+  const metricField = `${horizontal ? "横轴" : "纵轴"} · ${PURCHASE_METRIC_LABELS[metric]}　${fmtValue(metric, valueOf(group, metric))}`;
+  const counts = metric === "orders" ? [] : [`采购单数　${group.orders} 单`];
+  return [dimension, metricField, ...counts, `明细行数　${group.lines} 行`];
+}
+function hitIndex(p: unknown) {
+  const point = (Array.isArray(p) ? p[0] : p) as { dataIndex?: number } | undefined;
+  return point?.dataIndex;
+}
+function usePointClick(onDrill?: (key: string) => void) {
+  const lastTouch = useRef<{ key: string; at: number }>();
+  return (params: unknown, group?: PurchaseAnalyticsGroup) => {
+    if (!group || !onDrill) return;
+    const native = (params as { event?: { event?: { zrByTouch?: boolean; pointerType?: string } } }).event?.event;
+    if (native?.zrByTouch || native?.pointerType === "touch" || native?.pointerType === "pen") {
+      if (lastTouch.current?.key !== group.key || Date.now() - lastTouch.current.at > 5000) {
+        lastTouch.current = { key: group.key, at: Date.now() };
+        return;
+      }
+    }
+    lastTouch.current = undefined;
+    onDrill(group.key);
+  };
+}
+
 /**
  * 日 / 月桶排序：日期文本键升序；「(空)」（无订单日期）恒排最后——与销售侧
  * 「无日期列在末端」同一语义，不猜归属。
@@ -59,18 +86,22 @@ const barItemStyle = (v: number) => ({
 export function buildPurchaseTrendOption(
   groups: PurchaseAnalyticsGroup[],
   metric: PurchaseChartMetric,
+  axis = "采购日期",
+  sample?: SampleTooltip,
 ): ECOption {
   const labels = groups.map((g) => (g.key === PURCHASE_EMPTY_KEY ? "无日期" : g.key));
   return {
     grid: { left: 8, right: 16, top: 24, bottom: 8, containLabel: true },
     tooltip: {
-      trigger: "item",
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
       confine: true,
-      formatter: (p: unknown) => {
-        const { dataIndex, value } = p as { dataIndex: number; value: number | null };
-        const g = groups[dataIndex];
-        const name = g ? (g.key === PURCHASE_EMPTY_KEY ? "无日期" : g.key) : "";
-        return `<b>${escapeHtml(name)}</b><br/>${PURCHASE_METRIC_LABELS[metric]}：${fmtValue(metric, value)}`;
+      extraCssText: "max-width: min(340px, calc(100vw - 32px)); white-space: normal; overflow-wrap: anywhere;",
+      formatter: (p: unknown, ticket: string, callback?: (ticket: string, html: string) => void) => {
+        const index = hitIndex(p);
+        if (index == null || !groups[index]) return "";
+        const text = pointText(groups[index], axis, labels[index], metric, false).map(escapeHtml).join("<br/>");
+        return sample && callback ? sample(groups[index].key, text, ticket, callback) : text;
       },
     },
     xAxis: {
@@ -109,10 +140,12 @@ export function buildPurchaseTrendOption(
   } as ECOption;
 }
 
-/** 排行横条 option：按传入顺序（表格已排好序）；null 项剔除并在组件副标题注明。 */
+/** 排行横条 option：按传入顺序（调用方依当前指标排序）；null 项剔除并在组件副标题注明。 */
 export function buildPurchaseRankOption(
   items: { label: string; group: PurchaseAnalyticsGroup }[],
   metric: PurchaseChartMetric,
+  axis = "分组",
+  sample?: SampleTooltip,
 ): ECOption {
   const present = items.filter((i) => valueOf(i.group, metric) !== null);
   return {
@@ -134,11 +167,15 @@ export function buildPurchaseRankOption(
       axisLine: { lineStyle: { color: CHART_COLORS.axisLine } },
     },
     tooltip: {
-      trigger: "item",
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
       confine: true,
-      formatter: (p: unknown) => {
-        const { name, value } = p as { name: string; value: number };
-        return `<b>${escapeHtml(name)}</b><br/>${PURCHASE_METRIC_LABELS[metric]}：${fmtValue(metric, value)}`;
+      extraCssText: "max-width: min(340px, calc(100vw - 32px)); white-space: normal; overflow-wrap: anywhere;",
+      formatter: (p: unknown, ticket: string, callback?: (ticket: string, html: string) => void) => {
+        const index = hitIndex(p), hit = index == null ? undefined : present[index];
+        if (!hit) return "";
+        const text = pointText(hit.group, axis, hit.label, metric, true).map(escapeHtml).join("<br/>");
+        return sample && callback ? sample(hit.group.key, text, ticket, callback) : text;
       },
     },
     series: [{
@@ -176,16 +213,23 @@ export function buildPurchaseRankOption(
 }
 
 export function PurchaseTrendChart({
-  groups, metric, loading, onBucketClick,
+  groups, metric, loading, onBucketClick, axis = "采购日期", sampleContext,
 }: {
   groups: PurchaseAnalyticsGroup[];
   metric: PurchaseChartMetric;
+  axis?: string;
   loading?: boolean;
+  sampleContext?: PurchaseChartSampleContext;
   /** 点某根柱 → 下钻到该日 / 月的订单列表（与表格行点击同一 drill 语义）。 */
   onBucketClick?: (key: string) => void;
 }) {
   const sorted = useMemo(() => sortTrendGroups(groups), [groups]);
-  const option = useMemo(() => buildPurchaseTrendOption(sorted, metric), [sorted, metric]);
+  const sample = usePurchaseChartSample(sampleContext);
+  const option = useMemo(() => buildPurchaseTrendOption(sorted, metric, axis, sample), [sorted, metric, axis, sample]);
+  const click = usePointClick(onBucketClick);
+  const points = useMemo(() => sorted.flatMap((g, i) => valueOf(g, metric) == null ? [] : [{
+    dataIndex: i, label: pointText(g, axis, g.key === PURCHASE_EMPTY_KEY ? "无日期" : g.key, metric, false).join("，")
+  }]), [sorted, metric, axis]);
   return (
     <EChartContainer
       option={option}
@@ -194,12 +238,13 @@ export function PurchaseTrendChart({
       emptyText="当前筛选下没有趋势数据"
       height={260}
       ariaLabel={`采购趋势：${PURCHASE_METRIC_LABELS[metric]}`}
+      keyboardPoints={points}
+      onKeyboardActivate={i => onBucketClick?.(sorted[i].key)}
       onEvents={{
         click: (params) => {
           const dataIndex = (params as { dataIndex?: number }).dataIndex;
           if (dataIndex == null || !onBucketClick) return;
-          const g = sorted[dataIndex];
-          if (g) onBucketClick(g.key);
+          click(params, sorted[dataIndex]);
         },
       }}
     />
@@ -207,21 +252,30 @@ export function PurchaseTrendChart({
 }
 
 export function PurchaseRankBar({
-  groups, metric, loading, labelOf, onItemClick,
+  groups, metric, loading, labelOf, onItemClick, axis = "分组", sampleContext,
 }: {
   groups: PurchaseAnalyticsGroup[];
   metric: PurchaseChartMetric;
+  axis?: string;
   loading?: boolean;
+  sampleContext?: PurchaseChartSampleContext;
   /** 分组行 → 显示名（与表格同标签：客户名 / label / key）。 */
   labelOf: (g: PurchaseAnalyticsGroup) => string;
   /** 点某条 → 下钻该组（与表格行点击同一 drill 语义，回传分组键）。 */
   onItemClick?: (key: string) => void;
 }) {
   const items = useMemo(
-    () => groups.map((g) => ({ label: labelOf(g), group: g })),
-    [groups, labelOf],
+    () => groups.map((g) => ({ label: labelOf(g), group: g })).sort((a, b) =>
+      (valueOf(b.group, metric) ?? -Infinity) - (valueOf(a.group, metric) ?? -Infinity)),
+    [groups, labelOf, metric],
   );
-  const option = useMemo(() => buildPurchaseRankOption(items, metric), [items, metric]);
+  const sample = usePurchaseChartSample(sampleContext);
+  const option = useMemo(() => buildPurchaseRankOption(items, metric, axis, sample), [items, metric, axis, sample]);
+  const present = useMemo(() => items.filter(i => valueOf(i.group, metric) !== null), [items, metric]);
+  const points = useMemo(() => present.map(({ group, label }, i) => ({
+    dataIndex: i, label: pointText(group, axis, label, metric, true).join("，")
+  })), [present, metric, axis]);
+  const click = usePointClick(onItemClick);
   const missing = items.filter((i) => valueOf(i.group, metric) === null).length;
   const height = Math.max(160, Math.min(items.length, 30) * 26 + 24);
   return (
@@ -233,12 +287,12 @@ export function PurchaseRankBar({
         emptyText="当前筛选下没有可画的数据"
         height={height}
         ariaLabel={`采购分组排行：${PURCHASE_METRIC_LABELS[metric]}`}
+        keyboardPoints={points}
+        onKeyboardActivate={i => onItemClick?.(present[i].group.key)}
         onEvents={{
-          click: (params) => {
-            const name = (params as { name?: string }).name;
-            if (!name || !onItemClick) return;
-            const hit = items.find((i) => i.label === name);
-            if (hit) onItemClick(hit.group.key);
+          click: params => {
+            const i = hitIndex(params);
+            if (i !== undefined) click(params, present[i]?.group);
           },
         }}
       />
