@@ -311,7 +311,9 @@ export default function PurchaseAnalyticsDashboard() {
             {nav}
             <Card size="small" className="purchase-dashboard-filter">
               <FilterBar
-                state={effective}
+                state={drill && sp.has("drill_from") && sp.has("drill_to")
+                  ? { ...effective, preset: "custom", from: sp.get("drill_from"), to: sp.get("drill_to") }
+                  : effective}
                 patch={patchFilters}
                 legacyControls={false}
                 sourceTypes={options?.source_types ?? []}

@@ -182,6 +182,12 @@ export function useAnalyticsPatch(sp: URLSearchParams, setSp: SetURLSearchParams
     const patch = serializeAnalyticsState(
       opts?.resetPage ? { ...next, page: 1, groupsPage: 1 } : next,
     );
+    if (next.preset !== undefined && (sp.has("drill_from") || sp.has("drill_to"))) {
+      // The user chose a new window while inspecting a comparison period.
+      patch.drill_from = undefined;
+      patch.drill_to = undefined;
+      patch.drill_name = undefined;
+    }
     writeAnalyticsUrlPatch(sp, setSp, patch, opts, ["source_type", "purchaser", "salesperson", "customer", "category", "basis"]);
   };
 }

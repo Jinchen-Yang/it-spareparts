@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "../../../../test/an
 import type { WorkbenchProps } from "../WorkbenchUI";
 import Dashboard from "../PurchaseAnalyticsDashboard";
 import { makeReadCache } from "../useDashboardRead";
+import { businessToday } from "../../../../utils/date";
 
 const calls = vi.hoisted(() => ({ options: vi.fn(), orders: vi.fn() }));
 vi.mock("../../../../api/purchaseAnalytics", async (original) => ({
@@ -48,6 +49,24 @@ function mount(path: string) {
   );
 }
 describe("采购分析正式路由", () => {
+  it("从上期钻入后显示实际区间，重新选日期只替换期间并保留分组", async () => {
+    mount("/purchases/analytics?view=compare&preset=30d&drill=%7B%22type%22%3A%22A%22%7D&drill_from=2026-09-01&drill_to=2026-09-30&drill_name=上期");
+    await waitFor(() => expect(calls.orders).toHaveBeenLastCalledWith(expect.objectContaining({
+      date_from: "2026-09-01", date_to: "2026-09-30", scope: { type: "A" },
+    })));
+    expect(screen.getByDisplayValue("2026-09-01")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("2026-09-30")).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "日期预设" }));
+    fireEvent.click(await screen.findByTitle("7 天"));
+    const today = businessToday();
+    await waitFor(() => expect(calls.orders).toHaveBeenLastCalledWith(expect.objectContaining({
+      date_from: today.subtract(6, "day").format("YYYY-MM-DD"), date_to: today.format("YYYY-MM-DD"),
+      scope: { type: "A" },
+    })));
+    const query = new URLSearchParams(screen.getByTestId("search").textContent || "");
+    expect(query.get("preset")).toBe("7d");
+    expect(query.has("drill_from") || query.has("drill_to") || query.has("drill_name")).toBe(false);
+  });
   it("从分享链接首次进入个人时，返回保留人员总榜的排序和页码", async () => {
     mount("/purchases/analytics?view=work&wb_workBuyer=%22A%22&wb_workRank=amount&wb_peoplePage=2");
     fireEvent.click(await screen.findByRole("button", { name: "返回上一个面板" }));
