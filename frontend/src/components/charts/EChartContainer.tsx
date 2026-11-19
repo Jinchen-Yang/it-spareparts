@@ -128,7 +128,8 @@ export default function EChartContainer({
         onFocus={canInspect ? () => setFocusedPoint(0) : undefined}
         onBlur={canInspect ? () => { setFocusedPoint(null); chartRef.current?.dispatchAction({ type: "hideTip" }); } : undefined}
         onKeyDown={canInspect ? e => {
-          const i = pointIndex ?? 0, last = keyboardPoints.length - 1;
+          // Escape 收起后焦点仍在图上，再按方向键从第一个数据点开始。
+          const i = pointIndex ?? -1, last = keyboardPoints.length - 1;
           if (e.key === "Escape") {
             setFocusedPoint(null);
             chartRef.current?.dispatchAction({ type: "hideTip" });

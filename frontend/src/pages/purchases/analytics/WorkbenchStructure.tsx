@@ -10,6 +10,8 @@ import {
   num,
   percent,
   positivePage,
+  quantityUnit,
+  QuantityUnitControl,
   Segments,
   useMeasure,
 } from "./WorkbenchMeasures";
@@ -179,7 +181,7 @@ function CustomerMix() {
   const { costRestricted, scope } = useWorkbench();
   const { basis, get, set } = useMeasure();
   const mode = get("mixMetric", "amount") === "qty" ? "qty" : costRestricted ? "orders" : "amount";
-  const unit = scope?.unit || get("mixUnit", "件"),
+  const unit = quantityUnit(scope, get("mixUnit", "件")),
     colors = [
       "var(--mb-success)",
       "var(--mb-accent)",
@@ -203,16 +205,8 @@ function CustomerMix() {
           onChange={(v) => set({ mixMetric: v })}
         />
         {mode === "qty" && (
-          <CubeBlock query={{ row: "unit", metric: "orders", basis, page_size: 100 }}>
-            {(d) => (
-              <Pick
-                label="构成数量单位"
-                value={unit}
-                options={[...new Set([unit, ...d.rows.flatMap((r) => (r.key ? [r.key] : []))])].map((k) => [k, k])}
-                onChange={(v) => set({ mixUnit: v })}
-              />
-            )}
-          </CubeBlock>
+          <QuantityUnitControl label="构成数量单位" unit={unit}
+            onChange={(v) => set({ mixUnit: v })} />
         )}
       </div>
       <CubeBlock

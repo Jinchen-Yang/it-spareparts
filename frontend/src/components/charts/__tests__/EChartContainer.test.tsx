@@ -158,4 +158,9 @@ it("键盘聚焦读到提示、方向键查相邻点，回车传回实际图元�
   fireEvent.keyDown(el, { key: "Escape" });
   expect(chart.dispatchAction).toHaveBeenLastCalledWith({ type: "hideTip" });
   expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  fireEvent.keyDown(el, { key: "ArrowRight" });
+  expect(screen.getByRole("status")).toHaveTextContent("11月，3单");
+  expect(chart.dispatchAction).toHaveBeenLastCalledWith({ type: "showTip", seriesIndex: 0, dataIndex: 0 });
+  fireEvent.keyDown(el, { key: "Enter" });
+  expect(drill).toHaveBeenLastCalledWith(0);
 });

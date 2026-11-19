@@ -6,6 +6,7 @@ import {
   GroupName,
   MeasureTools,
   percent,
+  quantityUnit,
   Segments,
   useMeasure,
 } from "./WorkbenchMeasures";
@@ -65,12 +66,13 @@ function HeatTable({
 }: {
   data: Cube;
   query: CubeQuery;
-  unit: string;
+  unit: string | null;
   share: boolean;
   compact: boolean;
 }) {
   if (!data.rows.length || !data.columns.length) return <EmptyNote />;
   const cells = new Map(data.cells.map((c) => [JSON.stringify([c.row_key, c.column_key]), c]));
+  const hasValues = data.cells.some((c) => c.value != null);
   const peak = Math.max(0, ...data.cells.map((c) => c.value ?? 0));
   return (
     <>
@@ -155,7 +157,9 @@ function HeatTable({
         <span>
           {data.rows.length}/{data.total_rows} 行 · {data.columns.length}/{data.total_columns} 列
         </span>
-        <span>色阶 0 至 {display(peak, query.metric, unit)} · — 无记录或无金额</span>
+        <span>{hasValues
+          ? <>色阶 0 至 {display(peak, query.metric, unit)} · — 无记录或指标缺失</>
+          : "当前指标无可比数值；有单据的格子可点击核对采购单。"}</span>
       </div>
     </>
   );
@@ -173,7 +177,7 @@ export function MatrixCard({
 }) {
   const { metric: chosen, basis, unit: chosenUnit, get, set } = useMeasure(!compact),
     { scope } = useWorkbench();
-  const unit = scope?.unit || chosenUnit,
+  const unit = quantityUnit(scope, chosenUnit),
     metric = metricOverride || chosen;
   const page = compact ? 1 : pageOf(get("rpage", "1")),
     cp = compact ? 1 : pageOf(get("cpage", "1"));

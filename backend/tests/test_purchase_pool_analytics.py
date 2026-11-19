@@ -1,3 +1,4 @@
+import json
 from datetime import date, timedelta
 from decimal import Decimal as D
 
@@ -97,6 +98,44 @@ def test_prices_are_weighted_within_unit_and_scope(db, inventory):
     assert len(members) == 3
     absent = next(r for r in members if r["pn"] == "MEM-Z")
     assert absent["orders"] == 0 and absent["purchase_metrics"]["price"] is None
+
+
+def test_omitted_evidence_unit_means_only_missing_unit_and_matches_drills(db, inventory):
+    """The UI omits unit=null on the wire; absence must remain IS NULL, never all units."""
+    a, b, gid = inventory
+    client = client_for(db, username="pool-missing-unit", role="admin")
+
+    def get(path, **params):
+        response = client.get(URL + path, params=params)
+        assert response.status_code == 200, response.text
+        return response.json()["items"]
+
+    selected = next(item for item in get("/parts") if item["part_id"] == a and item["unit"] is None)
+    assert (selected["orders"], selected["lines"], selected["quantity"]) == (1, 1, None)
+    sources = get("/sources", part_id=a)
+    assert len(sources) == 1
+    source = sources[0]
+    assert (source["orders"], source["lines"], source["quantity"]) == (1, 1, None)
+    assert source["purchase_metrics"]["price"] is None
+    known = get("/sources", part_id=a, unit="件")[0]
+    assert (known["orders"], known["lines"], known["quantity"]) == (2, 3, 6)
+    assert get("/sources", part_id=a, scope='{"unit":null}') == sources
+
+    members = get("/members", pool_id=gid)
+    by_part = {member["part_id"]: member for member in members}
+    assert by_part[a]["orders"] == 1 and by_part[a]["quantity"] is None
+    assert by_part[b]["orders"] == 0 and by_part[b]["quantity"] is None
+    assert all(member["purchase_metrics"]["price"] is None for member in members)
+    assert get("/members", pool_id=gid, scope='{"unit":null}') == members
+
+    for part_id, expected, supplier in [(a, source["orders"], source["supplier_id"]), (a, by_part[a]["orders"], None), (b, by_part[b]["orders"], None)]:
+        scope = {"partId": str(part_id), "unit": None, "_line": "1"}
+        if supplier is not None:
+            scope["supplier"] = str(supplier)
+        response = client.get("/api/purchases/analytics/orders", params={"scope": json.dumps(scope)})
+        assert response.status_code == 200, response.text
+        assert response.json()["total"] == expected
+        assert all(product["unit"] is None for order in response.json()["items"] for product in order["products"])
 
 
 @pytest.mark.parametrize(

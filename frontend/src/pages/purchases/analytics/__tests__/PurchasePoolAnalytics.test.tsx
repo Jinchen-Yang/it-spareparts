@@ -56,6 +56,23 @@ function mount(entry = "/") {
   return { onDrill, onOwnerStale };
 }
 describe("采购 PN 工作台", () => {
+  it("单位未填的来源、成员使用 null 单位，采购单下钻保留相同范围", async () => {
+    const missingUnit = { ...row, unit: null, quantity: null };
+    api.parts.mockResolvedValue({ data: { items: [missingUnit], price_visible: true, supplier_visible: true, has_more: false } });
+    api.sources.mockResolvedValue({ data: { items: [{ ...missingUnit, supplier: "未知单位来源", supplier_id: 23 }], has_more: false } });
+    api.members.mockResolvedValue({ data: { items: [{ ...missingUnit, part_id: 8, pn: "同池 PN" }], has_more: false } });
+    const { onDrill } = mount();
+    fireEvent.click(await screen.findByRole("button", { name: /PN-7.*目录/ }));
+    const source = await screen.findByRole("button", { name: "PN-7 · 未知单位来源 · 采购单" });
+    for (const fetch of [api.sources, api.members]) {
+      expect(fetch.mock.calls[0][1].unit).toBeNull();
+      expect(JSON.parse(fetch.mock.calls[0][1].scope)).toEqual({ buyer: "经办" });
+    }
+    fireEvent.click(source);
+    expect(onDrill).toHaveBeenLastCalledWith({ partId: "7", pn: "PN-7", unit: null, supplier: "23", _line: "1" }, expect.any(String));
+    fireEvent.click(screen.getByRole("button", { name: "同池 PN 的采购单" }));
+    expect(onDrill).toHaveBeenLastCalledWith({ partId: "8", pn: "同池 PN", unit: null, _line: "1" }, expect.any(String));
+  });
   it("在选中 PN 后才取价区间与成员，下钻携带单位及供应商 ID", async () => {
     api.parts.mockResolvedValue({
       data: { items: [row], price_visible: true, supplier_visible: true, has_more: false },

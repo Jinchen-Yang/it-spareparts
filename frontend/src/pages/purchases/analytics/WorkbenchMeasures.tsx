@@ -9,7 +9,7 @@ import {
   type WbMetric,
 } from "../../../api/purchaseWorkbench";
 import { formatMoney, qty } from "../../../utils/format";
-import { EmptyNote, Guide, Pick, QueryBlock, useSetting, useWorkbench } from "./WorkbenchUI";
+import { EmptyNote, Guide, Pick, QueryBlock, useSetting, useWorkbench, type DrillScope } from "./WorkbenchUI";
 import DocumentPreview from "./DocumentPreview";
 import WorkbenchChartPoint from "./WorkbenchChartPoint";
 
@@ -44,8 +44,12 @@ export const num = (n: number | null | undefined) =>
   n == null ? "—" : n.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
 export const cash = (n: number | null | undefined) => formatMoney(n, { prefix: "¥" });
 export const percent = (n: number | null | undefined) => (n == null ? "—" : (n * 100).toFixed(1) + "%");
-export function display(n: number | null | undefined, metric: WbMetric, unit: string) {
-  if (n == null) return "—";
+/** 页面精确筛选可以指定未填单位。 */
+export function quantityUnit(scope: DrillScope | undefined, fallback: string): string | null {
+  return scope && Object.prototype.hasOwnProperty.call(scope, "unit") ? scope.unit : fallback;
+}
+export function display(n: number | null | undefined, metric: WbMetric, unit: string | null) {
+  if (n == null || (metric === "qty" && unit === null)) return "—";
   if (metric === "amount" || metric === "avgOrder") return cash(n);
   const suffix = { orders: " 单", lines: " 行", qty: " " + unit, suppliers: " 家", pns: " 个" };
   return (metric === "qty" ? qty(n) : num(n)) + suffix[metric];
@@ -80,6 +84,32 @@ export function CubeBlock({ query, children }: { query: CubeQuery; children: (re
     </QueryBlock>
   );
 }
+export function QuantityUnitControl({
+  unit,
+  label = "数量单位",
+  onChange,
+}: {
+  unit: string | null;
+  label?: string;
+  onChange: (unit: string) => void;
+}) {
+  const { scope } = useWorkbench();
+  if (scope && Object.prototype.hasOwnProperty.call(scope, "unit")) {
+    return <span className="pw-pick" aria-label={label}>{unit === null
+      ? "单位未填，采购量不可比较"
+      : `${label} · ${unit}（页面筛选）`}</span>;
+  }
+  return (
+    <CubeBlock query={{ row: "unit", metric: "orders", basis: "paid", page_size: 100 }}>
+      {(data) => {
+        const units = data.rows.flatMap((r) => r.key ? [r.key] : []);
+        return <Pick label={label} value={unit || ""}
+          options={[...new Set([...(unit ? [unit] : []), ...units])].map((u) => [u, u])}
+          onChange={onChange} />;
+      }}
+    </CubeBlock>
+  );
+}
 export function MeasureTools({ average = false, top = false }: { average?: boolean; top?: boolean }) {
   const { metric, basis, unit, choices, get, set } = useMeasure(average);
   const { scope } = useWorkbench();
@@ -100,20 +130,8 @@ export function MeasureTools({ average = false, top = false }: { average?: boole
         />
       )}
       {metric === "qty" && (
-        <CubeBlock query={{ row: "unit", metric: "orders", basis, page_size: 100 }}>
-          {(data) => {
-            const units = data.rows.map((r) => r.key).filter((u): u is string => u !== null && u !== "");
-            const current = scope?.unit || unit;
-            return (
-              <Pick
-                label="数量单位"
-                value={current}
-                options={[...new Set([current, ...units])].map((u) => [u, u])}
-                onChange={(v) => set({ unit: v, rpage: "", cpage: "" })}
-              />
-            );
-          }}
-        </CubeBlock>
+        <QuantityUnitControl unit={quantityUnit(scope, unit)}
+          onChange={(v) => set({ unit: v, rpage: "", cpage: "" })} />
       )}
       {top && (
         <Pick
@@ -178,7 +196,7 @@ export function RankCard({
   title: string;
   note: string;
   query: CubeQuery;
-  unit: string;
+  unit: string | null;
 }) {
   return (
     <Guide title={title} note={note}>
@@ -214,7 +232,7 @@ export function RankCard({
                       y={[dimensionNames[query.row], row.label]}
                       detail={query.row === "pn" ? [["目录描述", row.description || "未填写"]] : []}
                     >
-                      <span className="pw-rank">{i + 1}</span>
+                      <span className="pw-rank">{row.value == null ? "—" : i + 1}</span>
                       {isDocument ? <span /> : <GroupName item={row} dim={query.row} />}
                       <strong>{display(row.value, query.metric, unit)}</strong>
                       <span className="pw-bar" aria-hidden="true">

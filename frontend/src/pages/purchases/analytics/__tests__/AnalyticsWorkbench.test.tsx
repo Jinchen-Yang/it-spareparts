@@ -58,6 +58,30 @@ function sample(q: CubeQuery): Cube {
     previous_to: "2026-10-31",
   };
 }
+function quantitySample(q: CubeQuery): Cube {
+  const result = sample(q);
+  if (q.row === "unit") {
+    result.rows = ["件", "套"].map(unit => ({ ...result.rows[0], key: unit, label: unit }));
+    result.total_rows = 2;
+  }
+  if (q.metric === "qty") {
+    const value = q.scope?.unit === null ? null : 12;
+    result.total.value = value;
+    result.rows = result.rows.map(row => ({ ...row, value }));
+  }
+  if (q.column) {
+    result.columns = [{ ...result.rows[0], key: "列甲", label: "列甲" }];
+    result.cells = [{ ...result.total, row_key: "a", column_key: "列甲",
+      scope: { ...q.scope, [q.row]: "a", [q.column]: "列甲", _line: "1" } }];
+    result.total_columns = 1;
+  }
+  return result;
+}
+const quantityViews = [
+  ["boards", "/?wb_metric=qty&wb_unit=套"],
+  ["matrix", "/?wb_metric=qty&wb_unit=套"],
+  ["structure", "/?wb_struct=links&wb_mixMetric=qty&wb_mixUnit=套"],
+] as const;
 function Location() {
   return <output data-testid="location">{useLocation().search}</output>;
 }
@@ -83,6 +107,78 @@ afterEach(() => {
   localStorage.clear();
 });
 describe("经营分析工作台", () => {
+  it.each([
+    ["amount", false], ["orders", false], ["lines", false], ["qty", false], ["lines", true],
+  ] as const)("%s 缺值不授名次且矩阵不显示虚构色阶（成本受限 %s）", async (metric, costRestricted) => {
+    requests.cube.mockImplementation(async (_filters, q: CubeQuery) => {
+      const result = quantitySample(q);
+      result.rows = result.rows.map(row => ({ ...row, value: null }));
+      result.cells = result.cells.map(cell => ({ ...cell, value: null }));
+      return { data: result };
+    });
+    mount({ costRestricted }, `/?wb_metric=${metric}`);
+    const rank = await screen.findByRole("button", { name: "采购员排行 · 对象甲，查看采购记录" });
+    expect(within(rank).getByText("—", { selector: ".pw-rank" })).toBeInTheDocument();
+    fireEvent.click(rank);
+    expect(props.onDrill).toHaveBeenLastCalledWith(expect.objectContaining({ buyer: "a" }), expect.any(String));
+    cleanup();
+    // Crossed groups can contain orders while their selected metric is missing.
+    requests.cube.mockImplementation(async (_filters, q: CubeQuery) => {
+      const result = quantitySample(q);
+      result.rows = result.rows.map(row => ({ ...row, value: null }));
+      result.cells = result.cells.map(cell => ({ ...cell, value: null }));
+      return { data: result };
+    });
+    mount({ view: "matrix", costRestricted }, `/?wb_metric=${metric}`);
+    const cell = (await screen.findAllByRole("button", { name: "对象甲 × 列甲 · —" }))[0];
+    expect(screen.queryByText(/色阶 0 至/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("当前指标无可比数值；有单据的格子可点击核对采购单。").length).toBeGreaterThan(0);
+    fireEvent.click(cell);
+    expect(props.onDrill).toHaveBeenLastCalledWith(expect.objectContaining({ buyer: "a", type: "列甲" }), expect.any(String));
+  });
+  it.each(quantityViews)("%s 保留页面的未填单位范围，不回退或将未知量计零", async (view, url) => {
+    requests.cube.mockImplementation(async (_filters, q: CubeQuery) => ({ data: quantitySample(q) }));
+    mount({ view, scope: { unit: null, buyer: "甲" } }, url);
+    await waitFor(() => expect(requests.cube.mock.calls.some(([, q]) => q.metric === "qty")).toBe(true));
+    const quantities = requests.cube.mock.calls.filter(([, q]) => q.metric === "qty");
+    expect(quantities.every(([, q]) => q.scope.unit === null && q.scope.buyer === "甲")).toBe(true);
+    expect(screen.queryByText("当前精确筛选未包含该分组。")).not.toBeInTheDocument();
+    expect(screen.getByText("单位未填，采购量不可比较")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /数量单位/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/0 件|0 套/)).not.toBeInTheDocument();
+    if (view !== "structure") {
+      const label = view === "boards" ? "采购员排行 · 对象甲，查看采购记录" : "对象甲 × 列甲 · —";
+      fireEvent.click((await screen.findAllByRole("button", { name: label }))[0]);
+      expect(props.onDrill).toHaveBeenLastCalledWith(expect.objectContaining({ unit: null }), expect.any(String));
+    }
+  });
+  it.each(quantityViews)("%s 的页面指定单位优先于旧偏好，按同单位请求及下钻", async (view, url) => {
+    requests.cube.mockImplementation(async (_filters, q: CubeQuery) => ({ data: quantitySample(q) }));
+    mount({ view, scope: { unit: "件" } }, url);
+    const label = view === "boards" ? "采购员排行 · 对象甲，查看采购记录"
+      : view === "matrix" ? "对象甲 × 列甲 · 12 件" : "对象甲 × 列甲";
+    fireEvent.click((await screen.findAllByRole("button", { name: label }))[0]);
+    expect(props.onDrill).toHaveBeenLastCalledWith(expect.objectContaining({ unit: "件" }), expect.any(String));
+    const quantities = requests.cube.mock.calls.filter(([, q]) => q.metric === "qty");
+    expect(quantities.length).toBeGreaterThan(0);
+    expect(quantities.every(([, q]) => q.scope.unit === "件")).toBe(true);
+    expect(screen.getByText(/数量单位 · 件（页面筛选）/)).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /数量单位/ })).not.toBeInTheDocument();
+  });
+  it.each(quantityViews)("%s 没有页面单位时允许切换，排序查询与下钻沿用所选单位", async (view, url) => {
+    requests.cube.mockImplementation(async (_filters, q: CubeQuery) => ({ data: quantitySample(q) }));
+    mount({ view }, url);
+    const picker = await screen.findByRole("combobox", { name: /数量单位/ });
+    expect(picker).toHaveValue("套");
+    fireEvent.change(picker, { target: { value: "件" } });
+    await waitFor(() => expect(requests.cube.mock.calls.some(([, q]) => q.metric === "qty" && q.scope.unit === "件")).toBe(true));
+    const label = view === "boards" ? "采购员排行 · 对象甲，查看采购记录"
+      : view === "matrix" ? "对象甲 × 列甲 · 12 件" : "对象甲 × 列甲";
+    fireEvent.click((await screen.findAllByRole("button", { name: label }))[0]);
+    expect(props.onDrill).toHaveBeenLastCalledWith(expect.objectContaining({ unit: "件" }), expect.any(String));
+    const quantities = requests.cube.mock.calls.filter(([, q]) => q.metric === "qty");
+    expect(quantities[quantities.length - 1][1].scope.unit).toBe("件");
+  });
   it("首屏 KPI 和人员排行共用一次聚合，请求保留 PN 的行级钻取条件", async () => {
     mount({ scope: { pn: "P-1", _line: "1" } });
     const kpi = await screen.findByLabelText("当前筛选摘要");

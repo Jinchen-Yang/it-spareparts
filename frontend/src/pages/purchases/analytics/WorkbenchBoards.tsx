@@ -12,6 +12,7 @@ import {
   num,
   percent,
   readTop,
+  quantityUnit,
   useMeasure,
 } from "./WorkbenchMeasures";
 import { Drill, EmptyNote, Guide, Pick, QueryBlock, useWorkbench } from "./WorkbenchUI";
@@ -88,7 +89,7 @@ export default function WorkbenchBoards() {
   const { governance } = useLocalRestrictions();
   const { metric, basis, unit: chosen, get, set } = useMeasure();
   const top = readTop(get("top", "5")),
-    unit = scope?.unit || chosen;
+    unit = quantityUnit(scope, chosen);
   const mode = get("boards", "dimensions") === "special" ? "special" : "dimensions";
   const dims: WbDimension[] = [
     "buyer",
