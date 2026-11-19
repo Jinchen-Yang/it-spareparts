@@ -515,6 +515,8 @@ export default function PurchaseAnalyticsPage() {
                   />
                 ) : (
                   <PurchaseTrendChart
+                    sampleContext={{ filters: apiFilters, groupBy: trendGran, ownerToken,
+                      onOwnerStale: notifyOwnerStale, refreshKey: retryTick }}
                     axis={trendGran === "day" ? "采购日期" : "采购月"}
                     groups={trendSummary?.groups ?? []}
                     metric={activeMetric}
@@ -533,6 +535,8 @@ export default function PurchaseAnalyticsPage() {
                   style={{ flex: "1 1 360px", minWidth: 0, maxWidth: "100%" }}
                 >
                   <PurchaseRankBar
+                    sampleContext={{ filters: apiFilters, groupBy: effectiveGroupBy, ownerToken,
+                      onOwnerStale: notifyOwnerStale, refreshKey: retryTick }}
                     groups={summary?.groups ?? []}
                     metric={activeMetric}
                     loading={summaryLoading}

@@ -4,6 +4,7 @@ import type { ECOption } from "./echartsCore";
 import { CHART_COLORS } from "./chartTheme";
 import { escapeHtml, moneyAxis, moneyExact } from "../../utils/format";
 import type { PurchaseAnalyticsGroup } from "../../api/purchaseAnalytics";
+import { usePurchaseChartSample, type PurchaseChartSampleContext, type SampleTooltip } from "./usePurchaseChartSample";
 
 /**
  * 采购分析图表（Q-A-01 / D-39 补图表）：日 / 月趋势柱图 + 当前分组维度排行横条图。
@@ -86,6 +87,7 @@ export function buildPurchaseTrendOption(
   groups: PurchaseAnalyticsGroup[],
   metric: PurchaseChartMetric,
   axis = "采购日期",
+  sample?: SampleTooltip,
 ): ECOption {
   const labels = groups.map((g) => (g.key === PURCHASE_EMPTY_KEY ? "无日期" : g.key));
   return {
@@ -94,10 +96,12 @@ export function buildPurchaseTrendOption(
       trigger: "axis",
       axisPointer: { type: "shadow" },
       confine: true,
-      formatter: (p: unknown) => {
+      extraCssText: "max-width: min(340px, calc(100vw - 32px)); white-space: normal; overflow-wrap: anywhere;",
+      formatter: (p: unknown, ticket: string, callback?: (ticket: string, html: string) => void) => {
         const index = hitIndex(p);
         if (index == null || !groups[index]) return "";
-        return pointText(groups[index], axis, labels[index], metric, false).map(escapeHtml).join("<br/>");
+        const text = pointText(groups[index], axis, labels[index], metric, false).map(escapeHtml).join("<br/>");
+        return sample && callback ? sample(groups[index].key, text, ticket, callback) : text;
       },
     },
     xAxis: {
@@ -141,6 +145,7 @@ export function buildPurchaseRankOption(
   items: { label: string; group: PurchaseAnalyticsGroup }[],
   metric: PurchaseChartMetric,
   axis = "分组",
+  sample?: SampleTooltip,
 ): ECOption {
   const present = items.filter((i) => valueOf(i.group, metric) !== null);
   return {
@@ -165,9 +170,12 @@ export function buildPurchaseRankOption(
       trigger: "axis",
       axisPointer: { type: "shadow" },
       confine: true,
-      formatter: (p: unknown) => {
+      extraCssText: "max-width: min(340px, calc(100vw - 32px)); white-space: normal; overflow-wrap: anywhere;",
+      formatter: (p: unknown, ticket: string, callback?: (ticket: string, html: string) => void) => {
         const index = hitIndex(p), hit = index == null ? undefined : present[index];
-        return hit ? pointText(hit.group, axis, hit.label, metric, true).map(escapeHtml).join("<br/>") : "";
+        if (!hit) return "";
+        const text = pointText(hit.group, axis, hit.label, metric, true).map(escapeHtml).join("<br/>");
+        return sample && callback ? sample(hit.group.key, text, ticket, callback) : text;
       },
     },
     series: [{
@@ -205,17 +213,19 @@ export function buildPurchaseRankOption(
 }
 
 export function PurchaseTrendChart({
-  groups, metric, loading, onBucketClick, axis = "采购日期",
+  groups, metric, loading, onBucketClick, axis = "采购日期", sampleContext,
 }: {
   groups: PurchaseAnalyticsGroup[];
   metric: PurchaseChartMetric;
   axis?: string;
   loading?: boolean;
+  sampleContext?: PurchaseChartSampleContext;
   /** 点某根柱 → 下钻到该日 / 月的订单列表（与表格行点击同一 drill 语义）。 */
   onBucketClick?: (key: string) => void;
 }) {
   const sorted = useMemo(() => sortTrendGroups(groups), [groups]);
-  const option = useMemo(() => buildPurchaseTrendOption(sorted, metric, axis), [sorted, metric, axis]);
+  const sample = usePurchaseChartSample(sampleContext);
+  const option = useMemo(() => buildPurchaseTrendOption(sorted, metric, axis, sample), [sorted, metric, axis, sample]);
   const click = usePointClick(onBucketClick);
   const points = useMemo(() => sorted.flatMap((g, i) => valueOf(g, metric) == null ? [] : [{
     dataIndex: i, label: pointText(g, axis, g.key === PURCHASE_EMPTY_KEY ? "无日期" : g.key, metric, false).join("，")
@@ -242,12 +252,13 @@ export function PurchaseTrendChart({
 }
 
 export function PurchaseRankBar({
-  groups, metric, loading, labelOf, onItemClick, axis = "分组",
+  groups, metric, loading, labelOf, onItemClick, axis = "分组", sampleContext,
 }: {
   groups: PurchaseAnalyticsGroup[];
   metric: PurchaseChartMetric;
   axis?: string;
   loading?: boolean;
+  sampleContext?: PurchaseChartSampleContext;
   /** 分组行 → 显示名（与表格同标签：客户名 / label / key）。 */
   labelOf: (g: PurchaseAnalyticsGroup) => string;
   /** 点某条 → 下钻该组（与表格行点击同一 drill 语义，回传分组键）。 */
@@ -258,7 +269,8 @@ export function PurchaseRankBar({
       (valueOf(b.group, metric) ?? -Infinity) - (valueOf(a.group, metric) ?? -Infinity)),
     [groups, labelOf, metric],
   );
-  const option = useMemo(() => buildPurchaseRankOption(items, metric, axis), [items, metric, axis]);
+  const sample = usePurchaseChartSample(sampleContext);
+  const option = useMemo(() => buildPurchaseRankOption(items, metric, axis, sample), [items, metric, axis, sample]);
   const present = useMemo(() => items.filter(i => valueOf(i.group, metric) !== null), [items, metric]);
   const points = useMemo(() => present.map(({ group, label }, i) => ({
     dataIndex: i, label: pointText(group, axis, label, metric, true).join("，")
