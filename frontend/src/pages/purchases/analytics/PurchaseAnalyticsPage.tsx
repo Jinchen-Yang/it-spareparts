@@ -28,6 +28,7 @@ import {
   type PurchaseChartMetric,
 } from "../../../components/charts/PurchaseAnalyticsCharts";
 import { analyticsControlTheme } from "../../sales/analytics/dashboardColors";
+import DocumentPreview from "./DocumentPreview";
 import FilterBar from "./FilterBar";
 import SummaryView, { groupByTitle, groupLabelOf } from "./SummaryView";
 import DrillTable from "./DrillTable";
@@ -220,6 +221,14 @@ export default function PurchaseAnalyticsPage() {
     [sp.toString(), customerRestricted, supplierRestricted, todayKey],
   );
   const filterKey = JSON.stringify(apiFilters);
+
+  // A document number fixes its sales identity. Legacy lookup sentinels therefore need
+  // no additional sales-axis filter when previewing that exact linked document.
+  const groupAxis: Record<string, string> = { purchaser: "buyer", source_type: "type",
+    category: "category", pn: "pn", month: "month", day: "day" };
+  const axis = groupAxis[effectiveGroupBy], key = effectiveState.groupKey;
+  const previewScope = axis && key ? { [axis]: key === "(空)" ||
+    (axis === "category" && key === "未分类") ? null : key } : {};
 
   const requestSummary = (groupBy: string, groupsPage: number) => {
     const key = JSON.stringify([filterKey, groupBy, groupsPage, retryTick]);
@@ -428,7 +437,7 @@ export default function PurchaseAnalyticsPage() {
           costRestricted={costRestricted}
           customerRestricted={customerRestricted}
           supplierRestricted={supplierRestricted}
-          onReset={() => setSp(new URLSearchParams(), { replace: true })}
+          onReset={() => setSp(sp.has("view") ? {view: "legacy"} : new URLSearchParams(), { replace: true })}
         />
 
         {sessionDead ? (
@@ -506,6 +515,7 @@ export default function PurchaseAnalyticsPage() {
                   />
                 ) : (
                   <PurchaseTrendChart
+                    axis={trendGran === "day" ? "采购日期" : "采购月"}
                     groups={trendSummary?.groups ?? []}
                     metric={activeMetric}
                     loading={trendLoading}
@@ -526,6 +536,7 @@ export default function PurchaseAnalyticsPage() {
                     groups={summary?.groups ?? []}
                     metric={activeMetric}
                     loading={summaryLoading}
+                    axis={groupByTitle(effectiveGroupBy)}
                     labelOf={groupLabelOf}
                     onItemClick={(key) => patch({ groupKey: key, page: 1 }, { history: "push" })}
                   />
@@ -578,6 +589,12 @@ export default function PurchaseAnalyticsPage() {
           />
         ) : (
           <DrillTable
+            renderNumber={(row, sale) => {
+              const number = sale ? row.linked_sales_order_no : row.order_no;
+              return number ? <DocumentPreview kind={sale ? "sale" : "purchase"} number={number}
+                orderId={row.order_id} filters={apiFilters} scope={previewScope}
+                ownerToken={ownerToken} onOwnerStale={notifyOwnerStale}/> : "/";
+            }}
             data={orders}
             loading={ordersLoading}
             basis={basis}
@@ -603,6 +620,7 @@ export default function PurchaseAnalyticsPage() {
       <OrderDetailDrawer
         orderId={effectiveState.orderId}
         category={drawerCategory}
+        filters={apiFilters} previewScope={previewScope}
         pn={effectiveGroupBy === "pn" ? effectiveState.groupKey : null}
         basis={basis}
         ownerToken={ownerToken}

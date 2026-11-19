@@ -1,0 +1,110 @@
+.pw-chart-tip {
+  max-width: min(330px, calc(100vw - 60px));
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.pw-chart-tip dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 14px;
+  margin: 0;
+}
+.pw-chart-fact {
+  display: contents;
+}
+.pw-chart-tip dt {
+  color: var(--mb-text-2);
+}
+.pw-chart-tip dd {
+  text-align: right;
+  font-weight: 600;
+  margin: 0;
+}
+.pw-chart-drill {
+  margin-top: 7px;
+  padding: 2px 0;
+  color: var(--mb-accent);
+  font: inherit;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+.purchase-workbench .pw-list .pw-chart-rank {
+  display: grid;
+  grid-template-columns: 19px minmax(0, 1fr) auto;
+  gap: 3px 6px;
+  width: 100%;
+  align-items: center;
+  text-align: left;
+}
+.pw-chart-rank .pw-name {
+  color: var(--mb-text);
+}
+.pw-chart-rank .pw-bar {
+  position: relative;
+  grid-column: 2 / -1;
+  margin: 0;
+}
+.pw-chart-rank .pw-bar i,
+.pw-chart-rank .pw-bar b {
+  position: absolute;
+}
+.pw-chart-rank .pw-bar b {
+  height: 7px;
+  width: 1px;
+  top: -2px;
+  background: var(--mb-text-2);
+}
+.pw-chart-rank .pw-bar i.negative {
+  background: var(--mb-danger);
+}
+.pw-chart-time {
+  --bucket-width: 10px;
+  position: relative;
+  min-width: calc(var(--bucket-count) * var(--bucket-width) + 84px);
+}
+.pw-chart-scroll {
+  overflow-x: auto;
+}
+.pw-chart-buckets {
+  position: absolute;
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+}
+.pw-chart-buckets .pw-link {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+}
+.pw-chart-buckets .pw-link:is(:hover, :focus-visible, [aria-expanded="true"]) {
+  background: color-mix(in srgb, var(--mb-accent) 10%, transparent);
+  outline: 1px solid var(--mb-accent);
+  outline-offset: -1px;
+}
+.pw-chart-mode {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 2px;
+}
+@media (pointer: coarse) {
+  .pw-chart-time {
+    --bucket-width: 29px;
+  }
+}
+.pw-rank-document {
+  position: absolute;
+  left: 25px;
+  top: 5px;
+  max-width: calc(100% - 126px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  z-index: 1;
+}
+.pw-chart-line-note {
+  display: block;
+  margin-top: 5px;
+  color: var(--mb-text-2);
+}

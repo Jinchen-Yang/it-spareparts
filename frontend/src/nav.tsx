@@ -107,7 +107,7 @@ const loadProfit = () => import("./pages/ProfitPage");
 const loadReplenishmentBeta = () => import("./pages/ReplenishmentBetaPage");
 const loadSalesAnalytics = () => import("./pages/sales/analytics/SalesAnalyticsPage");
 const loadPurchaseAnalysis = () => import("./pages/purchases/PurchaseAnalysisPage");
-const loadPurchaseAnalytics = () => import("./pages/purchases/analytics/PurchaseAnalyticsPage");
+const loadPurchaseAnalytics = () => import("./pages/purchases/analytics/PurchaseAnalyticsDashboard");
 const loadPurchaseExceptions = () => import("./pages/purchases/PurchaseExceptionsPage");
 const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage");
 // 维保三页（2026-08-19 #267 增页）：主页项目卡墙 + 项目面板 + 需求单与同步。

@@ -1,5 +1,5 @@
 // 采购分析 URL 状态层（D-39）：解析容错 / 序列化默认省略 / 双向往返 /
-// 状态 → 请求参数（「全部」不传日期、默认今天、多选全量传递）。
+// 状态 → 请求参数（「全部」不传日期、默认近 30 天、多选全量传递）。
 import { describe, expect, it, vi } from "vitest";
 import dayjs from "dayjs";
 
@@ -15,10 +15,10 @@ const sp = (qs: string) => new URLSearchParams(qs);
 const TODAY = dayjs("2026-10-17");
 
 describe("parseAnalyticsUrl：默认与容错", () => {
-  it("零参数 = 今天 + 采购类型分组 + 三口径并排 + 第 1 页 + 日期倒序", () => {
+  it("零参数 = 近 30 天 + 采购类型分组 + 三口径并排 + 第 1 页 + 日期倒序", () => {
     const s = parseAnalyticsUrl(sp(""));
     expect(s).toEqual({
-      preset: "today",
+      preset: "30d",
       from: null,
       to: null,
       sourceType: [],
@@ -45,7 +45,7 @@ describe("parseAnalyticsUrl：默认与容错", () => {
     const s = parseAnalyticsUrl(sp(
       "preset=forever&group_by=vendor&sort=weight&dir=sideways&page=-3&order_id=abc&basis=gold",
     ));
-    expect(s.preset).toBe("today");
+    expect(s.preset).toBe("30d");
     expect(s.groupBy).toBe(DEFAULT_GROUP_BY);
     expect(s.sort).toBe("order_date");
     expect(s.dir).toBe("desc");
@@ -89,9 +89,9 @@ describe("serializeAnalyticsState：默认值不落 URL", () => {
     expect(serializeAnalyticsState({ customerIds: [12, 7] })).toEqual({ customer: ["12", "7"], url_version: "2" });
   });
 
-  it("preset=today / group_by=source_type / sort=order_date / dir=desc / page=1 都转 undefined", () => {
+  it("preset=30d / group_by=source_type / sort=order_date / dir=desc / page=1 都转 undefined", () => {
     expect(serializeAnalyticsState({
-      preset: "today",
+      preset: "30d",
       groupBy: DEFAULT_GROUP_BY,
       sort: "order_date",
       dir: "desc",
@@ -132,7 +132,7 @@ describe("URL 双向往返（parse ∘ serialize = 恒等）", () => {
     // 完整形态：日期预设 + 全部多选筛选 + 分组 + 下钻 + 排序 + 翻页 + 口径子集 + 抽屉
     "preset=custom&from=2026-09-01&to=2026-10-15&source_type=%E5%A4%87%E4%BB%B6%E9%87%87%E8%B4%AD,%E6%89%B9%E9%87%8F%E9%87%87%E8%B4%AD&purchaser=%E5%BC%A0%E4%B8%89&salesperson=%E6%9D%8E%E5%9B%9B&customer=12,7&category=%E6%9C%AA%E5%88%86%E7%B1%BB&group_by=category&group_key=%E6%9C%AA%E5%88%86%E7%B1%BB&sort=amount_paid&dir=asc&page=4&basis=inc,paid&order_id=88",
     "preset=all",
-    "preset=30d&group_by=month",
+    "preset=today&group_by=month",
     "preset=yesterday&group_by=customer&group_key=12&basis=paid",
   ];
   for (const qs of cases) {
@@ -170,7 +170,7 @@ describe("URL 双向往返（parse ∘ serialize = 恒等）", () => {
   }
   it("URL 里显式写默认值 → 归一化为零参数（分享链接不携带冗余）", () => {
     const state = parseAnalyticsUrl(sp(
-      "preset=today&group_by=source_type&sort=order_date&dir=desc&page=1&basis=inc,ex,paid",
+      "preset=30d&group_by=source_type&sort=order_date&dir=desc&page=1&basis=inc,ex,paid",
     ));
     const full = serializeAnalyticsState(state);
     expect(Object.values(full).every((v) => v === undefined)).toBe(true);
@@ -179,9 +179,9 @@ describe("URL 双向往返（parse ∘ serialize = 恒等）", () => {
 });
 
 describe("toAnalyticsApiFilters：状态 → 请求筛选", () => {
-  it("默认（今天）→ date_from = date_to = 今天", () => {
+  it("默认范围含上海业务日，共 30 天", () => {
     expect(toAnalyticsApiFilters(parseAnalyticsUrl(sp("")), TODAY)).toEqual({
-      date_from: "2026-10-17",
+      date_from: "2026-09-18",
       date_to: "2026-10-17",
     });
   });
@@ -194,6 +194,8 @@ describe("toAnalyticsApiFilters：状态 → 请求筛选", () => {
   });
 
   it("各预设解析为对应闭区间", () => {
+    expect(toAnalyticsApiFilters(parseAnalyticsUrl(sp("preset=today")), TODAY))
+      .toEqual({ date_from: "2026-10-17", date_to: "2026-10-17" });
     expect(toAnalyticsApiFilters(parseAnalyticsUrl(sp("preset=7d")), TODAY))
       .toEqual({ date_from: "2026-10-11", date_to: "2026-10-17" });
     expect(toAnalyticsApiFilters(parseAnalyticsUrl(sp("preset=yesterday")), TODAY))
@@ -202,9 +204,9 @@ describe("toAnalyticsApiFilters：状态 → 请求筛选", () => {
       .toEqual({ date_from: "2025-10-17", date_to: "2026-10-17" });
   });
 
-  it("自定义非法回退今天；合法原样透传", () => {
+  it("自定义非法回退近 30 天；合法原样透传", () => {
     expect(toAnalyticsApiFilters(parseAnalyticsUrl(sp("preset=custom&from=2026-02-31&to=2026-03-05")), TODAY))
-      .toEqual({ date_from: "2026-10-17", date_to: "2026-10-17" });
+      .toEqual({ date_from: "2026-09-18", date_to: "2026-10-17" });
     expect(toAnalyticsApiFilters(parseAnalyticsUrl(sp("preset=custom&from=2026-09-01&to=2026-10-15")), TODAY))
       .toEqual({ date_from: "2026-09-01", date_to: "2026-10-15" });
   });
@@ -214,7 +216,7 @@ describe("toAnalyticsApiFilters：状态 → 请求筛选", () => {
       "source_type=%E5%A4%87%E4%BB%B6%E9%87%87%E8%B4%AD,%E6%89%B9%E9%87%8F%E9%87%87%E8%B4%AD&customer=12,7&category=%E6%9C%AA%E5%88%86%E7%B1%BB",
     )), TODAY);
     expect(f).toEqual({
-      date_from: "2026-10-17",
+      date_from: "2026-09-18",
       date_to: "2026-10-17",
       source_type: ["备件采购", "批量采购"],
       customer_id: [12, 7],
@@ -267,13 +269,13 @@ describe("toAnalyticsParams：URLSearchParams 序列化（FastAPI 重复键形�
   });
 });
 
-describe("toAnalyticsApiFilters：默认「今天」按 Asia/Shanghai", () => {
+describe("toAnalyticsApiFilters：默认 30 天窗口按 Asia/Shanghai", () => {
   it("不传 today 时用业务日：UTC 16:30 = 上海次日", () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(new Date("2026-10-17T16:30:00Z"));
       const f = toAnalyticsApiFilters(parseAnalyticsUrl(new URLSearchParams("")));
-      expect(f).toMatchObject({ date_from: "2026-10-18", date_to: "2026-10-18" });
+      expect(f).toMatchObject({ date_from: "2026-09-19", date_to: "2026-10-18" });
     } finally {
       vi.useRealTimers();
     }

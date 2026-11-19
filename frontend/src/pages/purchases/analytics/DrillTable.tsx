@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { ANALYTICS_PAGE_SIZES } from "../../../utils/analyticsUrlState";
 // 下钻层：分组值 → 订单列表（服务端分页 + 排序；筛选条件随层传递）。
 // 金额排序禁用要「预判」而非被动回显：后端 ranking_restricted 只在本次请求真的
@@ -5,7 +6,7 @@ import { ANALYTICS_PAGE_SIZES } from "../../../utils/analyticsUrlState";
 // 受限账号首屏金额列仍可点击并发出注定被回退的请求。因此本地 costRestricted 一并参与。
 import { Alert, Button, Table, Tooltip } from "antd";
 import type { ColumnsType, TablePaginationConfig } from "antd/es/table";
-import type { FilterValue, SorterResult } from "antd/es/table/interface";
+import type { FilterValue, SorterResult, TableCurrentDataSource } from "antd/es/table/interface";
 import { fmt, fmtMoney } from "../shared";
 import type {
   PurchaseAnalyticsOrderRow,
@@ -28,6 +29,7 @@ export interface DrillTableProps {
   onSortChange: (sort: AnalyticsSort, dir: "asc" | "desc") => void;
   onPageChange: (page: number, pageSize: number) => void;
   onOpenOrder: (orderId: number) => void;
+  renderNumber?: (row: PurchaseAnalyticsOrderRow, sale: boolean) => ReactNode;
   onBack: () => void;
 }
 
@@ -47,7 +49,7 @@ export default function DrillTable({
   onSortChange,
   onPageChange,
   onOpenOrder,
-  onBack,
+  onBack, renderNumber,
 }: DrillTableProps) {
   const restricted = costRestricted || data?.ranking_restricted === true;
 
@@ -76,14 +78,14 @@ export default function DrillTable({
       sortOrder: sort === "order_date" ? (dir === "desc" ? ("descend" as const) : ("ascend" as const)) : undefined,
       render: (v: string | null) => v || "—",
     },
-    { title: "采购单号", dataIndex: "order_no", width: 120 },
-    { title: "销售单号", dataIndex: "linked_sales_order_no", width: 160, render: (v: string | null) => v || "/" },
+    { title: "采购单号", dataIndex: "order_no", width: 140, render: (v, row) => renderNumber?.(row, false) ?? v },
+    { title: "销售单号", dataIndex: "linked_sales_order_no", width: 160, render: (v, row) => renderNumber?.(row, true) ?? (v || "/") },
     { title: "采购类型", dataIndex: "source_type", width: 100, render: (v: string | null) => v || "—" },
     { title: "采购员", dataIndex: "purchaser", width: 90, render: (v: string | null) => v || "—" },
     { title: "销售人员", dataIndex: "salesperson", width: 90, render: (v: string | null) => v || "—" },
     { title: "客户", dataIndex: "customer", ellipsis: true, render: (v: string | null) => v || "—" },
     { title: "供应商", dataIndex: "supplier", width: 180, render: (v: string | null) => v || "/" },
-    { title: "采购产品", key: "products", width: 240, render: (_, r) => r.products?.length ? r.products.map(p => <div key={p.line_id}>{p.pn_std || "/"}{p.description && <small style={{ display: "block" }}>{p.description}</small>}</div>) : "/" },
+    { title: "采购产品", key: "products", width: 240, render: (_, r) => r.products?.length ? r.products.map(p => <div key={p.line_id}>{p.pn_std || "/"} {p.qty != null && `× ${fmt(p.qty)} ${p.unit || ""}`}<small style={{ display: "block" }}>{p.description?.trim() || (p.catalog_description ? `目录 · ${p.catalog_description}` : "暂无描述")}</small></div>) : "/" },
     { title: "项目名称", key: "project_names", width: 240, render: (_, r) => r.project_names?.length ? r.project_names.map((name, i) => <div key={i}>{name || "/"}</div>) : "/" },
     { title: "明细行数", dataIndex: "lines", width: 84, align: "right", render: (v: number | null) => fmt(v) },
     ...(basis.includes("inc") ? [amountColumn("amount_inc", "含税金额")] : []),
@@ -95,7 +97,9 @@ export default function DrillTable({
     _pg: TablePaginationConfig,
     _filters: Record<string, FilterValue | null>,
     sorter: SorterResult<PurchaseAnalyticsOrderRow> | SorterResult<PurchaseAnalyticsOrderRow>[],
+    extra: TableCurrentDataSource<PurchaseAnalyticsOrderRow>,
   ) => {
+    if (extra.action !== "sort") return;
     const s = Array.isArray(sorter) ? sorter[0] : sorter;
     if (!s || !s.column || !s.order) return;
     const key = s.field as AnalyticsSort;

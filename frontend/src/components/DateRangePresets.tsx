@@ -1,5 +1,5 @@
 // 日期预设选择（D-39 / Q10）：全部/一年/半年/30天/15天/7天/今天/昨天/前天 + 自定义区间。
-// 采购分析（PR-4a）与销售分析（PR-4b）共用；默认今天（Q10），按业务时区 Asia/Shanghai 计算，
+// 采购与销售各自传入日期预设，按业务时区 Asia/Shanghai 计算，
 // 「全部」= 不传 date_from/date_to（后端约定：不传即全部历史）。
 import dayjs, { type Dayjs } from "dayjs";
 import { DatePicker, Select, Typography } from "antd";
@@ -17,7 +17,8 @@ export type DatePreset =
   | "before_yesterday"
   | "custom";
 
-export const DEFAULT_DATE_PRESET: DatePreset = "today";
+export type DefaultDatePreset = "today" | "30d";
+export const DEFAULT_DATE_PRESET: DefaultDatePreset = "today";
 
 export const DATE_PRESET_OPTIONS: { value: DatePreset; label: string }[] = [
   { value: "all", label: "全部" },
@@ -85,26 +86,28 @@ function wrap(from: Dayjs, to: Dayjs): DateRange {
 
 /**
  * 完整解析（含自定义区间）：custom 需要 from ≤ to 的合法 ISO 日期，
- * 非法时回退默认「今天」（请求侧永远拿到一个确定区间，只有 all 显式返回 null）。
+ * 非法时回退到所在页面的默认区间。
  */
 export function resolveDateRange(
   preset: DatePreset,
   from: string | null | undefined,
   to: string | null | undefined,
   today: Dayjs,
+  defaultPreset: DefaultDatePreset = DEFAULT_DATE_PRESET,
 ): DateRange | null {
   if (preset === "custom") {
     if (isStrictIsoDate(from) && isStrictIsoDate(to)) {
       const range = strictIsoDateRange(from, to);
       if (range) return { from: range.from, to: range.to };
     }
-    return wrap(today, today);
+    return resolvePresetRange(defaultPreset, today);
   }
   return resolvePresetRange(preset, today);
 }
 
 export interface DateRangePresetsProps {
   preset: DatePreset;
+  defaultPreset?: DefaultDatePreset;
   from: string | null;
   to: string | null;
   /** preset 切到 custom 时把当前生效区间快照进自定义值（状态始终完整、可分享）。 */
@@ -114,14 +117,14 @@ export interface DateRangePresetsProps {
 
 export default function DateRangePresets({
   preset,
+  defaultPreset = DEFAULT_DATE_PRESET,
   from,
   to,
   onChange,
   disabled,
 }: DateRangePresetsProps) {
   const today = businessToday();
-  const current = resolveDateRange(preset, from, to, today);
-  // 自定义区间非法（格式错/开始晚于结束/缺边）时请求侧已回退今天，这里如实提示
+  const current = resolveDateRange(preset, from, to, today, defaultPreset);
   const customInvalid = preset === "custom" && !strictIsoDateRange(from, to);
 
   const pickPreset = (next: DatePreset) => {
@@ -168,7 +171,7 @@ export default function DateRangePresets({
       )}
       {customInvalid && (
         <Typography.Text type="warning" role="alert">
-          自定义区间无效（日期格式错误或开始晚于结束），已按今天查询
+          自定义区间无效（日期格式错误或开始晚于结束），已按{defaultPreset === "30d" ? "近 30 天" : "今天"}查询
         </Typography.Text>
       )}
     </span>

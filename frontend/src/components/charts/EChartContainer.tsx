@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Spin } from "antd";
 import { echarts, CHART_THEME_NAME, type ECOption, type EChartsInstance } from "./echartsCore";
 import { COLORS } from "../../theme";
@@ -28,6 +28,8 @@ export interface EChartContainerProps {
   /** 无障碍：图表对读屏软件的一句话描述（echarts aria 选项在 option 里另行开启）。 */
   ariaLabel?: string;
   testId?: string;
+  keyboardPoints?: { dataIndex: number; label: string }[];
+  onKeyboardActivate?: (dataIndex: number) => void;
 }
 
 const overlayStyle: React.CSSProperties = {
@@ -43,10 +45,18 @@ const overlayStyle: React.CSSProperties = {
 
 export default function EChartContainer({
   option, loading = false, error = null, empty = false,
-  emptyText = "窗口内无数据", height = 320, onEvents, ariaLabel, testId,
+  emptyText = "窗口内无数据", height = 320, onEvents, ariaLabel, testId, keyboardPoints, onKeyboardActivate,
 }: EChartContainerProps) {
   const elRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<EChartsInstance | null>(null);
+  const [focusedPoint, setFocusedPoint] = useState<number | null>(null);
+  const canInspect = !!keyboardPoints?.length && !loading && !error && !empty;
+  const pointIndex = canInspect && focusedPoint != null ? Math.min(focusedPoint, keyboardPoints.length - 1) : null;
+  const point = pointIndex == null ? undefined : keyboardPoints?.[pointIndex];
+  useEffect(() => {
+    if (point) chartRef.current?.dispatchAction({ type: "showTip", seriesIndex: 0, dataIndex: point.dataIndex });
+  }, [point]);
+
   const eventsRef = useRef(onEvents);
   eventsRef.current = onEvents;
 
@@ -113,7 +123,25 @@ export default function EChartContainer({
       {/* overflow hidden 必须保留：echarts HTML tooltip 隐藏用 visibility:hidden，
         * 布局盒残留在旧坐标；宽屏悬浮过再缩窗（手机旋转）会把页面撑出横向滚动。
         * 配合 option 里 tooltip.confine=true，可见 tooltip 不会被裁。 */}
-      <div ref={elRef} role="img" aria-label={ariaLabel} style={{ width: "100%", height, overflow: "hidden" }} />
+      <div ref={elRef} role="img" aria-label={canInspect ? ariaLabel + "。方向键查看数据，回车查看单据" : ariaLabel}
+        tabIndex={canInspect ? 0 : undefined}
+        onFocus={canInspect ? () => setFocusedPoint(0) : undefined}
+        onBlur={canInspect ? () => { setFocusedPoint(null); chartRef.current?.dispatchAction({ type: "hideTip" }); } : undefined}
+        onKeyDown={canInspect ? e => {
+          const i = pointIndex ?? 0, last = keyboardPoints.length - 1;
+          if (e.key === "Escape") {
+            setFocusedPoint(null);
+            chartRef.current?.dispatchAction({ type: "hideTip" });
+          } else if (e.key === "Enter" && point) onKeyboardActivate?.(point.dataIndex);
+          else if (["ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown", "Home", "End"].includes(e.key)) {
+            e.preventDefault();
+            const next = e.key === "Home" ? 0 : e.key === "End" ? last
+              : ["ArrowLeft", "ArrowUp"].includes(e.key) ? Math.max(0, i - 1) : Math.min(last, i + 1);
+            setFocusedPoint(next);
+          }
+        } : undefined}
+        style={{ width: "100%", height, overflow: "hidden" }} />
+      {canInspect && <span role="status" aria-live="polite" style={{ position: "absolute", clipPath: "inset(50%)", width: 1, height: 1, overflow: "hidden" }}>{point?.label}</span>}
       {loading && (
         <div style={overlayStyle} data-testid="chart-loading"><Spin /></div>
       )}

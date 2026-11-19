@@ -111,7 +111,7 @@ export interface PurchaseAnalyticsOrderRow {
   supplier?: string | null;
   linked_sales_order_no?: string | null;
   project_names?: string[];
-  products?: { line_id: number; pn_std: string | null; description: string | null }[];
+  products?: { line_id: number; pn_std: string | null; description: string | null; catalog_description?: string | null; qty?: number | null; unit?: string | null; category?: string | null }[];
   lines: number | null;
   amount_inc: number | null;
   amount_ex: number | null;
@@ -120,7 +120,10 @@ export interface PurchaseAnalyticsOrderRow {
   nominal_side: NominalSide;
 }
 
+export type PurchaseScope = Record<string, string | null>;
+
 export interface PurchaseAnalyticsOrdersQuery extends PurchaseAnalyticsFilters {
+  scope?: PurchaseScope;
   group_by?: string;
   group_key?: string;
   sort?: string;
@@ -152,6 +155,8 @@ export interface PurchaseAnalyticsOrderLine {
   description: string | null;
   brand: string | null;
   qty: number | null;
+  catalog_description?: string | null;
+  unit?: string | null;
   unit_price: number | null;
   line_amount: number | null;
   category: string | null;
@@ -257,6 +262,7 @@ export const downloadPurchaseOrdersCsv = (
 
 export const fetchPurchaseAnalyticsOrders = (query: PurchaseAnalyticsOrdersQuery) => {
   const extra: Record<string, string | number> = {};
+  if (query.scope) extra.scope = JSON.stringify(query.scope);
   if (query.group_by) extra.group_by = query.group_by;
   if (query.group_key) extra.group_key = query.group_key;
   if (query.sort) extra.sort = query.sort;
@@ -272,12 +278,15 @@ export const fetchPurchaseAnalyticsOrderDetail = (
   orderId: number,
   category: string[] = [],
   pn?: string | null,
+  scope?: PurchaseScope,
+  filters?: PurchaseAnalyticsFilters,
 ) => {
-  const p = new URLSearchParams();
+  const p = toAnalyticsParams({ ...filters, category: [] });
   for (const c of category) {
     if (c) p.append("category", c);
   }
   if (pn) p.set("pn", pn);
+  if (scope) p.set("scope", JSON.stringify(scope));
   return api.get<PurchaseAnalyticsOrderDetail>(
     `/purchases/analytics/orders/${orderId}`,
     { params: p },
