@@ -1,6 +1,6 @@
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "../../../test/antdRender";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "../../../test/antdRender";
 import { businessToday } from "../../../utils/date";
 import type { Cube, WarehouseResults } from "../../../api/warehouseAnalytics";
 import { warehouseParams } from "../../../api/warehouseAnalytics";
@@ -248,7 +248,7 @@ describe("库存管理分析", () => {
     );
   });
 
-  it("矩阵双轴保留空仓储中心，继续查看原单再返回时恢复筛选与缓存", async () => {
+  it("矩阵双轴保留空仓储中心，单号在行内展开匹配货品，返回保持筛选与缓存", async () => {
     mount("view=matrix&" + period + "&unit=件");
     fireEvent.click(await screen.findByRole("button", { name: "未填 × 采购入库" }));
     const doc = await screen.findByRole("button", { name: "TEST-DOC" });
@@ -260,13 +260,18 @@ describe("库存管理分析", () => {
     };
     expect(reads("documents")).toContainEqual(expect.objectContaining(filters));
     fireEvent.focus(doc);
-    expect(await screen.findByText(/测试用内存条/)).toBeInTheDocument();
+    expect(screen.queryByText(/测试用内存条/)).not.toBeInTheDocument();
+    expect(reads("lines")).toHaveLength(0);
     fireEvent.click(doc);
-    expect(await screen.findByRole("columnheader", { name: "PN / 描述" })).toBeInTheDocument();
+    const details = await screen.findByRole("group", { name: "TEST-DOC · 货品明细" });
+    expect(await within(details).findByRole("columnheader", { name: "PN / 描述" })).toBeInTheDocument();
+    expect(doc).toHaveAttribute("aria-expanded", "true");
+    expect(query().has("doc")).toBe(false);
     expect(reads("lines")).toContainEqual(expect.objectContaining(filters));
     expect(request.mock.calls.find((r) => r[0] === "lines")?.[2]).toBe("12");
-    fireEvent.click(screen.getByRole("button", { name: "返回上一级" }));
-    await screen.findByRole("button", { name: "TEST-DOC" });
+    fireEvent.click(doc);
+    expect(doc).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("group", { name: "TEST-DOC · 货品明细" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "返回上一级" }));
     await screen.findByRole("button", { name: "未填 × 采购入库" });
     expect(query().get("unit")).toBe("件");
@@ -274,6 +279,67 @@ describe("库存管理分析", () => {
     expect(reads("cube")).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "刷新数据" }));
     await waitFor(() => expect(reads("cube")).toHaveLength(2));
+  });
+
+  it("本页返库单可同时展开和折叠，各单明细保持独立", async () => {
+    const fallback = request.getMockImplementation()!;
+    request.mockImplementation(async (endpoint, params, docId) => {
+      if (endpoint === "documents")
+        return {
+          items: [
+            { ...record, source: "return", number: "RETURN-A" },
+            { ...record, source: "return", number: "RETURN-B", id: "13" },
+            { ...record, source: "return", number: "RETURN-EMPTY", id: "14", matched_lines: 0 },
+          ],
+          total: 3,
+        };
+      if (endpoint === "lines")
+        return { items: [{ ...sample, pn: "PN-" + docId }], total: 1 };
+      return fallback(endpoint, params, docId);
+    });
+    mount(period + "&source=return&drill=%7B%7D");
+    await screen.findByRole("button", { name: "RETURN-A" });
+    expect(screen.queryByRole("button", { name: "RETURN-EMPTY" })).not.toBeInTheDocument();
+    expect(reads("lines")).toHaveLength(0);
+    const collapse = screen.getByRole("button", { name: "全部折叠（本页）" });
+    expect(collapse).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "全部展开（本页）" }));
+    expect(await within(await screen.findByRole("group", { name: "RETURN-A · 货品明细" }))
+      .findByText("PN-12")).toBeInTheDocument();
+    expect(await within(await screen.findByRole("group", { name: "RETURN-B · 货品明细" }))
+      .findByText("PN-13")).toBeInTheDocument();
+    expect(reads("lines")).toHaveLength(2);
+    expect(reads("lines").every((read) => read.source === "return")).toBe(true);
+    expect(screen.getByRole("button", { name: "全部展开（本页）" })).toBeDisabled();
+    fireEvent.click(collapse);
+    expect(screen.queryByRole("group", { name: /RETURN-.*货品明细/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "RETURN-B" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("行内明细失败后重试该单，保持展开与单据列表", async () => {
+    const fallback = request.getMockImplementation()!;
+    let attempts = 0;
+    request.mockImplementation(async (endpoint, params, docId) => {
+      if (endpoint === "lines" && ++attempts === 1) throw new Error("temporary read failed");
+      return fallback(endpoint, params, docId);
+    });
+    mount(period + "&drill=%7B%7D");
+    const doc = await screen.findByRole("button", { name: "TEST-DOC" });
+    fireEvent.click(doc);
+    const details = await screen.findByRole("group", { name: "TEST-DOC · 货品明细" });
+    fireEvent.click(await within(details).findByRole("button", { name: "重试" }));
+    expect(await within(details).findByText("TEST-PN")).toBeInTheDocument();
+    expect(doc).toHaveAttribute("aria-expanded", "true");
+    expect(reads("documents")).toHaveLength(1);
+    expect(reads("lines")).toHaveLength(2);
+  });
+
+  it("已有单据深链继续按原筛选打开明细", async () => {
+    mount(period + "&source=return&drill=%7B%7D&doc=12&docNo=RETURN-A");
+    expect(await screen.findByRole("heading", { name: "RETURN-A" })).toBeInTheDocument();
+    expect(await screen.findByRole("columnheader", { name: "PN / 描述" })).toBeInTheDocument();
+    expect(reads("documents")).toHaveLength(0);
+    expect(reads("lines")).toContainEqual(expect.objectContaining({ source: "return" }));
   });
 
   it("矩阵明细维度的全集、单头边际下钻均剔除无子行单据", async () => {
