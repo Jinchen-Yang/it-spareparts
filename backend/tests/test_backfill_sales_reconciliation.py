@@ -884,7 +884,8 @@ def test_execute_with_no_files_in_scope_is_applied_exit_0(db, capsys):
     assert applied["files"] == []
     assert applied["totals"] == {
         "files_executed": 0, "files_skipped": 0, "files_failed": 0,
-        "snapshots_inserted": 0, "tax_columns_filled": 0, "tax_conflicts_total": 0}
+        "snapshots_inserted": 0, "tax_columns_filled": 0,
+        "sales_receivable_updated": 0, "tax_conflicts_total": 0}
     assert _snap_count(db) == 0
 
 
