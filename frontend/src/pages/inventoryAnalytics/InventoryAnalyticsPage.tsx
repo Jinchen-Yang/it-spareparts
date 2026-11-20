@@ -60,7 +60,6 @@ function Dashboard({ board }: { board: Board }) {
   const name = boards[board];
   const source = filters.source || selection?.scope?.source;
   const selectedSource = source && coverage?.data?.sources.find((s) => s.source === source);
-  const awaitingSource = source && !coverage?.data && !coverage?.error;
   const ctx = { ...outer, coverage: coverage?.data };
   const missing = coverage?.data?.sources.find((x) => x.source === "outbound");
   const coverText = coverage?.data?.sources
@@ -191,7 +190,9 @@ function Dashboard({ board }: { board: Board }) {
           {coverText && <span> · 已导入单据首末日 {coverText}</span>}
           {missing && !missing.available && <span className="wa-missing"> · 实际出库（CKD）待接入</span>}
         </div>
-        {coverage?.error && (
+        {invalid ? (
+          <Alert type="warning" message="单据范围无效，请返回上一级重新选择。" />
+        ) : coverage?.error ? (
           <Alert
             type="error"
             showIcon
@@ -202,10 +203,7 @@ function Dashboard({ board }: { board: Board }) {
               </button>
             }
           />
-        )}
-        {invalid ? (
-          <Alert type="warning" message="单据范围无效，请返回上一级重新选择。" />
-        ) : awaitingSource ? (
+        ) : !coverage?.data ? (
           <p role="status">正在核对来源覆盖…</p>
         ) : selectedSource && !selectedSource.available ? (
           <Alert
@@ -214,6 +212,8 @@ function Dashboard({ board }: { board: Board }) {
             message={warehouseSources[selectedSource.source] + "待接入"}
             description="该来源尚无已导入单据，当前无法计算业务量。"
           />
+        ) : !coverage.data.sources.some((entry) => entry.available) ? (
+          <Alert type="info" showIcon message="尚无已导入的仓单" description="导入首批仓单后即可查看业务量。" />
         ) : isList && selection ? (
           <DocumentList selection={selection} documentId={doc} />
         ) : board === "overview" ? (

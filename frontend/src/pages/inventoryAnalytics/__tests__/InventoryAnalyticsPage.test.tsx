@@ -377,6 +377,49 @@ describe("库存管理分析", () => {
     expect(reads("documents")[0]).toMatchObject({ scope: '{"source":"inbound","week":"2026-11-02"}' });
   });
 
+  it("来源覆盖失败后结束加载，重试成功才加载原看板", async () => {
+    const normalRead = request.getMockImplementation()!;
+    let release: (data: typeof coverage) => void = () => {};
+    const retried = new Promise<typeof coverage>((resolve) => { release = resolve; });
+    let attempts = 0;
+    request.mockImplementation((endpoint, params) => {
+      if (endpoint !== "coverage") return normalRead(endpoint, params);
+      attempts += 1;
+      return attempts === 1 ? Promise.reject(new Error("offline")) : retried;
+    });
+    mount(period);
+    const retry = await screen.findByRole("button", { name: "重试" });
+    expect(screen.queryByText(/正在核对|正在读取/)).not.toBeInTheDocument();
+    expect(reads("cube")).toHaveLength(0);
+    fireEvent.click(retry);
+    expect(await screen.findByText("正在核对来源覆盖…")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+    expect(reads("cube")).toHaveLength(0);
+    release(coverage);
+    await screen.findByRole("button", { name: /2026-11-03.*入库单/ });
+    expect(reads("coverage")).toHaveLength(2);
+    expect(screen.queryByText("正在核对来源覆盖…")).not.toBeInTheDocument();
+  });
+
+  it("全仓尚无导入来源时显示空态，切板不查询业务量", async () => {
+    const normalRead = request.getMockImplementation()!;
+    const emptyCoverage = {
+      ...coverage,
+      sources: coverage.sources.map((source) => ({
+        ...source, available: false, min_date: null, max_date: null, documents: null, lines: null,
+      })),
+    };
+    request.mockImplementation((endpoint, params) =>
+      endpoint === "coverage" ? Promise.resolve(emptyCoverage) : normalRead(endpoint, params),
+    );
+    mount(period);
+    expect(await screen.findByText("尚无已导入的仓单")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "人员工作量" }));
+    expect(screen.getByText("尚无已导入的仓单")).toBeInTheDocument();
+    expect(request.mock.calls.map(([endpoint]) => endpoint)).toEqual(["coverage"]);
+    expect(screen.queryByText(/正在核对|正在读取/)).not.toBeInTheDocument();
+  });
+
   it.each(Object.keys(boards))("缺实际出库来源时 %s 不把未知量渲染为零", async (view) => {
     mount("view=" + view + "&source=outbound");
     await screen.findByText("该来源尚无已导入单据，当前无法计算业务量。");
