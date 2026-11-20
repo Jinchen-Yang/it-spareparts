@@ -96,7 +96,6 @@ _TAX_TRIO_FIELDS = ("amount_inc_tax", "is_tax_inclusive", "tax_amount")
 _RECON_FIELD_LABELS = {
     "reconciled_amount": "已对账金额",
     "pending_amount": "待对账金额",
-    "sales_receivable_amount": "待收尾款",
     "return_reconciled_amount": "退货已对账金额",
     "source_modified_at": "修改时间",
     "amount_inc_tax": "订单金额",
@@ -111,6 +110,7 @@ _RECON_FIELD_LABELS = {
 # 其他合法单据继续。后出现的合法值不能豁免早先的非法值；也绝不引入
 # 「不含税×税率=税金」等算术等式或舍入阈值阻断（票面差异按源值保留）。
 _HEAD_ECONOMIC_LABELS = {
+    "sales_receivable_amount": "待收尾款",
     "amount_ex_tax": "不含税金额",
     "amount_inc_tax": "申报金额",
     "tax_amount": "税金",
@@ -177,7 +177,8 @@ def _collect_head_economics(res, row, row_no: int, raw_order_id: str,
         col = inv_head.get(internal)
         return row.get(col) if col is not None else None
 
-    for field_name in ("amount_ex_tax", "amount_inc_tax", "tax_amount"):
+    for field_name in ("amount_ex_tax", "amount_inc_tax", "tax_amount",
+                       "sales_receivable_amount"):
         raw = g(field_name)
         try:
             value = cleaner.parse_money(raw)
@@ -258,10 +259,9 @@ def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
         _merge_recon_value(res, slot, raw_order_id, "is_tax_inclusive",
                            tax_inclusive, row_no)
 
-    money_fields = _RECON_MONEY_FIELDS if res.has_reconciliation_columns else ()
-    if inv_head.get("sales_receivable_amount") in row.index:
-        money_fields = (*money_fields, "sales_receivable_amount")
-    for field_name in money_fields:
+    if not res.has_reconciliation_columns:
+        return
+    for field_name in _RECON_MONEY_FIELDS:
         try:
             value = cleaner.parse_money(g(field_name))
         except ValueError as exc:
@@ -274,8 +274,6 @@ def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
             continue
         if value is not None:
             _merge_recon_value(res, slot, raw_order_id, field_name, value, row_no)
-    if not res.has_reconciliation_columns:
-        return
     try:
         modified = cleaner.parse_datetime(g("source_modified_at"))
     except ValueError as exc:
