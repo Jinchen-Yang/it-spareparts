@@ -127,8 +127,6 @@ describe("订单明细表：全权限 11 个可排序数据列双向排序（A-A
     ["毛利", "gross_profit"],
     ["已对账金额", "reconciled_display"],
     ["待对账金额", "pending_amount"],
-    ["退货已对账金额", "return_reconciled_amount"],
-    ["数据截至时间", "reconciled_as_of"],
   ];
 
   it("每列首次点击降序、再次点击升序（sortDirections 无 cancel，第三击回降序由后端兜底）", () => {

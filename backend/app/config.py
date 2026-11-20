@@ -1055,6 +1055,9 @@ FIELD_GROUPS = {
         "order_amount_at_snapshot",
         "reconciled_as_of",
         "reconciled_display",
+        "sales_receivable_amount",
+        "sales_receivable_total",
+        "sales_receivable_missing",
     ],
 }
 

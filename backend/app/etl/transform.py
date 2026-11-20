@@ -96,6 +96,7 @@ _TAX_TRIO_FIELDS = ("amount_inc_tax", "is_tax_inclusive", "tax_amount")
 _RECON_FIELD_LABELS = {
     "reconciled_amount": "已对账金额",
     "pending_amount": "待对账金额",
+    "sales_receivable_amount": "待收尾款",
     "return_reconciled_amount": "退货已对账金额",
     "source_modified_at": "修改时间",
     "amount_inc_tax": "订单金额",
@@ -257,9 +258,10 @@ def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
         _merge_recon_value(res, slot, raw_order_id, "is_tax_inclusive",
                            tax_inclusive, row_no)
 
-    if not res.has_reconciliation_columns:
-        return
-    for field_name in _RECON_MONEY_FIELDS:
+    money_fields = _RECON_MONEY_FIELDS if res.has_reconciliation_columns else ()
+    if inv_head.get("sales_receivable_amount") in row.index:
+        money_fields = (*money_fields, "sales_receivable_amount")
+    for field_name in money_fields:
         try:
             value = cleaner.parse_money(g(field_name))
         except ValueError as exc:
@@ -272,6 +274,8 @@ def _collect_sales_reconciliation(res, row, row_no, raw_order_id, inv_head,
             continue
         if value is not None:
             _merge_recon_value(res, slot, raw_order_id, field_name, value, row_no)
+    if not res.has_reconciliation_columns:
+        return
     try:
         modified = cleaner.parse_datetime(g("source_modified_at"))
     except ValueError as exc:
@@ -458,6 +462,8 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
             continue
         if file_type == mapping.SALES:
             head["is_tax_inclusive"] = values.get("is_tax_inclusive")
+            if inv_head.get("sales_receivable_amount") in df.columns:
+                head["sales_receivable_amount"] = values.get("sales_receivable_amount")
         if file_type == mapping.SALES and res.has_reconciliation_columns:
             for field_name in (*_RECON_MONEY_FIELDS, "source_modified_at"):
                 head[field_name] = values.get(field_name)

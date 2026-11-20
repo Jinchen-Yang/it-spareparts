@@ -1173,3 +1173,26 @@ def test_keyboard_interrupt_rolls_back_releases_lock_and_reraises(db, tmp_path, 
         assert _lock_is_free(probe) is True         # finally 生效，锁不滞留
     finally:
         probe.close()
+
+
+def test_backfill_receivable_keeps_latest_upload_per_order(db, tmp_path):
+    _import_one(db, tmp_path, "first.xlsx", [_row(待收尾款=113)])
+    latest = _import_one(db, tmp_path, "second.xlsx", [_row(
+        待收尾款=25, **{"修改时间(必填)": "2026-06-30 09:30:00"},
+    )])
+    latest_id = latest.id
+    _import_one(db, tmp_path, "legacy-template.xlsx", [_row()])
+    db.execute(update(FSalesOrder).values(
+        sales_receivable_amount=None, sales_receivable_batch_id=None,
+    ))
+    db.commit()
+    operator = _operator(db)
+
+    report = bs.run_backfill(db)
+    assert _order(db).sales_receivable_amount is None
+    assert sum(f["sales_receivable_orders"] for f in report["files"]) == 2
+    applied = bs.run_backfill(db, execute=True, operator=operator,
+                              confirm_manifest_sha256=report["manifest_sha256"])
+    assert applied["status"] == "applied"
+    assert _order(db).sales_receivable_amount == Decimal("25.00")
+    assert _order(db).sales_receivable_batch_id == latest_id
