@@ -119,6 +119,7 @@ const loadMaintenanceProjectPanel = () =>
   import("./pages/maintenance/MaintenanceProjectPanelPage");
 const loadMaintenanceDemands = () =>
   import("./pages/maintenance/MaintenanceDemandsPage");
+const loadRepairOrders = () => import("./pages/maintenance/RepairOrdersPage");
 const loadCyclePool = () => import("./pages/maintenance/CyclePoolPage");
 const loadInventory = () => import("./pages/InventoryPage");
 const loadImport = () => import("./pages/ImportPage");
@@ -162,6 +163,7 @@ const MaintenanceAnalyticsPage = lazy(loadMaintenanceAnalytics);
 const MaintenanceDashboardPage = lazy(loadMaintenanceDashboard);
 const MaintenanceProjectPanelPage = lazy(loadMaintenanceProjectPanel);
 const MaintenanceDemandsPage = lazy(loadMaintenanceDemands);
+const RepairOrdersPage = lazy(loadRepairOrders);
 const CyclePoolPage = lazy(loadCyclePool);
 const InventoryPage = lazy(loadInventory);
 const ImportPage = lazy(loadImport);
@@ -283,6 +285,21 @@ export const NAV_GROUPS: NavGroup[] = [
         perm: "page_maintenance",
         page: MaintenanceDemandsPage,
         load: loadMaintenanceDemands,
+      },
+      {
+        key: "repair-orders",
+        path: "/maintenance/repair-orders",
+        label: "检测与维修",
+        icon: <ToolOutlined />,
+        anyPerm: [
+          "page_repair_order_sales",
+          "page_repair_order_supervisor",
+          "page_repair_order_technician",
+          "page_repair_order_disposition",
+        ],
+        accountScoped: true,
+        page: RepairOrdersPage,
+        load: loadRepairOrders,
       },
       {
         key: "cycle-pool",

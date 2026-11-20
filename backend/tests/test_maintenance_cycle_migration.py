@@ -14,7 +14,7 @@ from sqlalchemy.exc import DatabaseError, IntegrityError
 from app import permissions
 from app.db import engine
 
-REVISION = "a7e2f9c4d1b8"  # 随最新迁移递进（D-0063 sys_user.hide_documents）
+REVISION = "c8e62a7d4f31"  # 维修任务单与原待修池共享返还容量
 CYCLE_REVISION = "86f7486b9ed5"
 BASELINE = "98afc0d2157b"
 CYCLE_PAGE_KEYS = (

@@ -50,6 +50,11 @@ from app.models.maintenance_repair import (
     MaintenanceRepairRecord,
     MaintenanceRepairRecordSource,
 )
+from app.models.maintenance_repair_orders import (
+    MaintenanceRepairOrder,
+    MaintenanceRepairOrderCommand,
+    MaintenanceRepairOrderLine,
+)
 from app.models.maintenance_cycle import MaintenanceCycleSellIntent
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionReceipt,
@@ -214,6 +219,9 @@ __all__ = [
     "MaintenanceRepairRecord",
     "MaintenanceRepairRecordSource",
     "MaintenanceRepairCommand",
+    "MaintenanceRepairOrder",
+    "MaintenanceRepairOrderCommand",
+    "MaintenanceRepairOrderLine",
     "MaintenanceCycleSellIntent",
     "MaintenanceCollectionReceipt",
     "MaintenanceCollectionSnapshot",

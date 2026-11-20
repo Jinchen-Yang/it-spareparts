@@ -251,19 +251,11 @@ def _active_deducted_map(db: Session, receipt_ids: Iterable[str]) -> dict[str, i
     if not ids:
         return {}
     rows = db.execute(
-        select(
-            MaintenanceRepairRecordSource.receipt_id,
-            func.coalesce(func.sum(MaintenanceRepairRecordSource.qty), 0),
-        )
-        .join(
-            MaintenanceRepairRecord,
-            MaintenanceRepairRecord.record_id == MaintenanceRepairRecordSource.record_id,
-        )
-        .where(
-            MaintenanceRepairRecordSource.receipt_id.in_(ids),
-            MaintenanceRepairRecord.status == "active",
-        )
-        .group_by(MaintenanceRepairRecordSource.receipt_id)
+        text(
+            "SELECT receipt_id, legacy_qty + order_qty "
+            "FROM v_repair_receipt_deductions WHERE receipt_id = ANY(:ids)"
+        ),
+        {"ids": ids},
     ).all()
     return {receipt_id: int(qty) for receipt_id, qty in rows}
 
