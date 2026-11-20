@@ -1,4 +1,4 @@
-"""D-0064 销售订单待收款快照。"""
+"""D-0069 销售订单待收款快照。"""
 from alembic import op
 import sqlalchemy as sa
 

@@ -1,4 +1,4 @@
-"""Persist one current source value per sales order (D-0064)."""
+"""Persist one current source value per sales order (D-0069)."""
 from decimal import Decimal
 
 from sqlalchemy import String, column, or_, update, values

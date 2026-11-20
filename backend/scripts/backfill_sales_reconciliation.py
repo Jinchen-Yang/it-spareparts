@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""销售单对账快照、含税三件套及待收尾款历史回填（D-40/D-41/D-0064）。
+"""销售单对账快照、含税三件套及待收尾款历史回填（D-40/D-41/D-0069）。
 
 背景
 ----
@@ -688,7 +688,7 @@ def _apply_file(db: Session, batch: SysImportBatch, plan: dict[str, Any],
             "tax_conflicts": len(plan["tax_conflicts"]),
             "tax_unresolved": plan["tax_unresolved"],
         },
-        reason=f"D-40/D-41/D-0064 销售对账、含税金额及待收尾款历史回填（manifest_sha256={manifest_sha256}）",
+        reason=f"D-40/D-41/D-0069 销售对账、含税金额及待收尾款历史回填（manifest_sha256={manifest_sha256}）",
         operated_by=operator,
     ))
     return {
