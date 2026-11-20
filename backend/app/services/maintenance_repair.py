@@ -162,21 +162,20 @@ def lock_parts(
     # 避免把 30 秒写进返还改单、导入和工作簿后面的语句。
     previous = db.scalar(text("SELECT current_setting('lock_timeout')"))
     _lock_timeout(db, "1000ms")
-    try:
-        for part_id in ids:
-            db.execute(
-                select(
-                    func.pg_advisory_xact_lock(
-                        func.hashtextextended(f"repair-part:{part_id}", 0)
-                    )
+    for part_id in ids:
+        db.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(f"repair-part:{part_id}", 0)
                 )
             )
-    finally:
-        if not keep_lock_timeout and previous is not None:
-            db.execute(
-                text("SELECT set_config('lock_timeout', :value, true)"),
-                {"value": previous},
-            )
+        )
+    # PostgreSQL 锁失败时事务已中止，保留原错误供调用方回滚和映射。
+    if not keep_lock_timeout and previous is not None:
+        db.execute(
+            text("SELECT set_config('lock_timeout', :value, true)"),
+            {"value": previous},
+        )
 
 
 def try_lock_part(db: Session, part_id: int) -> bool:
@@ -251,19 +250,11 @@ def _active_deducted_map(db: Session, receipt_ids: Iterable[str]) -> dict[str, i
     if not ids:
         return {}
     rows = db.execute(
-        select(
-            MaintenanceRepairRecordSource.receipt_id,
-            func.coalesce(func.sum(MaintenanceRepairRecordSource.qty), 0),
-        )
-        .join(
-            MaintenanceRepairRecord,
-            MaintenanceRepairRecord.record_id == MaintenanceRepairRecordSource.record_id,
-        )
-        .where(
-            MaintenanceRepairRecordSource.receipt_id.in_(ids),
-            MaintenanceRepairRecord.status == "active",
-        )
-        .group_by(MaintenanceRepairRecordSource.receipt_id)
+        text(
+            "SELECT receipt_id, legacy_qty + order_qty "
+            "FROM v_repair_receipt_deductions WHERE receipt_id = ANY(:ids)"
+        ),
+        {"ids": ids},
     ).all()
     return {receipt_id: int(qty) for receipt_id, qty in rows}
 

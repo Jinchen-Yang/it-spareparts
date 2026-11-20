@@ -1,0 +1,136 @@
+.wo-form, .wo-detail {
+  color: var(--mb-text);
+  overflow-wrap: anywhere;
+}
+.wo-form-section-heading, .wo-entry-head, .wo-line-heading, .wo-counts, .wo-assignment {
+  display: flex;
+  align-items: center;
+  gap: 8px 14px;
+  flex-wrap: wrap;
+}
+.wo-form-section-heading, .wo-entry-head {
+  justify-content: space-between;
+}
+.wo-form-section-heading {
+  margin: 22px 0 10px;
+}
+.wo-form-section-heading:first-child { margin-top: 12px; }
+.wo-form-section-heading h3, .wo-line-heading h4 {
+  margin: 0;
+  color: var(--mb-text);
+  font-weight: 600;
+}
+.wo-form-section-heading h3 { font-size: 16px; }
+.wo-form-section-heading > span, .wo-line-description, .wo-counts, .wo-detail-meta dt {
+  color: var(--mb-text-2);
+  font-size: 13px;
+}
+.wo-entry, .wo-detail-line {
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  background: var(--mb-surface);
+  border: 1px solid var(--mb-border);
+  border-radius: 8px;
+}
+.wo-entry-head { margin-bottom: 8px; }
+.wo-entry-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.3fr) minmax(76px, .55fr);
+  gap: 4px 10px;
+}
+.wo-entry-grid .ant-form-item { margin-bottom: 0; }
+.wo-form .ant-input-number, .wo-quantities .ant-input-number, .wo-quantities .ant-select { width: 100%; }
+.wo-detail-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 13px 18px;
+  margin: 0 0 15px;
+}
+.wo-detail-meta dd { margin: 3px 0 0; }
+.wo-note {
+  margin: 8px 0 14px;
+  padding: 8px 12px;
+  background: var(--mb-inset);
+  border-radius: 6px;
+}
+.wo-note strong { margin-right: 6px; }
+.wo-assignment .ant-select { min-width: 150px; }
+.wo-line-heading h4 { font-size: 16px; }
+.wo-line-description { margin: 4px 0; }
+.wo-line-heading .ant-tag { margin: 0; }
+.wo-counts { margin-top: 8px; }
+.wo-counts b { font-variant-numeric: tabular-nums; color: var(--mb-text); }
+.wo-line-form, .wo-dispose-row, .wo-dispositions {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--mb-border-soft);
+}
+.wo-quantities {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin: 10px 0;
+}
+.wo-quantities label { display: grid; gap: 5px; }
+.wo-order-actions:not(:empty) { margin: 10px 0; }
+.wo-owner-history { margin: 0; padding-inline-start: 22px; }
+.wo-owner-history li { margin-bottom: 8px; padding-inline-start: 3px; }
+.wo-owner-history li > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 3px 9px; }
+.wo-owner-history li::marker, .wo-owner-history time { color: var(--mb-text-2); font-variant-numeric: tabular-nums; }
+.wo-owner-history time { font-size: 12px; }
+.wo-invalid { color: var(--mb-danger); }
+.wo-dispositions ul { margin: 4px 0 0; padding-inline-start: 16px; }
+@media (max-width: 560px) {
+  .wo-entry-grid { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .wo-form .ant-form-item { margin-bottom: 8px; }
+  .wo-entry, .wo-detail-line { padding: 12px; }
+  .wo-entry-head .ant-btn { min-height: 32px; }
+}
+
+.wo-create-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 20px;
+}
+
+.wo-create-details { min-width: 0; }
+
+.wo-return-picker {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--mb-border);
+  border-radius: 8px;
+  background: var(--mb-surface);
+}
+
+.wo-return-picker h3, .wo-return-picker p, .wo-source-label { margin: 0; }
+.wo-return-picker > p, .wo-return-row small, .wo-source-label, .wo-return-count {
+  color: var(--mb-text-2);
+}
+
+.wo-return-list { display: grid; gap: 8px; padding: 0; margin: 0; list-style: none; }
+
+.wo-return-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--mb-border-soft);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+.wo-return-row > div { min-width: 0; }
+.wo-return-row > .ant-btn { flex-shrink: 0; }
+.wo-return-row small, .wo-return-count { display: block; }
+.wo-return-loading { display: flex; align-items: center; gap: 8px; min-height: 48px; }
+.wo-form .wo-source-label, .wo-detail .wo-source-label { margin: 2px 0 8px; }
+.wo-return-picker .ant-pagination { justify-content: flex-end; }
+
+@media (max-width: 720px) {
+  .wo-create-layout { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+}
