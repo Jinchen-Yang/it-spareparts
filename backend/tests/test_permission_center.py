@@ -640,16 +640,16 @@ def test_migration_admin_short_circuit():
         template_perms = filled["template_perms"]
         perm_overrides = filled["perm_overrides"]
 
-    # 常规 admin 权限仍强制全开、自定义锁不住；后续新增的两个生产 Beta 页面
-    # 没有出现在历史快照中，因此按账号白名单失败关闭。
+    # 冻结迁移中缺少后来新增的实名页键，其余管理员权限沿用常规默认。
     effective = permissions.effective_for_user(U())
     legacy_full = permissions.effective("admin", U.permissions)
+    account_pages = permissions.ACCOUNT_SCOPED_BETA_PAGE_KEYS | {permissions.INVENTORY_ANALYTICS_PAGE}
     assert all(
         effective[key] == legacy_full[key]
         for key in permissions.ALL_KEYS
-        if key not in permissions.ACCOUNT_SCOPED_BETA_PAGE_KEYS
+        if key not in account_pages
     )
-    assert all(effective[key] is False for key in permissions.ACCOUNT_SCOPED_BETA_PAGE_KEYS)
+    assert all(effective[key] is False for key in account_pages)
 
 
 def test_frozen_templates_match_current_code():

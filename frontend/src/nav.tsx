@@ -107,6 +107,7 @@ const loadProfit = () => import("./pages/ProfitPage");
 const loadReplenishmentBeta = () => import("./pages/ReplenishmentBetaPage");
 const loadSalesAnalytics = () => import("./pages/sales/analytics/SalesAnalyticsPage");
 const loadPurchaseAnalysis = () => import("./pages/purchases/PurchaseAnalysisPage");
+const loadInventoryAnalytics = () => import("./pages/inventoryAnalytics/InventoryAnalyticsPage");
 const loadPurchaseAnalytics = () => import("./pages/purchases/analytics/PurchaseAnalyticsDashboard");
 const loadPurchaseExceptions = () => import("./pages/purchases/PurchaseExceptionsPage");
 const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage");
@@ -147,6 +148,7 @@ const ProfitPage = lazy(loadProfit);
 const ReplenishmentBetaPage = lazy(loadReplenishmentBeta);
 const SalesAnalyticsPage = lazy(loadSalesAnalytics);
 const PurchaseAnalysisPage = lazy(loadPurchaseAnalysis);
+const InventoryAnalyticsPage = lazy(loadInventoryAnalytics);
 const PurchaseAnalyticsPage = lazy(loadPurchaseAnalytics);
 
 /** 销售 / 采购分析角色硬界（后端契约 §0/§9/§10.8）：仅 admin / boss 可访问——
@@ -325,6 +327,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "库存管理",
     items: [
       { key: "inventory", path: "/inventory", label: "库存查询", icon: <InboxOutlined />, perm: "page_inventory", page: InventoryPage, load: loadInventory },
+      { key: "inventory-analytics", path: "/inventory/analytics", label: "库存管理分析", icon: <BarChartOutlined />, perm: "page_inventory_analytics", accountScoped: true, page: InventoryAnalyticsPage, load: loadInventoryAnalytics },
     ],
   },
   {

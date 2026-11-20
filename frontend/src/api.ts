@@ -13,6 +13,9 @@ export interface BetaFeatures {
 export const getBetaFeatures = () =>
   api.get<BetaFeatures>("/auth/beta-features");
 
+export const getSessionPermissions = () =>
+  api.get<Record<string, boolean>>("/auth/session-permissions");
+
 api.interceptors.request.use((cfg) => {
   const token = localStorage.getItem("token");
   if (token && !cfg.headers.Authorization) cfg.headers.Authorization = `Bearer ${token}`;

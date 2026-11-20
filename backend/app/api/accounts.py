@@ -23,9 +23,10 @@ effective(role, 完整图) 逐键等于该图，回滚零漂移（设计 §1.6�
 import hashlib
 import json
 from datetime import datetime, timezone
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import AfterValidator, BaseModel, model_validator
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
@@ -52,6 +53,16 @@ def _read_gate(ident: dict = Depends(current_identity),
 
 
 # ---------- 请求体 ----------
+def _validate_permission_input(graph: dict) -> dict:
+    key = permissions.INVENTORY_ANALYTICS_PAGE
+    if key in graph and not isinstance(graph[key], bool):
+        raise ValueError(f"{key} 必须是 JSON 布尔值 true 或 false")
+    return graph
+
+
+PermissionInput = Annotated[dict, AfterValidator(_validate_permission_input)]
+
+
 class CreateAccount(BaseModel):
     username: str
     password: str
@@ -59,8 +70,8 @@ class CreateAccount(BaseModel):
     template_code: str | None = None   # v2：职位模板（缺省 readonly）
     display_name: str | None = None
     salesperson_name: str | None = None
-    overrides: dict | None = None      # v2：相对模板的逐键调整
-    permissions: dict | None = None    # 旧字段：完整/部分自定义图（换算成 overrides）
+    overrides: PermissionInput | None = None      # v2：相对模板的逐键调整
+    permissions: PermissionInput | None = None    # 旧字段：完整/部分自定义图（换算成 overrides）
 
 
 class UpdateAccount(BaseModel):
@@ -68,8 +79,8 @@ class UpdateAccount(BaseModel):
     template_code: str | None = None
     display_name: str | None = None
     salesperson_name: str | None = None
-    overrides: dict | None = None
-    permissions: dict | None = None    # 旧字段兼容
+    overrides: PermissionInput | None = None
+    permissions: PermissionInput | None = None    # 旧字段兼容
 
 
 class PasswordReset(BaseModel):
@@ -89,7 +100,16 @@ class DocumentsVisibilityBody(BaseModel):
     hidden: bool
 
 
-class BulkBody(BaseModel):
+class OperationWithoutPermissionMap(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def reject_permission_map(cls, data):
+        if isinstance(data, dict) and ("permissions" in data or "overrides" in data):
+            raise ValueError("此操作不接受 permissions 或 overrides，请使用操作指定的权限键或职位模板")
+        return data
+
+
+class BulkBody(OperationWithoutPermissionMap):
     usernames: list[str]
     operation: str                     # apply_template / grant / revoke / reset_to_template
     template_code: str | None = None   # apply_template 用
@@ -110,8 +130,8 @@ def _view(u: SysUser, tpl: SysRoleTemplate | None = None) -> dict:
     # intentionally closed by account allowlist.  That is a valid state, not a
     # broken action/page combination for the permission-center warning banner.
     combo = [] if u.role == "admin" else permissions.combo_errors(eff)
-    base = permissions.normalize(u.template_perms) if u.template_perms is not None \
-        else permissions.effective(u.role, None)
+    base = permissions.account_template_snapshot(u)
+    overrides = permissions.account_overrides(u)
     return {
         "username": u.username, "display_name": u.display_name, "role": u.role,
         "salesperson_name": u.salesperson_name, "is_active": u.is_active,
@@ -129,8 +149,8 @@ def _view(u: SysUser, tpl: SysRoleTemplate | None = None) -> dict:
         "template_stale": bool(tpl and u.template_version is not None
                                and tpl.version > u.template_version and u.role != "admin"),
         "template_perms": base,                   # 快照底座（前端画"来自模板/单独调整"）
-        "overrides": u.perm_overrides or {},
-        "is_custom": bool(u.perm_overrides),
+        "overrides": overrides,
+        "is_custom": bool(overrides),
     }
 
 
@@ -171,6 +191,27 @@ def _dual_write_legacy(u: SysUser) -> None:
     """把完整有效权限图双写进旧列——回滚保险（设计 §1.6）。admin 角色写快照亦无害
     （旧代码对 admin 同样恒全开）。"""
     u.permissions = permissions.effective_for_user(u)
+
+
+def _set_admin_template(db: Session, user: SysUser, body: CreateAccount | UpdateAccount) -> None:
+    tpl = db.scalar(select(SysRoleTemplate).where(SysRoleTemplate.code == "admin"))
+    user.role = "admin"
+    user.template_code, user.template_version = "admin", (tpl.version if tpl else 1)
+    page = permissions.INVENTORY_ANALYTICS_PAGE
+    user.template_perms = (
+        permissions.normalize(tpl.permissions)
+        if tpl else permissions.admin_account_defaults()
+    )
+    # Pre-migration admin templates may lack the newly introduced default.
+    # Apply it only when creating/promoting an account from a valid template object.
+    if tpl and isinstance(tpl.permissions, dict) and page not in tpl.permissions:
+        user.template_perms[page] = True
+    # Only this ordinary account-level setting can be supplied alongside promotion.
+    # Existing high-risk actions and Beta allowlists retain their separate workflows.
+    given = permissions.sanitize(body.overrides if body.overrides is not None else body.permissions)
+    user.perm_overrides = (
+        {page: given[page]} if page in given and given[page] != user.template_perms[page] else None
+    )
 
 
 def _apply_template(u: SysUser, tpl: SysRoleTemplate, overrides: dict | None = None) -> None:
@@ -274,7 +315,8 @@ def _template_or_400(db: Session, code: str, ident: dict) -> SysRoleTemplate:
     if tpl.code == "admin":
         raise HTTPException(400, "管理员模板为锁定模板不可套用——升管理员请在账号上单独操作")
     # 模板本身带高风险键 → 套用即授予 → 同高风险守护
-    if not _op_is_admin(ident) and any(tpl.permissions.get(k) for k in permissions.HIGH_RISK_KEYS):
+    grants = permissions.sanitize(tpl.permissions)
+    if not _op_is_admin(ident) and any(grants.get(k) for k in permissions.HIGH_RISK_KEYS):
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             f"模板「{tpl.name}」含账号管理高风险权限，仅管理员可套用")
     return tpl
@@ -351,14 +393,7 @@ def create_account(body: CreateAccount, db: Session = Depends(get_db),
         # 直接建管理员：仅 admin 操作者（模板层无 admin 套用路径）
         if not _op_is_admin(ident):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "仅管理员可以创建管理员账号")
-        tpl = db.scalar(select(SysRoleTemplate).where(SysRoleTemplate.code == "admin"))
-        u.role = "admin"
-        u.template_code, u.template_version = "admin", (tpl.version if tpl else 1)
-        u.template_perms = (
-            permissions.normalize(tpl.permissions)
-            if tpl else permissions.admin_account_defaults()
-        )
-        u.perm_overrides = None
+        _set_admin_template(db, u, body)
     else:
         code = body.template_code or body.role or "readonly"
         tpl = _template_or_400(db, code, ident)
@@ -411,14 +446,7 @@ def update_account(username: str, body: UpdateAccount, db: Session = Depends(get
     if body.role == "admin" and u.role != "admin":
         # 升管理员：唯一路径（模板不可套 admin）
         _guard_admin_role_change(ident, db, u, "admin")
-        tpl = db.scalar(select(SysRoleTemplate).where(SysRoleTemplate.code == "admin"))
-        u.role = "admin"
-        u.template_code, u.template_version = "admin", (tpl.version if tpl else 1)
-        u.template_perms = (
-            permissions.normalize(tpl.permissions)
-            if tpl else permissions.admin_account_defaults()
-        )
-        u.perm_overrides = None
+        _set_admin_template(db, u, body)
     elif perm_change:
         # 降 admin / 换模板 / 调 overrides：统一走模板语义
         code = body.template_code
@@ -429,12 +457,16 @@ def update_account(username: str, body: UpdateAccount, db: Session = Depends(get
             _guard_admin_role_change(ident, db, u, tpl.base_role)
             keep = body.overrides if body.overrides is not None else None
             _apply_template(u, tpl, keep)
+        if code is None and u.template_perms is None and (
+                body.overrides is not None or body.permissions is not None):
+            # Freeze a legacy account's existing grants before the compatibility
+            # column is dual-written. Clearing an override can then restore its base.
+            u.template_perms = permissions.account_template_snapshot(u)
         if body.overrides is not None and code is None:
             u.perm_overrides = permissions.sanitize(body.overrides) or None
         if body.permissions is not None and body.overrides is None:
             # 旧字段：期望的最终图 → 相对当前快照换算 diff
-            base = permissions.normalize(u.template_perms) if u.template_perms is not None \
-                else permissions.effective(u.role, None)
+            base = permissions.account_template_snapshot(u)
             desired = permissions.effective_from_snapshot(base, permissions.sanitize(body.permissions))
             u.perm_overrides = permissions.diff_overrides(base, desired) or None
         after_eff = permissions.effective_for_user(u)
@@ -562,8 +594,7 @@ def _plan_bulk(db: Session, ident: dict, body: BulkBody) -> tuple[list[dict], st
             continue
 
         before_eff = permissions.effective_for_user(u)
-        base = permissions.normalize(u.template_perms) if u.template_perms is not None \
-            else permissions.effective(u.role, None)
+        base = permissions.account_template_snapshot(u)
 
         if body.operation == "apply_template":
             new_code, new_ver = tpl.code, tpl.version
