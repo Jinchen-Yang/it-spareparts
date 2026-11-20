@@ -1,8 +1,9 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { App as AntApp } from "antd";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { presales, type Inquiry } from "../../../api/presales";
+import { presales } from "../../../api/presales";
 import { presalesPool, type PoolLine, type PoolPage as PoolPageData } from "../../../api/presalesPool";
 import PoolPage from "../PoolPage";
 
@@ -261,46 +262,96 @@ describe("询价报价共享池", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("行内关单默认未成交，选已成交时带这一行的报价", async () => {
-    const lines = vi.spyOn(presalesPool, "lines").mockResolvedValue(page([{ ...quoted(), is_mine: true }]));
-    const close = vi.spyOn(presales, "closeInquiry").mockResolvedValue({} as Inquiry);
-    show();
-    fireEvent.click(await screen.findByRole("button", { name: "关闭询价 XJ20261101001" }));
-    const dialog = await screen.findByRole("dialog");
-    fireEvent.click(within(dialog).getByRole("radio", { name: /已成交/ }));
-    fireEvent.click(within(dialog).getByRole("button", { name: "确定关单" }));
-    await waitFor(() => expect(close).toHaveBeenCalledWith(9, { expected_version: 1, outcome: "won", won_offer_id: 7, expected_offer_revision_no: 1 }));
-    await waitFor(() => expect(lines).toHaveBeenCalledTimes(2));
-  });
-
-  it("成交时价格变更要重新选价，不能沿用旧弹窗确认新价格", async () => {
-    const original = { ...quoted("100.00"), is_mine: true };
-    const current = { ...original, line_version: 5, price: { ...original.price!, unit_price: "200.00", revision_no: 2 } };
-    vi.spyOn(presalesPool, "lines").mockResolvedValueOnce(page([original])).mockResolvedValue(page([current]));
-    const close = vi.spyOn(presales, "closeInquiry").mockRejectedValueOnce({ response: { status: 409,
-      data: { detail: { code: "offer_revision_conflict", message: "采纳报价已更新" } } } })
-      .mockResolvedValueOnce({} as Inquiry);
-    show();
-    for (const [revision, price] of [[1, "100"], [2, "200"]] as const) {
-      fireEvent.click(await screen.findByRole("button", { name: "关闭询价 XJ20261101001" }));
-      const dialog = await screen.findByRole("dialog");
-      fireEvent.click(within(dialog).getByRole("radio", { name: new RegExp(`已成交.*${price}`) }));
-      fireEvent.click(within(dialog).getByRole("button", { name: "确定关单" }));
-      await waitFor(() => expect(close).toHaveBeenNthCalledWith(revision, 9, expect.objectContaining({
-        outcome: "won", won_offer_id: 7, expected_offer_revision_no: revision,
-      })));
-      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    }
-  });
-
-  it("主管可关闭他人询价，未报价行没有已成交选项；草稿入口显示本人草稿数", async () => {
+  it("D-0068：不报与关单入口退场，无货可报价 0；草稿入口显示本人草稿数", async () => {
     localStorage.setItem("permissions", JSON.stringify({ action_presales_supervise: true }));
-    vi.spyOn(presalesPool, "lines").mockResolvedValue({ ...page([line()]), counts: { pending: 1, quoted: 0, skip: 0, mine: 1, all: 1, drafts: 2 } });
+    const skipped = line({ answer_state: "skip", answer_reason: "已停产", is_mine: true });
+    vi.spyOn(presalesPool, "lines").mockResolvedValue({ ...page([skipped]),
+      counts: { pending: 1, quoted: 1, skip: 0, mine: 2, all: 2, drafts: 2 } });
+    const setPrice = vi.spyOn(presalesPool, "setPrice").mockResolvedValue(quoted("0.00"));
     show();
     expect(await screen.findByRole("link", { name: "我的草稿 2" })).toHaveAttribute("href", "/presales/inquiries?status=draft&scope=mine");
-    fireEvent.click(screen.getByRole("button", { name: "关闭询价 XJ20261101001" }));
+    // 行内不再提供「不报」与「关单」入口。
+    expect(screen.queryByRole("button", { name: "不报" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /关闭询价/ })).toBeNull();
+    // 历史「不报」筛选 tab 保留。
+    expect(screen.getByRole("button", { name: "不报 0" })).toBeInTheDocument();
+    expect(screen.getByText("已停产")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("PN-1 单价"), { target: { value: "0" } });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => expect(setPrice).toHaveBeenCalledWith(1, expect.objectContaining({ unit_price: 0 })));
+    expect(await screen.findByRole("button", { name: "复制 PN-1 报价给客户" })).toBeInTheDocument();
+  });
+
+  it("D-0068：报价备注在单价后行内编辑，随保存一起提交并回显", async () => {
+    vi.spyOn(presalesPool, "lines").mockResolvedValue(page([quoted("100.00")]));
+    const note = "含原装配件。".repeat(45);
+    const saved = quoted("100.00", "王五", 5);
+    const setPrice = vi.spyOn(presalesPool, "setPrice").mockResolvedValue({ ...saved, price: { ...saved.price!, notes: note } });
+    userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    show();
+    const notes = await screen.findByRole("textbox", { name: "PN-1 报价备注" });
+    expect(notes).toBeInTheDocument();
+    // 备注列在「单价」之后、「含税」之前（DOM 顺序即列顺序）。
+    expect(notes.closest("td")!.previousElementSibling).toBe(screen.getByRole("spinbutton", { name: "PN-1 单价" }).closest("td"));
+    expect(notes.closest("td")!.nextElementSibling).toBe(screen.getByRole("combobox", { name: "PN-1 含税" }).closest("td"));
+    expect(notes).not.toHaveAttribute("maxlength");
+    fireEvent.change(notes, { target: { value: note } });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => expect(setPrice).toHaveBeenCalledWith(1, expect.objectContaining({ notes: note })));
+    await screen.findByText(/王五/);
+    expect(notes).toHaveValue(note);
+    fireEvent.change(notes, { target: { value: "尚未保存的备注" } });
+    fireEvent.click(screen.getByRole("button", { name: "复制 PN-1 报价给客户" }));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining(`（备注：${note}）`));
+  });
+
+  it("D-0068：描述点击查看全文并可编辑，保存走行编辑且不动价格", async () => {
+    vi.spyOn(presalesPool, "lines").mockResolvedValue(page([line({ description: "EMC controller SP" })]));
+    const edit = vi.spyOn(presalesPool, "edit").mockResolvedValue(line({ description: "EMC controller SP 无内存" }));
+    const setPrice = vi.spyOn(presalesPool, "setPrice");
+    show();
+    fireEvent.click(await screen.findByRole("button", { name: /EMC controller SP/ }));
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).queryByRole("radio", { name: /已成交/ })).not.toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText("PN-1 描述"), { target: { value: "EMC controller SP 无内存" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => expect(edit).toHaveBeenCalledWith(1, { expected_version: 3, description: "EMC controller SP 无内存" }));
+    expect(setPrice).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("描述保存失败保留原稿，版本冲突展示最新描述，用户核对后按新版本保存", async () => {
+    vi.spyOn(presalesPool, "lines").mockResolvedValue(page([line()]));
+    const latest = line({ line_version: 4, description: "另一人修改的描述" });
+    const edit = vi.spyOn(presalesPool, "edit")
+      .mockRejectedValueOnce(new Error("Network Error"))
+      .mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: "version_conflict", latest } } } })
+      .mockResolvedValueOnce(line({ line_version: 5, description: "我的新描述" }));
+    show();
+    fireEvent.click(await screen.findByRole("button", { name: "内存" }));
+    const dialog = within(await screen.findByRole("dialog"));
+    const input = dialog.getByLabelText("PN-1 描述");
+    expect(input).not.toHaveAttribute("maxlength");
+    fireEvent.change(input, { target: { value: "我的新描述" } });
+    fireEvent.click(dialog.getByRole("button", { name: /保\s*存/ }));
+    await screen.findAllByText("操作未完成");
+    expect(input).toHaveValue("我的新描述");
+    fireEvent.click(dialog.getByRole("button", { name: /保\s*存/ }));
+    await dialog.findByText(/另一人修改的描述/);
+    expect(input).toHaveValue("我的新描述");
+    fireEvent.click(dialog.getByRole("button", { name: "核对后保存" }));
+    await waitFor(() => expect(edit).toHaveBeenNthCalledWith(3, 1, { expected_version: 4, description: "我的新描述" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("已关单的询价可点开描述阅读全文", async () => {
+    vi.spyOn(presalesPool, "lines").mockResolvedValue(page([line({ inquiry_status: "closed", description: "历史描述" })]));
+    show();
+    fireEvent.click(await screen.findByRole("button", { name: "历史描述" }));
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(dialog.getByText("历史描述")).toBeInTheDocument();
+    expect(dialog.queryByRole("textbox")).toBeNull();
+    expect(dialog.queryByRole("button", { name: /保\s*存/ })).toBeNull();
   });
 
   it("切换筛选和搜索都走服务端", async () => {

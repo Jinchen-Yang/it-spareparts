@@ -95,6 +95,8 @@ export interface PoolLineEdit {
   return_defective?: boolean;
   require_exact_pn?: boolean;
   notes?: string | null;
+  /** D-0068：只改描述不作废当前答复；传 null 清空。 */
+  description?: string | null;
 }
 
 export interface PoolHistoryItem {

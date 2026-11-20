@@ -165,7 +165,7 @@ export default function InquiryListPage() {
     </div>
     <Drawer title={detail ? `${detail.inquiry_no} · 报价概览` : "报价概览"} open={!!detailId} width={640} onClose={() => setDetailId(undefined)} destroyOnHidden>
       {detail && <><Table aria-label="PN 报价状态" rowKey="id" dataSource={detail.lines} tableLayout="fixed" pagination={{ pageSize: 10 }} columns={[
-        { title: "PN / 描述", key: "pn", render: (_, line) => <>{line.pn_raw}<div className="presales-muted">{line.description}</div></> },
+        { title: "PN / 描述", key: "pn", render: (_, line) => <>{line.pn_raw}<div className="presales-muted" title={line.description ?? undefined}>{line.description}</div></> },
         { title: "数量", dataIndex: "qty", width: 70 },
         { title: "报价状态", key: "state", render: (_, line) => {
           if (detail.line_answers) return <CurrentAnswer inquiry={detail} line={line} />;

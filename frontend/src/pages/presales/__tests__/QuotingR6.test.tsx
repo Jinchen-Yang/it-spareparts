@@ -71,34 +71,65 @@ function proactive() {
 const conflict = () => ({ response: { status: 409, data: { detail: { code: "existing_offer", draft_offer_id: 81,
   line_id: 11, existing_offers: [activeQuote()] } } } });
 
-describe("r6 采购逐行三选一", () => {
-  it("显示可见有效报价，沿用不复制价格，不报原因填写完成后一次回复", async () => {
+describe("采购逐行报价与沿用", () => {
+  it("显示可见有效报价，沿用不复制价格，无货按 D-0068 报价 0", async () => {
     process();
     await openLine("PN-1");
     await openLine("PN-1");
     await screen.findByText(/有效报价 ¥120/);
     expect(screen.getByRole("columnheader", { name: /已有有效报价/ })).toBeInTheDocument();
     const mode = screen.getByRole("radiogroup", { name: "PN-1处理方式" });
+    // D-0068：处理方式只剩报价与沿用，无「不报」入口。
+    expect(within(mode).queryByRole("radio", { name: "无货 / 不报" })).toBeNull();
     fireEvent.click(within(mode).getByRole("radio", { name: "沿用有效报价" }));
     expect(screen.queryByLabelText("PN-1单价")).not.toBeInTheDocument();
     fireEvent.mouseDown(screen.getByRole("combobox", { name: "PN-1沿用报价" }));
     fireEvent.click(await screen.findByText(/报价 #99/, { selector: ".ant-select-item-option-content span" }));
     expect(screen.getByText("所沿用报价：")).toHaveTextContent("有效报价");
     await openLine("PN-2");
-    fireEvent.click(within(screen.getByRole("radiogroup", { name: "PN-2处理方式" })).getByRole("radio", { name: "无货 / 不报" }));
-    expect(screen.getByRole("button", { name: "回复给销售" })).toBeDisabled();
     await openLine("PN-2");
-    fireEvent.change(screen.getByLabelText("PN-2不报原因"), { target: { value: "   " } });
-    expect(screen.getByRole("button", { name: "回复给销售" })).toBeDisabled();
-    await openLine("PN-2");
-    fireEvent.change(screen.getByLabelText("PN-2不报原因"), { target: { value: "  供应商确认无货  " } });
+    mocks.saveOffer.mockImplementation(async () => {
+      const saved = quote({ id: 82, line_id: 12, unit_price: 0, status: "draft" });
+      inquiry = { ...inquiry, offers: [...(inquiry.offers ?? []), saved] };
+      return saved;
+    });
+    fireEvent.change(screen.getByLabelText("PN-2单价"), { target: { value: "0" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "保存该行报价" })[0]);
+    await waitFor(() => expect(mocks.saveOffer).toHaveBeenCalledWith(1, 12, expect.objectContaining({ unit_price: 0 })));
+    // 保存进本人草稿后整单才算完成，可回复给销售。
+    await waitFor(() => expect(screen.getByRole("button", { name: "回复给销售" })).toBeEnabled());
     await closeLine();
     fireEvent.click(screen.getByRole("button", { name: "回复给销售" }));
     await waitFor(() => expect(mocks.replyInquiry).toHaveBeenCalledWith(1, { expected_version: 4,
       work_item_id: 71, expected_work_item_version: 3, line_responses: [
-        { line_id: 11, mode: "reuse", ref_offer_id: 99 }, { line_id: 12, mode: "skip", reason: "供应商确认无货" },
+        { line_id: 11, mode: "reuse", ref_offer_id: 99 }, { line_id: 12, mode: "quote" },
       ] }));
-    expect(mocks.saveOffer).not.toHaveBeenCalled();
+  });
+
+  it("D-0068：历史不报草稿按报价展示，直接报价后回复不再产出不报", async () => {
+    inquiry.lines = [inquiry.lines![0]];
+    inquiry.line_responses = [{ line_id: 11, mode: "skip", reason: "旧草稿无货", is_draft: true, created_by: 7,
+      work_item_id: 71, expired: false }];
+    mocks.saveOffer.mockImplementation(async () => {
+      const saved = quote({ id: 83, line_id: 11, unit_price: 15, status: "draft" });
+      inquiry = { ...inquiry, offers: [...(inquiry.offers ?? []), saved] };
+      return saved;
+    });
+    process();
+    await openLine("PN-1");
+    await openLine("PN-1");
+    // 处理方式如实显示「报价」选中，不再提供不报原因输入。
+    const mode = screen.getByRole("radiogroup", { name: "PN-1处理方式" });
+    expect(within(mode).getByRole("radio", { name: "报新价" })).toBeChecked();
+    expect(screen.queryByLabelText("PN-1不报原因")).toBeNull();
+    fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "15" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "保存该行报价" })[0]);
+    await waitFor(() => expect(screen.getByRole("button", { name: "回复给销售" })).toBeEnabled());
+    await closeLine();
+    fireEvent.click(screen.getByRole("button", { name: "回复给销售" }));
+    await waitFor(() => expect(mocks.replyInquiry).toHaveBeenCalledWith(1, expect.objectContaining({
+      line_responses: [expect.objectContaining({ line_id: 11, mode: "quote" })],
+    })));
   });
 
   it("有有效报价也须明确处理，未保存的新报价不会算已回复", async () => {
@@ -110,6 +141,21 @@ describe("r6 采购逐行三选一", () => {
     fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "160" } });
     expect(screen.getByRole("button", { name: "回复给销售" })).toBeDisabled();
     expect(mocks.replyInquiry).not.toHaveBeenCalled();
+  });
+
+  it("已完成待办保留历史不报原因与完成数，只读查看", async () => {
+    inquiry.lines = [inquiry.lines![0]];
+    inquiry.work_items![0].status = "done";
+    inquiry.line_responses = [{ line_id: 11, mode: "skip", reason: "供应商停产", is_draft: false,
+      created_by: 7, work_item_id: 71, expired: false }];
+    process();
+    const table = await screen.findByRole("table", { name: "采购报价明细" });
+    expect(table).toHaveTextContent("不报：供应商停产");
+    expect(screen.getByText(/填写完成/)).toHaveTextContent("1 / 1 行（报价 0 · 沿用 0 · 历史不报 1）");
+    await openLine("PN-1");
+    expect(screen.getByText("处理方式：不报：供应商停产")).toBeVisible();
+    expect(screen.queryByRole("radiogroup", { name: "PN-1处理方式" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "回复给销售" })).not.toBeInTheDocument();
   });
 
   it("沿用报价不随时间失效（D-0046）", async () => {
@@ -128,7 +174,7 @@ describe("r6 采购逐行三选一", () => {
     expect(reused).not.toHaveTextContent("已失效");
   });
 
-  it("改选沿用报价更新原报价人，切换不报后不再显示沿用信息", async () => {
+  it("改选沿用报价更新原报价人，切回新报价后不再显示沿用信息", async () => {
     inquiry.lines = [inquiry.lines![0]];
     inquiry.line_responses = [{ line_id: 11, mode: "reuse", ref_offer_id: 99, created_by: 7,
       work_item_id: 71, offer: activeQuote(), expired: false, reporter_label: "采购甲" }];
@@ -142,7 +188,8 @@ describe("r6 采购逐行三选一", () => {
     fireEvent.click(await screen.findByText(/报价 #10/, { selector: ".ant-select-item-option-content span" }));
     expect(screen.getByText("原报价人：采购乙")).toBeInTheDocument();
     expect(screen.queryByText("原报价人：采购甲")).not.toBeInTheDocument();
-    fireEvent.click(within(screen.getByRole("radiogroup", { name: "PN-1处理方式" })).getByRole("radio", { name: "无货 / 不报" }));
+    // D-0068：「不报」入口退场后，切回「报价」同样清掉沿用信息。
+    fireEvent.click(within(screen.getByRole("radiogroup", { name: "PN-1处理方式" })).getByRole("radio", { name: "报新价" }));
     expect(screen.queryByText("所沿用报价：")).not.toBeInTheDocument();
     expect(screen.queryByText("沿用报价当前不可见或已失效")).not.toBeInTheDocument();
   });
@@ -346,6 +393,7 @@ it("Excel 草稿处理在工作台明确标为未回复，填写完成数独立�
     await openLine("PN-1");
   expect(await screen.findAllByText("草稿（未回复）")).toHaveLength(2);
   expect(screen.getByText("2026-12-06")).toBeVisible();
-  expect(screen.getByText(/填写完成/)).toHaveTextContent("2 / 2");
+  // D-0068：历史不报草稿按报价处理，不再计入已完成行；沿用草稿仍算已处理。
+  expect(screen.getByText(/填写完成/)).toHaveTextContent("1 / 2 行（报价 0 · 沿用 1）");
   expect(screen.queryByText(/已回复/)).not.toBeInTheDocument();
 });

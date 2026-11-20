@@ -233,15 +233,18 @@ it("当前答复失效时列表和概览一致，不把历史引用价计入有�
   expect(screen.getByText("最低报价合计（含税）：—")).toBeVisible();
 });
 
-it("当前报价和概览均显示成本性质，不因成本数据权限隐藏", async () => {
+it("当前报价和概览均显示零价、报价备注与成本性质", async () => {
   localStorage.setItem("permissions", JSON.stringify({ data_cost: false }));
   const current: Offer = { id: 71, inquiry_id: 1, line_id: 11, part_id: 1, version: 2, revision_no: 2,
-    status: "published", unit_price: "100", is_tax_inclusive: true, price_basis: "cost", valid_from: "2020-01-01T00:00:00Z" };
+    status: "published", unit_price: "0.00", notes: "暂时无货", is_tax_inclusive: true, price_basis: "cost", valid_from: "2020-01-01T00:00:00Z" };
   listSummary({ ...row, lines: [
     { id: 11, inquiry_id: 1, line_key: "cost", seq: 1, pn_raw: "PN-COST", qty: 1, status: "active", version: 1 },
   ], line_answers: [{ line_id: 11, state: "quoted", responded: true, offer: current }] });
   render(<MemoryRouter><InquiryListPage /></MemoryRouter>);
   await screen.findByText("成本价");
+  const currentAnswer = /PN-COST ¥0\.00 含税.*报价（备注：暂时无货）/;
+  expect(screen.getByText(currentAnswer)).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "报价概览" }));
   expect(screen.getAllByText("成本价")).toHaveLength(2);
+  expect(screen.getAllByText(currentAnswer)).toHaveLength(2);
 });

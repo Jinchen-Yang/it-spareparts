@@ -99,11 +99,11 @@ def test_direct_update_of_existing_quote_keeps_source_and_closed_state(db, r6_ac
 
 def test_reuse_current_answer_updates_but_old_snapshot_and_completed_task_do_not(db, r6_actors):
     u = r6_actors
-    quote = offers.direct_offer(db, u.buyer.id, u.part.id, {"unit_price": "123.45"})
+    quote = offers.direct_offer(db, u.buyer.id, u.part.id, {"unit_price": "123.45", "notes": "旧配置"})
     inquiry, lines = _pending(db, u)
     assert _view(db, inquiry, u.sales)["can_urge"] is False
     _reply(db, inquiry, u.buyer, [{"line_id": lines[0].id, "mode": "reuse", "ref_offer_id": quote.id}])
-    offers.direct_offer(db, u.buyer.id, u.part.id, {"unit_price": "234.56", "price_basis": "cost"},
+    offers.direct_offer(db, u.buyer.id, u.part.id, {"unit_price": "234.56", "price_basis": "cost", "notes": "无内存配置"},
         existing_offer_id=quote.id, expected_version=quote.version)
     for actor in (u.sales, u.buyer):
         view = _view(db, inquiry, actor)
@@ -111,6 +111,8 @@ def test_reuse_current_answer_updates_but_old_snapshot_and_completed_task_do_not
         assert answer["state"] == "quoted" and answer["responded"] is True
         assert answer["offer"]["unit_price"] == Decimal("234.56")
         assert answer["offer"]["price_basis"] == "cost"
+        assert answer["offer"]["notes"] == "无内存配置"
+        assert view["line_responses"][0]["offer"]["notes"] == "旧配置"
         assert view["line_responses"][0]["offer"]["unit_price"] == Decimal("123.45")
         assert view["line_responses"][0]["offer"]["latest"]["price_basis"] == "cost"
         assert view["line_responses"][0]["offer"]["expired"] is True
@@ -121,6 +123,26 @@ def test_reuse_current_answer_updates_but_old_snapshot_and_completed_task_do_not
     view = _view(db, inquiry, u.sales)
     assert view["line_answers"][0] == {"line_id": lines[0].id, "state": "unavailable", "responded": True}
     assert view["can_urge"] is False and view["progress"]["quoted_lines"] == 1
+
+
+def test_pool_zero_price_and_note_reach_sales_list_detail_and_pool(db, r6_actors):
+    u = r6_actors
+    inquiry, (line,) = _pending(db, u)
+    db.commit()
+    saved = _client(u.buyer).put(f"/api/presales/pool/lines/{line.id}/price", json={
+        "expected_version": line.version, "unit_price": "0.00", "notes": "暂时无货"})
+    assert saved.status_code == 200, saved.text
+    sales = _client(u.sales)
+    summary, = sales.get("/api/presales/inquiries", params={"scope": "mine"}).json()["items"]
+    detail = sales.get(f"/api/presales/inquiries/{inquiry.id}").json()
+    row, = sales.get("/api/presales/pool/lines", params={"tab": "quoted"}).json()["items"]
+    for view in (summary, detail):
+        answer, = view["line_answers"]
+        assert (answer["line_id"], answer["state"]) == (line.id, "quoted")
+        assert Decimal(answer["offer"]["unit_price"]) == 0
+        assert answer["offer"]["notes"] == "暂时无货"
+        assert answer["offer"]["id"] == row["price"]["offer_id"]
+    assert (row["line_id"], row["price"]["unit_price"], row["price"]["notes"]) == (line.id, "0.00", "暂时无货")
 
 
 def test_paused_tasks_cannot_be_urged_in_read_or_write_paths(db, r6_actors):
