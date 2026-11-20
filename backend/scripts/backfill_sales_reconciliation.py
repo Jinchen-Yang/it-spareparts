@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""销售单已对账快照历史回填 + 含税三件套回填（D-40/D-41，PR-2）。
+"""销售单对账快照、含税三件套及待收尾款历史回填（D-40/D-41/D-0069）。
 
 背景
 ----
 D-40（已对账快照）与 D-41（销售单金额三件套）的列在 2026-06-30 之后的新型销售
 导出里才有；PR-2 之前的导入不落这些列。本脚本把历史批次（sys_import_batch 中
-file_type=sales、status=success/superseded）的归档原件逐个回放，补两样东西：
+file_type=sales、status=success/superseded）的归档原件逐个回放，补三类数据：
 
 1. ``f_sales_reconciliation_snapshot``：source='backfill'，import_batch_id=原件
    所属批次；(raw_order_id, import_batch_id) 唯一 + ON CONFLICT DO NOTHING——
@@ -18,7 +18,9 @@ file_type=sales、status=success/superseded）的归档原件逐个回放，补�
    库内值/原件值）不覆盖；原件缺失/哈希不符/解析失败/无该值 → 记未解决保持
    NULL。
 
-只写以上两处，绝不触碰任何其它既有列。解析复用导入同一代码路径
+3. ``f_sales_order`` 待收尾款：只处理原件带该列的订单，更大的批次号覆盖当前快照。
+
+解析复用导入同一代码路径
 （pipeline.load_workbook / transform_workbook），列映射与导入完全同源。
 
 安全护栏（沿用 remediate_contract_amount_inc_tax 的模式）
@@ -78,6 +80,7 @@ from sqlalchemy.pool import NullPool
 from app.etl import mapping, pipeline
 from app.models.sales import FSalesOrder, FSalesReconciliationSnapshot
 from app.models.system import SysAuditLog, SysImportBatch, SysRawFile
+from app.etl.sales_receivable import write_sales_receivable
 from app.services.sales_reconciliation import (
     SOURCE_BACKFILL,
     snapshot_rows_from_orders,
@@ -336,8 +339,7 @@ def _orders_in_batch(db: Session, batch_id: int) -> list[Any]:
 def _plan_file(db: Session, batch: SysImportBatch) -> dict[str, Any]:
     """单文件回放计划（纯读，不写任何东西）。
 
-    返回 dict：报告字段（进 JSON/manifest）+ 两个私有键 ``_snapshot_rows`` /
-    ``_tax_fills``（执行用的完整行数据，dry-run 报告里剔除）。
+    返回 dict：报告字段（进 JSON/manifest）及执行所需的私有行数据。
     """
     plan: dict[str, Any] = {
         "batch_id": batch.id,
@@ -354,6 +356,9 @@ def _plan_file(db: Session, batch: SysImportBatch) -> dict[str, Any]:
         "tax_conflicts_sha256": _canonical_sha256([]),
         "tax_unresolved": 0,
         "transform_errors": 0,
+        "sales_receivable_orders": 0,
+        "sales_receivable_plan_sha256": None,
+        "_sales_receivable_orders": {},
         "_snapshot_rows": [],
         "_tax_fills": [],
     }
@@ -389,6 +394,18 @@ def _plan_file(db: Session, batch: SysImportBatch) -> dict[str, Any]:
     result = transformed.result
     plan["orders_in_file"] = len(result.orders)
     plan["transform_errors"] = len(result.errors)
+    balances = {
+        raw_id: {"sales_receivable_amount": head["sales_receivable_amount"]}
+        for raw_id, head in result.orders.items()
+        if "sales_receivable_amount" in head
+    }
+    plan["_sales_receivable_orders"] = balances
+    plan["sales_receivable_orders"] = len(balances)
+    plan["sales_receivable_plan_sha256"] = _canonical_sha256([
+        [raw_id, _money_text(head["sales_receivable_amount"])]
+        for raw_id, head in sorted(balances.items())
+    ])
+
 
     # ---- 1) 快照计划：本批次在库内还没有观测的订单才追加 ----
     if result.has_reconciliation_columns:
@@ -482,6 +499,8 @@ def _manifest_entry(plan: dict[str, Any]) -> dict[str, Any]:
         "status": plan["status"],
         "snapshots_planned": plan["snapshots_planned"],
         "snapshots_plan_sha256": plan["snapshots_plan_sha256"],
+        "sales_receivable_orders": plan["sales_receivable_orders"],
+        "sales_receivable_plan_sha256": plan["sales_receivable_plan_sha256"],
         "tax_fills_planned": plan["tax_fills_planned"],
         "tax_fills_plan_sha256": plan["tax_fills_plan_sha256"],
         "tax_conflicts_count": len(plan["tax_conflicts"]),
@@ -651,6 +670,9 @@ def _apply_file(db: Session, batch: SysImportBatch, plan: dict[str, Any],
         inserted += len(db.execute(
             stmt.returning(FSalesReconciliationSnapshot.id)).all())
     tax_filled = _apply_tax_fills(db, batch, plan["_tax_fills"])
+    receivables_updated = write_sales_receivable(
+        db, plan["_sales_receivable_orders"], batch.id,
+    )
     db.add(SysAuditLog(
         entity_type="sales_reconciliation_backfill",
         entity_id=batch.id,
@@ -662,15 +684,17 @@ def _apply_file(db: Session, batch: SysImportBatch, plan: dict[str, Any],
             "snapshots_existing": plan["snapshots_existing"],
             "tax_fills_planned": plan["tax_fills_planned"],
             "tax_columns_filled": tax_filled,
+            "sales_receivable_updated": receivables_updated,
             "tax_conflicts": len(plan["tax_conflicts"]),
             "tax_unresolved": plan["tax_unresolved"],
         },
-        reason=f"D-40/D-41 销售对账快照与含税三件套历史回填（manifest_sha256={manifest_sha256}）",
+        reason=f"D-40/D-41/D-0069 销售对账、含税金额及待收尾款历史回填（manifest_sha256={manifest_sha256}）",
         operated_by=operator,
     ))
     return {
         "snapshots_inserted": inserted,
         "tax_columns_filled": tax_filled,
+        "sales_receivable_updated": receivables_updated,
         # 冲突计数与 dry-run 报告同源同口径（锁内重算的同一计划），可逐文件核对
         "tax_conflicts": len(plan["tax_conflicts"]),
         "tax_unresolved": plan["tax_unresolved"],
@@ -798,6 +822,8 @@ def run_backfill(
                     "files_failed": files_failed,
                     "snapshots_inserted": sum(r.get("snapshots_inserted", 0) for r in results),
                     "tax_columns_filled": sum(r.get("tax_columns_filled", 0) for r in results),
+                    "sales_receivable_updated": sum(
+                        r.get("sales_receivable_updated", 0) for r in results),
                     "tax_conflicts_total": sum(r.get("tax_conflicts", 0) for r in results),
                 },
             }

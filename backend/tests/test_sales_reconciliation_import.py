@@ -1061,3 +1061,42 @@ def test_missing_line_id_bad_amount_rejects_document_without_facts(
     assert good is not None
     types = {e["error_type"] for e in batch.report_json["errors_preview"]}
     assert {"missing_raw_id", "invalid_head_value"} <= types
+
+
+def test_sales_receivable_overwrites_by_upload_batch(db, tmp_path):
+    from app.services import sales_analytics
+
+    raw_id = "RAW-RECON-1"
+    initial = _write_xlsx(tmp_path / "initial.xlsx", [
+        _row(待收尾款=113), _second_line(待收尾款=113),
+    ])
+    pipeline.run_import(db, initial, "initial.xlsx")
+    db.commit()
+    assert sales_analytics.summary(db)["kpi"]["sales_receivable_total"] == 113
+
+    latest = _write_xlsx(tmp_path / "latest.xlsx", [
+        _row(待收尾款=0), _second_line(待收尾款=0),
+        _row(待收尾款=22, **{
+            "数据ID(不可修改)": "RAW-RECON-2",
+            "订单编号(必填)": "XSDD-20260630-0002",
+            "销售人员": "另一销售",
+            LINE_ID: "LINE-B1",
+        }),
+    ])
+    batch = pipeline.run_import(db, latest, "latest.xlsx")
+    db.commit()
+
+    order = db.scalar(select(FSalesOrder).where(FSalesOrder.raw_order_id == raw_id))
+    assert order.sales_receivable_amount == Decimal("0.00")
+    assert order.sales_receivable_batch_id == batch.id
+    assert sales_analytics.summary(db)["kpi"]["sales_receivable_total"] == 22
+    kpi = sales_analytics.summary(db, salesperson="测试销售")["kpi"]
+    assert kpi["sales_receivable_total"] == 0
+    assert kpi["sales_receivable_missing"] == 0
+
+    blank = _write_xlsx(tmp_path / "blank.xlsx", [_row(待收尾款=None)])
+    pipeline.run_import(db, blank, "blank.xlsx")
+    db.commit()
+    kpi = sales_analytics.summary(db, salesperson="测试销售")["kpi"]
+    assert kpi["sales_receivable_total"] is None
+    assert kpi["sales_receivable_missing"] == 1

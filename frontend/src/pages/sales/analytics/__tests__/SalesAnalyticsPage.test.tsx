@@ -82,6 +82,8 @@ const SUMMARY = {
     amount_inc_tax_total: 1130,
     amount_inc_tax_missing: 1,
     revenue_total: 800,
+    sales_receivable_total: 333,
+    sales_receivable_missing: 2,
   },
 };
 
@@ -99,6 +101,8 @@ const ORDER_ROW = {
   order_id: 201, order_no: "XS-2026-201", order_date: "2026-10-16", is_future: false,
   salesperson: "王五", customer: "客户甲", business_type: "备件销售", data_status: "已生效",
   amount_ex_tax: 200, amount_inc_tax: 226, revenue: 150,
+  sales_receivable_amount: 222,
+  products: [{ line_id: 1, pn: "PN-1", unit_price: 88 }],
   reconciliation: RECON,
 };
 
@@ -209,7 +213,7 @@ describe("销售分析页：URL 单一真值", () => {
     // 含税缺失单数的如实披露（不以推算值冒充）
     expect(screen.getByText(/1 单缺失/)).toBeInTheDocument();
     // 列表三金额列 + 对账块列都在
-    for (const t of ["PN", "含税单价", "含税订单金额", "已对账金额", "待对账金额", "退货已对账金额", "数据截至时间"]) {
+    for (const t of ["PN", "单价", "含税订单金额", "已对账金额", "待对账金额", "待收款"]) {
       expect(screen.getByRole("columnheader", { name: t }), t).toBeInTheDocument();
     }
   });
@@ -412,21 +416,14 @@ describe("销售分析页：URL 单一真值", () => {
     expect(locationSearch).toContain("order=asc");
   });
 
-  it("退货已对账金额列双向排序（契约 §3 返工第四对账列）：sort=return_reconciled_amount 进请求与 URL", async () => {
-    fetchSalesAnalyticsOrders.mockImplementation((q: Record<string, unknown>) =>
-      Promise.resolve({ data: ordersResp({ sort: q.sort, order: q.order ?? "desc" }) }));
+  it("显示原单价、订单待收款及筛选汇总", async () => {
     renderPage();
-    expect(await screen.findByRole("row", { name: /XS-2026-201/ })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("columnheader", { name: "退货已对账金额" }));
-    await waitFor(() => expect(fetchSalesAnalyticsOrders.mock.lastCall?.[0]).toMatchObject({
-      sort: "return_reconciled_amount", order: "desc",
-    }));
-    expect(locationSearch).toContain("sort=return_reconciled_amount");
-    // 再点切升序（A-AC07 双向）
-    fireEvent.click(screen.getByRole("columnheader", { name: "退货已对账金额" }));
-    await waitFor(() => expect(fetchSalesAnalyticsOrders.mock.lastCall?.[0]).toMatchObject({
-      sort: "return_reconciled_amount", order: "asc",
-    }));
+    const row = await screen.findByRole("row", { name: /XS-2026-201/ });
+    expect(within(row).getByText("88.00")).toBeInTheDocument();
+    expect(within(row).getByText("222.00")).toBeInTheDocument();
+    expect(screen.getByText("待收款合计金额")).toBeInTheDocument();
+    expect(screen.getByText("333.00")).toBeInTheDocument();
+    expect(screen.getByText("2 笔待收款未知")).toBeInTheDocument();
   });
 
   it("订单行点击打开详情抽屉：三金额 + 最新对账块 + 对账历史（每批次一条，旧→新）", async () => {
