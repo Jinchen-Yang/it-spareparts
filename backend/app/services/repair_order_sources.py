@@ -109,7 +109,12 @@ def reserve_return_sources(
     ids = set(quantities) | set(existing_quantities)
     if not ids:
         return {}
-    _require_receipt_page(ctx)
+    increasing_ids = {
+        receipt_id for receipt_id, requested in quantities.items()
+        if requested > existing_quantities.get(receipt_id, 0)
+    }
+    if increasing_ids:
+        _require_receipt_page(ctx)
     lock_receipt_context(db)
     identities = {
         row.rkd_line_id: (row.part_id, row.project_id)
@@ -121,7 +126,7 @@ def reserve_return_sources(
     if set(identities) != ids:
         raise RepairConflict("选中的返还明细已变化，请刷新后重试")
     part_ids = {part for part, _ in identities.values() if part is not None}
-    lock_parts(db, part_ids, keep_lock_timeout=True)
+    lock_parts(db, part_ids)
     lock_receipt_projects(db, {project for _, project in identities.values()})
     rows = db.scalars(
         select(Receipt)
@@ -135,33 +140,36 @@ def reserve_return_sources(
     ):
         raise RepairConflict("选中的返还明细已变化，请刷新后重试")
 
+    # 释放原单占用沿用同一套锁，只有增加占用需要重新选件鉴权。
+    if not increasing_ids:
+        return {}
     scope = resolve_visible_project_ids(db, ctx)
+    increasing_part_ids = {identities[receipt_id][0] for receipt_id in increasing_ids}
     parts = {
         part.id: part for part in db.scalars(
-            select(DimPart).where(DimPart.id.in_(part_ids)).order_by(DimPart.id).with_for_update(read=True)
+            select(DimPart).where(DimPart.id.in_(increasing_part_ids)).order_by(DimPart.id).with_for_update(read=True)
         )
     }
     used = dict(db.execute(
         select(deductions.c.receipt_id, deductions.c.legacy_qty + deductions.c.order_qty)
-        .where(deductions.c.receipt_id.in_(ids))
+        .where(deductions.c.receipt_id.in_(increasing_ids))
     ).all())
     sources = {}
     for row in rows:
         receipt_id = row.rkd_line_id
-        requested = quantities.get(receipt_id, 0)
-        existing = existing_quantities.get(receipt_id, 0)
+        if receipt_id not in increasing_ids:
+            continue
         if scope is not None and row.project_id not in scope:
             raise RepairForbidden("无权选用该维保项目的返还明细")
         version = expected_versions.get(receipt_id)
-        if requested > existing and version is None:
+        if version is None:
             raise RepairConflict("追加送修数量须使用当前返还明细版本，请刷新后重试")
-        if version is not None and row.version != version:
+        if row.version != version:
             raise RepairConflict("返还明细已更新，请刷新左侧候选后重试")
-        if not requested:
-            continue
         part = parts.get(row.part_id)
+        existing = existing_quantities.get(receipt_id, 0)
         available = _available_source(row, part) - used.get(receipt_id, 0) + existing
-        if part is None or requested > available:
+        if part is None or quantities[receipt_id] > available:
             raise RepairConflict("返还明细的可用数量不足或已不可送修，请刷新后重试")
         sources[receipt_id] = _candidate(row, part, available)
     return sources

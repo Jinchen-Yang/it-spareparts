@@ -162,21 +162,20 @@ def lock_parts(
     # 避免把 30 秒写进返还改单、导入和工作簿后面的语句。
     previous = db.scalar(text("SELECT current_setting('lock_timeout')"))
     _lock_timeout(db, "1000ms")
-    try:
-        for part_id in ids:
-            db.execute(
-                select(
-                    func.pg_advisory_xact_lock(
-                        func.hashtextextended(f"repair-part:{part_id}", 0)
-                    )
+    for part_id in ids:
+        db.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtextextended(f"repair-part:{part_id}", 0)
                 )
             )
-    finally:
-        if not keep_lock_timeout and previous is not None:
-            db.execute(
-                text("SELECT set_config('lock_timeout', :value, true)"),
-                {"value": previous},
-            )
+        )
+    # PostgreSQL 锁失败时事务已中止，保留原错误供调用方回滚和映射。
+    if not keep_lock_timeout and previous is not None:
+        db.execute(
+            text("SELECT set_config('lock_timeout', :value, true)"),
+            {"value": previous},
+        )
 
 
 def try_lock_part(db: Session, part_id: int) -> bool:
