@@ -25,7 +25,7 @@ vi.mock("../api/systemSettings", () => ({
 
 vi.mock("../AppShell", async () => {
   const { Outlet } = await import("react-router-dom");
-  return { default: () => <Outlet /> };
+  return { default: ({ notice }: { notice?: import("react").ReactNode }) => <>{notice}<Outlet /></> };
 });
 
 vi.mock("../nav", async (importOriginal) => {
@@ -363,4 +363,102 @@ it("同一会话聚焦刷新期间保留已授权库存面板状态与下钻深�
   await act(async () => { resolve({ data: { page_inventory_analytics: true } }); });
   expect(screen.getByRole("textbox", { name: "库存面板状态" })).toHaveValue("保留下钻");
   expect(window.location.search).toBe("?view=matrix&drill=test");
+});
+
+function seedInventorySession() {
+  localStorage.setItem("role", "readonly");
+  localStorage.setItem("name", "仓储账号");
+  localStorage.setItem("token", "verified-inventory");
+  localStorage.setItem("permissions", JSON.stringify({ page_parts: true, page_inventory_analytics: true }));
+  window.history.replaceState({}, "", "/inventory/analytics?view=matrix&drill=test");
+}
+
+it.each([undefined, 503])("已确认库存授权的 focus 临时错误 %s 保留输入深链且非阻塞重试成功", async (status) => {
+  seedInventorySession();
+  getSessionPermissions.mockResolvedValueOnce({ data: { page_inventory_analytics: true } });
+  render(<App />);
+  await screen.findByText("库存管理分析路由");
+  fireEvent.change(screen.getByRole("textbox", { name: "库存面板状态" }), { target: { value: "不可丢失" } });
+  getSessionPermissions.mockRejectedValueOnce(status ? { response: { status } } : { code: "ERR_NETWORK", request: {} });
+  fireEvent(window, new Event("focus"));
+  const retry = await screen.findByRole("button", { name: "重试库存权限" });
+  expect(screen.getByRole("textbox", { name: "库存面板状态" })).toHaveValue("不可丢失");
+  expect(window.location.search).toBe("?view=matrix&drill=test");
+  getSessionPermissions.mockResolvedValueOnce({ data: { page_inventory_analytics: true } });
+  fireEvent.click(retry);
+  await waitFor(() => expect(screen.queryByRole("button", { name: "重试库存权限" })).toBeNull());
+  expect(screen.getByRole("textbox", { name: "库存面板状态" })).toHaveValue("不可丢失");
+});
+
+it("已确认 false 后网络错误仍关闭，并在其他页面提供权限重试", async () => {
+  seedInventorySession();
+  getSessionPermissions.mockResolvedValueOnce({ data: { page_inventory_analytics: false } });
+  render(<App />);
+  await screen.findByText("型号页会话：仓储账号");
+  getSessionPermissions.mockRejectedValueOnce({ code: "ERR_NETWORK", request: {} });
+  fireEvent(window, new Event("focus"));
+  const retry = await screen.findByRole("button", { name: "重试库存权限" });
+  expect(screen.queryByText("库存管理分析路由")).toBeNull();
+  expect(window.location.pathname).toBe("/parts");
+  getSessionPermissions.mockResolvedValueOnce({ data: { page_inventory_analytics: false } });
+  fireEvent.click(retry);
+  await waitFor(() => expect(screen.queryByRole("button", { name: "重试库存权限" })).toBeNull());
+  expect(screen.queryByText("库存管理分析路由")).toBeNull();
+});
+
+it.each([401, 403, "denied"])("已确认 true 后明确权限否定 %s 关闭库存页面", async (status) => {
+  seedInventorySession();
+  getSessionPermissions.mockResolvedValueOnce({ data: { page_inventory_analytics: true } });
+  render(<App />);
+  await screen.findByText("库存管理分析路由");
+  if (status === "denied") getSessionPermissions.mockResolvedValueOnce({ data: { page_inventory_analytics: false } });
+  else getSessionPermissions.mockRejectedValueOnce({ response: { status } });
+  fireEvent(window, new Event("focus"));
+  await waitFor(() => expect(screen.queryByText("库存管理分析路由")).toBeNull());
+});
+
+it("换 token 后首查网络失败不继承旧身份的已确认 true", async () => {
+  seedInventorySession();
+  getSessionPermissions.mockResolvedValueOnce({ data: { page_inventory_analytics: true } });
+  render(<App />);
+  await screen.findByText("库存管理分析路由");
+  getSessionPermissions.mockRejectedValueOnce(new Error("new-session-network"));
+  localStorage.setItem("token", "new-unverified-inventory");
+  publishTokenChange("verified-inventory", "new-unverified-inventory");
+  await screen.findByText("库存分析权限读取失败");
+  expect(screen.queryByText("库存管理分析路由")).toBeNull();
+});
+
+it("较早的网络失败不能覆盖较新明确拒绝，也不能留下旧错误重试", async () => {
+  seedInventorySession();
+  getSessionPermissions.mockResolvedValueOnce({ data: { page_inventory_analytics: true } });
+  render(<App />);
+  await screen.findByText("库存管理分析路由");
+  let reject!: (error: Error) => void;
+  getSessionPermissions.mockImplementationOnce(() => new Promise((_done, fail) => { reject = fail; }))
+    .mockResolvedValueOnce({ data: { page_inventory_analytics: false } });
+  fireEvent(window, new Event("focus"));
+  fireEvent(window, new Event("focus"));
+  await screen.findByText("型号页会话：仓储账号");
+  await act(async () => { reject(new Error("late-network")); });
+  expect(screen.queryByText("库存管理分析路由")).toBeNull();
+  expect(screen.queryByRole("button", { name: "重试库存权限" })).toBeNull();
+});
+
+it("离开库存看板后临时错误仍可非阻塞重试且保留当前页面草稿", async () => {
+  seedInventorySession();
+  window.history.replaceState({}, "", "/parts");
+  getSessionPermissions.mockResolvedValueOnce({ data: { page_inventory_analytics: true } });
+  render(<App />);
+  await screen.findByText("型号页会话：仓储账号");
+  fireEvent.change(screen.getByRole("textbox", { name: "页面本地草稿" }), { target: { value: "其他页面草稿" } });
+  getSessionPermissions.mockRejectedValueOnce({ code: "ERR_NETWORK", request: {} });
+  fireEvent(window, new Event("focus"));
+  const retry = await screen.findByRole("button", { name: "重试库存权限" });
+  expect(window.location.pathname).toBe("/parts");
+  expect(screen.getByRole("textbox", { name: "页面本地草稿" })).toHaveValue("其他页面草稿");
+  getSessionPermissions.mockResolvedValueOnce({ data: { page_inventory_analytics: true } });
+  fireEvent.click(retry);
+  await waitFor(() => expect(screen.queryByRole("button", { name: "重试库存权限" })).toBeNull());
+  expect(screen.getByRole("textbox", { name: "页面本地草稿" })).toHaveValue("其他页面草稿");
 });

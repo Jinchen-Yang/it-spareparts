@@ -1,5 +1,5 @@
 import PageSkeleton from "./components/PageSkeleton";
-import { Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   Alert, Breadcrumb, Button, Drawer, Dropdown, Grid, Layout, Menu, Modal,
@@ -64,10 +64,12 @@ export default function AppShell({
   allowed,
   onLogout,
   onToken,
+  notice,
 }: {
   allowed: NavItem[];
   onLogout: () => void;
   onToken: (token: string) => void;
+  notice?: ReactNode;
 }) {
   const location = useLocation();
   const navigate = useNavigate();
@@ -375,6 +377,7 @@ export default function AppShell({
               }
             />
           )}
+          {notice}
           <TaxPolicyBoundary>
             <Suspense
               key={location.pathname}

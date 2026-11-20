@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
-import { Button, Result } from "antd";
+import { Alert, Button, Result } from "antd";
+import type { AxiosError } from "axios";
 import LoginPage from "./pages/LoginPage";
 import AppShell from "./AppShell";
 import { DETAIL_ROUTES, NAV_ITEMS, NAV_REDIRECTS, defaultPath, isNavItemAllowed } from "./nav";
@@ -44,17 +45,32 @@ export default function App() {
         return;
       }
       const request = ++latest;
-      // A refresh of the same verified session must not unmount the open board.
-      // First load, identity switches and failed reads still wait closed.
-      setInventoryAccess((prior) => prior?.token === token && prior.granted !== undefined
-        ? prior : { token });
+      // 保留同一会话最近一次服务端确认的结果。首次核验和切换身份时等待新结果。
+      setInventoryAccess((prior) => ({ token, granted: prior?.token === token ? prior.granted : undefined }));
       void getSessionPermissions().then(({ data }) => {
         if (!active || request !== latest || localStorage.getItem("token") !== token) return;
-        const granted = data.page_inventory_analytics === true;
-        setInventoryAccess({ token, granted });
-      }).catch(() => {
-        if (!active || request !== latest || localStorage.getItem("token") !== token) return;
-        setInventoryAccess({ token, error: true });
+        setInventoryAccess({ token, granted: data?.page_inventory_analytics === true });
+      }).catch((error: AxiosError | null) => {
+        if (!active || request !== latest) return;
+        const currentToken = localStorage.getItem("token");
+        if (currentToken !== token) {
+          setToken(currentToken);
+          return;
+        }
+        const status = error?.response?.status;
+        if (status === 401 || status === 403) {
+          setInventoryAccess({ token, granted: false });
+          return;
+        }
+        const networkFailure = !error?.response && (
+          error?.code === "ERR_NETWORK" || error?.code === "ECONNABORTED" || error?.code === "ETIMEDOUT"
+        );
+        const transient = networkFailure || (status !== undefined && status >= 500 && status < 600);
+        setInventoryAccess((prior) => ({
+          token,
+          granted: transient && prior?.token === token ? prior.granted : undefined,
+          error: true,
+        }));
       });
     };
     const visible = () => { if (document.visibilityState === "visible") refresh(); };
@@ -157,16 +173,33 @@ export default function App() {
     setToken(null);
   };
 
+  const permissionNotice = inventoryError && (
+    <Alert
+      type="warning"
+      showIcon
+      style={{ marginBottom: 12 }}
+      message={inventoryReady ? "库存权限暂时未能刷新" : "库存分析权限读取失败"}
+      action={
+        <Button size="small" aria-label={inventoryReady ? "重试库存权限" : "重试"} onClick={() => setAccessRetry((n) => n + 1)}>
+          重试
+        </Button>
+      }
+    />
+  );
+
   // 一个页面权限都没有的账号：给明确提示而不是空壳白屏
   if (allowed.length === 0 && inventoryReady) {
     return (
-      <Result
-        style={{ paddingTop: 120 }}
-        status="403"
-        title="当前账号未分配任何页面权限"
-        subTitle="请联系管理员在「账号管理」中为你开通所需页面后重新登录。"
-        extra={<Button type="primary" onClick={logout}>退出登录</Button>}
-      />
+      <>
+        {permissionNotice}
+        <Result
+          style={{ paddingTop: 120 }}
+          status="403"
+          title="当前账号未分配任何页面权限"
+          subTitle="请联系管理员在「账号管理」中为你开通所需页面后重新登录。"
+          extra={<Button type="primary" onClick={logout}>退出登录</Button>}
+        />
+      </>
     );
   }
 
@@ -179,11 +212,9 @@ export default function App() {
     <TaxBasisProvider key={token}>
       <BrowserRouter key={token}>
         <Routes>
-          <Route element={<AppShell allowed={allowed} onLogout={logout} onToken={setToken} />}>
+          <Route element={<AppShell allowed={allowed} onLogout={logout} onToken={setToken} notice={permissionNotice} />}>
             {!inventoryReady && <Route path="/inventory/analytics" element={
-              inventoryError
-                ? <Result status="warning" title="库存分析权限读取失败" extra={<Button aria-label="重试" onClick={() => setAccessRetry((n) => n + 1)}>重试</Button>} />
-                : <div role="status">正在核对库存分析权限…</div>
+              inventoryError ? null : <div role="status">正在核对库存分析权限…</div>
             } />}
             {allowed.map((it) => (
               <Route key={it.key} path={it.path} element={<it.page />} />
