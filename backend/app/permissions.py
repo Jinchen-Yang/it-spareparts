@@ -55,6 +55,10 @@ PAGE_KEYS: list[str] = [
     "page_cycle_repair",
     "page_cycle_manage",
     "page_cycle_wip",
+    "page_repair_order_sales",
+    "page_repair_order_supervisor",
+    "page_repair_order_technician",
+    "page_repair_order_disposition",
 ]
 # 坏件循环五个页键：生产默认全关（含 admin），不进入 _full() 全开图；运行时必须
 # 由实名账号 template_perms ⊕ perm_overrides 显式授权（见 ACCOUNT_SCOPED_BETA_PAGE_KEYS）。
@@ -65,12 +69,18 @@ CYCLE_PAGE_KEYS: frozenset[str] = frozenset({
     "page_cycle_manage",
     "page_cycle_wip",
 })
+REPAIR_ORDER_PAGE_KEYS: frozenset[str] = frozenset({
+    "page_repair_order_sales",
+    "page_repair_order_supervisor",
+    "page_repair_order_technician",
+    "page_repair_order_disposition",
+})
 # 这些页面不是角色能力，而是生产灰度/运营岗位名单。即使 role=admin，也必须从实名账号
 # template_perms ⊕ perm_overrides 得到 True；旧 token/共享口令/缺失账号快照一律失败关闭。
 ACCOUNT_SCOPED_BETA_PAGE_KEYS: frozenset[str] = frozenset({
     "page_maintenance_beta",
     "page_replenishment_beta",
-}) | CYCLE_PAGE_KEYS
+}) | CYCLE_PAGE_KEYS | REPAIR_ORDER_PAGE_KEYS
 # 回款提醒两个写动作同为实名白名单能力（设计 §9）：不进入 admin 常规全开图，
 # require_action 的 admin 短路不适用；必须由 security.require_explicit_account_action
 # 读取实名账号快照⊕覆盖后显式放行。迁移把存量模板与账号中的这两个键强制回填 false。
@@ -200,6 +210,10 @@ LABELS: dict[str, str] = {
     "page_cycle_repair": "坏件循环·待修池",
     "page_cycle_manage": "坏件循环·主管",
     "page_cycle_wip": "坏件循环·采购三数",
+    "page_repair_order_sales": "检测与维修·销售",
+    "page_repair_order_supervisor": "检测与维修·维修主管",
+    "page_repair_order_technician": "检测与维修·维修人员",
+    "page_repair_order_disposition": "检测与维修·去向管理员",
     "action_presales_inquire": "销售询价管理",
     "action_presales_quote": "询价回复报价",
     "action_presales_offer": "主动报价管理",
@@ -221,7 +235,7 @@ def _full(own: bool = False) -> dict[str, bool]:
         d[key] = False
     # 坏件循环工位页不进全开图：admin/boss/readonly 兜底模板同样默认 false
     # （运行时只认实名账号快照 ⊕ 覆盖，见 ACCOUNT_SCOPED_BETA_PAGE_KEYS）。
-    for key in CYCLE_PAGE_KEYS:
+    for key in CYCLE_PAGE_KEYS | REPAIR_ORDER_PAGE_KEYS:
         d[key] = False
     d["own_customers_only"] = own
     # 维保行级收敛键不进全开图：admin/boss 恒全范围（is_scoped_maintenance 双保险）
@@ -1259,6 +1273,42 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["采购"],
         "sensitivity": "low",
         "risk": "只读口径。这三个数不是 itsp 主库存。",
+    },
+    "page_repair_order_sales": {
+        "label": "检测与维修·销售",
+        "summary": "建立本人维修单并查看办理进度。",
+        "can": "新建、直接派给有权限的维修人员或投入公共池。",
+        "cannot": "不能查看别人的维修单、维保返还来源或登记维修结果。",
+        "typical": ["销售"],
+        "sensitivity": "medium",
+        "risk": "建单后可由维修人员领取或办理。",
+    },
+    "page_repair_order_supervisor": {
+        "label": "检测与维修·维修主管",
+        "summary": "管理维修单并处理退回单，可按维保项目权限选用返还明细。",
+        "can": "新建、派发、更正任务条数量与结果、查看维修分析。",
+        "cannot": "不能绕过维保项目权限选件，不能改写返还台账。",
+        "typical": ["维修主管"],
+        "sensitivity": "high",
+        "risk": "更正数量会调整维保返还明细可送修的剩余件数。",
+    },
+    "page_repair_order_technician": {
+        "label": "检测与维修·维修人员",
+        "summary": "承接公共池或被派发的维修单。",
+        "can": "领取任务、登记本人负责的任务条结果、将未办完的任务退回主管。",
+        "cannot": "不能查看其他人员的专属订单或维保返还来源。",
+        "typical": ["维修人员"],
+        "sensitivity": "medium",
+        "risk": "办理结果影响可登记去向的数量。",
+    },
+    "page_repair_order_disposition": {
+        "label": "检测与维修·去向管理员",
+        "summary": "处理维修单上已登记结果的待去向件数。",
+        "can": "登记主公司去向，或从没修好数量中生成关联二次维修单。",
+        "cannot": "不能分配超出已登记结果的数量，不能修改维修结果。",
+        "typical": ["去向管理员"],
+        "sensitivity": "medium",
+        "risk": "二次维修会生成同一物品的下一轮任务记录。",
     },
 }
 

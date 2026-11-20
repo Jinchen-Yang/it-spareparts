@@ -5,6 +5,7 @@ import {
   NAV_GROUPS,
   NAV_ITEMS,
   NAV_REDIRECTS,
+  isNavItemAllowed,
   matchDetailRoute,
   matchNavItem,
 } from "../nav";
@@ -20,7 +21,7 @@ import {
 describe("维保信息架构（2 页定稿 + #267 需求单页）", () => {
   beforeEach(() => localStorage.clear());
 
-  it("维保只有一个导航组；组内为维保主页 + 数据分析 + 数据看板 + 需求单与同步 + 补库申请", () => {
+  it("维保只有一个导航组，检测与维修和待修池各有一个入口", () => {
     const groups = NAV_GROUPS.filter((group) => group.key.startsWith("grp-maintenance"));
     expect(groups).toHaveLength(1);
     expect(groups[0].label).toBe("维保项目");
@@ -29,9 +30,23 @@ describe("维保信息架构（2 页定稿 + #267 需求单页）", () => {
       { key: "maintenance-analytics", path: "/maintenance/analytics" },
       { key: "maintenance-dashboard", path: "/maintenance/dashboard" },
       { key: "maintenance-demands", path: "/maintenance/demands" },
+      { key: "repair-orders", path: "/maintenance/repair-orders" },
       { key: "cycle-pool", path: "/maintenance/cycle" },
       { key: "replenishment-beta", path: "/maintenance/replenishment" },
     ]);
+  });
+
+  it("检测与维修以实名账号的任一岗位授权开放入口", () => {
+    const item = matchNavItem("/maintenance/repair-orders")!;
+    const permissions = [
+      "page_repair_order_sales", "page_repair_order_supervisor",
+      "page_repair_order_technician", "page_repair_order_disposition",
+    ];
+    expect(item.anyPerm).toEqual(permissions);
+    expect(isNavItemAllowed(item, "admin", { page_maintenance: true }, {})).toBe(false);
+    for (const permission of permissions) {
+      expect(isNavItemAllowed(item, "readonly", { [permission]: true }, {})).toBe(true);
+    }
   });
 
   it("组名互不重复（不再出现两个同名维保分组）", () => {
@@ -116,6 +131,7 @@ describe("维保信息架构（2 页定稿 + #267 需求单页）", () => {
       "/maintenance/analytics",
       "/maintenance/dashboard",
       "/maintenance/demands",
+      "/maintenance/repair-orders",
       "/maintenance/cycle",
       "/maintenance/replenishment",
     ]);

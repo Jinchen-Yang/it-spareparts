@@ -529,9 +529,17 @@ def test_data_reconciliation_hidden_masks_reconciliation_fields(db, seeded):
     连 has_data / reconciled_as_of / import_batch_id 这类非金额字段也不泄漏
     「该单有对账数据」。（角色硬界后 readonly 即便授予页面键也 403，反例改用
     boss 模板关对账组。）"""
+    seeded["orders"][0].sales_receivable_amount = 31
+    db.commit()
+    visible = _client(db, "sa-mask-visible", role="boss")
+    assert visible.get(SUMMARY).json()["kpi"]["sales_receivable_total"] == 31
     client = _client(db, "sa-mask", role="boss",
                      overrides={"data_reconciliation": False})
     items = client.get(ORDERS).json()["items"]
+    assert all(item["sales_receivable_amount"] is None for item in items)
+    kpi = client.get(SUMMARY).json()["kpi"]
+    assert kpi["sales_receivable_total"] is None
+    assert kpi["sales_receivable_missing"] is None
     by_no = {i["order_no"]: i["reconciliation"] for i in items}
     empty = {"has_data": False, "reconciled_as_of": None,
              "order_amount_at_snapshot": None, "reconciled_amount": None,
@@ -625,6 +633,7 @@ def test_reconciliation_keys_registered_in_field_groups():
     emitted = {
         "reconciled_amount", "pending_amount", "return_reconciled_amount",
         "order_amount_at_snapshot", "reconciled_as_of", "reconciled_display",
+        "sales_receivable_amount", "sales_receivable_total", "sales_receivable_missing",
     }
     assert emitted <= group
     # 通用键名绝不入组：会把其他接口同名/as_of 等字段一并误遮

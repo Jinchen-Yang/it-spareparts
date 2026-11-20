@@ -110,6 +110,7 @@ _RECON_FIELD_LABELS = {
 # 其他合法单据继续。后出现的合法值不能豁免早先的非法值；也绝不引入
 # 「不含税×税率=税金」等算术等式或舍入阈值阻断（票面差异按源值保留）。
 _HEAD_ECONOMIC_LABELS = {
+    "sales_receivable_amount": "待收尾款",
     "amount_ex_tax": "不含税金额",
     "amount_inc_tax": "申报金额",
     "tax_amount": "税金",
@@ -176,7 +177,8 @@ def _collect_head_economics(res, row, row_no: int, raw_order_id: str,
         col = inv_head.get(internal)
         return row.get(col) if col is not None else None
 
-    for field_name in ("amount_ex_tax", "amount_inc_tax", "tax_amount"):
+    for field_name in ("amount_ex_tax", "amount_inc_tax", "tax_amount",
+                       "sales_receivable_amount"):
         raw = g(field_name)
         try:
             value = cleaner.parse_money(raw)
@@ -458,6 +460,8 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
             continue
         if file_type == mapping.SALES:
             head["is_tax_inclusive"] = values.get("is_tax_inclusive")
+            if inv_head.get("sales_receivable_amount") in df.columns:
+                head["sales_receivable_amount"] = values.get("sales_receivable_amount")
         if file_type == mapping.SALES and res.has_reconciliation_columns:
             for field_name in (*_RECON_MONEY_FIELDS, "source_modified_at"):
                 head[field_name] = values.get(field_name)
