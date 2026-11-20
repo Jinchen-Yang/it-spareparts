@@ -22,6 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.etl import expense_void, mapping
+from app.etl.sales_receivable import write_sales_receivable
 from app.etl.transform import SOFT_ERROR_TYPES, ErrorRec, TransformResult
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inventory import Inventory
@@ -934,6 +935,7 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
     sales_tax_backfilled = 0
     recon_stats: dict = {}
     if is_sales:
+        write_sales_receivable(session, orders, batch_id)
         if not upsert:
             sales_tax_backfilled = _backfill_sales_tax_columns(
                 session, order_rows, set(order_stats["changed_keys"]))

@@ -1,14 +1,14 @@
 """D-0067 维修任务单与返还来源。
 
 Revision ID: b7d43e19af62
-Revises: a7e2f9c4d1b8
+Revises: e8b4c1a6d925
 """
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSONB
 
 revision = "b7d43e19af62"
-down_revision = "a7e2f9c4d1b8"
+down_revision = "e8b4c1a6d925"
 branch_labels = None
 depends_on = None
 

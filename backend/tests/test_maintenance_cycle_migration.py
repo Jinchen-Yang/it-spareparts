@@ -62,7 +62,7 @@ def _insert_part(conn, pn: str) -> int:
     ).scalar_one()
 
 
-def test_single_head_is_repair_pool_revision():
+def test_single_head_is_current_revision():
     assert _current_head() == REVISION
 
 

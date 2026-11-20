@@ -79,6 +79,8 @@ export interface SalesKpi {
   // D-44 新增（旧响应缺省）
   customers?: number;
   salespeople?: number;
+  sales_receivable_total?: number | null;
+  sales_receivable_missing?: number | null;
   revenue_costed?: number | null;
   gross_profit?: number | null;
   gross_margin?: number | null;
@@ -136,6 +138,7 @@ export interface SalesAnalyticsOrderRow {
   customer_type?: string | null;
   gross_profit?: number | null;
   gross_margin?: number | null;
+  sales_receivable_amount?: number | null;
   reconciliation: SalesReconciliationBlock;
   products?: { line_id: number; pn: string | null; description?: string | null; unit_price: number | null }[];
 }

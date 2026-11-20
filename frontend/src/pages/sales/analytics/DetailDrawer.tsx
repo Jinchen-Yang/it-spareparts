@@ -135,7 +135,7 @@ export default function DetailDrawer({
     { title: "大类", dataIndex: "category_major", width: 90, render: (v: string | null) => v || "未分类" },
     { title: "品牌", dataIndex: "brand", width: 90, render: (v: string | null) => v || "—" },
     { title: "数量", dataIndex: "qty", width: 70, align: "right", render: (v: number | null) => qty(v) },
-    { title: "含税单价", dataIndex: "unit_price", width: 100, align: "right", render: (v: number | null) => fmtMoney(v) },
+    { title: "单价", dataIndex: "unit_price", width: 100, align: "right", render: (v: number | null) => fmtMoney(v) },
     { title: "行金额", dataIndex: "line_amount", width: 100, align: "right", render: (v: number | null) => fmtMoney(v) },
     {
       title: "营收", dataIndex: "revenue", width: 100, align: "right",
@@ -265,7 +265,7 @@ export default function DetailDrawer({
                 { key: "asof", label: "数据截至时间", children: fmtDateTime(recon.reconciled_as_of) },
                 {
                   key: "note", label: "口径",
-                  children: `已对账金额 = 实际回款；${includeReturns ? "含退货 = 已对账 + 退货已对账（相加，不扣减）" : "不含退货 = 只看已对账"}`,
+                  children: `已对账金额来自订单对账快照。${includeReturns ? "含退货 = 已对账 + 退货已对账（相加，不扣减）" : "不含退货 = 只看已对账"}`,
                 },
               ]}
             />

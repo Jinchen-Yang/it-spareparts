@@ -214,7 +214,7 @@ def _order_query(
     inner = (
         select(
             so.id, so.order_no, so.order_date, so.salesperson, so.business_type,
-            so.data_status, so.raw_order_id, *amount_cols,
+            so.data_status, so.raw_order_id, so.sales_receivable_amount, *amount_cols,
             so.amount_ex_tax.label("header_amount_ex_tax"),
             so.amount_inc_tax.label("header_amount_inc_tax"),
             _header_revenue(so).label("header_revenue"),
@@ -511,6 +511,9 @@ def summary(
             func.count()
             .filter(sub.c.amount_inc_tax.is_(None))
             .label("amount_inc_tax_missing"),
+            func.sum(sub.c.sales_receivable_amount).label("sales_receivable_total"),
+            func.count().filter(sub.c.sales_receivable_amount.is_(None))
+            .label("sales_receivable_missing"),
             func.sum(sub.c.revenue).label("revenue_total"),
             func.sum(sub.c.revenue_costed).label("revenue_costed"),
             func.sum(sub.c.cost_costed).label("cost_costed"),
@@ -561,6 +564,8 @@ def summary(
             "revenue_total": _f(agg.revenue_total),
             "customers": agg.customers,
             "salespeople": agg.salespeople,
+            "sales_receivable_total": _f(agg.sales_receivable_total),
+            "sales_receivable_missing": agg.sales_receivable_missing,
             "revenue_costed": _f(agg.revenue_costed),
             "gross_profit": _f(gross),
             "gross_margin": margin,
@@ -678,6 +683,9 @@ def orders(
         item = {**_order_fields(r, today)}
         item["products"] = products.get(r.id, [])
         if with_recon_blocks:
+            item["sales_receivable_amount"] = (
+                None if recon_hidden else _f(r.sales_receivable_amount)
+            )
             item["reconciliation"] = _reconciliation_block(
                 snaps.get(r.raw_order_id), include_returns=include_returns
             )
