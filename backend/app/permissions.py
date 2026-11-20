@@ -469,6 +469,10 @@ def template_for(role: str) -> dict[str, bool]:
     return dict(ROLE_TEMPLATES.get(role, _DEFAULT))
 
 
+def _stored_bit(key: str, value) -> bool:
+    return value is True if key == INVENTORY_ANALYTICS_PAGE else bool(value)
+
+
 def effective(role: str, custom: dict | None) -> dict[str, bool]:
     """旧角色口径：role 模板打底、custom 逐项覆盖；admin 返回传统全开图。
 
@@ -476,12 +480,12 @@ def effective(role: str, custom: dict | None) -> dict[str, bool]:
     与历史迁移对账；Beta 页不会再通过 security 的 admin 短路或缺失权限图获得放行。
     """
     if role == "admin":
-        return _full()
+        graph = _full()
+        if isinstance(custom, dict) and INVENTORY_ANALYTICS_PAGE in custom:
+            graph[INVENTORY_ANALYTICS_PAGE] = custom[INVENTORY_ANALYTICS_PAGE] is True
+        return graph
     perms = template_for(role)
-    if custom:
-        for k, v in custom.items():
-            if k in _VALID:
-                perms[k] = bool(v)
+    perms.update(sanitize(custom))
     for k in ALL_KEYS:
         perms.setdefault(k, False)
     return perms
@@ -489,9 +493,9 @@ def effective(role: str, custom: dict | None) -> dict[str, bool]:
 
 def sanitize(custom: dict | None) -> dict[str, bool]:
     """存库前清洗：只留合法 key、值转 bool。"""
-    if not custom:
+    if not isinstance(custom, dict):
         return {}
-    return {k: bool(v) for k, v in custom.items() if k in _VALID}
+    return {k: _stored_bit(k, v) for k, v in custom.items() if k in _VALID}
 
 
 # "能改必须能看"的动作→数据依赖（复审阻塞 4）：动作权限开而对应数据可见权限关，
@@ -1332,22 +1336,23 @@ PERMISSION_META: dict[str, dict] = {
 
 def normalize(perms: dict | None) -> dict[str, bool]:
     """把任意权限图规范化成「全键→bool」的完整图（未知键丢弃、缺键补 False）。"""
-    src = perms or {}
-    return {k: bool(src.get(k, False)) for k in ALL_KEYS}
+    src = perms if isinstance(perms, dict) else {}
+    return {k: _stored_bit(k, src.get(k, False)) for k in ALL_KEYS}
 
 
 def diff_overrides(base: dict, desired: dict) -> dict[str, bool]:
     """算稀疏覆盖：desired 相对 base（模板快照）逐键 diff，只留不同的键。"""
-    return {k: bool(desired.get(k, False)) for k in ALL_KEYS
-            if bool(desired.get(k, False)) != bool(base.get(k, False))}
+    before, after = normalize(base), normalize(desired)
+    return {key: value for key, value in after.items() if value != before[key]}
 
 
 def effective_from_snapshot(template_perms: dict | None, overrides: dict | None) -> dict[str, bool]:
     """v2 有效权限（纯函数）：模板快照打底 + 稀疏覆盖逐键盖上。"""
     perms = normalize(template_perms)
-    for k, v in (overrides or {}).items():
-        if k in _VALID:
-            perms[k] = bool(v)
+    if overrides is not None and not isinstance(overrides, dict):
+        perms[INVENTORY_ANALYTICS_PAGE] = False
+    else:
+        perms.update(sanitize(overrides))
     return perms
 
 
@@ -1356,12 +1361,28 @@ def _inventory_analytics_base(user) -> bool:
     stored = snapshot if snapshot is not None else (getattr(user, "permissions", None) or {})
     # Role defaults are written when templates/accounts are created or migrated.
     # An incomplete stored grant must stay closed until an operator repairs it.
-    return bool(stored.get(INVENTORY_ANALYTICS_PAGE, False))
+    return isinstance(stored, dict) and stored.get(INVENTORY_ANALYTICS_PAGE) is True
 
 
 def inventory_analytics_for_user(user) -> bool:
-    overrides = getattr(user, "perm_overrides", None) or {}
-    return bool(overrides.get(INVENTORY_ANALYTICS_PAGE, _inventory_analytics_base(user)))
+    overrides = getattr(user, "perm_overrides", None)
+    if overrides is not None:
+        if not isinstance(overrides, dict):
+            return False
+        if INVENTORY_ANALYTICS_PAGE in overrides:
+            return overrides[INVENTORY_ANALYTICS_PAGE] is True
+    return _inventory_analytics_base(user)
+
+
+def account_overrides(user) -> dict[str, bool]:
+    """Only v2 accounts apply ordinary overrides. A v1 row's other stored overrides are inert."""
+    stored = user.perm_overrides
+    if stored is not None and not isinstance(stored, dict):
+        return {INVENTORY_ANALYTICS_PAGE: False}
+    overrides = sanitize(stored)
+    if user.template_perms is not None:
+        return overrides
+    return {k: v for k, v in overrides.items() if k == INVENTORY_ANALYTICS_PAGE}
 
 
 def effective_for_user(user) -> dict[str, bool]:
@@ -1404,7 +1425,9 @@ def page_permission_allowed(
     page_key: str,
 ) -> bool:
     """Resolve a page gate, respecting individual grants even for named admins."""
-    if page_key == INVENTORY_ANALYTICS_PAGE or page_key in ACCOUNT_SCOPED_BETA_PAGE_KEYS:
+    if page_key == INVENTORY_ANALYTICS_PAGE:
+        return isinstance(permission_map, dict) and permission_map.get(page_key) is True
+    if page_key in ACCOUNT_SCOPED_BETA_PAGE_KEYS:
         return isinstance(permission_map, dict) and bool(permission_map.get(page_key, False))
     if role == "admin":
         return True

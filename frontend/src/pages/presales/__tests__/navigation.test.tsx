@@ -3,7 +3,10 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "../../../test/antdRender";
 import { DETAIL_ROUTES, NAV_GROUPS, NAV_ITEMS } from "../../../nav";
 
-vi.mock("../../../api", () => ({ getBetaFeatures: () => Promise.resolve({ data: {} }) }));
+vi.mock("../../../api", () => ({
+  getBetaFeatures: () => Promise.resolve({ data: {} }),
+  getSessionPermissions: () => Promise.resolve({ data: { page_inventory_analytics: false } }),
+}));
 vi.mock("../../../context/TaxBasis", () => ({ TaxBasisProvider: ({ children }: { children: ReactNode }) => children }));
 vi.mock("../../../pages/PartSearchPage", () => ({ default: () => <div>型号页面</div> }));
 vi.mock("../InquiryListPage", () => ({ default: () => <div>询价列表内容</div> }));

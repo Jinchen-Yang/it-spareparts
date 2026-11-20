@@ -21,6 +21,8 @@ from sqlalchemy.orm import Session
 
 from app import permissions
 from app.api.accounts import (
+    OperationWithoutPermissionMap,
+    PermissionInput,
     _acct_snapshot,
     _audit,
     _bump_token,
@@ -45,7 +47,7 @@ class TemplateCreate(BaseModel):
     description: str | None = None
     base_role: str = "readonly"
     code: str | None = None          # 缺省自动生成 tpl-xxxxxx
-    permissions: dict | None = None  # 缺省全 False；或从 copy_from 复制
+    permissions: PermissionInput | None = None  # 缺省全 False；或从 copy_from 复制
     copy_from: str | None = None     # 复制既有模板
 
 
@@ -54,10 +56,10 @@ class TemplateUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     base_role: str | None = None     # 仅自定义模板可改
-    permissions: dict | None = None
+    permissions: PermissionInput | None = None
 
 
-class SyncBody(BaseModel):
+class SyncBody(OperationWithoutPermissionMap):
     usernames: list[str] | None = None   # 缺省=该模板全部账号
     clear_overrides: bool = False        # true=同步时一并清除个别调整
     dry_run: bool = True
@@ -152,7 +154,7 @@ def create_template(body: TemplateCreate, db: Session = Depends(get_db),
     perms = body.permissions
     if body.copy_from:
         src = _get(db, body.copy_from)
-        perms = dict(src.permissions)
+        perms = permissions.normalize(src.permissions)
         if body.permissions:
             perms.update(permissions.sanitize(body.permissions))
     normalized = _guard_perms_payload(ident, perms or {})
@@ -255,7 +257,7 @@ def template_accounts(code: str, db: Session = Depends(get_db),
             "is_active": u.is_active, "template_version": u.template_version,
             "stale": bool(u.template_version is not None and t.version > u.template_version
                           and u.role != "admin"),
-            "override_count": len(u.perm_overrides or {}),
+            "override_count": len(permissions.account_overrides(u)),
         } for u in users],
     }
 
@@ -298,7 +300,7 @@ def sync_template(code: str, body: SyncBody, db: Session = Depends(get_db),
     plan: list[dict] = []
     for u in users:
         before_eff = permissions.effective_for_user(u)
-        new_over = {} if body.clear_overrides else dict(u.perm_overrides or {})
+        new_over = {} if body.clear_overrides else permissions.account_overrides(u)
         # 覆盖里与新快照相同的键收敛掉（保持稀疏）
         new_over = {k: v for k, v in new_over.items()
                     if k in permissions.ALL_KEYS and bool(v) != bool(new_base.get(k, False))}

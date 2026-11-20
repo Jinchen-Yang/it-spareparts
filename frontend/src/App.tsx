@@ -6,7 +6,7 @@ import AppShell from "./AppShell";
 import { DETAIL_ROUTES, NAV_ITEMS, NAV_REDIRECTS, defaultPath, isNavItemAllowed } from "./nav";
 import { clearSessionScopedPreferences } from "./sessionPreferences";
 import { TaxBasisProvider } from "./context/TaxBasis";
-import { getBetaFeatures } from "./api";
+import { getBetaFeatures, getSessionPermissions } from "./api";
 
 /** 安全读取本地权限快照：localStorage 被写坏时回退为空而非抛错致整页白屏（审计 U-1）。 */
 function readPerms(): Record<string, boolean> {
@@ -28,6 +28,45 @@ function readBetaFeatures(): Record<string, boolean> {
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
   const [betaFeatures, setBetaFeatures] = useState<Record<string, boolean>>(readBetaFeatures);
+  const [inventoryAccess, setInventoryAccess] = useState<{ token: string; granted?: boolean; error?: boolean }>();
+  const [accessRetry, setAccessRetry] = useState(0);
+  const inventoryReady = inventoryAccess?.token === token && inventoryAccess.granted !== undefined;
+  const inventoryError = inventoryAccess?.token === token && inventoryAccess.error;
+
+  useEffect(() => {
+    if (!token) return;
+    let active = true;
+    let latest = 0;
+    const refresh = () => {
+      const currentToken = localStorage.getItem("token");
+      if (currentToken !== token) {
+        setToken(currentToken);
+        return;
+      }
+      const request = ++latest;
+      // A refresh of the same verified session must not unmount the open board.
+      // First load, identity switches and failed reads still wait closed.
+      setInventoryAccess((prior) => prior?.token === token && prior.granted !== undefined
+        ? prior : { token });
+      void getSessionPermissions().then(({ data }) => {
+        if (!active || request !== latest || localStorage.getItem("token") !== token) return;
+        const granted = data.page_inventory_analytics === true;
+        setInventoryAccess({ token, granted });
+      }).catch(() => {
+        if (!active || request !== latest || localStorage.getItem("token") !== token) return;
+        setInventoryAccess({ token, error: true });
+      });
+    };
+    const visible = () => { if (document.visibilityState === "visible") refresh(); };
+    refresh();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", visible);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", visible);
+    };
+  }, [token, accessRetry]);
 
   useEffect(() => {
     const syncCrossTabSession = (event: StorageEvent) => {
@@ -91,22 +130,18 @@ export default function App() {
     };
   }, [token]);
 
-  // 权限快照随登录周期固定：只在 token 变化（登录/登出/改密）时重算，
-  // 让 AppShell 收到的 allowed 引用稳定、下游 useMemo 可依赖
-  const allowed = useMemo(() => {
-    if (!token) return [];
+  // 常规权限沿用登录快照；库存入口叠加本会话服务端确认值。
+  // 两者与 Beta 能力共同决定菜单和直达路由。
+  const inventoryGranted = inventoryReady && inventoryAccess?.granted === true;
+  const { allowed, allowedDetails } = useMemo(() => {
+    if (!token) return { allowed: [], allowedDetails: [] };
     const role = localStorage.getItem("role") || "";
-    const perms = readPerms();
-    return NAV_ITEMS.filter((it) => isNavItemAllowed(it, role, perms, betaFeatures));
-  }, [token, betaFeatures]);
-
-  // 带参详情路由（如 /pool-analysis/:groupId）：与母页共用同一权限门，无权限则不注册
-  const allowedDetails = useMemo(() => {
-    if (!token) return [];
-    const role = localStorage.getItem("role") || "";
-    const perms = readPerms();
-    return DETAIL_ROUTES.filter((r) => isNavItemAllowed(r, role, perms, betaFeatures));
-  }, [token, betaFeatures]);
+    const perms = { ...readPerms(), page_inventory_analytics: inventoryGranted };
+    return {
+      allowed: NAV_ITEMS.filter((item) => isNavItemAllowed(item, role, perms, betaFeatures)),
+      allowedDetails: DETAIL_ROUTES.filter((item) => isNavItemAllowed(item, role, perms, betaFeatures)),
+    };
+  }, [token, betaFeatures, inventoryGranted]);
 
   // 未登录时任何路径都先登录；登录后停留在原地址（支持深链接直达）
   if (!token) return <LoginPage onLogin={setToken} />;
@@ -123,7 +158,7 @@ export default function App() {
   };
 
   // 一个页面权限都没有的账号：给明确提示而不是空壳白屏
-  if (allowed.length === 0) {
+  if (allowed.length === 0 && inventoryReady) {
     return (
       <Result
         style={{ paddingTop: 120 }}
@@ -135,7 +170,7 @@ export default function App() {
     );
   }
 
-  const home = defaultPath(allowed);
+  const home = allowed.length ? defaultPath(allowed) : "/inventory/analytics";
   const allowedKeys = new Set(allowed.map((it) => it.perm).filter(Boolean));
   // 兼容重定向只在对应权限具备时注册；无权限则不建，交给 * 回 home（不越权暴露目标页存在）
   const redirects = NAV_REDIRECTS.filter((r) => !r.perm || allowedKeys.has(r.perm));
@@ -145,6 +180,11 @@ export default function App() {
       <BrowserRouter key={token}>
         <Routes>
           <Route element={<AppShell allowed={allowed} onLogout={logout} onToken={setToken} />}>
+            {!inventoryReady && <Route path="/inventory/analytics" element={
+              inventoryError
+                ? <Result status="warning" title="库存分析权限读取失败" extra={<Button aria-label="重试" onClick={() => setAccessRetry((n) => n + 1)}>重试</Button>} />
+                : <div role="status">正在核对库存分析权限…</div>
+            } />}
             {allowed.map((it) => (
               <Route key={it.key} path={it.path} element={<it.page />} />
             ))}

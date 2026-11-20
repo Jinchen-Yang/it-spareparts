@@ -305,6 +305,21 @@ def current_identity(creds: HTTPAuthorizationCredentials | None = Depends(_beare
     return verify_request_token(creds.credentials)
 
 
+@router.get("/session-permissions", response_model=dict[str, bool])
+def session_permissions(
+    response: Response,
+    ident: dict = Depends(current_identity),
+) -> dict[str, bool]:
+    """Return server-verified account gates; never trust a client's login cache."""
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        permissions.INVENTORY_ANALYTICS_PAGE: permissions.page_permission_allowed(
+            role=ident["role"], permission_map=ident.get("perms"),
+            page_key=permissions.INVENTORY_ANALYTICS_PAGE,
+        )
+    }
+
+
 @router.get("/beta-features", response_model=dict[str, bool])
 def beta_features(
     response: Response,

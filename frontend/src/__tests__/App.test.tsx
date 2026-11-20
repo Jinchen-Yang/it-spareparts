@@ -1,11 +1,12 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "../test/antdRender";
 
-const { getBetaFeatures } = vi.hoisted(() => ({
+const { getBetaFeatures, getSessionPermissions } = vi.hoisted(() => ({
+  getSessionPermissions: vi.fn(),
   getBetaFeatures: vi.fn(),
 }));
 
-vi.mock("../api", () => ({ getBetaFeatures }));
+vi.mock("../api", () => ({ getBetaFeatures, getSessionPermissions }));
 
 vi.mock("../pages/LoginPage", () => ({
   default: () => <div>登录页</div>,
@@ -41,10 +42,14 @@ vi.mock("../nav", async (importOriginal) => {
     );
   };
   const MaintenanceBetaPage = () => <div>维保 Beta 页面</div>;
+  const InventoryPage = () => {
+    const [draft, setDraft] = useState("");
+    return <div>库存管理分析路由<input aria-label="库存面板状态" value={draft} onChange={(e) => setDraft(e.target.value)} /></div>;
+  };
   return {
     NAV_ITEMS: [
       { key: "parts", path: "/parts", perm: "page_parts", page: PartsPage },
-      { ...actual.matchNavItem("/inventory/analytics")!, page: () => <div>库存管理分析路由</div> },
+      { ...actual.matchNavItem("/inventory/analytics")!, page: InventoryPage },
       {
         key: "maintenance-beta",
         path: "/maintenance/beta/projects",
@@ -77,6 +82,8 @@ beforeEach(() => {
   cleanup();
   localStorage.clear();
   window.history.replaceState({}, "", "/parts");
+  getSessionPermissions.mockReset();
+  getSessionPermissions.mockImplementation(() => Promise.resolve({ data: JSON.parse(localStorage.getItem("permissions") || "{}") }));
   getBetaFeatures.mockReset();
   getBetaFeatures.mockImplementation(() => Promise.resolve({
     data: JSON.parse(localStorage.getItem("beta_features") || "{}"),
@@ -279,4 +286,81 @@ it.each(["readonly", "admin"])("库存分析深链接按 %s 账号权限注册�
   await screen.findByText("型号页会话：仓储账号");
   expect(screen.queryByText("库存管理分析路由")).toBeNull();
   expect(window.location.pathname).toBe("/parts");
+});
+
+it.each([true, false])("库存首次直达等待服务端有效位，忽略相反的旧缓存 %s", async (cached) => {
+  localStorage.setItem("role", "readonly");
+  localStorage.setItem("name", "仓储账号");
+  localStorage.setItem("token", "server-gate");
+  localStorage.setItem("permissions", JSON.stringify({ page_parts: true, page_inventory_analytics: cached }));
+  window.history.replaceState({}, "", "/inventory/analytics?view=matrix");
+  let resolve!: (value: { data: Record<string, boolean> }) => void;
+  getSessionPermissions.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+  render(<App />);
+  expect(screen.getByRole("status")).toHaveTextContent("正在核对库存分析权限");
+  expect(screen.queryByText("库存管理分析路由")).toBeNull();
+  expect(window.location.search).toBe("?view=matrix");
+  await act(async () => { resolve({ data: { page_inventory_analytics: !cached } }); });
+  if (cached) await screen.findByText("型号页会话：仓储账号");
+  else expect(await screen.findByText("库存管理分析路由")).toBeInTheDocument();
+});
+
+it("库存权限读取失败保留深链并可重试，聚焦后的新结果压过迟到响应", async () => {
+  localStorage.setItem("role", "admin");
+  localStorage.setItem("name", "仓储账号");
+  localStorage.setItem("token", "retry-gate");
+  localStorage.setItem("permissions", JSON.stringify({ page_parts: true, page_inventory_analytics: true }));
+  window.history.replaceState({}, "", "/inventory/analytics?view=matrix");
+  getSessionPermissions.mockRejectedValueOnce(new Error("offline"));
+  render(<App />);
+  await screen.findByText("库存分析权限读取失败");
+  expect(window.location.pathname).toBe("/inventory/analytics");
+  getSessionPermissions.mockResolvedValueOnce({ data: { page_inventory_analytics: true } });
+  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  await screen.findByText("库存管理分析路由");
+  let resolve!: (value: { data: Record<string, boolean> }) => void;
+  getSessionPermissions.mockImplementationOnce(() => new Promise((done) => { resolve = done; }))
+    .mockResolvedValueOnce({ data: { page_inventory_analytics: false } });
+  fireEvent(window, new Event("focus"));
+  fireEvent(window, new Event("focus"));
+  await screen.findByText("型号页会话：仓储账号");
+  await act(async () => { resolve({ data: { page_inventory_analytics: true } }); });
+  expect(screen.queryByText("库存管理分析路由")).toBeNull();
+});
+
+it("切换身份后旧会话库存授权响应不会覆盖新身份，焦点发现静默换令牌", async () => {
+  localStorage.setItem("role", "readonly");
+  localStorage.setItem("name", "账号 A");
+  localStorage.setItem("token", "late-a");
+  localStorage.setItem("permissions", JSON.stringify({ page_parts: true }));
+  window.history.replaceState({}, "", "/inventory/analytics");
+  let resolve!: (value: { data: Record<string, boolean> }) => void;
+  getSessionPermissions.mockImplementationOnce(() => new Promise((done) => { resolve = done; }))
+    .mockResolvedValueOnce({ data: { page_inventory_analytics: false } });
+  render(<App />);
+  localStorage.setItem("name", "账号 B");
+  localStorage.setItem("token", "current-b");
+  fireEvent(window, new Event("focus"));
+  await screen.findByText("型号页会话：账号 B");
+  await act(async () => { resolve({ data: { page_inventory_analytics: true } }); });
+  expect(screen.queryByText("库存管理分析路由")).toBeNull();
+  expect(getSessionPermissions).toHaveBeenCalledTimes(2);
+});
+
+it("同一会话聚焦刷新期间保留已授权库存面板状态与下钻深链", async () => {
+  localStorage.setItem("role", "readonly");
+  localStorage.setItem("token", "stable-inventory");
+  localStorage.setItem("permissions", JSON.stringify({ page_parts: true }));
+  getSessionPermissions.mockResolvedValueOnce({ data: { page_inventory_analytics: true } });
+  window.history.replaceState({}, "", "/inventory/analytics?view=matrix&drill=test");
+  render(<App />);
+  await screen.findByText("库存管理分析路由");
+  fireEvent.change(screen.getByRole("textbox", { name: "库存面板状态" }), { target: { value: "保留下钻" } });
+  let resolve!: (value: { data: Record<string, boolean> }) => void;
+  getSessionPermissions.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+  fireEvent(window, new Event("focus"));
+  expect(screen.getByRole("textbox", { name: "库存面板状态" })).toHaveValue("保留下钻");
+  await act(async () => { resolve({ data: { page_inventory_analytics: true } }); });
+  expect(screen.getByRole("textbox", { name: "库存面板状态" })).toHaveValue("保留下钻");
+  expect(window.location.search).toBe("?view=matrix&drill=test");
 });
