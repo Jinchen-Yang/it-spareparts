@@ -204,7 +204,7 @@ describe("采购待办与询价处理", () => {
     }));
   });
 
-  it("逐行保存新报价或填写不报原因，不再填写有效期，全部完成才回复", async () => {
+  it("逐行保存新报价，无货按 D-0068 报价 0，不再填写有效期，全部完成才回复", async () => {
     processPage();
     await openLine("PN-1");
     await openLine("PN-1");
@@ -213,6 +213,8 @@ describe("采购待办与询价处理", () => {
     expect(screen.queryByLabelText("PN-1有效天数")).not.toBeInTheDocument();
     expect(within(screen.getByRole("dialog")).getByText("报价不设有效期，一直有效，直到你更新或撤回。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "回复给销售" })).toBeDisabled();
+    // D-0068：不再提供「不报」入口。
+    expect(screen.queryByRole("radio", { name: "无货 / 不报" })).toBeNull();
     fireEvent.change(screen.getByLabelText("PN-1单价"), { target: { value: "120" } });
     expect(screen.getAllByLabelText("供应商可见性：私密")).toHaveLength(1);
     fireEvent.click(screen.getAllByRole("button", { name: "保存该行报价" })[0]);
@@ -223,16 +225,14 @@ describe("采购待办与询价处理", () => {
     await waitFor(() => expect(screen.getByText("已保存草稿")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "回复给销售" })).toBeDisabled();
     await openLine("PN-2");
-    fireEvent.click(within(screen.getByRole("radiogroup", { name: "PN-2处理方式" })).getByRole("radio", { name: "无货 / 不报" }));
-    expect(screen.getByRole("button", { name: "回复给销售" })).toBeDisabled();
-    await openLine("PN-2");
-    fireEvent.change(screen.getByLabelText("PN-2不报原因"), { target: { value: "供应商确认无货" } });
+    fireEvent.change(screen.getByLabelText("PN-2单价"), { target: { value: "0" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "保存该行报价" })[0]);
     await waitFor(() => expect(screen.getByRole("button", { name: "回复给销售" })).toBeEnabled());
     await closeLine();
     fireEvent.click(screen.getByRole("button", { name: "回复给销售" }));
     await waitFor(() => expect(mocks.replyInquiry).toHaveBeenCalledWith(1, {
       expected_version: 4, work_item_id: 71, expected_work_item_version: 3,
-      line_responses: [{ line_id: 11, mode: "quote" }, { line_id: 12, mode: "skip", reason: "供应商确认无货" }],
+      line_responses: [{ line_id: 11, mode: "quote" }, { line_id: 12, mode: "quote" }],
     }));
     await openLine("PN-1");
     await screen.findAllByRole("button", { name: "更新报价" });

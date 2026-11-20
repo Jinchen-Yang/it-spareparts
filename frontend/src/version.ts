@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.47.0";
+export const APP_VERSION = "1.48.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.48.0",
+    date: "2026-11-18",
+    items: [
+      "询价报价页在单价后面新增「报价备注」列，可标注通用报价和特殊情况（如无内存配置）；备注会随当前答复和「复制」话术展示给销售。",
+      "询价行的描述改为可点击：点击查看全文并可修正保存，只改描述不影响当前报价；询价详情页点描述可打开行详情。",
+      "按业务口径移除「不报」入口：页面和报价工作台不再提供「不报」，无货或不想做的行报价 0；历史不报记录仍可查看，可直接重新报价覆盖。",
+      "按业务口径移除「关单」入口：询价报价页和询价详情页不再提供关单按钮；历史已关单的询价单照常展示。",
+    ],
+  },
   {
     version: "1.47.0",
     date: "2026-11-12",

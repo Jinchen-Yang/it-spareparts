@@ -1,7 +1,7 @@
 import { parseApiError } from "../../utils/apiError";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { Alert, App, Button, Descriptions, Drawer, Form, Modal, Radio, Select, Space, Spin, Table, Tag, Typography } from "antd";
+import { Alert, App, Button, Descriptions, Drawer, Space, Spin, Table, Tag, Typography } from "antd";
 import { presales, type Inquiry, type InquiryLine, type Offer, type OfferRevision } from "../../api/presales";
 import type { WorkItem } from "../../api/workItems";
 import PartThumb from "../../components/gallery/PartThumb";
@@ -42,20 +42,13 @@ function InquiryDetailContent({ id }: { id: number }) {
   const [history, setHistory] = useState<OfferRevision[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
-  const [closeOpen, setCloseOpen] = useState(false);
   const [visibilityOpen, setVisibilityOpen] = useState(false);
-  const [outcome, setOutcome] = useState<"won" | "lost" | "cancelled">("won");
-  const [wonOffer, setWonOffer] = useState<{ id: number; revision: number }>();
-  const wonOfferId = wonOffer?.id;
-  const selectWonOffer = (offer?: Offer) => setWonOffer(offer ? {
-    id: offer.id, revision: offer.latest?.revision_no ?? offer.revision_no,
-  } : undefined);
   const generation = useRef(0);
   const historyGeneration = useRef(0);
   const clearProtectedData = useCallback(() => {
     historyGeneration.current += 1;
     setInquiry(undefined); setGalleryOpen(false); setGalleryLineId(undefined); setTimelineOpen(false);
-    setLineId(undefined); setHistoryOffer(undefined); setHistory([]); setCloseOpen(false); setWonOffer(undefined); setVisibilityOpen(false);
+    setLineId(undefined); setHistoryOffer(undefined); setHistory([]); setVisibilityOpen(false);
   }, []);
   const now = useNow([...(inquiry?.offers ?? []), ...(inquiry?.lines ?? []).flatMap((line) => [...(line.linked_offers ?? []), ...(line.ref_offer ? [line.ref_offer] : [])]),
     ...(inquiry?.line_responses ?? []).flatMap((row) => row.offer ? [row.offer] : [])]
@@ -108,25 +101,6 @@ function InquiryDetailContent({ id }: { id: number }) {
     finally { setBusy(false); }
   };
 
-  const close = async () => {
-    if (!inquiry || busy) return;
-    setBusy(true);
-    try {
-      const data = await presales.closeInquiry(id, { expected_version: inquiry.version, outcome,
-        ...(outcome === "won" && wonOffer ? { won_offer_id: wonOffer.id, expected_offer_revision_no: wonOffer.revision } : {}) });
-      setInquiry(data); setCloseOpen(false); message.success("已关单");
-    } catch (error) {
-      const info = parseApiError(error);
-      if (info.kind === "permission" || info.status === 404) { clearProtectedData(); await load(); }
-      if (info.code === "offer_revision_conflict") {
-        setWonOffer(undefined);
-        setCloseOpen(false);
-        void message.warning("报价已更新，请重新选择要成交的报价");
-        await load();
-      } else await handlePresalesError(error, load);
-    } finally { setBusy(false); }
-  };
-
   if (!inquiry) return <>{loading && <Spin aria-label="询价单加载中" />}{error && <Alert type="error" message={error}
     action={<Button onClick={() => void load()}>重试</Button>} />}</>;
 
@@ -135,18 +109,12 @@ function InquiryDetailContent({ id }: { id: number }) {
   const canManage = inquiry.is_owner === true || isPresalesSupervisor();
   const canAmend = canManage && inquiry.kind === "sales_inquiry";
   const adopted = inquiry.won_offer;
-  const lineForOffer = (offer: Offer) => lines.find((line) => !line.answer_requires_review && (line.id === offer.line_id || line.ref_offer_id === offer.id
-    || line.linked_offer_ids?.includes(offer.id) || line.linked_offers?.some((linked) => linked.id === offer.id) || inquiry.line_responses?.some((row) => !row.is_draft && row.line_id === line.id && row.mode === "reuse" && row.ref_offer_id === offer.id)));
-  const closeOptions = [...new Map([...offers, ...lines.flatMap((line) => [...(line.linked_offers ?? []), ...(line.ref_offer ? [line.ref_offer] : [])]),
-    ...(inquiry.line_responses ?? []).flatMap((row) => !row.is_draft && row.mode === "reuse" && row.offer ? [row.offer] : [])]
-    .filter((offer) => isOfferActive(offer, now) && !!lineForOffer(offer)).map((offer) => [offer.id, offer])).values()];
   const galleryItems = lines.filter((line) => line.part_id).map((line) => ({ partId: line.part_id!, pn: line.pn_raw }));
 
   const lineOffers = new Map(lines.map((line) => [line.id, offersForLine(line, inquiry)]));
   const referenceIds = (line: InquiryLine) => new Set([...(line.linked_offer_ids ?? []), ...(line.linked_offers ?? []).map((offer) => offer.id),
     ...(line.ref_offer_id ? [line.ref_offer_id] : []), ...(inquiry.line_responses ?? []).filter((response) => !response.is_draft && response.line_id === line.id && response.mode === "reuse")
       .flatMap((response) => response.ref_offer_id ? [response.ref_offer_id] : [])]);
-  const canClose = !readOnly && canManage && ["submitted", "revising"].includes(inquiry.status);
   const renderOffer = (line: InquiryLine, offer: Offer) => {
     const active = !line.answer_requires_review && isOfferActive(offer, now);
     const candidates = (lineOffers.get(line.id) ?? []).filter((candidate) => !line.answer_requires_review && isOfferActive(candidate, now) && !candidate.no_stock
@@ -155,17 +123,15 @@ function InquiryDetailContent({ id }: { id: number }) {
       && Number(offer.unit_price) === Math.min(...candidates.map((candidate) => Number(candidate.unit_price)));
     const detail = [offer.reporter?.name || `报价 #${offer.id}`, offer.stock_location, offer.lead_time,
       offer.valid_from ? `报价于 ${formatBusinessDateTime(offer.valid_from)}` : ""].filter(Boolean).join(" · ");
+    // D-0068：关单入口移除后报价格子不再承担「选择成交」交互，仅作展示。
     return <span key={offer.id} className="presales-quote-cell">
-      <button type="button" aria-label={`采纳 ${line.pn_raw} 报价 ${offer.id}`} aria-pressed={wonOfferId === offer.id}
-        className={`presales-offer-choice ${wonOfferId === offer.id ? "is-selected" : lowest ? "is-lowest" : ""}`}
-        disabled={!canClose || busy || !active || !!offer.no_stock} title={detail}
-        onClick={() => selectWonOffer(wonOfferId === offer.id ? undefined : offer)}><OfferPrice offer={offer} />
+      <div className={`presales-offer-choice ${lowest ? "is-lowest" : ""}`} title={detail}><OfferPrice offer={offer} />
         {lowest && <span className="presales-muted">{taxLabel(offer.is_tax_inclusive)}最低价</span>}
         {active && <Tag color="green">有效</Tag>}
         {offer.status === "stale" && <span>基于旧版本</span>}
         {offer.status === "draft" && <span>报价草稿</span>}
         {offer.status === "published" && !offer.no_stock && !active && <span>已失效</span>}
-      </button>
+      </div>
       <span className="presales-muted"><OfferUpdates offer={offer} /></span>
       <Button size="small" type="link" aria-label={`查看报价 ${offer.id} 历史`} onClick={() => void showHistory(offer)}>历史</Button>
     </span>;
@@ -200,7 +166,7 @@ function InquiryDetailContent({ id }: { id: number }) {
       {adopted && <Space wrap><Button type="link" onClick={() => void showHistory(adopted)}>报价 #{adopted.id} · 第 {adopted.revision_no} 版</Button><OfferBadge offer={adopted} /></Space>}
       <p className="presales-muted">最低价按同一含税口径比较，仅计入有效报价。</p>
       <Table aria-label="询价比价矩阵" rowKey="id" dataSource={lines} loading={loading} tableLayout="fixed" pagination={{ defaultPageSize: 20 }} columns={[
-        { title: "PN / 描述", key: "pn", render: (_, line) => <><Space>{line.part_id && <PartThumb partId={line.part_id} pn={line.pn_raw} size={24} />}{line.pn_raw}{line.require_exact_pn && <Tag>一致</Tag>}</Space><div className="presales-muted">{line.description}</div></> },
+        { title: "PN / 描述", key: "pn", render: (_, line) => <><Space>{line.part_id && <PartThumb partId={line.part_id} pn={line.pn_raw} size={24} />}{line.pn_raw}{line.require_exact_pn && <Tag>一致</Tag>}</Space><button type="button" className="presales-link presales-ellipsis" title={line.description ?? "点击查看行详情"} onClick={() => setLineId(line.id)}>{line.description || "—"}</button></> },
         { title: "数量 / 期望交期", key: "quantity", width: 150, render: (_, line) => <>{line.qty}<div className="presales-muted">{line.expected_delivery || "—"}</div></> },
         ...(inquiry.line_answers ? [{ title: "当前答复", key: "answer", render: (_: unknown, line: InquiryLine) => <CurrentAnswer inquiry={inquiry} line={line} /> }] : []),
         { title: "报价对比", key: "offers", render: (_, line) => <>{(lineOffers.get(line.id) ?? []).filter((offer) => !referenceIds(line).has(offer.id)).map((offer) => <div key={offer.id}>{offer.reporter?.name}{renderOffer(line, offer)}</div>)}
@@ -211,9 +177,7 @@ function InquiryDetailContent({ id }: { id: number }) {
         { title: "操作", key: "actions", width: 120, render: (_, line) => <Space direction="vertical"><Button type="link" aria-label={`查看 ${line.pn_raw} 详情`} onClick={() => setLineId(line.id)}>查看详情</Button>{line.part_id && <Button type="link" onClick={() => { setGalleryLineId(line.id); setGalleryOpen(true); }}>图库多选下载</Button>}</Space> },
       ]} />
     </div>
-    <footer className="presales-footer"><span>{readOnly ? "报价通知 · 只读" : wonOfferId ? `已选择报价 #${wonOfferId}` : canClose ? "点报价格子选择成交采纳报价" : "询价详情"}</span>
-      {canClose && <Space><Button disabled={busy} onClick={() => { setOutcome("lost"); setCloseOpen(true); }}>未成交关单</Button><Button type="primary" aria-label="关单" disabled={busy} onClick={() => { setOutcome("won"); setCloseOpen(true); }}>成交关单</Button></Space>}
-    </footer>
+    <footer className="presales-footer"><span>{readOnly ? "报价通知 · 只读" : "询价详情"}</span></footer>
     <Drawer title="询价动态" open={timelineOpen} onClose={() => setTimelineOpen(false)} width={480} destroyOnHidden>
       {timelineOpen && <Timeline key={`${id}:${inquiry.version}`} subjectType="presales_inquiry" subjectId={id} />}
     </Drawer>
@@ -233,12 +197,5 @@ function InquiryDetailContent({ id }: { id: number }) {
     </Drawer>
     {visibilityOpen && <InquiryVisibilityDialog inquiryId={id} inquiryNo={inquiry.inquiry_no} onClose={() => setVisibilityOpen(false)}
       onSaved={() => void load()} onDenied={() => { clearProtectedData(); void load(); }} />}
-    <Modal open={closeOpen} title="关单" onCancel={() => { if (!busy) setCloseOpen(false); }} onOk={() => void close()} confirmLoading={busy} okText="确认关单" cancelButtonProps={{ disabled: busy }} maskClosable={!busy} closable={!busy}>
-      <Form layout="vertical"><Form.Item label="关单结果"><Radio.Group value={outcome} onChange={(event) => setOutcome(event.target.value)}><Radio value="won">成交</Radio><Radio value="lost">未成交</Radio><Radio value="cancelled">取消</Radio></Radio.Group></Form.Item>
-        {outcome === "won" && <Form.Item label="采纳本单报价（可选）"><Select aria-label="采纳报价" allowClear value={wonOfferId} onChange={(id) => selectWonOffer(closeOptions.find((offer) => offer.id === id))} placeholder="选择采纳的本单报价（可选）" options={closeOptions.map((offer) => ({ value: offer.id,
-          label: `${lineForOffer(offer)?.pn_raw || ""} · 报价 #${offer.id}${offer.reporter ? ` · ${offer.reporter.name}` : ""} · ${offer.latest ? `当前${formatMoney(offer.latest.unit_price, { prefix: "¥" })} · ${taxLabel(offer.latest.is_tax_inclusive)}${offer.latest.price_basis ? ` · ${basisLabel(offer.latest)}` : ""} · 第 ${offer.latest.revision_no} 版` : `${formatMoney(offer.unit_price, { prefix: "¥" })} · ${taxLabel(offer.is_tax_inclusive)} · ${basisLabel(offer)}`}`,
-        }))} /></Form.Item>}
-      </Form>
-    </Modal>
   </section>;
 }

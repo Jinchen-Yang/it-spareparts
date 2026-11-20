@@ -676,6 +676,54 @@ def test_condition_cannot_be_null(db, users, key):
     assert response.status_code == 422
 
 
+def test_edit_description_keeps_current_answer(db, users):
+    # D-0068：描述与备注同类，只改不作废当前答复；历史记录「描述」变更。
+    line = _inquiry(db, users.seller, users.part)
+    priced = _price(db, users.buyer, line, "100")
+    offer_id = priced["price"]["offer_id"]
+    api = _client(users.peer)
+    response = api.patch(f"/api/presales/pool/lines/{line.id}",
+                         json={"expected_version": priced["line_version"], "description": "EMC controller SP（无内存）"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["description"] == "EMC controller SP（无内存）"
+    assert (body["answer_state"], body["price"]["offer_id"], body["price"]["unit_price"]) == ("quoted", offer_id, "100.00")
+    stale = api.patch(f"/api/presales/pool/lines/{line.id}",
+                      json={"expected_version": priced["line_version"], "description": None})
+    assert stale.status_code == 409
+    conflict = stale.json()["detail"]
+    assert conflict["code"] == "version_conflict"
+    assert conflict["latest"]["description"] == body["description"]
+    assert conflict["latest"]["line_version"] == body["line_version"]
+    db.refresh(line)
+    assert line.current_offer_id == offer_id
+    events = db.scalars(select(SubjectEvent).where(SubjectEvent.subject_id == line.inquiry_id,
+                                                   SubjectEvent.kind == "line.edited").order_by(SubjectEvent.id.desc())).all()
+    assert events and events[0].payload["changed"] == ["description"]
+
+
+def test_edit_description_can_clear_and_ignores_same_value(db, users):
+    result = pool.create_inquiry(db, _ctx(db, users.seller), visible_to=["api_other"],
+        lines=[{"part_id": users.part.id, "pn_raw": users.part.pn_std, "qty": Decimal(1),
+                "description": "原粘贴描述"}])
+    db.commit()
+    line = db.scalar(select(PresalesInquiryLine).where(PresalesInquiryLine.inquiry_id == result["inquiry_id"]))
+    _price(db, users.buyer, line, "50")
+    db.refresh(line)
+    version = line.version
+    # 显式传 null 清空描述；写入路径与备注一致，不作废答复。
+    cleared = pool.edit_line(db, line.id, users.seller.id, {"description": None}, expected_version=version)
+    assert cleared["description"] is None
+    assert cleared["answer_state"] == "quoted"
+    db.refresh(line)
+    # 同值再传不产生新版本、不产生新事件。
+    same = pool.edit_line(db, line.id, users.seller.id, {"description": None}, expected_version=line.version)
+    assert same["line_version"] == line.version
+    events = db.scalars(select(SubjectEvent).where(SubjectEvent.subject_id == line.inquiry_id,
+                                                   SubjectEvent.kind == "line.edited")).all()
+    assert len(events) == 1 and events[0].payload["changed"] == ["description"]
+
+
 def test_revising_owner_edits_the_inquiry_but_other_users_can_quote_shared_lines(db, users):
     draft = inquiries.create_draft(db, _ctx(db, users.seller),
         offer_audience={"mode": "include", "user_ids": [users.other.username]}, lines=[

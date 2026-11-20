@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Button, Descriptions, Drawer, Form, Input, Radio, Select, Space, Table, Tag } from "antd";
+import { Button, Descriptions, Drawer, Radio, Select, Space, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { InquiryLine, LineResponseInput, Offer, OfferInput } from "../../api/presales";
 import PriceRefBadge from "../../components/pricing/PriceRefBadge";
@@ -31,7 +31,7 @@ interface Props {
   now: number;
   proactive?: boolean;
   onChange: (lineId: number, value: OfferInput) => void;
-  onResponse?: (lineId: number, patch: Partial<LineResponseInput>) => void;
+  onResponse?: (lineId: number, choice: { mode: "quote" | "reuse"; ref_offer_id?: number }) => void;
 }
 
 export default function QuoteGrid({ id, rows, now, proactive = false, onChange, onResponse }: Props) {
@@ -41,7 +41,7 @@ export default function QuoteGrid({ id, rows, now, proactive = false, onChange, 
   const bindingRow = rows.find((item) => item.line.id === binding);
   const offersFor = (item: QuoteGridRow) => flattenOffers(activeOfferGroups(item.existing ?? [], now));
   const state = (item: QuoteGridRow) => item.referenced ? "已引用报价，无需再次处理"
-    : item.response?.mode === "skip" ? `不报：${item.response.reason || "待填写原因"}`
+    : item.response?.mode === "skip" ? `不报：${item.response.reason || "未记录原因"}`
     : item.response?.mode === "reuse" ? `沿用报价 #${item.response.ref_offer_id ?? "待选择"}`
     : item.current?.status === "published" ? "已回复" : item.current?.status === "stale" ? "基于旧版本"
     : item.current?.status === "withdrawn" ? "已撤销" : item.current?.status === "draft" ? "已保存草稿" : "待填写";
@@ -68,14 +68,11 @@ export default function QuoteGrid({ id, rows, now, proactive = false, onChange, 
           ...(row.line.field_values ?? []).map((field, index) => ({ key: `field-${index}`, label: field.name ?? field.new_name, children: String(field.value ?? "") })),
         ]} />
         {row.referenced ? row.line.ref_offer && <OfferBadge offer={row.line.ref_offer} /> : <>
-          {!proactive && (row.responseDisabled ? <div>处理方式：{state(row)}</div> : <span role="radiogroup" aria-label={`${row.line.pn_raw}处理方式`}><Radio.Group value={row.response?.mode ?? "quote"}
+          {!proactive && (row.responseDisabled ? <div>处理方式：{state(row)}</div> : <span role="radiogroup" aria-label={`${row.line.pn_raw}处理方式`}><Radio.Group value={row.response?.mode === "reuse" ? "reuse" : "quote"}
             onChange={(event) => onResponse?.(row.line.id, { mode: event.target.value })}>
             <Radio.Button aria-label="报新价" value="quote">报价</Radio.Button><Radio.Button aria-label="沿用有效报价" value="reuse" disabled={!offersFor(row).length}>沿用</Radio.Button>
-            <Radio.Button aria-label="无货 / 不报" value="skip">不报</Radio.Button>
           </Radio.Group></span>)}
-          {!proactive && row.response?.mode === "skip" ? row.responseDisabled ? <p>不报原因：{row.response.reason}</p> : <Form layout="vertical"><Form.Item label="不报原因" required>
-            <Input.TextArea aria-label={`${row.line.pn_raw}不报原因`} value={row.response.reason ?? ""} onChange={(event) => onResponse?.(row.line.id, { reason: event.target.value })} />
-          </Form.Item></Form> : !proactive && row.response?.mode === "reuse" ? <>
+          {!proactive && row.response?.mode === "skip" ? null : !proactive && row.response?.mode === "reuse" ? <>
             {!row.responseDisabled && <Select aria-label={`${row.line.pn_raw}沿用报价`} placeholder="选择有效报价" value={row.response.ref_offer_id} style={{ width: "100%" }}
               onChange={(ref_offer_id: number) => onResponse?.(row.line.id, { mode: "reuse", ref_offer_id })}
               options={offersFor(row).map((offer) => ({ value: offer.id, label: <span>{`报价 #${offer.id} · ${offer.reporter?.name ?? "采购"} · ${moneyExact(Number(offer.unit_price))} ${taxLabel(offer.is_tax_inclusive)} · ${basisLabel(offer)}`}</span> }))} />}
