@@ -1,17 +1,9 @@
 import { ANALYTICS_PAGE_SIZES } from "../../../utils/analyticsUrlState";
-// 订单列表：任意列升序 / 降序（D-44 §4，后端 NULLS LAST + id 同向破并列），每单挂
-// 最新对账快照块（D-40 §4-§5）。排序以响应 sort 回显为准——被遮蔽的金额 / 毛利 /
-// 客户 / 对账键后端一律回退 order_date（Q-A-04 行序防泄漏，契约 §10.3），前端如实
-// 提示并预先禁用对应排序入口，不发注定被回退的新请求。所有实际可见数据列双向排序
-// （A-AC07：订单号 / 业务类型 / 客户类型 / 对账块四列在内——含按最新快照原值排序的
-// 退货已对账金额）。
-// 窄屏布局（A-AC 返工）：表格自身 scroll.x 承担横向滚动（外层不裁剪、body 不藏
-// overflow），外层容器 min-width:0 / max-width:100% 保证在 flex/grid 父级里可收缩，
-// 长客户名列固定宽 + ellipsis——14 个可见数据列在 320/390/1366 宽下都可达可点。
+// 订单级对账列沿用服务端排序和权限。单价按 PN 明细展示，待收款按单展示。
 import { Alert, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType, TablePaginationConfig } from "antd/es/table";
 import type { FilterValue, SorterResult } from "antd/es/table/interface";
-import { fmtDateTime, fmtMoney, isReconBlockEmpty } from "../shared";
+import { fmtMoney, isReconBlockEmpty } from "../shared";
 import type {
   SalesAnalyticsOrderRow,
   SalesAnalyticsOrdersResp,
@@ -146,7 +138,7 @@ export default function DrillTable({
             </div>
           );
         }) : "/" },
-    { title: "含税单价", key: "unit_prices", width: 120, align: "right", render: (_, row) => row.products?.length
+    { title: "单价", key: "unit_prices", width: 120, align: "right", render: (_, row) => row.products?.length
       ? row.products.map(product => (
           <div key={product.line_id}>
             <div style={{ height: 24, whiteSpace: "nowrap" }}>{costRestricted ? "—" : fmtMoney(product.unit_price)}</div>
@@ -179,7 +171,7 @@ export default function DrillTable({
       // 开「含已退货」时该列数值 = 已对账 + 退货已对账（D-40 §5），列头必须随之改标，
       // 否则一眼读数会把含退货合计误读为已对账金额本身（与抽屉内标注同一口径）
       title: (
-        <Tooltip title="已对账金额 = 实际回款（D-40）。开「含已退货」时 = 已对账 + 退货已对账（相加，不扣减）。">
+        <Tooltip title="已对账金额来自订单对账快照。开「含已退货」时 = 已对账 + 退货已对账（相加，不扣减）。">
           {includeReturns ? "已对账金额（含退货）" : "已对账金额"}
         </Tooltip>
       ),
@@ -202,21 +194,11 @@ export default function DrillTable({
       ...sortableCol("pending_amount", !reconRestricted),
     },
     {
-      title: "退货已对账金额",
-      width: 118,
+      title: "待收款",
+      key: "sales_receivable_amount",
+      width: 120,
       align: "right",
-      // 按最新快照的退货已对账原值排序，不随 include_returns（那只改 reconciled_display
-      // 的展示定义，契约 §3）；无对账权限同回退 order_date
-      ...sortableCol("return_reconciled_amount", !reconRestricted),
-      render: (_v, r) =>
-        reconNoData(r.reconciliation) ? "—" : fmtMoney(r.reconciliation.return_reconciled_amount),
-    },
-    {
-      title: "数据截至时间",
-      width: 128,
-      render: (_v, r) =>
-        reconNoData(r.reconciliation) ? "—" : fmtDateTime(r.reconciliation.reconciled_as_of),
-      ...sortableCol("reconciled_as_of", !reconRestricted),
+      render: (_v, r) => reconRestricted ? "—" : fmtMoney(r.sales_receivable_amount ?? null),
     },
   ];
 

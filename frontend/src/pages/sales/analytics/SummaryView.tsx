@@ -164,12 +164,12 @@ export default function SummaryView({ summary, amounts, profitRestricted = false
               {summary.recorded_expenses.missing_amounts ? ` ${summary.recorded_expenses.missing_amounts} 条缺金额。` : ""}
               <Button type="link" size="small" onClick={onOpenExpenses}>查看费用记录</Button></span>} />
         )}
-        {kpi?.salespeople !== undefined && (
+        {kpi?.sales_receivable_missing != null && (
           <KpiCard
-            label="销售人数"
-            value={String(kpi.salespeople)}
-            sub={kpi.orders && kpi.amount_ex_tax_total != null
-              ? `单均（不含税）${fmtMoney(kpi.amount_ex_tax_total / kpi.orders)}` : "区间内有成交"}
+            label="待收款合计金额"
+            value={fmtMoney(kpi.sales_receivable_total ?? null)}
+            sub={kpi.sales_receivable_missing > 0
+              ? `${kpi.sales_receivable_missing} 笔待收款未知` : undefined}
           />
         )}
       </div>

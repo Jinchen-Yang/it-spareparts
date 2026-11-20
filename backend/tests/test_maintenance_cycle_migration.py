@@ -14,7 +14,7 @@ from sqlalchemy.exc import DatabaseError, IntegrityError
 from app import permissions
 from app.db import engine
 
-REVISION = "a7e2f9c4d1b8"  # 随最新迁移递进（D-0063 sys_user.hide_documents）
+REVISION = "b6285fa3c918"  # D-0066 库存管理分析投影
 CYCLE_REVISION = "86f7486b9ed5"
 BASELINE = "98afc0d2157b"
 CYCLE_PAGE_KEYS = (
@@ -62,7 +62,7 @@ def _insert_part(conn, pn: str) -> int:
     ).scalar_one()
 
 
-def test_single_head_is_repair_pool_revision():
+def test_single_head_is_current_revision():
     assert _current_head() == REVISION
 
 

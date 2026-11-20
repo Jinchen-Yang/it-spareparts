@@ -21,7 +21,7 @@ from app.models.sales import FSalesOrder, FSalesReconciliationSnapshot
 from app.models.system import SysAuditLog, SysRawFile, SysUser
 from app.services.sales_reconciliation import latest_snapshots_by_raw_order_id
 from scripts import backfill_sales_reconciliation as bs
-from tests.test_sales_reconciliation_import import LINE_ID, _row, _write_xlsx
+from tests.test_sales_reconciliation_import import LINE_ID, _row, _second_line, _write_xlsx
 
 # 第二张订单（不同数据ID/订单编号/行ID），用于多文件执行场景
 ROW2 = {"订单编号(必填)": "XSDD-20260630-0002", "数据ID(不可修改)": "RAW-RECON-2",
@@ -884,7 +884,8 @@ def test_execute_with_no_files_in_scope_is_applied_exit_0(db, capsys):
     assert applied["files"] == []
     assert applied["totals"] == {
         "files_executed": 0, "files_skipped": 0, "files_failed": 0,
-        "snapshots_inserted": 0, "tax_columns_filled": 0, "tax_conflicts_total": 0}
+        "snapshots_inserted": 0, "tax_columns_filled": 0,
+        "sales_receivable_updated": 0, "tax_conflicts_total": 0}
     assert _snap_count(db) == 0
 
 
@@ -1173,3 +1174,66 @@ def test_keyboard_interrupt_rolls_back_releases_lock_and_reraises(db, tmp_path, 
         assert _lock_is_free(probe) is True         # finally 生效，锁不滞留
     finally:
         probe.close()
+
+
+def test_backfill_receivable_keeps_latest_upload_per_order(db, tmp_path):
+    _import_one(db, tmp_path, "first.xlsx", [_row(待收尾款=113)])
+    latest = _import_one(db, tmp_path, "second.xlsx", [_row(
+        待收尾款=25, **{"修改时间(必填)": "2026-06-30 09:30:00"},
+    )])
+    latest_id = latest.id
+    _import_one(db, tmp_path, "legacy-template.xlsx", [_row()])
+    db.execute(update(FSalesOrder).values(
+        sales_receivable_amount=None, sales_receivable_batch_id=None,
+    ))
+    db.commit()
+    operator = _operator(db)
+
+    report = bs.run_backfill(db)
+    assert _order(db).sales_receivable_amount is None
+    assert sum(f["sales_receivable_orders"] for f in report["files"]) == 2
+    applied = bs.run_backfill(db, execute=True, operator=operator,
+                              confirm_manifest_sha256=report["manifest_sha256"])
+    assert applied["status"] == "applied"
+    assert _order(db).sales_receivable_amount == Decimal("25.00")
+    assert _order(db).sales_receivable_batch_id == latest_id
+
+
+@pytest.mark.parametrize(("first_amount", "second_amount", "error_type"), [
+    ("不是金额", 25, "invalid_head_value"),
+    (25, 50, "head_value_conflict"),
+])
+def test_invalid_receivable_preserves_snapshot_during_import_and_backfill(
+    db, tmp_path, first_amount, second_amount, error_type,
+):
+    initial = _import_one(db, tmp_path, "initial.xlsx", [_row(待收尾款=113)])
+    initial_id = initial.id
+    mixed = _import_one(db, tmp_path, "mixed.xlsx", [
+        _row(待收尾款=first_amount),
+        _second_line(待收尾款=second_amount),
+        _row(待收尾款=22, **ROW2),
+    ])
+    assert _order(db).sales_receivable_amount == Decimal("113.00")
+    assert _order(db).sales_receivable_batch_id == initial_id
+    assert _order(db, "RAW-RECON-2").sales_receivable_amount == Decimal("22.00")
+    errors = mixed.report_json["errors_preview"]
+    assert any(e["error_type"] == error_type and "待收尾款" in e["detail"]
+               for e in errors)
+    assert not db.scalar(select(FSalesReconciliationSnapshot.id).where(
+        FSalesReconciliationSnapshot.raw_order_id == "RAW-RECON-1",
+        FSalesReconciliationSnapshot.import_batch_id == mixed.id,
+    ))
+
+    db.execute(update(FSalesOrder).values(
+        sales_receivable_amount=None, sales_receivable_batch_id=None,
+    ))
+    db.commit()
+    operator = _operator(db)
+    report = bs.run_backfill(db)
+    assert _order(db).sales_receivable_amount is None
+    applied = bs.run_backfill(db, execute=True, operator=operator,
+                              confirm_manifest_sha256=report["manifest_sha256"])
+    assert applied["status"] == "applied"
+    assert _order(db).sales_receivable_amount == Decimal("113.00")
+    assert _order(db).sales_receivable_batch_id == initial_id
+    assert _order(db, "RAW-RECON-2").sales_receivable_amount == Decimal("22.00")

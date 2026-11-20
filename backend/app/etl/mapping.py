@@ -76,6 +76,7 @@ SALES_HEAD = {
     "不含税金额": "amount_ex_tax",
     "税率": "tax_rate",
     "税金": "tax_amount",
+    "待收尾款": "sales_receivable_amount",
     # D-40 对账区单头列（2026-06-30 起新导出才有；旧格式缺列 → 全 NULL 不当 0，
     # loader 据此不写快照）。三个金额列注册裸名：无其它文件类型注册同名，
     # 「已对账金额(必填)」等变体由 canonicalize_columns 剥注解自动归一到裸名。
@@ -342,7 +343,9 @@ IDENTITY_INTERNALS = frozenset({
 })
 QUANTITY_INTERNALS = frozenset({"qty", "return_qty", "source_qty"})
 NUMERIC_ALIAS_INTERNALS = frozenset(
-    PRICE_INTERNALS | QUANTITY_INTERNALS | {"tax_rate", "recent_purchase_price"}
+    PRICE_INTERNALS | QUANTITY_INTERNALS | {
+        "tax_rate", "recent_purchase_price", "sales_receivable_amount",
+    }
 )
 CRITICAL_ALIAS_INTERNALS = frozenset(
     IDENTITY_INTERNALS | NUMERIC_ALIAS_INTERNALS | {"is_tax_inclusive"}
