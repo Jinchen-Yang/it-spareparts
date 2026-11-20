@@ -33,28 +33,45 @@ Docker Compose 交付。当前主线是维保业务闭环（见 issue #128）与
    （单一 `CONTEXT.md` + `docs/adr/`）。
 5. `git fetch` 对齐远端，**别在过期 ref 上开工**。
 
-**UI 改动的验收路径**：基于 main 的候选完成本地回归（pytest / vitest / `tsc && vite build`）后报告"待验收"，
-由用户安排候选构建的实际点按验收；验收环境与远期 test 分支是不同概念，不要求先合入 test。
-代理驱动浏览器只用于开发期调试，不代替用户点按验收。
+**UI 改动的验收路径**：基于 main 的候选就绪后报告「待验收」，由用户安排点按验收；
+验收环境与远期 test 分支是不同概念，不要求先合入 test。
+代理驱动浏览器只用于开发期调试，不代替用户点按验收。何时本地测见 §2.1。
+
+### 2.1 何时跑本地测试 / 何时等 CI（不要事事全量）
+
+**禁止默认行为**：不要对每次改动、每次提交都跑全量 `pytest`、全量前端 `tsc && vitest && vite build`，
+也不要为了「保险」空等 GitHub CI 再继续改代码。全量门禁留给 **合入 main 的 PR 必需检查**
+（见 §0 / `docs/BRANCH_POLICY.md`），不是日常迭代税。
+
+| 改动类型 | 代理应做 | 不必做 |
+|---|---|---|
+| 纯文档 / 决策 / PRD / 交接 / 注释 | 读相关口径、保证链接与编号正确 | 本地测、等 CI |
+| 后端业务 / API / 迁移 / 权限 | 跑**相关** pytest（单文件或模块）；迁移改动顺带确认 alembic heads | 无关前端全量构建 |
+| 前端页面 / 组件 | 对触及范围做 `tsc` 与相关 vitest；关键交互可按需冒烟 | 无关后端全量 pytest |
+| 高危模块（§3.3 所列）或并发/权限契约 | 必带/必跑对应契约测试，失败先修 | 用「等 CI」代替本地契约 |
+| 准备合入 main 的 PR | 推送后让两项必需 CI 自然跑；红了再针对性修 | 合入前反复手工复跑整仓当仪式 |
+
+用户或任务**明确要求**全量回归、发布候选验收、热修上线前核对时，再跑 §4 全量命令。
+CI 红了只修与本 PR 相关的失败；既有 flaky / 跨文件隔离问题记下来，不擅自扩大改动面去「顺手全绿」。
 
 ## 3. 四条纪律（都是事故换来的）
 
 1. **不要从历史 PR/issue 反推口径。** 口径只在 `docs/decisions/`；PR 描述里必须写
-   `决策: D-NNNN` 或 `决策: 无`（CI 校验该行存在）。
-2. **近期正式功能以 main 为基线；合并 ≠ 上线。** 两个必需 CI 检查全绿、分支与 main 同步后正常合并，
+   `决策: D-NNNN` 或 `决策: 无`（合入 CI 会校验该行存在，与「每次改动都跑 CI」无关）。
+2. **近期正式功能以 main 为基线；合并 ≠ 上线。** 合入时两项必需 CI 全绿、分支与 main 同步即可，
    遵循 `docs/BRANCH_POLICY.md`；禁止从功能分支直接部署生产，生产只部署打了 `release-` 标签的精确提交。
 3. **同一模块被多工具反复改，必带契约测试。** 高危区：`services/maintenance_project_master_workbook.py`、
    `etl/loader.py`、`services/maintenance_project_identity.py` —— 并发语义与 bump 调用点。
 4. **部署不是自动的。** 写生产前先备份、前后端同 commit、`alembic upgrade head` 跑完再启镜像、
    打 `release-` 标签。用户没明确说"开始部署"，不要动生产。
 
-## 4. 常用命令
+## 4. 常用命令（按需，非每次必跑）
 
 ```bash
-# 后端测试（需要本机 Postgres :5433）
-cd backend && uv run --extra dev pytest
-# 前端检查与测试
-cd frontend && npm ci && npx tsc && npx vitest run && npx vite build
+# 后端：优先单测/模块，不要默认全仓
+cd backend && uv run --extra dev pytest tests/<相关文件> -q
+# 前端：优先类型 + 相关测试；全量构建留给合入门禁或用户点名
+cd frontend && npx tsc && npx vitest run <相关>
 # 本地起完整栈 / API 冒烟 / UI 截图：用 .claude/skills/run-it-spareparts/ 技能
 ```
 
