@@ -8,13 +8,15 @@ restore of the old head, compare frozen business rows, run alembic, check, and
 compare those rows again. The command is ``alembic upgrade head`` and the only
 accepted path is 98afc0d2157b -> 86f7486b9ed5 -> c3e8a1d94b27.
 
-Successor lessons kept here: Mounts are compared in stable order, ``alembic
-current`` may include ``(mergepoint)`` on 98af, the main Caddy route may carry
-``terminal: true``, a live dry-run must pass before freeze, exposure-started.json
-is written before the Caddyfile edit, and cutover never POSTs /load. After
-exposure the controller does not roll back. Downgrade and alembic_version
-rewrites are refused. ``docker compose down`` of the shared it-spareparts
-project is refused.
+Successor lessons kept here: Mounts are compared in stable order. A live
+container with fewer than two mounts has only one order, so dry-run accepts
+matching samples and proves multi-mount normalization with a synthetic fixture
+instead of requiring another live mount. ``alembic current`` may include
+``(mergepoint)`` on 98af, the main Caddy route may carry ``terminal: true``, a
+live dry-run must pass before freeze, exposure-started.json is written before
+the Caddyfile edit, and cutover never POSTs /load. After exposure the controller
+does not roll back. Downgrade and alembic_version rewrites are refused.
+``docker compose down`` of the shared it-spareparts project is refused.
 """
 import copy
 import datetime as dt
@@ -53,7 +55,7 @@ VISIBILITY_DIGEST = "6b2fe7287242ff6ce5dfcd785613877ef49dd80f13fb8ea15c4d244e93d
 SUCCESSOR_DIGEST = "2b2aa5ca2ca305b9f42574b50f505199169919323eea9d7c80ed90e3f19e2d1e"
 HELPER_DIGEST = "054e67d143a808e5672eea716573ac23a4ecf47ae6cd9a762a89901acfff5f16"
 SMOKE_DIGEST = "8b942cbbd5fcb70517f84647af6ad25de72a621ccc7c7befd3ad55191685d7d5"
-DRY_RUN_DIGEST = "073b33061b73c2fbd30d384d8f30f4357782fbc05f1169505d55f445538f8b6e"
+DRY_RUN_DIGEST = "5dd23aa813980e9c20cf96db7a3d6876c19c94daed11f86847d3b19a2f8ca131"
 LOCKS = (".catalog-source-handoff.lock", ".itsp-production-deploy.lock")
 GATES = (
     "required_ci", "independent_review", "candidate_regression", "scope_review",
@@ -357,6 +359,25 @@ def conditional_dial_patch(request, old_dial, new_dial):
     raise RuntimeError("could not bind main route; full load refused")
 
 
+def paired_mount_samples(left, right):
+    """Pair two Docker Mounts samples for the dry-run order check.
+
+    Docker 29.1.3 returns Mounts in map iteration order. Zero or one mount has
+    only one order, so the two reads must match; a difference is content drift.
+    Two or more mounts must be shown in two orders. If both reads match, reverse
+    one sample. Reversing does not add a mount to the live container.
+    """
+    h.need(isinstance(left, list) and isinstance(right, list), "mount sample is not a list")
+    h.need(len(left) == len(right), "mount sample length drifted")
+    if len(left) < 2:
+        h.need(left == right, "mount sample changed with nothing to reorder")
+        return left, right
+    if left == right:
+        right = list(reversed(right))
+    h.need(left != right, "mount order sample did not vary")
+    return left, right
+
+
 class Release(vis.Release):
     def __init__(self, manifest):
         self.path = Path(manifest)
@@ -591,8 +612,6 @@ class Release(vis.Release):
             "alembic_current": {"stdout": self.alembic(["current"]), "code": 0},
             "route": route,
             "route_dial": dial,
-            "mounts_a": mounts[0],
-            "mounts_b": mounts[1],
             "nginx_sha256": self.m["nginx_sha256"],
             "predecessor": {"path": PREDECESSOR_OWNER, "release": OLD_SHA, "rewritten": False},
             "daily_backup_dir": str(self.daily_backup_dir()),
@@ -606,9 +625,7 @@ class Release(vis.Release):
                 "images": {"status": "PASS", "release": images["release"], "manifest_sha256": images["manifest_sha256"]},
             },
         }
-        if snapshot["mounts_a"] == snapshot["mounts_b"] and len(snapshot["mounts_a"]) >= 2:
-            snapshot["mounts_b"] = list(reversed(snapshot["mounts_b"]))
-        h.need(snapshot["mounts_a"] != snapshot["mounts_b"], "mount order sample did not vary")
+        snapshot["mounts_a"], snapshot["mounts_b"] = paired_mount_samples(mounts[0], mounts[1])
         return snapshot
 
     def load_harness(self):
