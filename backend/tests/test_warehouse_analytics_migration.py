@@ -29,13 +29,18 @@ def test_warehouse_permissions_roundtrip(db):
                 INSERT INTO sys_user (username, role, password_hash, template_perms, permissions, perm_overrides)
                 VALUES ('wh-new', 'boss', 'unused', '{}', '{}', '{"page_inventory_analytics": false}'),
                        ('wh-explicit', 'boss', 'unused', '{"page_inventory_analytics": false}', null, null),
-                       ('wh-old', 'readonly', 'unused', null, '{"page_inventory": true}', null)
+                       ('wh-old', 'readonly', 'unused', null, '{"page_inventory": true}', null),
+                       ('wh-legacy-admin', 'admin', 'unused', null, null, null)
+            """))
+            conn.execute(text("""
+                INSERT INTO sys_role_template (code, name, base_role, permissions)
+                VALUES ('wh-custom-boss', '库存测试老板模板', 'boss', '{}')
             """))
         command.upgrade(cfg, "b6285fa3c918")
         with engine.connect() as conn:
             rows = {r.username: r for r in conn.execute(text("""
                 SELECT username, template_perms, permissions, perm_overrides
-                FROM sys_user WHERE username IN ('wh-new','wh-explicit','wh-old')
+                FROM sys_user WHERE username IN ('wh-new','wh-explicit','wh-old','wh-legacy-admin')
             """))}
             assert rows["wh-new"].template_perms[PAGE] is True
             assert rows["wh-new"].permissions[PAGE] is True
@@ -46,6 +51,9 @@ def test_warehouse_permissions_roundtrip(db):
             assert rows["wh-old"].permissions == {"page_inventory": True, PAGE: False}
             roles = dict(conn.execute(text("SELECT code, permissions ->> :key FROM sys_role_template"), {"key": PAGE}).all())
             assert roles["boss"] == roles["admin"] == "true"
+            assert roles["wh-custom-boss"] == "true"
+            assert rows["wh-legacy-admin"].template_perms is None
+            assert rows["wh-legacy-admin"].permissions == {PAGE: True}
             assert roles["readonly"] == roles["sales"] == "false"
     finally:
         command.upgrade(cfg, "head")

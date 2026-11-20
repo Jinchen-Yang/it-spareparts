@@ -6,31 +6,27 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app import config
-from app.auth import current_role
+from app import permissions
+from app.auth import current_identity
 from app.db import get_db
-from app.security import (
-    UserContext,
-    get_current_user_context,
-    is_scoped_sales,
-    require_page,
-)
 from app.services import warehouse_analytics as service
 
 
-def _guard(ctx: Annotated[UserContext, Depends(get_current_user_context)]):
-    if config.ENABLE_RBAC and (ctx.role not in ("admin", "boss") or is_scoped_sales(ctx)):
-        raise HTTPException(403, "库存管理分析为全公司统计，仅限具备权限的管理员与老板")
+def _require_inventory_access(ident: Annotated[dict, Depends(current_identity)]) -> None:
+    # Inventory always uses the authenticated account grant, including deployments
+    # operating older RBAC-compatible pages with their role checks disabled.
+    if not permissions.page_permission_allowed(
+        role=ident["role"],
+        permission_map=ident.get("perms"),
+        page_key=permissions.INVENTORY_ANALYTICS_PAGE,
+    ):
+        raise HTTPException(403, "无权访问库存管理分析")
 
 
 router = APIRouter(
     prefix="/inventory/analytics",
     tags=["inventory-analytics"],
-    dependencies=[
-        Depends(current_role),
-        Depends(require_page("page_inventory_analytics")),
-        Depends(_guard),
-    ],
+    dependencies=[Depends(_require_inventory_access)],
 )
 
 

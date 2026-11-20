@@ -172,25 +172,36 @@ def test_rankings_roles_equipment_testing_and_coverage(warehouse):
 
 
 def test_visibility_is_enforced_on_all_routes(warehouse, db):
-    c = client_for(
-        db,
-        username="warehouse-scoped-user",
-        role="readonly",
-        overrides={"page_inventory_analytics": True},
-    )
-    for path in (
+    _, document_id = warehouse
+    paths = (
         "/coverage",
         "/cube",
         "/rankings",
         "/documents",
-        "/documents/1/lines",
+        f"/documents/{document_id}/lines",
         "/testing",
         "/equipment",
+    )
+    for role, granted, expected in (
+        ("readonly", True, 200),
+        ("readonly", False, 403),
+        ("sales", True, 200),
+        ("purchaser", False, 403),
+        ("boss", False, 403),
+        ("admin", True, 200),
+        ("admin", False, 403),
     ):
-        assert c.get(BASE + path).status_code == 403
+        c = client_for(
+            db,
+            username=f"warehouse-{role}-{granted}",
+            role=role,
+            overrides={"page_inventory_analytics": granted},
+        )
+        for path in paths:
+            assert c.get(BASE + path).status_code == expected, (path, role, granted)
 
 
-def test_scope_restrictions_and_known_zero(warehouse, db):
+def test_inventory_reports_use_warehouse_grant_and_preserve_known_zero(warehouse, db):
     from app.models.warehouse_analytics import WarehouseAnalyticsDocument as Document
     from sqlalchemy import update
 
@@ -198,7 +209,7 @@ def test_scope_restrictions_and_known_zero(warehouse, db):
     restricted = client_for(
         db, username="warehouse-limited-boss", role="boss", overrides={"own_customers_only": True}
     )
-    assert restricted.get(BASE + "/documents").status_code == 403
+    assert restricted.get(BASE + "/documents").status_code == 200
     denied = client_for(
         db, username="warehouse-page-denied", role="boss", overrides={"page_inventory_analytics": False}
     )
@@ -233,3 +244,128 @@ def test_line_dimension_margins_drill_only_into_documents_with_lines(warehouse, 
     assert normal["total"] == cube["total"] + 1
     assert matches["total"] == cube["rows"][0]["value"] == cube["total"]
     assert all(item["matched_lines"] for item in matches["items"])
+
+
+def test_unidentified_and_shared_tokens_cannot_use_inventory_grant(warehouse, db):
+    from app.auth import _make_token, verify_token_db
+    from app.config import get_settings
+    from app.main import app
+    from fastapi.testclient import TestClient
+
+    page = "page_inventory_analytics"
+    client = TestClient(app)
+    shared = client.post(
+        "/api/auth/login", json={"username": "admin", "password": get_settings().admin_password}
+    )
+    assert shared.status_code == 200
+    assert shared.json()["permissions"][page] is False
+    assert (
+        client.get(
+            BASE + "/coverage", headers={"Authorization": f"Bearer {shared.json()['token']}"}
+        ).status_code
+        == 403
+    )
+    for sub, authn, fallback in (
+        ("warehouse-analytics-boss", None, False),
+        ("warehouse-analytics-boss", "shared", False),
+        ("warehouse-analytics-boss", "sys_user", True),
+        ("warehouse-unknown", "sys_user", False),
+    ):
+        token, _ = _make_token("admin", sub, None, fallback=fallback, perms={page: True}, authn=authn)
+        assert verify_token_db(token, db)["perms"][page] is False
+        response = client.get(BASE + "/coverage", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 403
+
+    # A named old token without the newly introduced key uses the verified account.
+    token, _ = _make_token("boss", "warehouse-analytics-boss", None, perms={}, authn="sys_user")
+    assert verify_token_db(token, db)["perms"][page] is True
+    # A pre-change token may still carry the old unconditional admin grant.
+    client_for(db, username="warehouse-denied-admin", role="admin", overrides={page: False})
+    token, _ = _make_token(
+        "admin", "warehouse-denied-admin", None, perms={page: True}, authn="sys_user"
+    )
+    assert (
+        client.get(BASE + "/coverage", headers={"Authorization": f"Bearer {token}"}).status_code == 403
+    )
+
+
+def test_legacy_account_inventory_baseline_and_admin_creation(db):
+    from app.models.system import SysUser
+    from sqlalchemy import select
+
+    page = "page_inventory_analytics"
+    operator = client_for(db, username="warehouse-manager", role="admin")
+    create = operator.post(
+        "/api/accounts",
+        json={
+            "role": "admin",
+            "username": "created-without-warehouse",
+            "password": "synthetic-warehouse-admin",
+            "overrides": {page: False},
+        },
+    )
+    assert create.status_code == 201 and create.json()["permissions"][page] is False
+    user = db.scalar(select(SysUser).where(SysUser.username == "created-without-warehouse"))
+    user.template_perms = None
+    user.permissions = {page: True, "page_maintenance_beta": False}
+    user.perm_overrides = None
+    db.commit()
+    accounts = operator.get("/api/accounts").json()
+    old = next(a for a in accounts if a["username"] == user.username)
+    assert old["permissions"][page] is old["template_perms"][page] is True
+    unaffected = {k: v for k, v in old["permissions"].items() if k != page}
+    version = user.token_version
+    for overrides, expected in (({page: False}, False), ({}, True)):
+        response = operator.put(f"/api/accounts/{user.username}", json={"overrides": overrides})
+        assert response.status_code == 200
+        graph = response.json()
+        assert graph["template_perms"][page] is True and graph["permissions"][page] is expected
+        assert {k: v for k, v in graph["permissions"].items() if k != page} == unaffected
+        db.refresh(user)
+        version += 1
+        assert user.token_version == version
+    # Even an administrator with incomplete historical data must be granted the
+    # missing inventory bit. The editor must show exactly the same closed base.
+    user.template_perms = {"page_maintenance_beta": False}
+    user.permissions = {page: True}
+    user.perm_overrides = None
+    db.commit()
+    incomplete = next(
+        acc for acc in operator.get("/api/accounts").json() if acc["username"] == user.username
+    )
+    assert incomplete["template_perms"][page] is incomplete["permissions"][page] is False
+    repaired = operator.put(f"/api/accounts/{user.username}", json={"overrides": {page: True}})
+    assert repaired.status_code == 200 and repaired.json()["permissions"][page] is True
+
+
+def test_inventory_always_checks_the_named_grant_with_legacy_rbac_switch(warehouse, db, monkeypatch):
+    from app import config
+    from app.config import get_settings
+    from app.main import app
+    from fastapi.testclient import TestClient
+
+    allowed, document_id = warehouse
+    closed = client_for(
+        db,
+        username="warehouse-legacy-switch-denied",
+        role="admin",
+        overrides={"page_inventory_analytics": False},
+    )
+    shared = TestClient(app)
+    login = shared.post(
+        "/api/auth/login", json={"username": "admin", "password": get_settings().admin_password}
+    )
+    assert login.status_code == 200
+    shared.headers["Authorization"] = f"Bearer {login.json()['token']}"
+    monkeypatch.setattr(config, "ENABLE_RBAC", False)
+    for path in (
+        "/coverage",
+        "/cube",
+        "/rankings",
+        "/documents",
+        f"/documents/{document_id}/lines",
+        "/equipment",
+        "/testing",
+    ):
+        for client, status in ((allowed, 200), (closed, 403), (shared, 403)):
+            assert client.get(BASE + path).status_code == status, path

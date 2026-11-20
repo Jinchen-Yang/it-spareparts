@@ -36,7 +36,13 @@ export default function AccountDrawer({ meta, account, onClose, onSaved }: {
     if (!cur) return;
     setSaving(true);
     try {
-      const overrides = diffOverrides(base, value, meta.all_keys);
+      // 接口整体替换个别调整。按项编辑时保留未动过的键，避免把角色强制开启的权限写回模板快照。
+      const changedKeys = tplCode
+        ? meta.all_keys
+        : meta.all_keys.filter((key) => !!value[key] !== !!cur.permissions[key]);
+      const overrides: Perms = tplCode ? {} : { ...cur.overrides };
+      for (const key of changedKeys) delete overrides[key];
+      Object.assign(overrides, diffOverrides(base, value, changedKeys));
       await updateAccount(cur.username, tplCode
         ? { template_code: tplCode, overrides }
         : { overrides });

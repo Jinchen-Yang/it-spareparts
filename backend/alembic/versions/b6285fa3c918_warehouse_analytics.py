@@ -1,4 +1,4 @@
-"""库存管理分析只读投影、访问权限（D-0066）。"""
+"""库存管理分析只读投影、访问权限（D-0066、D-0072）。"""
 
 from alembic import op
 import sqlalchemy as sa
@@ -12,7 +12,7 @@ _PAGE = "page_inventory_analytics"
 _DOCUMENT = "warehouse_analytics_document"
 _LINE = "warehouse_analytics_line"
 _PERMISSION_MAPS = (
-    ("sys_role_template", "permissions", "code"),
+    ("sys_role_template", "permissions", "base_role"),
     ("sys_user", "template_perms", "role"),
     ("sys_user", "permissions", "role"),
 )
@@ -55,12 +55,21 @@ def upgrade() -> None:
     op.create_index("ix_wa_line_source_id", _LINE, ["source_id"])
     op.create_index("ix_wa_line_pn_document", _LINE, ["pn", "document_id"])
 
-    # 保留显式设置和空快照的现有回退语义。访问时还会检查账号角色。
+    # 按基础职位补首次默认值，保留已有显式设置和空快照的回退语义。
     for table, column, role in _PERMISSION_MAPS:
         op.execute(sa.text(
             f"UPDATE {table} SET {column} = {column} || jsonb_build_object(CAST(:key AS text), {role} IN ('admin','boss')) "
             f"WHERE jsonb_typeof({column}) = 'object' AND NOT ({column} ? :key)"
         ).bindparams(key=_PAGE))
+
+    # 老的实名老板/管理员可能从未保存过权限图。给真实账号留下显式初始值，
+    # 保留空的 v2 快照以维持其原有 v1 读取路径。
+    op.execute(sa.text("""
+        UPDATE sys_user SET permissions = jsonb_build_object(CAST(:key AS text), true)
+        WHERE role IN ('admin', 'boss')
+          AND jsonb_typeof(template_perms) IS DISTINCT FROM 'object'
+          AND (permissions IS NULL OR permissions = 'null'::jsonb)
+    """).bindparams(key=_PAGE))
 
 
 def downgrade() -> None:

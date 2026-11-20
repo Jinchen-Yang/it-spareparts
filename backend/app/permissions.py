@@ -82,6 +82,9 @@ ACCOUNT_SCOPED_BETA_PAGE_KEYS: frozenset[str] = frozenset({
     "page_maintenance_beta",
     "page_replenishment_beta",
 }) | CYCLE_PAGE_KEYS | REPAIR_ORDER_PAGE_KEYS
+# 常规经营页面，管理员和老板模板默认开启，账号中心可以单独取消。
+INVENTORY_ANALYTICS_PAGE = "page_inventory_analytics"
+
 # 回款提醒两个写动作同为实名白名单能力（设计 §9）：不进入 admin 常规全开图，
 # require_action 的 admin 短路不适用；必须由 security.require_explicit_account_action
 # 读取实名账号快照⊕覆盖后显式放行。迁移把存量模板与账号中的这两个键强制回填 false。
@@ -881,10 +884,10 @@ PERMISSION_META: dict[str, dict] = {
     },
     "page_inventory_analytics": {
         "label": "库存管理分析",
-        "summary": "查询全仓作业流水、人员工作量和返库型号分布。",
+        "summary": "允许此账号查询全仓作业流水、人员工作量和返库型号分布。老板与管理员模板默认勾选。",
         "can": "查看来源覆盖、单据和明细，按中心、人员、类型、日期和 PN 下钻。",
-        "cannot": "仅向获授权的老板及管理员开放。页面仅供查询。",
-        "typical": ["老板", "管理员"],
+        "cannot": "仅供查询，不能改动仓储单据或库存余额。",
+        "typical": ["老板", "管理员", "获授权的仓库管理人员"],
         "sensitivity": "high",
         "risk": "可查看全仓作业量、人员姓名以及仓储单据。",
     },
@@ -1348,12 +1351,25 @@ def effective_from_snapshot(template_perms: dict | None, overrides: dict | None)
     return perms
 
 
+def _inventory_analytics_base(user) -> bool:
+    snapshot = getattr(user, "template_perms", None)
+    stored = snapshot if snapshot is not None else (getattr(user, "permissions", None) or {})
+    # Role defaults are written when templates/accounts are created or migrated.
+    # An incomplete stored grant must stay closed until an operator repairs it.
+    return bool(stored.get(INVENTORY_ANALYTICS_PAGE, False))
+
+
+def inventory_analytics_for_user(user) -> bool:
+    overrides = getattr(user, "perm_overrides", None) or {}
+    return bool(overrides.get(INVENTORY_ANALYTICS_PAGE, _inventory_analytics_base(user)))
+
+
 def effective_for_user(user) -> dict[str, bool]:
     """v2 有效权限（账号级单一真值源）。
 
     admin 的常规权限仍强制全开，防止账号中心把管理员锁死；Beta 页面是灰度名单，
-    唯独尊重该实名账号的 template_perms ⊕ perm_overrides。无快照的旧 admin 只读取
-    legacy permissions 中明确存在的 Beta 位，缺失时默认 False。
+    仅读取实名账号的有效位。库存管理分析同样接受个别调整，初始值由职位模板指定。
+    无快照的旧 admin 使用 legacy permissions 中显式存在的账号级授权。
     """
     if user.role == "admin":
         result = _full()
@@ -1366,10 +1382,19 @@ def effective_for_user(user) -> dict[str, bool]:
         # 回款提醒两个写动作同样只认实名账号快照⊕覆盖，admin 无显式授权保持 false。
         for key in ACCOUNT_SCOPED_ACTION_KEYS:
             result[key] = bool(stored.get(key, False))
-        return result
-    if getattr(user, "template_perms", None) is not None:
-        return effective_from_snapshot(user.template_perms, user.perm_overrides)
-    return effective(user.role, user.permissions)
+    elif getattr(user, "template_perms", None) is not None:
+        result = effective_from_snapshot(user.template_perms, user.perm_overrides)
+    else:
+        result = effective(user.role, user.permissions)
+    result[INVENTORY_ANALYTICS_PAGE] = inventory_analytics_for_user(user)
+    return result
+
+
+def account_template_snapshot(user) -> dict[str, bool]:
+    """底座同时供权限抽屉和写路径使用。无 v2 快照时保留既有的有效权限。"""
+    graph = normalize(user.template_perms) if user.template_perms is not None else effective_for_user(user)
+    graph[INVENTORY_ANALYTICS_PAGE] = _inventory_analytics_base(user)
+    return graph
 
 
 def page_permission_allowed(
@@ -1378,8 +1403,8 @@ def page_permission_allowed(
     permission_map: dict | None,
     page_key: str,
 ) -> bool:
-    """Resolve a page gate without letting admin bypass account-scoped Beta pages."""
-    if page_key in ACCOUNT_SCOPED_BETA_PAGE_KEYS:
+    """Resolve a page gate, respecting individual grants even for named admins."""
+    if page_key == INVENTORY_ANALYTICS_PAGE or page_key in ACCOUNT_SCOPED_BETA_PAGE_KEYS:
         return isinstance(permission_map, dict) and bool(permission_map.get(page_key, False))
     if role == "admin":
         return True

@@ -44,6 +44,7 @@ vi.mock("../nav", async (importOriginal) => {
   return {
     NAV_ITEMS: [
       { key: "parts", path: "/parts", perm: "page_parts", page: PartsPage },
+      { ...actual.matchNavItem("/inventory/analytics")!, page: () => <div>库存管理分析路由</div> },
       {
         key: "maintenance-beta",
         path: "/maintenance/beta/projects",
@@ -261,4 +262,21 @@ it("较早的 capability 响应迟到时不会重新点亮已关闭的 Beta", as
 
   expect(screen.queryByText("维保 Beta 页面")).toBeNull();
   expect(JSON.parse(localStorage.getItem("beta_features") || "{}").maintenance).toBe(false);
+});
+
+
+it.each(["readonly", "admin"])("库存分析深链接按 %s 账号权限注册，撤权后用新令牌登录即回首页", async (role) => {
+  localStorage.setItem("role", role);
+  localStorage.setItem("name", "仓储账号");
+  localStorage.setItem("token", "before-revoke");
+  localStorage.setItem("permissions", JSON.stringify({ page_parts: true, page_inventory_analytics: true }));
+  window.history.replaceState({}, "", "/inventory/analytics?view=matrix");
+  render(<App />);
+  expect(await screen.findByText("库存管理分析路由")).toBeInTheDocument();
+  localStorage.setItem("permissions", JSON.stringify({ page_parts: true, page_inventory_analytics: false }));
+  localStorage.setItem("token", "after-revoke");
+  publishTokenChange("before-revoke", "after-revoke");
+  await screen.findByText("型号页会话：仓储账号");
+  expect(screen.queryByText("库存管理分析路由")).toBeNull();
+  expect(window.location.pathname).toBe("/parts");
 });

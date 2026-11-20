@@ -158,12 +158,6 @@ const PurchaseAnalyticsPage = lazy(loadPurchaseAnalytics);
 const analyticsRoleGate = (perm: string) => () =>
   ["admin", "boss"].includes(localStorage.getItem("role") || "")
   && !!readPermissionMap()[perm];
-function canViewInventoryAnalytics() {
-  const role = localStorage.getItem("role");
-  const permissions = readPermissionMap();
-  return !permissions.own_customers_only
-    && (role === "admin" || (role === "boss" && !!permissions.page_inventory_analytics));
-}
 const PurchaseExceptionsPage = lazy(loadPurchaseExceptions);
 const PurchaseRecordsPage = lazy(loadPurchaseRecords);
 const MaintenanceHomePage = lazy(loadMaintenanceHome);
@@ -333,7 +327,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "库存管理",
     items: [
       { key: "inventory", path: "/inventory", label: "库存查询", icon: <InboxOutlined />, perm: "page_inventory", page: InventoryPage, load: loadInventory },
-      { key: "inventory-analytics", path: "/inventory/analytics", label: "库存管理分析", icon: <BarChartOutlined />, perm: "page_inventory_analytics", visibleWhen: canViewInventoryAnalytics, accountScoped: true, page: InventoryAnalyticsPage, load: loadInventoryAnalytics },
+      { key: "inventory-analytics", path: "/inventory/analytics", label: "库存管理分析", icon: <BarChartOutlined />, perm: "page_inventory_analytics", accountScoped: true, page: InventoryAnalyticsPage, load: loadInventoryAnalytics },
     ],
   },
   {

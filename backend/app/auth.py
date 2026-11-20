@@ -129,6 +129,9 @@ def verify_token_db(token: str, db: Session) -> dict:
     token_has_perms = isinstance(data.get("perms"), dict)
     if token_has_perms:
         data["perms"] = permissions.runtime_safe(data["perms"])
+        # Earlier signed admin tokens could contain an unconditional inventory
+        # grant. Only a verified named account below can supply its current bit.
+        data["perms"][permissions.INVENTORY_ANALYTICS_PAGE] = False
     if data.get("fb"):
         return data
     sub = data.get("sub")
@@ -146,6 +149,10 @@ def verify_token_db(token: str, db: Session) -> dict:
                 data["perms"] = permissions.runtime_safe(
                     permissions.effective_for_user(user)
                 )
+            data["perms"][permissions.INVENTORY_ANALYTICS_PAGE] = (
+                data.get("authn") == "sys_user" and user.deleted_at is None
+                and permissions.inventory_analytics_for_user(user)
+            )
     return data
 
 
@@ -263,6 +270,7 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
     perms = permissions.runtime_safe(permissions.effective(role, None))
     # Shared credentials are not a real SysUser identity and therefore never
     # advertise high-risk maintenance identity/approval capabilities to the client.
+    perms[permissions.INVENTORY_ANALYTICS_PAGE] = False
     perms["action_maintenance_project_manage"] = False
     perms["action_maintenance_demand_delete"] = False
     perms["action_maintenance_warehouse_manage"] = False
