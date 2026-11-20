@@ -1,0 +1,18 @@
+.wo-edit { display: grid; gap: 14px; margin-top: 16px; }
+.wo-edit label { display: grid; min-width: 0; gap: 4px; }
+.wo-edit .ant-input-number, .wo-edit .ant-select { width: 100%; }
+.wo-edit fieldset { margin: 0; padding: 0; border: 0; }
+.wo-edit legend { margin-bottom: 4px; font: inherit; }
+.wo-edit .ant-radio-wrapper { display: inline-flex; }
+.wo-edit-head, .wo-edit-qty { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+.wo-edit-qty { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.wo-edit-line { display: grid; min-width: 0; gap: 10px; padding: 12px; border: 1px solid var(--mb-border); border-radius: 8px; }
+.wo-edit-line-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wo-edit .wo-edit-destinations { padding-top: 6px; border-top: 1px solid var(--mb-border-soft); }
+.wo-edit-destinations > label { display: inline-grid; min-width: 8em; margin: 0 10px 4px 0; color: var(--mb-text-2); }
+.wo-edit-destinations > p { margin: 4px 0; color: var(--mb-text-2); }
+.wo-edit-add { justify-self: start; }
+@media (max-width: 520px) {
+  .wo-edit-head { grid-template-columns: minmax(0, 1fr); }
+  .wo-edit-qty { gap: 6px; }
+}

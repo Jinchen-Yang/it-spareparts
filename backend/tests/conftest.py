@@ -163,6 +163,9 @@ _TABLES = [
     "f_project_expense",
     "maintenance_source_order_assignment",
     # 坏件循环待修池（D-0058）：意图/扣数引用结果。命令表无外键，一并清空。
+    "maintenance_repair_order_command",
+    "maintenance_repair_order_line",
+    "maintenance_repair_order",
     "maintenance_cycle_sell_intent",
     "maintenance_repair_record_source",
     "maintenance_repair_command",
