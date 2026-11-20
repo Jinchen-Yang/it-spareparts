@@ -1,6 +1,6 @@
 # 检测与维修候选验收及回退
 
-关联 [Issue #549](https://github.com/Jinchen-Yang/it-spareparts/issues/549)，业务口径见 [D-0067](../decisions/0047-维修任务单正式接入维保返还.md) 与 [D-0068](../decisions/0048-维修结果去向标签与导出.md)。候选 SHA 与执行结果随 PR 更新。
+关联 [Issue #549](https://github.com/Jinchen-Yang/it-spareparts/issues/549)，业务口径见 [D-0067](../decisions/0047-维修任务单正式接入维保返还.md) 与 [D-0071](../decisions/0051-维修结果去向标签与导出.md)。候选 SHA 与执行结果随 PR 更新。
 
 ## 点按验收
 
