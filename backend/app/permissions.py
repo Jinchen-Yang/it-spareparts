@@ -48,6 +48,7 @@ PAGE_KEYS: list[str] = [
     # 三口径（含税/不含税/实付）分析与下钻。模板仅 boss 开（admin 由
     # page_permission_allowed 恒放行）；sales/purchaser/readonly 显式 False。
     "page_purchase_analytics",
+    "page_inventory_analytics",
     "page_presales",
     # 坏件循环池（D-0057）：与 page_maintenance 脱钩的五个独立工位页键。
     "page_cycle_recycle",
@@ -167,6 +168,7 @@ LABELS: dict[str, str] = {
     "own_customers_only": "只看自己成交的客户（防恶性竞争）",
     "own_maintenance_projects_only": "只看自己负责/销售的维保项目",
     "page_accounts": "账号与权限中心（查看）",
+    "page_inventory_analytics": "库存管理分析",
     "page_purchase_analytics": "采购分析（日期/分类/三口径）",
     "action_account_manage": "账号与权限管理（建号/改权/批量/模板）",
     "action_data_quality_review": "数据疑点核实（逐条确认/重新打开）",
@@ -300,6 +302,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  # 采购分析=公司整体采购经营数据（D-39），readonly 必须显式关：
                  # _full() 打底会把新页面键置 True，guest 兜底同样继承（同上防泄漏注释）
                  "page_purchase_analytics": False,
+                 "page_inventory_analytics": False,
                  "action_pool_manage": False, "action_pool_set_policy": False,
                  "action_data_quality_review": False,
                  "action_maintenance_roundtrip_apply": False,
@@ -380,6 +383,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_replenishment_review": False,
         # 采购分析=公司整体采购经营数据（D-39），销售不开
         "page_purchase_analytics": False,
+        "page_inventory_analytics": False,
         "own_customers_only": True,
         # 行键保持历史冻结口径 False（防漂移契约）；销售的项目收敛同样由
         # 迁移 a9e2f7c4d1b8 在 DB 侧开启（账号快照），代码兜底不动。
@@ -435,6 +439,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_replenishment_review": False,
         # 采购分析=公司整体采购经营数据（D-39），采购员不开
         "page_purchase_analytics": False,
+        "page_inventory_analytics": False,
         "own_maintenance_projects_only": False,
         "own_customers_only": False,
     },
@@ -859,6 +864,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["老板"],
         "sensitivity": "high",
         "risk": "公司经营核心数据入口。",
+    },
+    "page_inventory_analytics": {
+        "label": "库存管理分析",
+        "summary": "查询全仓作业流水、人员工作量和返库型号分布。",
+        "can": "查看来源覆盖、单据和明细，按中心、人员、类型、日期和 PN 下钻。",
+        "cannot": "仅向获授权的老板及管理员开放。页面仅供查询。",
+        "typical": ["老板", "管理员"],
+        "sensitivity": "high",
+        "risk": "可查看全仓作业量、人员姓名以及仓储单据。",
     },
     "page_inventory": {
         "label": "库存查询",

@@ -125,6 +125,7 @@ except BaseException:
 _app_engine = engine
 
 _TABLES = [
+    "warehouse_analytics_line", "warehouse_analytics_document",
     "workbook_operation",
     "subject_event", "work_item",
     "field_anchor_usage", "field_value", "field_def", "audience_rule_member",

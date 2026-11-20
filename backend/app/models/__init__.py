@@ -14,6 +14,7 @@ from app.models.fields_audience import (
     FieldValue,
 )
 from app.models.inventory import Inventory, PartSubstitute
+from app.models.warehouse_analytics import WarehouseAnalyticsDocument, WarehouseAnalyticsLine
 from app.models.maintenance import (
     FMaintenanceLine,
     FMaintenanceOrder,
@@ -269,6 +270,8 @@ __all__ = [
     "FSalesLine",
     "FSalesReconciliationSnapshot",
     "Inventory",
+    "WarehouseAnalyticsDocument",
+    "WarehouseAnalyticsLine",
     "PartSubstitute",
     "FPartInquiry",
     "SysImportBatch",
