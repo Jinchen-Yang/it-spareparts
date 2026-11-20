@@ -462,3 +462,71 @@ it("离开库存看板后临时错误仍可非阻塞重试且保留当前页面�
   await waitFor(() => expect(screen.queryByRole("button", { name: "重试库存权限" })).toBeNull());
   expect(screen.getByRole("textbox", { name: "页面本地草稿" })).toHaveValue("其他页面草稿");
 });
+
+function controlledInventoryRead() {
+  let resolve!: (value: { data: Record<string, boolean> }) => void;
+  let reject!: (error: { response: { status: number } }) => void;
+  const promise = new Promise<{ data: Record<string, boolean> }>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, grant: (granted: boolean) => resolve({ data: { page_inventory_analytics: granted } }), reject };
+}
+
+async function startParallelInventoryReads() {
+  seedInventorySession();
+  getSessionPermissions.mockResolvedValueOnce({ data: { page_inventory_analytics: true } });
+  render(<App />);
+  await screen.findByText("库存管理分析路由");
+  const a = controlledInventoryRead(), b = controlledInventoryRead();
+  getSessionPermissions.mockImplementationOnce(() => a.promise).mockImplementationOnce(() => b.promise);
+  fireEvent(window, new Event("focus"));
+  fireEvent(window, new Event("focus"));
+  expect(getSessionPermissions).toHaveBeenCalledTimes(3);
+  return { a, b };
+}
+
+it.each([
+  { denial: "403", first: "A" }, { denial: "403", first: "B" },
+  { denial: "false", first: "A" }, { denial: "false", first: "B" },
+])("并行库存核验 A=$denial 与 B=503，先完成 $first 时仍执行明确拒绝", async ({ denial, first }) => {
+  const { a, b } = await startParallelInventoryReads();
+  const deny = () => denial === "403" ? a.reject({ response: { status: 403 } }) : a.grant(false);
+  if (first === "A") {
+    await act(async () => { deny(); });
+    await act(async () => { b.reject({ response: { status: 503 } }); });
+  } else {
+    await act(async () => { b.reject({ response: { status: 503 } }); });
+    await act(async () => { deny(); });
+  }
+  expect(screen.queryByText("库存管理分析路由")).toBeNull();
+  expect(await screen.findByRole("button", { name: "重试库存权限" })).toBeInTheDocument();
+});
+
+it("B临时失败后重试C期间A明确拒绝立即关闭，C最新确认true才重新允许", async () => {
+  const { a, b } = await startParallelInventoryReads();
+  await act(async () => { b.reject({ response: { status: 503 } }); });
+  const c = controlledInventoryRead();
+  getSessionPermissions.mockImplementationOnce(() => c.promise);
+  fireEvent.click(await screen.findByRole("button", { name: "重试库存权限" }));
+  await act(async () => { a.reject({ response: { status: 403 } }); });
+  expect(screen.queryByText("库存管理分析路由")).toBeNull();
+  await act(async () => { c.grant(true); });
+  // Denial may have navigated away. Follow the original deep link after the newest grant.
+  await act(async () => {
+    window.history.pushState({}, "", "/inventory/analytics?view=matrix");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  expect(await screen.findByText("库存管理分析路由")).toBeInTheDocument();
+});
+
+it("B最新明确true后迟到A403不覆盖该确认", async () => {
+  const { a, b } = await startParallelInventoryReads();
+  await act(async () => { b.grant(true); });
+  await act(async () => { a.reject({ response: { status: 403 } }); });
+  expect(screen.getByText("库存管理分析路由")).toBeInTheDocument();
+});
+
+it("旧Atrue不能压过新B明确拒绝", async () => {
+  const { a, b } = await startParallelInventoryReads();
+  await act(async () => { b.grant(false); });
+  await act(async () => { a.grant(true); });
+  expect(screen.queryByText("库存管理分析路由")).toBeNull();
+});

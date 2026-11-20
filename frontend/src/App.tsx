@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Alert, Button, Result } from "antd";
 import type { AxiosError } from "axios";
@@ -30,28 +30,40 @@ export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
   const [betaFeatures, setBetaFeatures] = useState<Record<string, boolean>>(readBetaFeatures);
   const [inventoryAccess, setInventoryAccess] = useState<{ token: string; granted?: boolean; error?: boolean }>();
-  const [accessRetry, setAccessRetry] = useState(0);
+  const retryInventoryAccess = useRef<(() => void) | null>(null);
   const inventoryReady = inventoryAccess?.token === token && inventoryAccess.granted !== undefined;
   const inventoryError = inventoryAccess?.token === token && inventoryAccess.error;
 
   useEffect(() => {
     if (!token) return;
     let active = true;
-    let latest = 0;
+    let latestRequest = 0;
+    let lastDecision = 0;
+    const recordDecision = (request: number, granted: boolean) => {
+      if (!active || localStorage.getItem("token") !== token || request < lastDecision) return;
+      // 已发出更新的请求时只允许收紧权限。临时错误不参与许可或撤权的排序。
+      if (granted && request !== latestRequest) return;
+      lastDecision = request;
+      const superseded = request < latestRequest;
+      setInventoryAccess((prior) => ({
+        token,
+        granted,
+        error: superseded && prior?.token === token && prior.error,
+      }));
+    };
     const refresh = () => {
       const currentToken = localStorage.getItem("token");
       if (currentToken !== token) {
         setToken(currentToken);
         return;
       }
-      const request = ++latest;
+      const request = ++latestRequest;
       // 保留同一会话最近一次服务端确认的结果。首次核验和切换身份时等待新结果。
       setInventoryAccess((prior) => ({ token, granted: prior?.token === token ? prior.granted : undefined }));
       void getSessionPermissions().then(({ data }) => {
-        if (!active || request !== latest || localStorage.getItem("token") !== token) return;
-        setInventoryAccess({ token, granted: data?.page_inventory_analytics === true });
+        recordDecision(request, data?.page_inventory_analytics === true);
       }).catch((error: AxiosError | null) => {
-        if (!active || request !== latest) return;
+        if (!active) return;
         const currentToken = localStorage.getItem("token");
         if (currentToken !== token) {
           setToken(currentToken);
@@ -59,9 +71,10 @@ export default function App() {
         }
         const status = error?.response?.status;
         if (status === 401 || status === 403) {
-          setInventoryAccess({ token, granted: false });
+          recordDecision(request, false);
           return;
         }
+        if (request !== latestRequest) return;
         const networkFailure = !error?.response && (
           error?.code === "ERR_NETWORK" || error?.code === "ECONNABORTED" || error?.code === "ETIMEDOUT"
         );
@@ -74,15 +87,17 @@ export default function App() {
       });
     };
     const visible = () => { if (document.visibilityState === "visible") refresh(); };
+    retryInventoryAccess.current = refresh;
     refresh();
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", visible);
     return () => {
       active = false;
+      retryInventoryAccess.current = null;
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", visible);
     };
-  }, [token, accessRetry]);
+  }, [token]);
 
   useEffect(() => {
     const syncCrossTabSession = (event: StorageEvent) => {
@@ -180,7 +195,7 @@ export default function App() {
       style={{ marginBottom: 12 }}
       message={inventoryReady ? "库存权限暂时未能刷新" : "库存分析权限读取失败"}
       action={
-        <Button size="small" aria-label={inventoryReady ? "重试库存权限" : "重试"} onClick={() => setAccessRetry((n) => n + 1)}>
+        <Button size="small" aria-label={inventoryReady ? "重试库存权限" : "重试"} onClick={() => retryInventoryAccess.current?.()}>
           重试
         </Button>
       }
