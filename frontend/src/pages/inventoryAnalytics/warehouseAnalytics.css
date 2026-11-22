@@ -190,6 +190,34 @@
   text-align: left;
   font-weight: 550;
 }
+.wa-document-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.wa-document-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  text-align: start;
+}
+.wa-document-toggle > span {
+  flex: none;
+}
+.wa-page .wa-document-details > td {
+  padding: 0;
+  background: var(--mb-inset);
+}
+.wa-document-children {
+  margin: 8px 9px 8px 22px;
+  padding-inline-start: 12px;
+  border-inline-start: 2px solid var(--wa-line);
+}
+.wa-document-children th small {
+  min-width: 10em;
+}
 .wa-matrix td,
 .wa-matrix th {
   white-space: nowrap;

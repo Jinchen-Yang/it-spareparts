@@ -1,11 +1,13 @@
-import { Popover } from "antd";
+import { Fragment, useId, useState } from "react";
+import { Button } from "antd";
 import {
   warehouseSources,
-  type Product,
+  warehouseParams,
   type TestCounts,
   type TestingStatus,
   type WarehouseDocument,
   type Drill,
+  type WarehouseQuery,
 } from "../../api/warehouseAnalytics";
 import { pageNumber, pageSize } from "./warehouseState";
 import {
@@ -17,7 +19,6 @@ import {
   Result,
   Tile,
   format,
-  quantity,
   useWarehouse,
   useWarehouseRead,
 } from "./WarehouseShared";
@@ -172,19 +173,133 @@ export function TestingBoard() {
     </>
   );
 }
-function SampleLines({ sample }: { sample: Product[] }) {
-  if (!sample.length) return <span>当前范围没有可见货品样本。</span>;
+function DocumentLines({
+  documentId,
+  query,
+  page,
+  change,
+}: {
+  documentId: string;
+  query: WarehouseQuery;
+  page: number;
+  change: (page: number) => void;
+}) {
+  const [attempt, setAttempt] = useState(0);
+  const read = useWarehouseRead("lines", { ...query, page, page_size: pageSize }, true, documentId, attempt);
   return (
-    <div className="wa-pop">
-      {sample.map((p, i) => (
-        <div key={i}>
-          <strong>{p.pn || "PN 未填"}</strong> · {p.description || "描述未填"}
-          <small>{quantity(p.quantity, p.unit)}</small>
-        </div>
-      ))}
-    </div>
+    <Result read={read} retry={() => setAttempt((previous) => previous + 1)}>
+      {(data) => (
+        <>
+          <DataTable
+            labels={["PN / 描述", "数量", "单位", "品类", "仓库", "库位", "测试结果"]}
+            empty={!data.items.length}
+          >
+            {data.items.map((line, i) => (
+              <tr key={i}>
+                <th scope="row">
+                  {line.pn || "PN 未填"}
+                  <small>{line.description || "描述未填"}</small>
+                </th>
+                <td>{format(line.quantity)}</td>
+                <td>{line.unit || "单位未填"}</td>
+                <td>{line.category || "—"}</td>
+                <td>{line.warehouse || "—"}</td>
+                <td>{line.bin_name || "—"}</td>
+                <td>{line.test_result || "—"}</td>
+              </tr>
+            ))}
+          </DataTable>
+          <Pager page={page} total={data.total} change={change} />
+        </>
+      )}
+    </Result>
   );
 }
+
+function ExpandedDocumentLines({ documentId, query }: { documentId: string; query: WarehouseQuery }) {
+  const [page, setPage] = useState(1);
+  return <DocumentLines documentId={documentId} query={query} page={page} change={setPage} />;
+}
+
+const documentLabels = ["单号 / 来源", "业务日期", "类别", "仓储中心", "作业人", "匹配行 / 原单行"];
+
+function DocumentRows({ items, query }: { items: WarehouseDocument[]; query: WarehouseQuery }) {
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const groupId = useId();
+  const expandable = items.filter((doc) => doc.matched_lines > 0).map((doc) => String(doc.id));
+  function toggle(id: string) {
+    setExpanded((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  const count = expandable.filter((id) => expanded.has(id)).length;
+  return (
+    <>
+      {!!expandable.length && (
+        <div className="wa-document-tools" role="group" aria-label="本页单据明细">
+          <Button disabled={count === expandable.length} onClick={() => setExpanded(new Set(expandable))}>
+            全部展开（本页）
+          </Button>
+          <Button disabled={count === 0} onClick={() => setExpanded(new Set())}>
+            全部折叠（本页）
+          </Button>
+        </div>
+      )}
+      <DataTable labels={documentLabels} empty={!items.length}>
+        {items.map((doc) => {
+          const id = String(doc.id);
+          const open = expanded.has(id);
+          const detailsId = `${groupId}-document-${id}`;
+          return (
+            <Fragment key={id}>
+              <tr>
+                <th scope="row">
+                  {doc.matched_lines > 0 ? (
+                    <button
+                      className="wa-link wa-document-toggle"
+                      type="button"
+                      aria-expanded={open}
+                      aria-controls={detailsId}
+                      onClick={() => toggle(id)}
+                    >
+                      <span aria-hidden="true">{open ? "▾" : "▸"}</span>
+                      {doc.number}
+                    </button>
+                  ) : (
+                    doc.number
+                  )}
+                  <small>{warehouseSources[doc.source]}</small>
+                </th>
+                <td>{doc.date}</td>
+                <td>{doc.kind || "未填"}</td>
+                <td>{doc.center || "未登记"}</td>
+                <td>{doc.operator || "未登记"}</td>
+                <td>
+                  {format(doc.matched_lines)} / {format(doc.total_lines)}
+                </td>
+              </tr>
+              {doc.matched_lines > 0 && (
+                <tr id={detailsId} className="wa-document-details" hidden={!open}>
+                  <td colSpan={documentLabels.length}>
+                    {open && (
+                      <div className="wa-document-children" role="group" aria-label={doc.number + " · 货品明细"}>
+                        <ExpandedDocumentLines documentId={id} query={query} />
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              )}
+            </Fragment>
+          );
+        })}
+      </DataTable>
+    </>
+  );
+}
+
 export function DocumentList({
   selection,
   documentId,
@@ -192,85 +307,32 @@ export function DocumentList({
   selection: Drill;
   documentId: string | null;
 }) {
-  const { filters, params, patch } = useWarehouse(),
-    isDetail = documentId !== null;
+  const { filters, params, patch } = useWarehouse();
+  const isDetail = documentId !== null;
   const page = pageNumber(params.get(isDetail ? "linePage" : "listPage"));
-  const query = { ...filters, ...selection, page, page_size: pageSize };
-  const list = useWarehouseRead("documents", query, !isDetail);
-  const detail = useWarehouseRead("lines", query, isDetail, documentId ?? undefined);
-  function open(doc: WarehouseDocument) {
-    patch({ doc: String(doc.id), docNo: doc.number, linePage: null }, true);
-  }
-  if (isDetail)
+  const query = { ...filters, ...selection };
+  const listQuery = { ...query, page, page_size: pageSize };
+  const list = useWarehouseRead("documents", listQuery, !isDetail);
+  if (isDetail) {
     return (
       <Panel
         title={params.get("docNo") || "单据货品"}
-        why="仅显示与上一级日期、仓库、人员及货品条件相符的来源行。"
+        why="显示与上一级日期、仓库、人员及货品条件相符的来源行。"
       >
-        <Result read={detail}>
-          {(data) => (
-            <>
-              <DataTable
-                labels={["PN / 描述", "数量", "单位", "品类", "仓库", "库位", "测试结果"]}
-                empty={!data.items.length}
-              >
-                {data.items.map((l, i) => (
-                  <tr key={i}>
-                    <th scope="row">
-                      {l.pn || "PN 未填"}
-                      <small>{l.description || "描述未填"}</small>
-                    </th>
-                    <td>{format(l.quantity)}</td>
-                    <td>{l.unit || "单位未填"}</td>
-                    <td>{l.category || "—"}</td>
-                    <td>{l.warehouse || "—"}</td>
-                    <td>{l.bin_name || "—"}</td>
-                    <td>{l.test_result || "—"}</td>
-                  </tr>
-                ))}
-              </DataTable>
-              <Pager page={page} total={data.total} change={(n) => patch({ linePage: String(n) })} />
-            </>
-          )}
-        </Result>
+        <DocumentLines documentId={documentId} query={query} page={page}
+          change={(n) => patch({ linePage: String(n) })} />
       </Panel>
     );
+  }
   return (
     <Panel
       title="匹配单据"
-      why="每张业务单展示一次。悬停或聚焦单号查看匹配货品样本，点击单号查看分页明细。"
+      why="展开单号可在下方查看符合筛选条件的货品明细。"
     >
       <Result read={list}>
         {(data) => (
           <>
-            <DataTable
-              labels={["单号 / 来源", "业务日期", "类别", "仓储中心", "作业人", "匹配行 / 原单行"]}
-              empty={!data.items.length}
-            >
-              {data.items.map((doc) => (
-                <tr key={doc.id}>
-                  <th scope="row">
-                    <Popover
-                      trigger={["hover", "focus"]}
-                      title={doc.number}
-                      content={<SampleLines sample={doc.sample} />}
-                    >
-                      <button className="wa-link" type="button" onClick={() => open(doc)}>
-                        {doc.number}
-                      </button>
-                    </Popover>
-                    <small>{warehouseSources[doc.source]}</small>
-                  </th>
-                  <td>{doc.date}</td>
-                  <td>{doc.kind || "未填"}</td>
-                  <td>{doc.center || "未登记"}</td>
-                  <td>{doc.operator || "未登记"}</td>
-                  <td>
-                    {format(doc.matched_lines)} / {format(doc.total_lines)}
-                  </td>
-                </tr>
-              ))}
-            </DataTable>
+            <DocumentRows key={warehouseParams(listQuery).toString()} items={data.items} query={query} />
             <Pager page={page} total={data.total} change={(n) => patch({ listPage: String(n) })} />
           </>
         )}

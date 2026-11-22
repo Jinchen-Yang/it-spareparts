@@ -1,5 +1,6 @@
 """The candidate UI and both repair write paths share return-receipt capacity."""
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -60,6 +61,94 @@ def _old_result(client, part_id, qty):
         json={"part_id": part_id, "fixed_qty": 0, "scrap_qty": qty},
         headers={"Idempotency-Key": uuid4().hex},
     )
+
+
+def test_sales_can_only_read_their_own_repair_orders(db):
+    with (
+        _user(db, "ownership-sales-a", "page_repair_order_sales", role="sales") as first,
+        _user(db, "ownership-sales-b", "page_repair_order_sales", role="sales") as second,
+    ):
+        data = {"mode": "internal", "lines": [{"pn": "TEST-REPAIR-PN", "qty": 1}]}
+        key = uuid4().hex
+        a = _command(first, "/orders", "sales", data, key)
+        b = _command(second, "/orders", "sales", data, key)
+        assert a.status_code == b.status_code == 201
+        a_id, b_id = a.json()["id"], b.json()["id"]
+        assert a_id != b_id
+
+        for client, own, other in ((first, a_id, b_id), (second, b_id, a_id)):
+            session = client.get(f"{BASE}/session")
+            assert session.status_code == 200 and session.json()["roles"] == ["sales"]
+            listing = client.get(f"{BASE}/orders", params={"role": "sales"})
+            assert listing.status_code == 200
+            assert [order["id"] for order in listing.json()] == [own]
+            for role in ("supervisor", "technician", "admin"):
+                assert client.get(f"{BASE}/orders", params={"role": role}).status_code == 403
+            action = _command(client, f"/orders/{other}/actions", "sales", {
+                "type": "claim", "version": 1,
+            })
+            assert action.status_code == 404
+            replay = _command(client, "/orders", "sales", data, key)
+            assert replay.status_code == 201 and replay.json()["id"] == own
+
+
+def test_sales_repair_relationships_hide_other_creators_order_numbers(db):
+    with (
+        _user(db, "relationship-sales-a", "page_repair_order_sales", role="sales") as first,
+        _user(db, "relationship-sales-b", "page_repair_order_sales", role="sales") as second,
+        _user(db, "relationship-tech", "page_repair_order_technician") as technician,
+        _user(db, "relationship-dispose", "page_repair_order_disposition") as disposer,
+        _user(db, "relationship-manager", "page_repair_order_supervisor") as supervisor,
+    ):
+        created = _command(first, "/orders", "sales", {
+            "mode": "internal", "assignee": "relationship-tech",
+            "lines": [{"pn": "RETRY-EXAMPLE", "qty": 1}],
+        })
+        assert created.status_code == 201, created.text
+        parent = created.json()
+        parent_route = f"/orders/{parent['id']}/actions"
+        result = _command(technician, parent_route, "technician", {
+            "type": "result", "version": parent["version"], "line": 0, "unfixed": 1, "fixed": 0,
+        })
+        assert result.status_code == 200, result.text
+        assigned = _command(disposer, parent_route, "admin", {
+            "type": "dispose", "version": result.json()["version"], "line": 0,
+            "result": "unfixed", "kind": "retry", "qty": 1,
+        })
+        assert assigned.status_code == 200, assigned.text
+
+        def listed(client, role="sales"):
+            response = client.get(f"{BASE}/orders", params={"role": role})
+            assert response.status_code == 200, response.text
+            return {item["id"]: item for item in response.json()}
+
+        own = listed(first)
+        retry = next(order for order in own.values() if order.get("repairSource"))
+        retry_id = retry["id"]
+        assert retry["repairSource"]["orderId"] == parent["id"]
+        assert own[parent["id"]]["lines"][0]["dispositions"][0]["retryOrderId"] == retry_id
+
+        edited_note = f"{retry['note']}\n已更换电源。原单 {parent['id']} 完成初检。"
+        changed = _command(supervisor, f"/orders/{retry_id}/actions", "supervisor", {
+            "type": "edit", "version": retry["version"], "mode": "internal",
+            "creator": "relationship-sales-b", "note": edited_note,
+            "lines": [{"pn": "RETRY-EXAMPLE", "qty": 1, "fixed": 0, "unfixed": 0}],
+        })
+        assert changed.status_code == 200, changed.text
+        left, right = listed(first), listed(second)
+        assert set(left) == {parent["id"]}
+        assert set(right) == {retry_id}
+        assert retry_id not in json.dumps(left)
+        assert parent["id"] not in json.dumps(right)
+        assert right[retry_id]["note"] == "二次维修\n已更换电源。原单 已隐藏 完成初检。"
+        assert left[parent["id"]]["lines"][0]["dispositions"] == [
+            {"kind": "retry", "result": "unfixed", "qty": 1},
+        ]
+
+        both = listed(supervisor, "supervisor")
+        assert both[parent["id"]]["lines"][0]["dispositions"][0]["retryOrderId"] == retry_id
+        assert both[retry_id]["repairSource"]["orderId"] == parent["id"]
+        assert both[retry_id]["note"] == edited_note
 
 
 def test_real_return_candidates_and_two_ledgers_share_remaining_capacity(db):

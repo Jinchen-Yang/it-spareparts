@@ -1,6 +1,7 @@
 """维修任务单：责任流转、送修来源与结果数量。"""
 from __future__ import annotations
 
+import re
 from collections import Counter
 from datetime import datetime
 from typing import Any
@@ -40,6 +41,9 @@ ROLE_PAGES: dict[RepairRole, str] = {
     "technician": "page_repair_order_technician",
     "admin": "page_repair_order_disposition",
 }
+_RETRY_NOTE_PREFIX = "二次维修 · 来源维修单 "
+_RETRY_EVENT_PREFIX = "登记二次维修，来源单 "
+_ORDER_NUMBER = re.compile(r"WX-[0-9]{8}-[0-9]{3,}")
 
 
 def roles_for(account: SysUser) -> list[RepairRole]:
@@ -145,7 +149,7 @@ def _new_order(
         id=f"WX-{at:%Y%m%d}-{serial:03d}", creator_id=creator_id,
         assignee_id=assignee.id if assignee else None, mode=mode, route=route,
         returned=False, note=note, version=1, created_at=at,
-        history=[_event(account, f"登记二次维修，来源单 {parent.order_id}" if parent else "创建维修单", at)],
+        history=[_event(account, f"{_RETRY_EVENT_PREFIX}{parent.order_id}" if parent else "创建维修单", at)],
         repair_source_line_id=parent.id if parent else None, lines=lines,
     )
     if assignee:
@@ -422,7 +426,7 @@ def _set_disposition(db: Session, order: Order, account: SysUser, body: DisposeA
             raise HTTPException(422, "只有没修好的备件可以进入二次维修")
         retry = _new_order(
             db, account, creator_id=order.creator_id, mode=order.mode, at=at,
-            note=f"二次维修 · 来源维修单 {order.id}",
+            note=f"{_RETRY_NOTE_PREFIX}{order.id}",
             lines=[_new_line(0, pn=line.pn, description=line.description, qty=body.qty)],
             parent=line,
         )
@@ -485,19 +489,28 @@ def replay_payload(db: Session, response: dict, account: SysUser, role: RepairRo
     }
 
 
+def _hide_related_numbers(value: str, hidden: set[str], prefix: str, replacement: str) -> str:
+    source = _ORDER_NUMBER.match(value, len(prefix)) if value.startswith(prefix) else None
+    if source and source.group() in hidden:
+        value = replacement + value[source.end():]
+    return _ORDER_NUMBER.sub(lambda match: "已隐藏" if match.group() in hidden else match.group(), value)
+
+
 def order_payloads(db: Session, orders: list[Order], account: SysUser, role: RepairRole) -> list[dict]:
     if not orders:
         return []
     people_ids = {user_id for order in orders for user_id in (order.creator_id, order.assignee_id) if user_id}
     people = {row.id: row for row in db.scalars(select(SysUser).where(SysUser.id.in_(people_ids)))}
+    # 销售列表已用同一条查询选出全部本人单据。关系的归属沿用该快照，
+    # 避免主管同时换建单人时混用两个时点的权限。
+    visible_order_ids = {order.id for order in orders} if role == "sales" else set()
     parents_ids = {order.repair_source_line_id for order in orders if order.repair_source_line_id}
     parents = {}
     if parents_ids:
+        parent_query = select(Line.id, Line.order_id, Line.position).where(Line.id.in_(parents_ids))
         parents = {
             key: {"orderId": order_id, "line": position}
-            for key, order_id, position in db.execute(
-                select(Line.id, Line.order_id, Line.position).where(Line.id.in_(parents_ids))
-            )
+            for key, order_id, position in db.execute(parent_query)
         }
     source_ids = {
         line.source_receipt_id for order in orders for line in order.lines if line.source_receipt_id
@@ -506,21 +519,44 @@ def order_payloads(db: Session, orders: list[Order], account: SysUser, role: Rep
     payload = []
     for order in orders:
         creator, assignee = people[order.creator_id], people.get(order.assignee_id)
+        parent = parents.get(order.repair_source_line_id)
+        note = order.note if role != "admin" else ""
+        history = [
+            entry for entry in order.history
+            if role != "admin" or entry.get("kind", "handoff") == "handoff"
+        ]
+        if role == "sales":
+            hidden = {
+                retry_id
+                for line in order.lines
+                for entry in line.dispositions
+                if isinstance(retry_id := entry.get("retryOrderId"), str) and retry_id not in visible_order_ids
+            }
+            if parent and parent["orderId"] not in visible_order_ids:
+                hidden.add(parent["orderId"])
+                parent = None
+            if hidden:
+                note = _hide_related_numbers(note, hidden, _RETRY_NOTE_PREFIX, "二次维修")
+                history = [
+                    {
+                        **entry,
+                        "event": _hide_related_numbers(entry["event"], hidden, _RETRY_EVENT_PREFIX, "登记二次维修"),
+                    }
+                    if isinstance(entry.get("event"), str) else entry
+                    for entry in history
+                ]
         item = {
             "id": order.id, "creator": creator.username, "creatorName": display_name(creator),
             "assignee": assignee.username if assignee else None,
             "assigneeName": display_name(assignee) if assignee else None,
             "mode": order.mode, "route": order.route, "returned": order.returned,
-            "note": order.note if role != "admin" else "",
+            "note": note,
             "version": order.version, "createdAt": order.created_at.isoformat(),
-            "history": [
-                entry for entry in order.history
-                if role != "admin" or entry.get("kind", "handoff") == "handoff"
-            ],
+            "history": history,
             "lines": [],
         }
-        if order.repair_source_line_id in parents:
-            item["repairSource"] = parents[order.repair_source_line_id]
+        if parent is not None:
+            item["repairSource"] = parent
         for line in order.lines:
             if role == "admin" and not _has_pending(line):
                 continue
@@ -529,6 +565,16 @@ def order_payloads(db: Session, orders: list[Order], account: SysUser, role: Rep
             if role == "admin":
                 fixed, unfixed = _pending(line, "fixed"), _pending(line, "unfixed")
                 qty, dispositions = fixed + unfixed, []
+            elif role == "sales":
+                masked_dispositions = []
+                for entry in dispositions:
+                    retry_id = entry.get("retryOrderId")
+                    if "retryOrderId" in entry and (
+                        not isinstance(retry_id, str) or retry_id not in visible_order_ids
+                    ):
+                        entry = {key: value for key, value in entry.items() if key != "retryOrderId"}
+                    masked_dispositions.append(entry)
+                dispositions = masked_dispositions
             row = {
                 "pn": line.pn, "description": line.description, "qty": qty, "fixed": fixed, "unfixed": unfixed,
                 "lineIndex": line.position, "dispositions": dispositions,

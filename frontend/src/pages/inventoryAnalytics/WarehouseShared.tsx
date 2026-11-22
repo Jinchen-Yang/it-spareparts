@@ -37,10 +37,11 @@ export function useWarehouseRead<K extends keyof WarehouseResults>(
   query: WarehouseQuery,
   enabled = true,
   docId?: string,
+  attempt = 0,
 ) {
   const { owner, stale, revision, cache } = useWarehouse();
   const params = warehouseParams(query);
-  const key = enabled ? JSON.stringify([revision, endpoint, docId, params.toString()]) : null;
+  const key = enabled ? JSON.stringify([revision, endpoint, docId, params.toString(), attempt]) : null;
   return useDashboardRead<WarehouseResults[K]>(
     key,
     () => cache.get(key!, () => fetchWarehouse(endpoint, params, docId)) as Promise<WarehouseResults[K]>,
@@ -50,9 +51,11 @@ export function useWarehouseRead<K extends keyof WarehouseResults>(
 }
 export function Result<T>({
   read,
+  retry,
   children,
 }: {
   read?: { data?: T; error?: string };
+  retry?: () => void;
   children: (data: T) => ReactNode;
 }) {
   const { refresh } = useWarehouse();
@@ -63,7 +66,7 @@ export function Result<T>({
         showIcon
         message={read.error}
         action={
-          <button className="wa-link" onClick={refresh}>
+          <button className="wa-link" type="button" onClick={retry || refresh}>
             重试
           </button>
         }

@@ -289,8 +289,8 @@ function RepairWorkbench({ session, role, onBusyChange }: {
       <div className="wo-list-head">
         {tab === "pool" && role !== "admin" ? (
           <div className="wo-switch" role="group" aria-label="维修任务池范围">
-            <button type="button" aria-pressed={!publicOnly} onClick={() => { setPublicOnly(false); resetListFilters(); }}>任务总池 {visible.length}</button>
-            <button type="button" aria-pressed={publicOnly} onClick={() => { setPublicOnly(true); resetListFilters(); }}>公共池 {available.length}</button>
+            <button type="button" aria-pressed={!publicOnly} onClick={() => { setPublicOnly(false); resetListFilters(); }}>{role === "sales" ? "我发起的" : "任务总池"} {visible.length}</button>
+            <button type="button" aria-pressed={publicOnly} onClick={() => { setPublicOnly(true); resetListFilters(); }}>{role === "sales" ? "我的待领取" : "公共池"} {available.length}</button>
           </div>
         ) : tab === "mine" && role === "supervisor" ? (
           <div className="wo-switch" role="group" aria-label="主管任务范围">

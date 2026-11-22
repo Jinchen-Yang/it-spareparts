@@ -7,6 +7,7 @@ import type {
 } from "../../../api/inspectionRepair";
 import { formatBusinessDateTime } from "../../../utils/date";
 import { destinationLabels, fixedDispositionLabel, fixedDispositionQty, orderOwner, orderStage, pendingQty } from "./workOrders";
+import { RepairPnInput } from "./RepairPnInput";
 import { SupervisorOrderEditor } from "./SupervisorOrderEditor";
 import ReturnSourcePicker from "./ReturnSourcePicker";
 import "./workOrderForms.css";
@@ -120,7 +121,7 @@ export function CreateOrderModal({ role, user, technicians, busy, saveBlocked, o
                   <div className="wo-entry-grid">
                     <Form.Item name={[name, "pn"]} label="备件 PN"
                       rules={[{ required: true, whitespace: true, message: "请填写备件 PN" }]}>
-                      <Input placeholder="输入备件 PN" maxLength={128} autoComplete="off" readOnly={!!source} />
+                      <RepairPnInput readOnly={!!source} disabled={busy} />
                     </Form.Item>
                     <Form.Item name={[name, "description"]} label="备件描述">
                       <Input placeholder="填写型号或描述" maxLength={256} readOnly={!!source} />
