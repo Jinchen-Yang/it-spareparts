@@ -11,8 +11,10 @@ const api = vi.hoisted(() => ({
 }));
 
 const { saveBlob } = vi.hoisted(() => ({ saveBlob: vi.fn() }));
+const { suggestParts } = vi.hoisted(() => ({ suggestParts: vi.fn() }));
 vi.mock("../../../api/inspectionRepair", () => api);
 vi.mock("../../../api/maintenanceWorkbooks", () => ({ saveBlob }));
+vi.mock("../../../api/search", () => ({ suggestParts }));
 
 import RepairOrdersPage from "../RepairOrdersPage";
 
@@ -224,9 +226,94 @@ describe("检测与维修正式页面", () => {
       username: "sales-one", displayName: "销售甲", roles: ["sales"], technicians: [],
     });
     render(<RepairOrdersPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "创建维修单" }));
+    expect(await screen.findByRole("button", { name: "我发起的 0" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "我的待领取 0" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "创建维修单" }));
     expect(screen.queryByText("维保备件返还")).toBeNull();
     expect(api.listRepairReturnCandidates).not.toHaveBeenCalled();
     expect(screen.getByRole("radio", { name: "放入公共池" })).toBeChecked();
+  });
+
+  it("销售建单可用键盘选择标准 PN，也能提交未建档的手填 PN", async () => {
+    api.getRepairSession.mockResolvedValue({
+      username: "sales-live-pn", displayName: "销售甲", roles: ["sales"], technicians: [],
+    });
+    api.applyRepairAction.mockResolvedValue(order);
+    const matching = [{
+      part_id: 1, pn_std: "CANON-PN", description: "档案中的描述",
+      match_type: "exact_alias", match_reason: "别名命中", matched_terms: [],
+    }];
+    suggestParts.mockResolvedValueOnce(matching).mockResolvedValueOnce(matching).mockResolvedValue([]);
+    render(<RepairOrdersPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "创建维修单" }));
+    const dialog = within(screen.getByRole("dialog"));
+    const pn = dialog.getByLabelText("备件 PN");
+    fireEvent.change(dialog.getByLabelText("备件描述"), { target: { value: "现场填写的描述" } });
+    fireEvent.change(pn, { target: { value: "维修专用别名" } });
+    expect(await dialog.findByRole("option", { name: /CANON-PN/ })).toBeTruthy();
+    expect(suggestParts).toHaveBeenCalledWith("维修专用别名", 10, expect.any(AbortSignal));
+
+    fireEvent.keyDown(pn, { key: "Escape", keyCode: 27 });
+    expect(dialog.queryByRole("listbox", { name: "型号联想" })).toBeNull();
+    fireEvent.change(pn, { target: { value: "维修别名" } });
+    await dialog.findByRole("option", { name: /CANON-PN/ });
+    expect(screen.queryByText("放弃这张未提交的维修单？")).toBeNull();
+    fireEvent.keyDown(pn, { key: "ArrowDown" });
+    fireEvent.keyDown(pn, { key: "Enter" });
+    expect(pn).toHaveValue("CANON-PN");
+    expect(pn).toHaveAttribute("aria-required", "true");
+    expect(dialog.queryByRole("listbox", { name: "型号联想" })).toBeNull();
+
+    fireEvent.click(dialog.getByRole("button", { name: /添加手工任务条/ }));
+    fireEvent.change(dialog.getAllByLabelText("备件 PN")[1], { target: { value: "未建档-PN" } });
+    fireEvent.click(dialog.getByRole("radio", { name: "委内维修" }));
+    fireEvent.click(dialog.getByRole("button", { name: "创建维修单" }));
+    await waitFor(() => expect(api.applyRepairAction).toHaveBeenCalledWith(
+      "sales", { type: "create", mode: "internal", assignee: undefined, note: "", lines: [
+        { pn: "CANON-PN", description: "现场填写的描述", qty: 1 },
+        { pn: "未建档-PN", description: "", qty: 1 },
+      ] }, undefined, expect.any(String),
+    ));
+  });
+
+  it("主管编辑可联想手工任务条，维保返还与已送二次维修的 PN 仍只读", async () => {
+    const mixed: RepairOrder = {
+      ...order, lines: [
+        ...order.lines,
+        { pn: "旧手填 PN", description: "原任务描述", qty: 1, fixed: 0, unfixed: 0 },
+        { pn: "RETRY-PN", description: "", qty: 2, fixed: 0, unfixed: 1,
+          dispositions: [{ kind: "retry", result: "unfixed", qty: 1, retryOrderId: "WX-RETRY" }] },
+      ],
+    };
+    api.listRepairOrders.mockResolvedValue([mixed]);
+    api.applyRepairAction.mockResolvedValue(mixed);
+    suggestParts.mockResolvedValue([{
+      part_id: 2, pn_std: "NEW-CANON-PN", description: "候选资料描述",
+      match_type: "description", match_reason: "描述命中", matched_terms: [],
+    }]);
+    render(<RepairOrdersPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /^编\s*辑$/ }));
+    const editor = within(await screen.findByRole("dialog"));
+    const fromReturn = within(editor.getByRole("region", { name: "编辑第 1 条任务条" }));
+    const manual = within(editor.getByRole("region", { name: "编辑第 2 条任务条" }));
+    const originalPn = fromReturn.getByLabelText("备件 PN");
+    expect(originalPn).toHaveAttribute("readonly");
+    expect(originalPn).toHaveValue(candidate.pn);
+    expect(editor.getByDisplayValue("RETRY-PN")).toHaveAttribute("readonly");
+    const manualPn = manual.getByLabelText("备件 PN");
+    fireEvent.change(manualPn, { target: { value: "控制板" } });
+    fireEvent.click(await manual.findByRole("option", { name: /NEW-CANON-PN/ }));
+    expect(suggestParts).toHaveBeenCalledTimes(1);
+    expect(manualPn).toHaveValue("NEW-CANON-PN");
+    expect(manual.getByLabelText("备件描述")).toHaveValue("原任务描述");
+    expect(originalPn).toHaveValue(candidate.pn);
+    fireEvent.click(editor.getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(api.applyRepairAction).toHaveBeenCalledWith(
+      "supervisor", expect.objectContaining({ type: "edit", sourceIndices: [0, 1, 2], lines: [
+        expect.objectContaining({ pn: candidate.pn, sourceReceiptId: candidate.receiptId }),
+        expect.objectContaining({ pn: "NEW-CANON-PN", description: "原任务描述" }),
+        expect.objectContaining({ pn: "RETRY-PN" }),
+      ] }), 1, expect.any(String),
+    ));
   });
 });

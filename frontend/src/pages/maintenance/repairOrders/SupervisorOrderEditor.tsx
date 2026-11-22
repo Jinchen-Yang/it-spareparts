@@ -1,7 +1,8 @@
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { Alert, Button, ConfigProvider, Input, InputNumber, Modal, Radio, Select } from "antd";
 import { PlusOutlined } from "@ant-design/icons";
 import type { RepairAccount, RepairAction, RepairLine, RepairOrder } from "../../../api/inspectionRepair";
+import { RepairPnInput } from "./RepairPnInput";
 import { destinationLabels } from "./workOrders";
 import "./supervisorOrderEditor.css";
 
@@ -34,6 +35,7 @@ export function SupervisorOrderEditor({
   const [lines, setLines] = useState<DraftLine[]>(() => order.lines.map((line, index) => ({
     ...line, key: index, original: line, destinations: (line.dispositions ?? []).map(item => ({ ...item })),
   })));
+  const pnInputPrefix = useId();
   const nextKey = useRef(lines.length);
   const stillInPool = order.route === "pool" && !order.returned && !order.assignee
     && lines.every(line => !line.fixed && !line.unfixed);
@@ -111,6 +113,8 @@ export function SupervisorOrderEditor({
         <label>备注<Input.TextArea value={note} maxLength={1000} autoSize={{ minRows: 2, maxRows: 4 }} onChange={event => setNote(event.target.value)} /></label>
         {lines.map((line, index) => {
           const dispositions = line.original?.dispositions ?? [];
+          const pnReadOnly = !!(line.original && (line.original.sourceReceiptId || order.repairSource || dispositions.some(entry => entry.kind === "retry")));
+          const pnInputId = `${pnInputPrefix}-${line.key}`;
           const deletable = !line.original || (!line.original.previouslyHandled && !line.original.fixed && !line.original.unfixed && !dispositions.length);
           return <section key={line.key} className="wo-edit-line" aria-label={`编辑第 ${index + 1} 条任务条`}>
             <div className="wo-edit-line-head"><strong>任务条 {index + 1}</strong>
@@ -118,7 +122,11 @@ export function SupervisorOrderEditor({
                 onClick={() => setLines(current => current.filter(item => item.key !== line.key))}>移除</Button>}</div>
             {line.original?.sourceReceiptId && <p className="wo-source-label">维保返还 {line.original.sourceHeadNo || "未登记来源单号"}</p>}
             <div className="wo-edit-head">
-              <label>备件 PN<Input value={line.pn} maxLength={128} readOnly={!!line.original?.sourceReceiptId} onChange={event => updateLine(line.key, { pn: event.target.value })} /></label>
+              <div className="wo-edit-pn">
+                <label htmlFor={pnInputId}>备件 PN</label>
+                <RepairPnInput id={pnInputId} value={line.pn} readOnly={pnReadOnly} disabled={busy}
+                  onChange={pn => updateLine(line.key, { pn })} />
+              </div>
               <label>备件描述<Input value={line.description} maxLength={256} onChange={event => updateLine(line.key, { description: event.target.value })} /></label>
             </div>
             <div className="wo-edit-qty">{quantityFields.map(field =>
