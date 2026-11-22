@@ -5,6 +5,7 @@
 .wo-edit legend { margin-bottom: 4px; font: inherit; }
 .wo-edit .ant-radio-wrapper { display: inline-flex; }
 .wo-edit-head, .wo-edit-qty { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+.wo-edit-pn { display: grid; align-content: start; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
 .wo-edit-qty { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .wo-edit-line { display: grid; min-width: 0; gap: 10px; padding: 12px; border: 1px solid var(--mb-border); border-radius: 8px; }
 .wo-edit-line-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

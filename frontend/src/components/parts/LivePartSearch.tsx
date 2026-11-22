@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 import { Alert, Button, Empty, Input, Space, Spin, Tag } from "antd";
-import type { InputProps } from "antd";
+import type { InputProps, InputRef } from "antd";
 import { suggestParts } from "../../api/search";
 import type { PartSuggestion } from "../../api/search";
 import { ApiErrorFeedback } from "../ApiErrorFeedback";
@@ -14,6 +14,7 @@ export interface LivePartSearchProps {
   onChange?: (items: PartSuggestion[]) => void;
   inputValue?: string;
   onInputChange?: (text: string) => void;
+  inputRef?: Ref<InputRef>;
   inputProps?: Omit<InputProps, "value" | "onChange" | "onKeyDown" | "onCompositionStart" | "onCompositionEnd">;
   limit?: number;
   minChars?: number;
@@ -71,7 +72,7 @@ function highlightedPn(pn: string, terms: string[]) {
 
 /** 独立联想组件，不接触现有 PartPicker 的身份与匹配契约。 */
 export default function LivePartSearch({
-  mode = "single", value, onChange, inputValue, onInputChange, inputProps,
+  mode = "single", value, onChange, inputValue, onInputChange, inputRef, inputProps,
   limit = 10, minChars = 1, onAddRaw, onCreate, renderThumb, renderBadges, onSuggestionsChange,
 }: LivePartSearchProps) {
   const [text, setText] = useState(inputValue ?? "");
@@ -184,6 +185,7 @@ export default function LivePartSearch({
         </Space>
       )}
       <Input
+        ref={inputRef}
         placeholder="输入型号 / 品牌 / 描述 / 规格" allowClear {...inputProps}
         value={query} aria-autocomplete="list" aria-controls={shown ? listId : undefined}
         aria-expanded={shown} aria-activedescendant={shown && active >= 0 ? `${listId}-${active}` : undefined}
@@ -213,9 +215,14 @@ export default function LivePartSearch({
         onKeyDown={(event) => {
           if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) {
             if (event.key === "Enter") event.preventDefault();
+            if (event.key === "Escape") event.stopPropagation();
             return;
           }
           if (event.key === "Escape") {
+            if (shown) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
             cancel();
             setLoading(false);
             setOpen(false);
