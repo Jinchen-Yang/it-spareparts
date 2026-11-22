@@ -128,9 +128,10 @@ def test_sales_repair_relationships_hide_other_creators_order_numbers(db):
         assert retry["repairSource"]["orderId"] == parent["id"]
         assert own[parent["id"]]["lines"][0]["dispositions"][0]["retryOrderId"] == retry_id
 
+        edited_note = f"{retry['note']}\n已更换电源。原单 {parent['id']} 完成初检。"
         changed = _command(supervisor, f"/orders/{retry_id}/actions", "supervisor", {
             "type": "edit", "version": retry["version"], "mode": "internal",
-            "creator": "relationship-sales-b", "note": retry["note"],
+            "creator": "relationship-sales-b", "note": edited_note,
             "lines": [{"pn": "RETRY-EXAMPLE", "qty": 1, "fixed": 0, "unfixed": 0}],
         })
         assert changed.status_code == 200, changed.text
@@ -139,6 +140,7 @@ def test_sales_repair_relationships_hide_other_creators_order_numbers(db):
         assert set(right) == {retry_id}
         assert retry_id not in json.dumps(left)
         assert parent["id"] not in json.dumps(right)
+        assert right[retry_id]["note"] == "二次维修\n已更换电源。原单 已隐藏 完成初检。"
         assert left[parent["id"]]["lines"][0]["dispositions"] == [
             {"kind": "retry", "result": "unfixed", "qty": 1},
         ]
@@ -146,6 +148,7 @@ def test_sales_repair_relationships_hide_other_creators_order_numbers(db):
         both = listed(supervisor, "supervisor")
         assert both[parent["id"]]["lines"][0]["dispositions"][0]["retryOrderId"] == retry_id
         assert both[retry_id]["repairSource"]["orderId"] == parent["id"]
+        assert both[retry_id]["note"] == edited_note
 
 
 def test_real_return_candidates_and_two_ledgers_share_remaining_capacity(db):

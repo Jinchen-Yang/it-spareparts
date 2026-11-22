@@ -489,11 +489,11 @@ def replay_payload(db: Session, response: dict, account: SysUser, role: RepairRo
     }
 
 
-def _without_source_number(value: str, prefix: str, replacement: str) -> str:
-    number = value.removeprefix(prefix)
-    if number != value and _ORDER_NUMBER.fullmatch(number):
-        return replacement
-    return value
+def _hide_related_numbers(value: str, hidden: set[str], prefix: str, replacement: str) -> str:
+    source = _ORDER_NUMBER.match(value, len(prefix)) if value.startswith(prefix) else None
+    if source and source.group() in hidden:
+        value = replacement + value[source.end():]
+    return _ORDER_NUMBER.sub(lambda match: "已隐藏" if match.group() in hidden else match.group(), value)
 
 
 def order_payloads(db: Session, orders: list[Order], account: SysUser, role: RepairRole) -> list[dict]:
@@ -501,31 +501,17 @@ def order_payloads(db: Session, orders: list[Order], account: SysUser, role: Rep
         return []
     people_ids = {user_id for order in orders for user_id in (order.creator_id, order.assignee_id) if user_id}
     people = {row.id: row for row in db.scalars(select(SysUser).where(SysUser.id.in_(people_ids)))}
+    # 销售列表已用同一条查询选出全部本人单据。关系的归属沿用该快照，
+    # 避免主管同时换建单人时混用两个时点的权限。
+    visible_order_ids = {order.id for order in orders} if role == "sales" else set()
     parents_ids = {order.repair_source_line_id for order in orders if order.repair_source_line_id}
     parents = {}
     if parents_ids:
         parent_query = select(Line.id, Line.order_id, Line.position).where(Line.id.in_(parents_ids))
-        if role == "sales":
-            parent_query = parent_query.join(Order, Order.id == Line.order_id).where(
-                Order.creator_id == account.id
-            )
         parents = {
             key: {"orderId": order_id, "line": position}
             for key, order_id, position in db.execute(parent_query)
         }
-    visible_retry_ids: set[str] = set()
-    if role == "sales":
-        retry_ids = {
-            retry_id
-            for order in orders
-            for line in order.lines
-            for entry in line.dispositions
-            if isinstance(retry_id := entry.get("retryOrderId"), str)
-        }
-        if retry_ids:
-            visible_retry_ids = set(db.scalars(
-                select(Order.id).where(Order.id.in_(retry_ids), Order.creator_id == account.id)
-            ))
     source_ids = {
         line.source_receipt_id for order in orders for line in order.lines if line.source_receipt_id
     }
@@ -539,16 +525,26 @@ def order_payloads(db: Session, orders: list[Order], account: SysUser, role: Rep
             entry for entry in order.history
             if role != "admin" or entry.get("kind", "handoff") == "handoff"
         ]
-        if role == "sales" and order.repair_source_line_id is not None and parent is None:
-            note = _without_source_number(note, _RETRY_NOTE_PREFIX, "二次维修")
-            history = [
-                {
-                    **entry,
-                    "event": _without_source_number(entry["event"], _RETRY_EVENT_PREFIX, "登记二次维修"),
-                }
-                if isinstance(entry.get("event"), str) else entry
-                for entry in history
-            ]
+        if role == "sales":
+            hidden = {
+                retry_id
+                for line in order.lines
+                for entry in line.dispositions
+                if isinstance(retry_id := entry.get("retryOrderId"), str) and retry_id not in visible_order_ids
+            }
+            if parent and parent["orderId"] not in visible_order_ids:
+                hidden.add(parent["orderId"])
+                parent = None
+            if hidden:
+                note = _hide_related_numbers(note, hidden, _RETRY_NOTE_PREFIX, "二次维修")
+                history = [
+                    {
+                        **entry,
+                        "event": _hide_related_numbers(entry["event"], hidden, _RETRY_EVENT_PREFIX, "登记二次维修"),
+                    }
+                    if isinstance(entry.get("event"), str) else entry
+                    for entry in history
+                ]
         item = {
             "id": order.id, "creator": creator.username, "creatorName": display_name(creator),
             "assignee": assignee.username if assignee else None,
@@ -574,7 +570,7 @@ def order_payloads(db: Session, orders: list[Order], account: SysUser, role: Rep
                 for entry in dispositions:
                     retry_id = entry.get("retryOrderId")
                     if "retryOrderId" in entry and (
-                        not isinstance(retry_id, str) or retry_id not in visible_retry_ids
+                        not isinstance(retry_id, str) or retry_id not in visible_order_ids
                     ):
                         entry = {key: value for key, value in entry.items() if key != "retryOrderId"}
                     masked_dispositions.append(entry)
