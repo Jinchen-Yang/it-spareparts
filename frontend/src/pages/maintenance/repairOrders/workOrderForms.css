@@ -39,6 +39,28 @@
   gap: 4px 10px;
 }
 .wo-entry-grid .ant-form-item { margin-bottom: 0; }
+
+@supports (width: 1cqw) {
+  .wo-entry-grid, .wo-edit-line .wo-edit-head { container-type: inline-size; }
+  :is(.wo-entry-grid, .wo-edit-pn) .live-part-search-dropdown {
+    /* Use the task row's width while keeping the popup anchored to the PN input. */
+    width: min(480px, 100cqw);
+    min-width: 100%;
+    right: auto;
+  }
+}
+:is(.wo-entry-grid, .wo-edit-pn) .live-part-search-line { flex-wrap: wrap; }
+:is(.wo-entry-grid, .wo-edit-pn) .live-part-search-pn { margin-right: 0; }
+:is(.wo-entry-grid, .wo-edit-pn) .live-part-search-secondary {
+  margin-left: 0;
+  padding-left: 0;
+}
+:is(.wo-entry-grid, .wo-edit-pn) :is(.live-part-search-secondary, .live-part-search-summary, .live-part-search-specs .ant-tag) {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .wo-form .ant-input-number, .wo-quantities .ant-input-number, .wo-quantities .ant-select { width: 100%; }
 .wo-detail-meta {
   display: grid;
