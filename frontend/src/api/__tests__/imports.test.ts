@@ -11,7 +11,7 @@ vi.mock("../../api", () => ({
 }));
 
 import {
-  downloadImportErrors, normalizeImportPrecheck, precheckImportFiles, uploadImportBatch,
+  downloadImportErrors, normalizeImportPrecheck, precheckImportFiles, uploadImportBatch, uploadWarehouseWorkbook,
 } from "../imports";
 
 const cleanV2 = {
@@ -45,6 +45,18 @@ const cleanV2 = {
 };
 
 beforeEach(() => vi.clearAllMocks());
+
+it("uploads one warehouse workbook as file and accepts only a valid queued receipt", async () => {
+  const file = new File(["xlsx"], "仓单.xlsx");
+  const receipt = { job_id: 7, total_files: 1, status: "processing" };
+  post.mockResolvedValueOnce({ data: receipt });
+  await expect(uploadWarehouseWorkbook(file)).resolves.toEqual(receipt);
+  const form = post.mock.calls[0][1] as FormData;
+  expect(Array.from(form.entries())).toEqual([["file", file]]);
+  expect(post).toHaveBeenCalledWith("/import/warehouse-workbook", form, { timeout: 120_000 });
+  post.mockResolvedValueOnce({ data: { ...receipt, total_files: 2 } });
+  await expect(uploadWarehouseWorkbook(file)).rejects.toThrow("仓单工作簿提交响应无效");
+});
 
 describe("import error download", () => {
   it("downloads the authenticated Blob with the response filename and releases its URL", async () => {
