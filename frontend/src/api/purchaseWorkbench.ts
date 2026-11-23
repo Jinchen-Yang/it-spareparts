@@ -55,6 +55,14 @@ export interface CubeCell extends Measure {
   row_key: string | null;
   column_key: string | null;
 }
+export interface TailPaymentTotal {
+  amount: number | null;
+  missing_orders: number;
+}
+export interface PurchaseTailPayments {
+  paid: TailPaymentTotal;
+  pending: TailPaymentTotal;
+}
 export interface Cube {
   row: WbDimension;
   column: WbDimension | null;
@@ -64,7 +72,7 @@ export interface Cube {
   rows: Group[];
   columns: Group[];
   cells: CubeCell[];
-  total: Measure;
+  total: Measure & { tail_payments?: PurchaseTailPayments };
   total_rows: number;
   total_columns: number;
   previous_total?: Measure | null;

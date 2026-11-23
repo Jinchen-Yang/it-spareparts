@@ -111,6 +111,7 @@ _RECON_FIELD_LABELS = {
 # 「不含税×税率=税金」等算术等式或舍入阈值阻断（票面差异按源值保留）。
 _HEAD_ECONOMIC_LABELS = {
     "sales_receivable_amount": "待收尾款",
+    **{internal: source for source, internal in mapping.PURCHASE_TAIL_PAYMENT_COLUMNS.items()},
     "amount_ex_tax": "不含税金额",
     "amount_inc_tax": "申报金额",
     "tax_amount": "税金",
@@ -178,7 +179,7 @@ def _collect_head_economics(res, row, row_no: int, raw_order_id: str,
         return row.get(col) if col is not None else None
 
     for field_name in ("amount_ex_tax", "amount_inc_tax", "tax_amount",
-                       "sales_receivable_amount"):
+                       "sales_receivable_amount", *mapping.PURCHASE_TAIL_PAYMENT_COLUMNS.values()):
         raw = g(field_name)
         try:
             value = cleaner.parse_money(raw)
@@ -346,8 +347,7 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
     inv_head = {v: k for k, v in head_map.items()}   # internal -> chinese
     inv_line = {v: k for k, v in line_map.items()}
     res.rows_total = len(df)
-    # D-0050：按 reader 规范化后的实际列判定字段是否由本文件提供。采购/销售
-    # loader 不消费此掩码（各自 D-41 规则不变），仅随结果返回供回执/测试核对。
+    # 按 reader 规范化后的实际列区分缺列与存在但值为空。
     res.present_fields = {
         "head": frozenset(
             internal for source, internal in head_map.items()
@@ -358,6 +358,9 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
             if source in df.columns
         ),
     }
+    purchase_tail_fields = res.present_fields["head"].intersection(
+        mapping.PURCHASE_TAIL_PAYMENT_COLUMNS.values()
+    )
     # D-40：对账区列存在性 = 至少「已对账金额」列；按订单聚合的单头观测值
     # （D-40 对账区 + D-41 含税三件套 + D-0050 金额/税率，见收集函数）
     head_obs_by_order: dict = {}
@@ -465,6 +468,8 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
         if file_type == mapping.SALES and res.has_reconciliation_columns:
             for field_name in (*_RECON_MONEY_FIELDS, "source_modified_at"):
                 head[field_name] = values.get(field_name)
+        for field in purchase_tail_fields:
+            head[field] = values.get(field)
         if _finalize_head_economics(res, file_type, raw_id, values, head):
             invalid_order_ids.add(raw_id)
 

@@ -190,6 +190,31 @@ describe("经营分析工作台", () => {
     fireEvent.click(link);
     expect(props.onDrill).toHaveBeenCalledWith({ pn: "P-1", _line: "1", buyer: "a" }, expect.any(String));
   });
+  it.each(["order", "line"] as const)("尾款卡只在单头口径显示（%s）", async (basisMode) => {
+    requests.cube.mockImplementation(async (_filters, q: CubeQuery) => {
+      const result = sample(q);
+      result.basis_mode = basisMode;
+      Object.assign(result.total, {
+        tail_payments: {
+          paid: { amount: null, missing_orders: 3 },
+          pending: { amount: 0, missing_orders: 1 },
+        },
+      });
+      return { data: result };
+    });
+    mount();
+    const kpi = within(await screen.findByLabelText("当前筛选摘要"));
+    expect(kpi.queryByText("成交供应商")).not.toBeInTheDocument();
+    if (basisMode === "line") {
+      expect(kpi.queryByText("已付尾款")).not.toBeInTheDocument();
+      expect(kpi.queryByText("待付尾款")).not.toBeInTheDocument();
+    } else {
+      expect(kpi.getByText("已付尾款").parentElement).toHaveTextContent("—");
+      expect(kpi.getByText("已付尾款").parentElement).toHaveTextContent("3 单未知");
+      expect(kpi.getByText("待付尾款").parentElement).toHaveTextContent("¥0.00");
+      expect(kpi.getByText("待付尾款").parentElement).toHaveTextContent("1 单未知");
+    }
+  });
   it("缺失采购类型精确范围不发两个不相交的类型内 PN 请求", async () => {
     mount({ scope: { type: null } });
     await screen.findByLabelText("当前筛选摘要");
