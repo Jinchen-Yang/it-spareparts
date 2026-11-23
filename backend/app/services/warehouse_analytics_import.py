@@ -1,4 +1,4 @@
-"""把已核对的仓单导出独立投影为分析事实。只由离线命令调用。"""
+"""把已核对的仓单导出独立投影为分析事实。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -307,7 +307,7 @@ def apply_warehouse_workbook(db: Session, parsed: dict[str, list[WarehouseRecord
     line = WarehouseAnalyticsLine.__table__
     counts = {"inserted": 0, "updated": 0, "unchanged": 0}
     with db.begin_nested():
-        # 仓单投影只有这一条离线写入路径。同一事务锁串行化新单、行身份检查与版本比较。
+        # 网页和离线导入在同一个事务锁下比较单据版本、核对行身份并写入。
         db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('warehouse_analytics_import', 0))"))
         for source, records in parsed.items():
             _check_line_identity(db, doc, line, source, records)

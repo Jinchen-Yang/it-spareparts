@@ -346,6 +346,7 @@ describe("销售分析页：URL 单一真值", () => {
     const row = screen.getByRole("row", { name: /XS-2026-201/ });
     expect(row.textContent).toContain("无对账数据");
     expect(row.textContent).not.toContain("100.00");
+    expect(screen.queryByText("待收款合计金额")).not.toBeInTheDocument();
   });
 
   it("无对账快照（has_data=false）：同样按「无对账数据」展示（与权限不可见同文案，不显示 0）", async () => {
@@ -422,8 +423,37 @@ describe("销售分析页：URL 单一真值", () => {
     expect(within(row).getByText("88.00")).toBeInTheDocument();
     expect(within(row).getByText("222.00")).toBeInTheDocument();
     expect(screen.getByText("待收款合计金额")).toBeInTheDocument();
-    expect(screen.getByText("333.00")).toBeInTheDocument();
-    expect(screen.getByText("2 笔待收款未知")).toBeInTheDocument();
+    expect(screen.getByText("333.00 元")).toBeInTheDocument();
+    expect(screen.getByText("2 笔待收款未知，未计入合计")).toBeInTheDocument();
+  });
+
+  it.each([
+    { orders: 2, total: null, missing: 2, value: "金额未知", note: "2 笔待收款未知" },
+    { orders: 0, total: null, missing: 0, value: "—", note: "区间内无订单" },
+    { orders: 1, total: 0, missing: 0, value: "0.00 元" },
+    { orders: 1, total: -1234.56, missing: undefined, value: "-1,234.56 元" },
+  ])("待收款卡区分未知、无订单与已知金额（$value）", async ({ orders, total, missing, value, note }) => {
+    fetchSalesAnalyticsSummary.mockResolvedValue({ data: {
+      ...SUMMARY,
+      kpi: { ...SUMMARY.kpi, orders, sales_receivable_total: total, sales_receivable_missing: missing },
+    } });
+    renderPage();
+
+    const label = await screen.findByText("待收款合计金额");
+    const card = within(label.parentElement!);
+    expect(card.getByText(value)).toBeInTheDocument();
+    if (note) expect(card.getByText(note)).toBeInTheDocument();
+  });
+
+  it("服务端隐藏对账金额时不显示待收款卡（即使本地登录快照仍有权限）", async () => {
+    fetchSalesAnalyticsSummary.mockResolvedValue({ data: {
+      ...SUMMARY,
+      kpi: { ...SUMMARY.kpi, sales_receivable_total: null, sales_receivable_missing: null },
+    } });
+    renderPage();
+
+    expect(await screen.findByText(String(SUMMARY.kpi.orders))).toBeInTheDocument();
+    expect(screen.queryByText("待收款合计金额")).not.toBeInTheDocument();
   });
 
   it("订单行点击打开详情抽屉：三金额 + 最新对账块 + 对账历史（每批次一条，旧→新）", async () => {

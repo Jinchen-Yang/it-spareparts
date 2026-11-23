@@ -407,6 +407,7 @@ export default function SalesAnalyticsPage() {
             summary={summaryLoading || !summary ? null : state.compare ? summary : { ...summary, compare: null, compare_available: undefined }}
             amounts={state.amounts}
             profitRestricted={profitRestricted}
+            reconRestricted={reconRestricted}
             onOpenExpenses={() => { if (!sessionExpired()) setExpensesOpen(true); }} />
         )}
 

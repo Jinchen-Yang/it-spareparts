@@ -41,6 +41,11 @@ class FPurchaseOrder(Base):
     is_tax_inclusive: Mapped[bool | None] = mapped_column(Boolean)
     tax_amount: Mapped[Decimal | None] = mapped_column(Money)
     amount_inc_tax: Mapped[Decimal | None] = mapped_column(Money)
+    # D-0075：每列各自保留最近一次有该列的导入快照。
+    purchase_paid_tail_amount: Mapped[Decimal | None] = mapped_column(Money)
+    purchase_paid_tail_batch_id: Mapped[int | None] = mapped_column(Integer)
+    purchase_pending_tail_amount: Mapped[Decimal | None] = mapped_column(Money)
+    purchase_pending_tail_batch_id: Mapped[int | None] = mapped_column(Integer)
     data_status: Mapped[str | None] = mapped_column(String(16))
     import_batch_id: Mapped[int] = mapped_column(ForeignKey("sys_import_batch.id"))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())

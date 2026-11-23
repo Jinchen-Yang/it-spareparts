@@ -190,26 +190,73 @@ describe("经营分析工作台", () => {
     fireEvent.click(link);
     expect(props.onDrill).toHaveBeenCalledWith({ pn: "P-1", _line: "1", buyer: "a" }, expect.any(String));
   });
+  it.each(["order", "line"] as const)("尾款卡只在单头口径显示（%s）", async (basisMode) => {
+    requests.cube.mockImplementation(async (_filters, q: CubeQuery) => {
+      const result = sample(q);
+      result.basis_mode = basisMode;
+      Object.assign(result.total, {
+        tail_payments: {
+          paid: { amount: null, missing_orders: 3 },
+          pending: { amount: 0, missing_orders: 1 },
+        },
+      });
+      return { data: result };
+    });
+    mount();
+    const kpi = within(await screen.findByLabelText("当前筛选摘要"));
+    expect(kpi.queryByText("成交供应商")).not.toBeInTheDocument();
+    if (basisMode === "line") {
+      expect(kpi.queryByText("已付尾款")).not.toBeInTheDocument();
+      expect(kpi.queryByText("待付尾款")).not.toBeInTheDocument();
+    } else {
+      expect(kpi.getByText("已付尾款").parentElement).toHaveTextContent("—");
+      expect(kpi.getByText("已付尾款").parentElement).toHaveTextContent("3 单未知");
+      expect(kpi.getByText("待付尾款").parentElement).toHaveTextContent("¥0.00");
+      expect(kpi.getByText("待付尾款").parentElement).toHaveTextContent("1 单未知");
+    }
+  });
   it("缺失采购类型精确范围不发两个不相交的类型内 PN 请求", async () => {
     mount({ scope: { type: null } });
     await screen.findByLabelText("当前筛选摘要");
     expect(requests.cube.mock.calls.filter((c) => c[1].row === "pn")).toHaveLength(1);
     expect(await screen.findByText("当前类型筛选未包含维保需求。")).toBeInTheDocument();
   });
-  it("成本、供应商和价格治理隐藏时不通过专题排序探测", async () => {
+  it("排行榜沿用成本和供应商权限", async () => {
     mount({ supplierRestricted: true, costRestricted: true }, "/?wb_boards=special");
     await screen.findByLabelText("当前筛选摘要");
-    expect(requests.cube.mock.calls.every((c) => c[1].row === "buyer" && c[1].metric === "lines")).toBe(true);
+    expect(requests.cube.mock.calls.every(([, q]) => q.row !== "supplier" && q.metric === "orders")).toBe(true);
     expect(requests.concentration).not.toHaveBeenCalled();
     expect(requests.parts).not.toHaveBeenCalled();
-    expect(screen.queryByText("采购单实付金额")).not.toBeInTheDocument();
+    expect(screen.queryByText("实付金额")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "供应商排行" })).not.toBeInTheDocument();
   });
-  it("价格治理单独关闭时不查询价格专题，成本权限仍可查看大单", async () => {
-    localStorage.setItem("permissions", JSON.stringify({ data_pool_price_governance: false }));
-    mount({}, "/?wb_boards=special");
-    await screen.findByText("大额采购单");
-    await waitFor(() => expect(requests.cube.mock.calls.some((c) => c[1].row === "orderId")).toBe(true));
-    expect(requests.parts).not.toHaveBeenCalled();
+  it("采购排行默认显示前 20 项，也可切到前 5 项再选回前 20 项", async () => {
+    requests.cube.mockImplementation(async (_filters, q: CubeQuery) => {
+      const result = sample(q);
+      if (q.row === "category") {
+        const [row] = result.rows;
+        result.rows = Array.from({ length: q.page_size ?? 0 }, (_, i) => ({
+          ...row,
+          key: String(i),
+          label: "大类 " + (i + 1),
+        }));
+        result.total_rows = 25;
+      }
+      return { data: result };
+    });
+    mount();
+    const picker = screen.getByRole("combobox", { name: "显示名次" });
+    const rank = (n: number) => ({ name: "商品大类排行 · 大类 " + n + "，查看采购记录" });
+    expect(picker).toHaveValue("20");
+    expect(within(picker).getByRole("option", { name: "前 20 项" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", rank(20))).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "专题榜组" })).not.toBeInTheDocument();
+    fireEvent.change(picker, { target: { value: "5" } });
+    expect(await screen.findByRole("button", rank(5))).toBeInTheDocument();
+    expect(screen.queryByRole("button", rank(6))).not.toBeInTheDocument();
+    fireEvent.change(picker, { target: { value: "20" } });
+    expect(await screen.findByRole("button", rank(20))).toBeInTheDocument();
+    expect(new URLSearchParams(screen.getByTestId("location").textContent || "").get("wb_top")).toBe("20");
   });
   it("点上期金额时携带上期闭区间与该组精确键", async () => {
     mount({ view: "compare", scope: { supplier: "173" } });
@@ -220,29 +267,14 @@ describe("经营分析工作台", () => {
     );
     expect(requests.cube).toHaveBeenCalledTimes(1);
   });
-  it("价格榜可直接打开选中型号的取价证据并保留筛选", async () => {
-    requests.parts.mockResolvedValue({
-      data: {
-        price_visible: true,
-        items: [
-          {
-            part_id: 18,
-            pn: "P-18",
-            unit: "套",
-            price_orders: 2,
-            description: "硬盘托架",
-            delta_pool: 0.2,
-            delta_cap: 0.1,
-          },
-        ],
-      },
-    });
-    mount({}, "/?wb_boards=special&supplier=供应甲");
-    fireEvent.click((await screen.findAllByRole("button", { name: "P-18 的互通池取价样本" }))[0]);
-    const target = new URLSearchParams(screen.getByTestId("location").textContent || "");
-    expect(target.get("view")).toBe("pool");
-    expect(target.get("wb_poolPart")).toBe("18");
-    expect(target.get("wb_poolUnit")).toBe("套");
-    expect(target.get("supplier")).toBe("供应甲");
+  it.each([3, 5, 10])("旧专题链接保留前 %s 项与筛选，打开采购排行", async (limit) => {
+    mount({}, "/?wb_boards=special&supplier=供应甲&wb_top=" + limit);
+    expect(await screen.findByRole("heading", { name: "采购员排行" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "显示名次" })).toHaveValue(String(limit));
+    expect(requests.cube.mock.calls.every(([, q]) => q.page_size === limit)).toBe(true);
+    expect(requests.concentration).not.toHaveBeenCalled();
+    expect(requests.parts).not.toHaveBeenCalled();
+    expect(screen.queryByText("大额采购单")).not.toBeInTheDocument();
+    expect(new URLSearchParams(screen.getByTestId("location").textContent || "").get("supplier")).toBe("供应甲");
   });
 });

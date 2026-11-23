@@ -109,6 +109,8 @@ def _parse_decimal(
     s = _THOUSANDS.sub("", str(x).strip())
     try:
         value = Decimal(s)
+        if not value.is_finite():
+            raise ValueError(f"{label}非数字: {x!r}")
         val = (
             value.quantize(Decimal(places))
             if rounding is None
