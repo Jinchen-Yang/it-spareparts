@@ -1,4 +1,4 @@
-import type { CubeQuery, WbDimension } from "../../../api/purchaseWorkbench";
+import type { CubeQuery, PurchaseTailPayments, WbDimension } from "../../../api/purchaseWorkbench";
 import {
   CubeBlock,
   MeasureTools,
@@ -11,6 +11,20 @@ import {
   useMeasure,
 } from "./WorkbenchMeasures";
 import { EmptyNote, Guide, useWorkbench } from "./WorkbenchUI";
+
+function TailPaymentCards({ payments }: { payments: PurchaseTailPayments }) {
+  const cards = [
+    ["已付尾款", payments.paid],
+    ["待付尾款", payments.pending],
+  ] as const;
+  return cards.map(([label, payment]) => (
+    <div key={label}>
+      <small>{label}</small>
+      <b>{cash(payment.amount)}</b>
+      {payment.missing_orders > 0 && <small>{num(payment.missing_orders)} 单未知</small>}
+    </div>
+  ));
+}
 
 export default function WorkbenchBoards() {
   const { costRestricted, supplierRestricted, scope, filters } = useWorkbench();
@@ -83,13 +97,10 @@ export default function WorkbenchBoards() {
                   <small>不含税金额</small>
                   <b>{cash(d.total.amount_ex)}</b>
                 </div>
+                {d.basis_mode === "order" && d.total.tail_payments && (
+                  <TailPaymentCards payments={d.total.tail_payments} />
+                )}
               </>
-            )}
-            {!supplierRestricted && (
-              <div>
-                <small>成交供应商</small>
-                <b>{num(d.total.supplier_count)} 家</b>
-              </div>
             )}
           </div>
         )}

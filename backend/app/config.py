@@ -800,6 +800,9 @@ FIELD_GROUPS = {
         # 名义侧标记、分类拆行后按单头税率规则换算的行级含税/不含税额——漏登记即
         # 绕过 data_purchase_cost 泄漏采购额（断言测试见 test_purchase_analytics_api.py）。
         "amount_paid",
+        "tail_payments",
+        "purchase_paid_tail_amount",
+        "purchase_pending_tail_amount",
         "nominal_inc_share",
         "nominal_ex_share",
         "nominal_side",

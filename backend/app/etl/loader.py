@@ -22,6 +22,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.etl import expense_void, mapping
+from app.etl.order_amount_snapshot import write_order_amount_snapshot
 from app.etl.sales_receivable import write_sales_receivable
 from app.etl.transform import SOFT_ERROR_TYPES, ErrorRec, TransformResult
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
@@ -954,6 +955,13 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
             1 for e in result.errors
             if e.error_type in ("bad_reconciliation_amount",
                                 "bad_source_modified_time"))
+
+    else:
+        for field in mapping.PURCHASE_TAIL_PAYMENT_COLUMNS.values():
+            write_order_amount_snapshot(
+                session, FPurchaseOrder.__table__, orders, batch_id,
+                field, field.removesuffix("_amount") + "_batch_id",
+            )
 
     # 4) 明细行
     line_model = FSalesLine if is_sales else FPurchaseLine

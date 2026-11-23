@@ -44,6 +44,10 @@ DIMENSIONS = (
 )
 METRICS = {"amount", "avgOrder", "orders", "lines", "qty", "suppliers", "pns"}
 BASIS = {"paid", "inc", "ex"}
+TAIL_PAYMENT_FIELDS = {
+    "paid": "purchase_paid_tail_amount",
+    "pending": "purchase_pending_tail_amount",
+}
 
 
 def invalid(message):
@@ -132,6 +136,7 @@ def facts(
     basis="paid",
     line_basis=False,
     visible_only=False,
+    include_tail_payments=False,
     db: Session,
 ):
     """Produce one row per current-batch line or one row per head, including no-line orders."""
@@ -219,7 +224,10 @@ def facts(
             .subquery()
         )
         count = func.coalesce(line_counts.c.n, 0)
-        extras = []
+        extras = (
+            [PO.__table__.c[field] for field in TAIL_PAYMENT_FIELDS.values()]
+            if include_tail_payments else []
+        )
     query = select(
         PO.id.label("order_id"),
         PO.supplier_id.label("supplier_identity"),
@@ -261,6 +269,14 @@ def aggregate(f, axes, metric, *, grouping_sets=False):
     if metric == "pns":
         metric_value = func.count(func.distinct(f.c.pn))
     keys = [f.c[key] for key in axes]
+    tail_totals = []
+    for field in TAIL_PAYMENT_FIELDS.values():
+        if field in f.c:
+            amount = f.c[field]
+            tail_totals.extend([
+                func.sum(amount).label(field),
+                (orders - func.count(amount)).label(f"{field}_missing"),
+            ])
     query = (
         select(
             *keys,
@@ -269,6 +285,7 @@ def aggregate(f, axes, metric, *, grouping_sets=False):
             lines.label("lines"),
             suppliers.label("supplier_count"),
             *(func.sum(f.c[key]).label(key) for key in ("amount_paid", "amount_inc", "amount_ex")),
+            *tail_totals,
         )
         .select_from(f)
         .group_by(*keys)
@@ -351,6 +368,19 @@ def pack(row, ctx, scope):
     }
 
 
+def pack_total(row, ctx, scope):
+    total = pack(row, ctx, scope)
+    if not security.is_field_hidden(ctx, "tail_payments"):
+        tail_payments = {
+            key: {"amount": pa._f(row[field]), "missing_orders": row[f"{field}_missing"]}
+            for key, field in TAIL_PAYMENT_FIELDS.items()
+            if field in row
+        }
+        if tail_payments:
+            total["tail_payments"] = tail_payments
+    return total
+
+
 def ranked_page(db, query, axis, size, page, sort="desc", value_max=None):
     grouped = query.subquery()
     stmt = select(grouped, func.count().over().label("num_groups"))
@@ -408,7 +438,7 @@ def single_pass(
     axes = [key for key in (row, column) if key]
     base = aggregate(f, axes, metric, grouping_sets=True)
     if not axes:
-        out["total"] = pack(db.execute(base).mappings().one(), ctx, drill)
+        out["total"] = pack_total(db.execute(base).mappings().one(), ctx, drill)
         return out
     cols = [f.c[a] for a in axes]
     sets = [tuple_(), *(tuple_(c) for c in cols)]
@@ -479,7 +509,7 @@ def single_pass(
     out["total_rows"], out["total_columns"] = records[0]["nr"], records[0]["nc"]
     for rec in records:
         if rec["level"] == total_level:
-            out["total"] = pack(rec, ctx, drill)
+            out["total"] = pack_total(rec, ctx, drill)
         elif column and rec["level"] == 0:
             out["cells"].append(
                 {
@@ -534,12 +564,16 @@ def cube(
         invalid("采购数量请指定单位，或按单位查看")
     if sort in {"absolute", "increase", "decrease"} and not compare:
         invalid("变动排序需要对比期间")
-    q, line = facts(filters, scope, axes, metric=metric, basis=basis, db=db)
+    include_tail_payments = not security.is_field_hidden(ctx, "tail_payments")
+    q, line = facts(
+        filters, scope, axes, metric=metric, basis=basis,
+        include_tail_payments=include_tail_payments, db=db,
+    )
     f = q.subquery()
     drill = {**scope, **({"_line": "1"} if line else {})}
 
     def total(source):
-        return pack(db.execute(aggregate(source, [], metric)).mappings().one(), ctx, drill)
+        return pack_total(db.execute(aggregate(source, [], metric)).mappings().one(), ctx, drill)
 
     out = {
         "row": row,
@@ -584,6 +618,7 @@ def cube(
         axes,
         metric=metric,
         basis=basis,
+        include_tail_payments=include_tail_payments,
         db=db,
     )
     previous = prior_query.subquery()

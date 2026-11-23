@@ -13,6 +13,11 @@ EXPENSE = "expense"
 INQUIRY = "inquiry"
 
 # ---- 采购订单 ----
+PURCHASE_TAIL_PAYMENT_COLUMNS = {
+    "已付尾款": "purchase_paid_tail_amount",
+    "待付尾款": "purchase_pending_tail_amount",
+}
+
 PURCHASE_HEAD = {
     "采购单号(必填)": "order_no",
     "数据ID(不可修改)": "raw_order_id",
@@ -33,6 +38,7 @@ PURCHASE_HEAD = {
     "是否含税(必填)": "is_tax_inclusive",
     "税金": "tax_amount",
     "采购金额": "amount_inc_tax",
+    **PURCHASE_TAIL_PAYMENT_COLUMNS,
     "数据状态": "data_status",
 }
 PURCHASE_LINE = {
@@ -345,6 +351,7 @@ QUANTITY_INTERNALS = frozenset({"qty", "return_qty", "source_qty"})
 NUMERIC_ALIAS_INTERNALS = frozenset(
     PRICE_INTERNALS | QUANTITY_INTERNALS | {
         "tax_rate", "recent_purchase_price", "sales_receivable_amount",
+        *PURCHASE_TAIL_PAYMENT_COLUMNS.values(),
     }
 )
 CRITICAL_ALIAS_INTERNALS = frozenset(
