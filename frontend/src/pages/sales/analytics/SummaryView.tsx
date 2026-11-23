@@ -17,6 +17,7 @@ export interface SummaryViewProps {
   amounts: AmountKey[];
   /** data_profit=false：毛利卡不渲染（后端已置空）。 */
   profitRestricted?: boolean;
+  reconRestricted?: boolean;
   onOpenExpenses?: () => void;
 }
 
@@ -69,13 +70,19 @@ function ProfitSub({ kpi, prev }: { kpi: SalesKpi; prev: SalesKpi | undefined })
   );
 }
 
-export default function SummaryView({ summary, amounts, profitRestricted = false, onOpenExpenses }: SummaryViewProps) {
+export default function SummaryView({
+  summary, amounts, profitRestricted = false, reconRestricted = false, onOpenExpenses,
+}: SummaryViewProps) {
   const kpi = summary?.kpi;
   const prev: SalesKpi | undefined = summary?.compare?.kpi;
   const noOrders = kpi != null && kpi.orders === 0;
   const sub = (fallback: ReactNode, cur: number | null | undefined, prevVal: number | null | undefined, money = true) =>
     prev ? <CompareLine cur={cur} prev={prevVal} money={money} /> : fallback;
   const lineMode = summary?.line_mode === true;
+  const receivableTotal = kpi?.sales_receivable_total;
+  const receivableMissing = kpi?.sales_receivable_missing;
+  const hasReceivableTotal = receivableTotal != null;
+  const showReceivable = !reconRestricted && (hasReceivableTotal || receivableMissing != null);
 
   return (
     <div style={{ marginBottom: 14 }}>
@@ -164,12 +171,13 @@ export default function SummaryView({ summary, amounts, profitRestricted = false
               {summary.recorded_expenses.missing_amounts ? ` ${summary.recorded_expenses.missing_amounts} 条缺金额。` : ""}
               <Button type="link" size="small" onClick={onOpenExpenses}>查看费用记录</Button></span>} />
         )}
-        {kpi?.sales_receivable_missing != null && (
+        {showReceivable && (
           <KpiCard
             label="待收款合计金额"
-            value={fmtMoney(kpi.sales_receivable_total ?? null)}
-            sub={kpi.sales_receivable_missing > 0
-              ? `${kpi.sales_receivable_missing} 笔待收款未知` : undefined}
+            value={hasReceivableTotal ? `${fmtMoney(receivableTotal)} 元` : noOrders ? "—" : "金额未知"}
+            sub={noOrders ? "区间内无订单" : receivableMissing != null && receivableMissing > 0
+              ? `${receivableMissing} 笔待收款未知${hasReceivableTotal ? "，未计入合计" : ""}`
+              : undefined}
           />
         )}
       </div>
