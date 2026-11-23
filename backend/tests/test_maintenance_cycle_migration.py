@@ -14,7 +14,7 @@ from sqlalchemy.exc import DatabaseError, IntegrityError
 from app import permissions
 from app.db import engine
 
-REVISION = "b6285fa3c918"  # D-0066 库存管理分析投影
+REVISION = "f261fbad9e04"  # D-0075 采购尾款快照
 CYCLE_REVISION = "86f7486b9ed5"
 BASELINE = "98afc0d2157b"
 CYCLE_PAGE_KEYS = (
