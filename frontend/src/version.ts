@@ -12,6 +12,15 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "1.48.1",
+    date: "2026-11-23",
+    items: [
+      "数据导入新增仓单工作簿入口，可同时校验入库单、返库单与直采直退，并逐页查看导入回执。",
+      "采购分析移除专题榜组，其余榜单默认显示前 20 项。购单口径下可查看已付尾款和待付尾款。",
+      "销售分析显示筛选范围内的待收款合计金额，并单独标明金额未知的订单笔数。",
+    ],
+  },
+  {
     version: "1.48.0",
     date: "2026-11-18",
     items: [
