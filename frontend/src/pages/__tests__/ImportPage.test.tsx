@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "../../test/antdRender";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../test/antdRender";
 
 import { StrictMode } from "react";
 import type { ImportPrecheckResult } from "../../api/imports";
@@ -8,6 +8,7 @@ const get = vi.fn();
 const downloadImportErrors = vi.fn();
 const precheckImportFiles = vi.fn();
 const uploadImportBatch = vi.fn();
+const uploadWarehouseWorkbook = vi.fn();
 const previewExpenseVoid = vi.fn();
 
 vi.mock("../../api", () => ({
@@ -18,6 +19,7 @@ vi.mock("../../api/imports", () => ({
   downloadImportErrors: (...args: unknown[]) => downloadImportErrors(...args),
   precheckImportFiles: (...args: unknown[]) => precheckImportFiles(...args),
   uploadImportBatch: (...args: unknown[]) => uploadImportBatch(...args),
+  uploadWarehouseWorkbook: (...args: unknown[]) => uploadWarehouseWorkbook(...args),
   previewExpenseVoid: (...args: unknown[]) => previewExpenseVoid(...args),
 }));
 
@@ -110,6 +112,89 @@ afterEach(() => {
   vi.restoreAllMocks();
   cleanup();
 
+});
+
+describe("仓单工作簿导入", () => {
+  it("显式提交一个工作簿，复用作业轮询与导入历史展示回执", async () => {
+    const upload = deferred<{ job_id: number; total_files: 1; status: "processing" }>();
+    uploadWarehouseWorkbook.mockReturnValueOnce(upload.promise);
+    const batch = {
+      id: 72, filename: "仓单.xlsx", file_type: "warehouse", status: "skipped",
+      uploaded_at: "2026-11-23T00:00:00+08:00", uploaded_by: "测试",
+      rows_total: 12, rows_inserted: 0, rows_skipped: 0, rows_error: 0, rows_inactive: 0,
+    };
+    const note = "入库单 3 张、12 行；新增 0 张、更新 0 张、未变更 3 张";
+    get.mockImplementation(async (url: string) => {
+      if (url === "/import/jobs/71") {
+        return { data: {
+          id: 71, mode: "warehouse", status: "done", total_files: 1, done_files: 1,
+          error_files: 0, note, batches: [batch],
+        } };
+      }
+      if (url === "/import/batches/72") {
+        return { data: { ...batch, report: {
+          warehouse_sources: { "入库单": { documents: 3, lines: 12 } },
+          warehouse_inserted: 0, warehouse_updated: 0, warehouse_unchanged: 3,
+        } } };
+      }
+      return { data: url === "/import/batches" ? [batch] : [] };
+    });
+    render(<ImportPage />);
+    const card = screen.getByRole("region", { name: "仓单工作簿导入" });
+    const input = card.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File(["xlsx"], "仓单.xlsx");
+    const submit = within(card).getByRole("button", { name: "导入仓单工作簿" });
+    expect(submit).toBeDisabled();
+    fireEvent.change(input, { target: { files: [file] } });
+    expect(await within(card).findByText("仓单.xlsx")).toBeInTheDocument();
+    expect(uploadWarehouseWorkbook).not.toHaveBeenCalled();
+    act(() => { submit.click(); submit.click(); });
+    expect(uploadWarehouseWorkbook).toHaveBeenCalledExactlyOnceWith(file);
+    expect(precheckImportFiles).not.toHaveBeenCalled();
+    expect(uploadImportBatch).not.toHaveBeenCalled();
+    expect(submit).toBeDisabled();
+    expect(card.querySelector('input[type="file"]')).toBeDisabled();
+    await act(async () => { upload.resolve({ job_id: 71, total_files: 1, status: "processing" }); });
+    expect(await screen.findByText(note)).toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith("/import/jobs/71");
+    expect(screen.getAllByText("复核通过")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "详情" }));
+    expect(await screen.findByText("入库单 3 张、12 行")).toBeInTheDocument();
+    expect(screen.getByText("未变更单据")).toBeInTheDocument();
+  });
+
+  it("读取并显示整本校验失败的页签与源行", async () => {
+    uploadWarehouseWorkbook.mockResolvedValueOnce({ job_id: 73, total_files: 1, status: "processing" });
+    get.mockImplementation(async (url: string) => ({ data: url === "/import/jobs/73" ? {
+      id: 73, mode: "warehouse", status: "failed", total_files: 1, done_files: 0,
+      error_files: 1, note: "返库单第 12 行缺少必填单号", batches: [],
+    } : [] }));
+    render(<ImportPage />);
+    const card = screen.getByRole("region", { name: "仓单工作簿导入" });
+    fireEvent.change(card.querySelector('input[type="file"]')!, {
+      target: { files: [new File(["xlsx"], "待修仓单.xlsx")] },
+    });
+    fireEvent.click(within(card).getByRole("button", { name: "导入仓单工作簿" }));
+    expect(await screen.findByText("返库单第 12 行缺少必填单号")).toBeInTheDocument();
+    expect(screen.queryByText("全部完成")).not.toBeInTheDocument();
+  });
+
+  it("提交结果未确认时保留文件，允许手动刷新已生成的历史回执", async () => {
+    uploadWarehouseWorkbook.mockRejectedValueOnce({ code: "ECONNABORTED" });
+    render(<ImportPage />);
+    const card = screen.getByRole("region", { name: "仓单工作簿导入" });
+    expect(within(card).getByText(/实名账号.*数据导入/)).toBeInTheDocument();
+    fireEvent.change(card.querySelector('input[type="file"]')!, {
+      target: { files: [new File(["xlsx"], "待核对仓单.xlsx")] },
+    });
+    fireEvent.click(within(card).getByRole("button", { name: "导入仓单工作簿" }));
+    expect(await within(card).findByText(/提交结果未确认.*已生成回执.*同一份文件/)).toBeInTheDocument();
+    expect(within(card).getByText("待核对仓单.xlsx")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "刷新导入历史" }));
+    await waitFor(() => expect(get.mock.calls.filter(([url]) => url === "/import/batches")).toHaveLength(2));
+    expect(uploadWarehouseWorkbook).toHaveBeenCalledOnce();
+    expect(get.mock.calls.some(([url]) => url.startsWith("/import/jobs/"))).toBe(false);
+  });
 });
 
 describe("批量文件数量提示", () => {

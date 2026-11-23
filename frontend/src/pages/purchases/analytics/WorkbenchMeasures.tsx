@@ -40,6 +40,7 @@ export const metricNames: Record<WbMetric, string> = {
   pns: "PN 数",
 };
 export const basisNames: Record<string, string> = { paid: "实付", inc: "含税", ex: "不含税" };
+const TOP_OPTIONS = ["3", "5", "10", "20"];
 export const num = (n: number | null | undefined) =>
   n == null ? "—" : n.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
 export const cash = (n: number | null | undefined) => formatMoney(n, { prefix: "¥" });
@@ -136,8 +137,8 @@ export function MeasureTools({ average = false, top = false }: { average?: boole
       {top && (
         <Pick
           label="显示名次"
-          value={String(readTop(get("top", "5")))}
-          options={["3", "5", "10"].map((v) => [v, "前 " + v + " 项"])}
+          value={String(readTop(get("top", "")))}
+          options={TOP_OPTIONS.map((v) => [v, "前 " + v + " 项"])}
           onChange={(v) => set({ top: v })}
         />
       )}
@@ -145,7 +146,7 @@ export function MeasureTools({ average = false, top = false }: { average?: boole
   );
 }
 export function readTop(raw: string) {
-  return ["3", "5", "10"].includes(raw) ? Number(raw) : 5;
+  return TOP_OPTIONS.includes(raw) ? Number(raw) : 20;
 }
 export function Segments({
   options,

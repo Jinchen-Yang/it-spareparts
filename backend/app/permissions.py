@@ -916,7 +916,7 @@ PERMISSION_META: dict[str, dict] = {
     "page_import": {
         "label": "数据导入",
         "summary": "可打开数据导入页，上传氚云 Excel 写入数据库。",
-        "can": "上传采购/销售/库存/询价/WBDD 文件，查看导入报告与历史批次；WBDD 会按 XSDD 自动挂靠已有项目或建档。",
+        "can": "上传采购/销售/库存/询价/WBDD 文件，实名账号可上传库存分析仓单。可查看导入报告与历史批次。WBDD 会按 XSDD 自动挂靠已有项目或建档。",
         "cannot": "不能删除已导入数据（无删除入口）；WBDD 导入不会覆盖已有项目负责人或账号可见范围。",
         "typical": ["管理员", "数据专员"],
         "sensitivity": "critical",

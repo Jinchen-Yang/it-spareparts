@@ -7,8 +7,8 @@ import PageHeader from "../components/PageHeader";
 import type { ColumnsType } from "antd/es/table";
 import api from "../api";
 import {
-  downloadImportErrors, precheckImportFiles, previewExpenseVoid, uploadImportBatch,
-  type ExpenseVoidPreview, type ImportMode, type ImportPrecheckResult,
+  downloadImportErrors, precheckImportFiles, previewExpenseVoid, uploadImportBatch, uploadWarehouseWorkbook,
+  type ExpenseVoidPreview, type ImportMode, type ImportPrecheckResult, type UploadImportBatchResult,
 } from "../api/imports";
 import ImportPrecheckPanel from "./import/ImportPrecheckPanel";
 import ExpenseVoidPreviewPanel from "./import/ExpenseVoidPreviewPanel";
@@ -44,9 +44,13 @@ function WbddImportModeNotice({ mode }: { mode: ImportMode }) {
 // 历史询价（inquiry）导入为合同 Step 4 规划，后端尚未实装（B7 去重口径待客户确认），实装后再加回
 const FILE_TYPE: Record<string, string> = {
   purchase: "采购订单", sales: "销售订单", inventory: "产品库存", maintenance: "维保出库",
-  expense: "报销明细", workbook: "项目工作簿",
+  expense: "报销明细", workbook: "项目工作簿", warehouse: "仓单工作簿",
 };
 const STATUS_COLOR: Record<string, string> = { success: "green", failed: "red", processing: "blue" };
+function batchStatus(status: string, fileType: string) {
+  if (fileType === "warehouse" && status === "skipped") return <Tag color="green">复核通过</Tag>;
+  return <Tag color={STATUS_COLOR[status]}>{status}</Tag>;
+}
 // 批次报告键的中文名。作废是**减钱**动作，其可见度必须高于插入统计，故除了在这里
 // 有名字，还单独渲染成 warning（见详情弹窗）。未列出的键按原样显示。
 const REPORT_LABEL: Record<string, string> = {
@@ -69,6 +73,11 @@ const REPORT_LABEL: Record<string, string> = {
   expense_attribution_legacy_orphans_voided: "从未建归因的旧键孤儿行已作废（原生键为准）",
   expense_attribution_legacy_takeovers_amount_changed: "接管时金额与旧行不同",
   expense_attribution_legacy_siblings_active: "接管所在报销单仍有未覆盖的旧键行",
+  warehouse_sources: "页签与行数",
+  warehouse_inserted: "新增单据",
+  warehouse_updated: "更新单据",
+  warehouse_unchanged: "未变更单据",
+  warehouse_error: "校验或导入错误",
 };
 const VOID_SUPPRESSED_REASON: Record<string, string> = {
   dropped_no_contract: "本表有行缺销售订单被排除",
@@ -77,6 +86,12 @@ const VOID_SUPPRESSED_REASON: Record<string, string> = {
 };
 function reportValue(k: string, v: unknown): string {
   if (k === "expense_void_suppressed_reason") return VOID_SUPPRESSED_REASON[String(v)] ?? String(v);
+  if (k === "warehouse_sources" && v && typeof v === "object") {
+    const sources = v as Record<string, { documents: number; lines: number }>;
+    return Object.entries(sources)
+      .map(([sheet, counts]) => `${sheet} ${counts?.documents ?? "—"} 张、${counts?.lines ?? "—"} 行`)
+      .join("；");
+  }
   if (k === "address_report" && v && typeof v === "object") {
     const address = v as Record<string, unknown>;
     const counts = `填写 ${address.set ?? 0} 张，未提供或保留 ${address.keep ?? 0} 张，清空 ${address.clear ?? 0} 张，冲突 ${address.conflict ?? 0} 张`;
@@ -123,7 +138,9 @@ export default function ImportPage() {
   const { message } = App.useApp();
   const [upsertMode, setUpsertMode] = useState(false);  // false=skip(默认), true=upsert(修复模式)
   const [staged, setStaged] = useState<File[]>([]);
-  const [submitting, setSubmitting] = useState(false);
+  const [warehouseStaged, setWarehouseStaged] = useState<File | null>(null);
+  const [warehouseError, setWarehouseError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState<"batch" | "warehouse" | null>(null);
   const [phase, setPhase] = useState<ImportPhase>("dirty");
   const [snapshot, setSnapshot] = useState<PrecheckSnapshot | null>(null);
   const [warningConfirmed, setWarningConfirmed] = useState(false);
@@ -131,6 +148,7 @@ export default function ImportPage() {
   const [pollingInterrupted, setPollingInterrupted] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
   const [batches, setBatches] = useState<Batch[]>([]);
+  const [refreshingHistory, setRefreshingHistory] = useState(false);
   const [detail, setDetail] = useState<any | null>(null);
   const [detailError, setDetailError] = useState<{ batchId: number; text: string } | null>(null);
   const [downloadError, setDownloadError] = useState<{ batchId: number; text: string } | null>(null);
@@ -155,6 +173,16 @@ export default function ImportPage() {
   const loadBatches = () => api.get("/import/batches").then((r) => {
     if (mountedRef.current) setBatches(r.data);
   });
+  const refreshHistory = async () => {
+    setRefreshingHistory(true);
+    try {
+      await loadBatches();
+    } catch {
+      if (mountedRef.current) message.error("导入历史刷新失败，请稍后重试");
+    } finally {
+      if (mountedRef.current) setRefreshingHistory(false);
+    }
+  };
   useEffect(() => {
     mountedRef.current = true;
     loadBatches();
@@ -169,7 +197,7 @@ export default function ImportPage() {
   }, []);
 
   const activeJob = job?.status === "processing";
-  const busy = phase === "prechecking" || phase === "uploading"
+  const busy = phase === "prechecking" || submitting !== null
     || (activeJob && !pollingInterrupted);
 
   const invalidatePrecheck = () => {
@@ -227,7 +255,7 @@ export default function ImportPage() {
         setPhase((current) => current === "processing" ? "dirty" : current);
         await loadBatches();
         if (!mountedRef.current || generation !== pollGenerationRef.current) return;
-        if (data.status === "done") message.success("批量导入完成");
+        if (data.status === "done") message.success(data.mode === "warehouse" ? "仓单工作簿导入完成" : "批量导入完成");
       }
     } catch {
       if (!mountedRef.current || generation !== pollGenerationRef.current) return;
@@ -237,6 +265,16 @@ export default function ImportPage() {
         pollRef.current = window.setTimeout(() => poll(jobId, generation), 1500);
       }
     }
+  };
+
+  const startJob = ({ job_id, total_files }: UploadImportBatchResult, mode: ImportMode | "warehouse") => {
+    setJob({ id: job_id, status: "processing", mode, total_files, done_files: 0,
+      error_files: 0, note: null, batches: [] });
+    setPollingInterrupted(false);
+    pollDeadlineRef.current = Date.now() + POLL_MAX_MS;
+    const generation = ++pollGenerationRef.current;
+    armPollingDeadline(generation);
+    void poll(job_id, generation);
   };
 
   const resumePolling = () => {
@@ -251,7 +289,7 @@ export default function ImportPage() {
   };
 
   const runPrecheck = async () => {
-    if (precheckActionLockRef.current) return;
+    if (precheckActionLockRef.current || uploadActionLockRef.current) return;
     precheckActionLockRef.current = true;
     if (!staged.length) {
       precheckActionLockRef.current = false;
@@ -320,7 +358,7 @@ export default function ImportPage() {
       uploadActionLockRef.current = false;
       return;
     }
-    setSubmitting(true);
+    setSubmitting("batch");
     setImportError(null);
     setPhase("uploading");
     try {
@@ -332,12 +370,7 @@ export default function ImportPage() {
         ? await uploadImportBatch(current.files, current.mode, tokens)
         : await uploadImportBatch(current.files, current.mode);
       if (!mountedRef.current) return;
-      setJob({ id: data.job_id, status: "processing", mode: current.mode,
-               total_files: data.total_files, done_files: 0, error_files: 0, note: null, batches: [] });
-      pollDeadlineRef.current = Date.now() + POLL_MAX_MS;
-      const generation = ++pollGenerationRef.current;
-      armPollingDeadline(generation);
-      poll(data.job_id, generation);
+      startJob(data, current.mode);
       if (current.revision === inputRevisionRef.current) {
         setStaged([]);
         inputRevisionRef.current += 1;
@@ -354,7 +387,30 @@ export default function ImportPage() {
         : `${detail}。请先查看导入历史，确认未创建作业后再重试。`);
       setPhase(current.result.decision === "warning" ? "warning_ready" : "clean_ready");
     } finally {
-      if (mountedRef.current) setSubmitting(false);
+      if (mountedRef.current) setSubmitting(null);
+      uploadActionLockRef.current = false;
+    }
+  };
+
+  const submitWarehouse = async () => {
+    if (!warehouseStaged || activeJob || uploadActionLockRef.current || precheckActionLockRef.current) return;
+    uploadActionLockRef.current = true;
+    setSubmitting("warehouse");
+    setWarehouseError(null);
+    try {
+      const data = await uploadWarehouseWorkbook(warehouseStaged);
+      if (!mountedRef.current) return;
+      setWarehouseStaged(null);
+      startJob(data, "warehouse");
+    } catch (error: any) {
+      if (!mountedRef.current) return;
+      const status = error?.response?.status;
+      const detail = error?.response?.data?.detail;
+      setWarehouseError(status >= 400 && status < 500
+        ? (typeof detail === "string" ? detail : "提交失败，请检查文件及导入权限后重试。")
+        : "仓单工作簿提交结果未确认。可刷新导入历史查看已生成回执的批次，作业处理期间可能还没有回执。如需重试，请用同一份文件重新校验。");
+    } finally {
+      if (mountedRef.current) setSubmitting(null);
       uploadActionLockRef.current = false;
     }
   };
@@ -460,10 +516,12 @@ export default function ImportPage() {
   const jobBatchCols: ColumnsType<JobBatch> = [
     { title: "文件名", dataIndex: "filename", ellipsis: true },
     { title: "类型", dataIndex: "file_type", width: 100, render: (t) => FILE_TYPE[t] || t },
-    { title: "状态", dataIndex: "status", width: 90, render: (s) => <Tag color={STATUS_COLOR[s]}>{s}</Tag> },
+    { title: "状态", dataIndex: "status", width: 90, render: (s, r) => batchStatus(s, r.file_type) },
     { title: "总行", dataIndex: "rows_total", width: 70, align: "right" },
-    { title: "入库", dataIndex: "rows_inserted", width: 70, align: "right" },
-    { title: "跳过", dataIndex: "rows_skipped", width: 70, align: "right" },
+    { title: "入库", dataIndex: "rows_inserted", width: 70, align: "right",
+      render: (v, r) => r.file_type === "warehouse" ? "—" : v },
+    { title: "跳过", dataIndex: "rows_skipped", width: 70, align: "right",
+      render: (v, r) => r.file_type === "warehouse" ? "—" : v },
     { title: "错误", dataIndex: "rows_error", width: 70, align: "right",
       render: (v) => (v ? <Tag color="red">{v}</Tag> : v) },
   ];
@@ -471,10 +529,12 @@ export default function ImportPage() {
   const batchCols: ColumnsType<Batch> = [
     { title: "文件名", dataIndex: "filename", width: 240, fixed: "left", ellipsis: true },
     { title: "类型", dataIndex: "file_type", width: 100, render: (t) => FILE_TYPE[t] || t },
-    { title: "状态", dataIndex: "status", width: 90, render: (s) => <Tag color={STATUS_COLOR[s]}>{s}</Tag> },
+    { title: "状态", dataIndex: "status", width: 90, render: (s, r) => batchStatus(s, r.file_type) },
     { title: "总行", dataIndex: "rows_total", width: 80, align: "right" },
-    { title: "入库", dataIndex: "rows_inserted", width: 80, align: "right" },
-    { title: "跳过", dataIndex: "rows_skipped", width: 80, align: "right" },
+    { title: "入库", dataIndex: "rows_inserted", width: 80, align: "right",
+      render: (v, r) => r.file_type === "warehouse" ? "—" : v },
+    { title: "跳过", dataIndex: "rows_skipped", width: 80, align: "right",
+      render: (v, r) => r.file_type === "warehouse" ? "—" : v },
     { title: "错误", dataIndex: "rows_error", width: 80, align: "right",
       render: (v) => (v ? <Tag color="red">{v}</Tag> : v) },
     { title: "未生效", dataIndex: "rows_inactive", width: 80, align: "right" },
@@ -566,7 +626,7 @@ export default function ImportPage() {
                 </Button>
               )}
               {phase === "clean_ready" && (
-                <Button type="primary" loading={submitting} disabled={busy || activeJob} onClick={submitBatch}>开始导入</Button>
+                <Button type="primary" loading={submitting === "batch"} disabled={busy || activeJob} onClick={submitBatch}>开始导入</Button>
               )}
               {phase === "warning_ready" && (
                 <>
@@ -575,7 +635,7 @@ export default function ImportPage() {
                       ? `我已逐行核对作废预演清单（共 ${snapshot.previews.reduce((n, preview) => n + (preview.void?.rows ?? 0), 0)} 行）并确认导入`
                       : "我已阅读并确认以上警告"}
                   </Checkbox>
-                  <Button type="primary" loading={submitting} disabled={busy || activeJob || !warningConfirmed} onClick={submitBatch}>
+                  <Button type="primary" loading={submitting === "batch"} disabled={busy || activeJob || !warningConfirmed} onClick={submitBatch}>
                     确认警告并导入
                   </Button>
                 </>
@@ -598,6 +658,45 @@ export default function ImportPage() {
             {snapshot && <ExpenseVoidPreviewPanel previews={snapshot.previews} />}
           </div>
         )}
+      </Card>
+
+      <Card title="仓单工作簿导入" role="region" aria-label="仓单工作簿导入">
+        <Upload.Dragger
+          accept=".xlsx"
+          multiple={false}
+          showUploadList={false}
+          disabled={busy}
+          beforeUpload={(file, files) => {
+            if (uploadActionLockRef.current) return Upload.LIST_IGNORE;
+            if (files.length !== 1 || !/\.xlsx$/i.test(file.name)) {
+              setWarehouseStaged(null);
+              setWarehouseError("每次请选择一个 .xlsx 仓单工作簿。");
+              return Upload.LIST_IGNORE;
+            }
+            setWarehouseStaged(file);
+            setWarehouseError(null);
+            return false;
+          }}
+        >
+          <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+          <p className="ant-upload-text">点击或拖拽一个 .xlsx 仓单工作簿</p>
+          <p className="ant-upload-hint">支持入库单、返库单、直采直退。请保留每张单据的全部子表明细行。系统会校验整本工作簿，发现错误即停止导入。</p>
+        </Upload.Dragger>
+        <p style={{ marginTop: 12 }}>提交需要实名账号及「数据导入」权限。</p>
+        {warehouseStaged && <p style={{ overflowWrap: "anywhere", marginTop: 12 }}>{warehouseStaged.name}</p>}
+        <Space wrap style={{ marginTop: 12 }}>
+          <Button type="primary" loading={submitting === "warehouse"}
+            disabled={!warehouseStaged || busy || activeJob} onClick={submitWarehouse}>
+            导入仓单工作簿
+          </Button>
+          {warehouseStaged && (
+            <Button disabled={busy} onClick={() => {
+              setWarehouseStaged(null);
+              setWarehouseError(null);
+            }}>移除仓单工作簿</Button>
+          )}
+        </Space>
+        {warehouseError && <Alert type="error" showIcon message={warehouseError} style={{ marginTop: 12 }} />}
       </Card>
 
       {job && (
@@ -623,7 +722,10 @@ export default function ImportPage() {
             共 {job.total_files} · 成功 {job.done_files} · 失败/跳过 {job.error_files}
             {job.status === "processing" && " · 处理中，请稍候…"}
           </div>
-          {job.note && <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={job.note} />}
+          {job.note && <Alert
+            type={job.mode === "warehouse" ? (job.status === "failed" ? "error" : "info") : "warning"}
+            showIcon style={{ marginBottom: 12 }} message={job.note}
+          />}
           {job.batches.length > 0 && (
             <ResizableTable storageKey="import-jobbatches" rowKey="id" size="small" columns={jobBatchCols} dataSource={job.batches}
               pagination={false} />
@@ -631,7 +733,9 @@ export default function ImportPage() {
         </Card>
       )}
 
-      <Card title="导入历史">
+      <Card title="导入历史" extra={
+        <Button loading={refreshingHistory} onClick={refreshHistory}>刷新导入历史</Button>
+      }>
         <ResizableTable storageKey="import-batches" rowKey="id" size="small" columns={batchCols} dataSource={batches}
           scroll={{ x: 1080 }} pagination={{ pageSize: 10 }} />
       </Card>

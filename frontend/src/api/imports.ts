@@ -317,6 +317,24 @@ export async function uploadImportBatch(
   return data;
 }
 
+interface UploadWarehouseWorkbookResult extends UploadImportBatchResult {
+  total_files: 1;
+  status: "processing";
+}
+
+export async function uploadWarehouseWorkbook(file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post<UploadWarehouseWorkbookResult>(
+    "/import/warehouse-workbook", form, { timeout: 120_000 },
+  );
+  if (!isRecord(data) || !isPositiveInteger(data.job_id)
+    || data.total_files !== 1 || data.status !== "processing") {
+    throw new Error("仓单工作簿提交响应无效");
+  }
+  return data;
+}
+
 export async function downloadImportErrors(batchId: number) {
   const response = await api.get<Blob>(`/import/batches/${batchId}/errors.csv`, {
     responseType: "blob",

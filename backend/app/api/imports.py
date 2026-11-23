@@ -6,14 +6,16 @@ import tempfile
 import threading
 
 import time
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.exc import DBAPIError, DataError
 from sqlalchemy.orm import Session
 
-from app.auth import current_role
+from app import permissions
+from app.auth import current_identity, current_role
 from app.config import MAX_IMPORT_FILES, MAX_UPLOAD_MB, get_settings
 from app.db import SessionLocal, get_db
 from app.security import (
@@ -31,9 +33,11 @@ from app.services.maintenance_project_identity import (
 )
 from app.etl import expense_void, loader, pipeline, precheck as import_precheck
 from app.services import import_void_preview
+from app.services import warehouse_analytics_import
+from app.services.import_safety import UploadSafetyError
 from app.etl.reader import ReaderError
 from app.etl.transform import SOFT_ERROR_TYPES
-from app.models.system import SysImportBatch, SysImportError, SysImportJob
+from app.models.system import SysImportBatch, SysImportError, SysImportJob, SysUser
 
 router = APIRouter(
     prefix="/import",
@@ -629,6 +633,93 @@ def upload_batch(
                      args=(job_id, saved, mode, ctx.user_id, fingerprints),
                      daemon=True, name=f"import-job-{job_id}").start()
     return {"job_id": job_id, "total_files": len(saved), "status": "processing"}
+
+
+def _process_warehouse_job(job_id: int, path: Path, filename: str, uploaded_by: str) -> None:
+    file_hash = None
+    try:
+        file_hash = pipeline.sha256_file(str(path))
+        parsed = warehouse_analytics_import.parse_warehouse_workbook(path)
+        if not any(parsed.values()):
+            raise warehouse_analytics_import.WarehouseImportError("工作簿没有可导入的仓单")
+        sheets = {
+            title: {"documents": len(parsed[source]), "lines": sum(len(row.lines) for row in parsed[source])}
+            for title, (source, _, _) in warehouse_analytics_import.SHEETS.items()
+            if source in parsed
+        }
+        with SessionLocal.begin() as db:
+            counts = warehouse_analytics_import.apply_warehouse_workbook(db, parsed)
+            identical = pipeline.successful_batch_ids_by_hash(db, {file_hash}, file_type="warehouse")
+            db.add(SysImportBatch(
+                import_job_id=job_id, filename=filename, file_type="warehouse", file_hash=file_hash,
+                uploaded_by=uploaded_by, status="skipped" if identical else "success",
+                rows_total=sum(sheet["lines"] for sheet in sheets.values()),
+                report_json={"warehouse_sources": sheets, **{f"warehouse_{key}": value for key, value in counts.items()}},
+            ))
+            summary = "，".join(f"{title} {sheet['documents']} 张（{sheet['lines']} 行明细）" for title, sheet in sheets.items())
+            db.execute(update(SysImportJob).where(SysImportJob.id == job_id).values(
+                status="done", done_files=1, finished_at=func.now(),
+                note=f"{summary}。新增 {counts['inserted']}、更新 {counts['updated']}、未变更 {counts['unchanged']} 张单据。",
+            ))
+        return
+    except (warehouse_analytics_import.WarehouseImportError, UploadSafetyError) as exc:
+        error = str(exc)
+    except Exception as exc:  # noqa: BLE001
+        # SQLAlchemy 异常正文可能包含仓单字段和绑定参数。
+        _log.error("warehouse import job=%s failed: %s", job_id, type(exc).__name__)
+        error = "仓单导入失败，本次数据已回滚。请联系管理员核对作业。"
+    finally:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            _log.warning("unable to remove temporary workbook for job=%s", job_id)
+    with SessionLocal.begin() as db:
+        if file_hash:
+            db.add(SysImportBatch(
+                import_job_id=job_id, filename=filename, file_type="warehouse", file_hash=file_hash,
+                uploaded_by=uploaded_by, status="failed", rows_error=1,
+                report_json={"warehouse_error": error},
+            ))
+        db.execute(update(SysImportJob).where(SysImportJob.id == job_id).values(
+            status="failed", error_files=1, finished_at=func.now(), note=error,
+        ))
+
+
+@router.post("/warehouse-workbook", status_code=202)
+def upload_warehouse_workbook(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+) -> dict:
+    """上传单本仓单工作簿，校验和写入使用同一个后台作业。"""
+    username = ident.get("sub")
+    if ident.get("authn") != "sys_user" or ident.get("fb") or not username:
+        raise HTTPException(403, "仓单导入需要实名账号")
+    account = db.scalar(select(SysUser).where(
+        SysUser.username == username, SysUser.is_active.is_(True), SysUser.deleted_at.is_(None),
+    ))
+    if account is None:
+        raise HTTPException(403, "账号不存在或已停用")
+    if not permissions.page_permission_allowed(
+        role=account.role, permission_map=permissions.effective_for_user(account), page_key="page_import",
+    ):
+        raise HTTPException(403, "没有数据导入权限")
+    filename = Path(file.filename or "仓单.xlsx").name
+    if len(filename) > 256:
+        raise HTTPException(400, "文件名过长，请缩短后再上传")
+    path = Path(_save_upload_to_temp(file, filename))
+    try:
+        job = SysImportJob(created_by=username, mode="warehouse", total_files=1, status="processing")
+        db.add(job)
+        db.flush()
+        job_id = job.id
+        db.commit()
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    background_tasks.add_task(_process_warehouse_job, job_id, path, filename, username)
+    return {"job_id": job_id, "total_files": 1, "status": "processing"}
 
 
 def _job_dict(j: SysImportJob) -> dict:

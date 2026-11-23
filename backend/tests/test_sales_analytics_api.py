@@ -521,6 +521,43 @@ def test_order_detail_404(db, seeded):
     assert client.get(f"{ORDERS}/{o6_id}").status_code == 404   # 已取消单与列表同口径
 
 
+# ---------- 待收款 ----------
+
+def test_sales_receivable_summary_uses_filtered_orders_once(db, seeded):
+    o1, o2, o3, o4, _ = seeded["orders"]
+    o1.sales_receivable_amount = Decimal("31.25")
+    o3.sales_receivable_amount = Decimal("0.00")
+    o4.sales_receivable_amount = Decimal("500.00")
+    first_line = db.query(FSalesLine).filter_by(order_id=o1.id).one()
+    first_line.brand = "待收款测试品牌"
+    for raw_line_id, order in (("L1-2", o1), ("L2-1", o2), ("L3-1", o3)):
+        db.add(FSalesLine(
+            raw_line_id=raw_line_id, order_id=order.id, part_id=first_line.part_id,
+            qty=Decimal("1"), brand=first_line.brand, import_batch_id=order.import_batch_id,
+        ))
+    db.commit()
+    client = _client(db, "sa-receivable-filters", role="boss")
+
+    def assert_summary(params, *, orders, total, missing):
+        response = client.get(SUMMARY, params=params)
+        assert response.status_code == 200, response.text
+        kpi = response.json()["kpi"]
+        assert (kpi["orders"], kpi["sales_receivable_total"], kpi["sales_receivable_missing"]) == (
+            orders, total, missing,
+        )
+
+    filters = {"brand": first_line.brand, "date_to": "2026-01-11", "amount_min": "1000"}
+    assert_summary(filters, orders=2, total=31.25, missing=1)
+    response = client.get(ORDERS, params={**filters, "page_size": 1, "sort": "amount_ex_tax"})
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 2
+    assert [item["sales_receivable_amount"] for item in response.json()["items"]] == [None]
+    assert_summary({"brand": first_line.brand}, orders=3, total=31.25, missing=1)
+    assert_summary({**filters, "amount_min": "1500"}, orders=1, total=None, missing=1)
+    assert_summary({"order_no": "SO-3"}, orders=1, total=0, missing=0)
+    assert_summary({"order_no": "SO-6"}, orders=0, total=None, missing=0)
+
+
 # ---------- 脱敏 ----------
 
 def test_data_reconciliation_hidden_masks_reconciliation_fields(db, seeded):
