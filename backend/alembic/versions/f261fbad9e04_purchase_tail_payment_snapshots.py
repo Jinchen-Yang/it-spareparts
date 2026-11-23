@@ -1,4 +1,4 @@
-"""D-0074 采购订单已付、待付尾款快照。"""
+"""D-0075 采购订单已付、待付尾款快照。"""
 import sqlalchemy as sa
 from alembic import op
 
