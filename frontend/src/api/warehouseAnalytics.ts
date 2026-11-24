@@ -65,7 +65,6 @@ export interface CoverageEntry {
   max_date: string | null;
   documents: number | null;
   lines: number | null;
-  observedDays?: string[];
 }
 export interface Coverage {
   sources: CoverageEntry[];

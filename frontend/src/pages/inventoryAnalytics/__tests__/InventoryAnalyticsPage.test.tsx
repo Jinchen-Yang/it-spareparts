@@ -5,8 +5,7 @@ import { businessToday } from "../../../utils/date";
 import type { Cube, WarehouseResults } from "../../../api/warehouseAnalytics";
 import { warehouseParams } from "../../../api/warehouseAnalytics";
 import Page from "../InventoryAnalyticsPage";
-import { boards, operatorRole, parseDrill, parseFilters } from "../warehouseState";
-import { reach } from "../Trend";
+import { boards, operatorRole, parseDrill, parseFilters, reach } from "../warehouseState";
 
 const request = vi.hoisted(() => vi.fn());
 vi.mock("../../../api/warehouseAnalytics", async (original) => ({

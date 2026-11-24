@@ -5,13 +5,11 @@ import dayjs from "dayjs";
 import {
   warehouseSources,
   metrics,
-  type Coverage,
-  type CoverageEntry,
   type Drill,
   type Metric,
   type Source,
 } from "../../api/warehouseAnalytics";
-import { exact, hasKey } from "./warehouseState";
+import { exact, hasKey, reach, sourceCoverage } from "./warehouseState";
 import {
   DataTable,
   DrillLink,
@@ -24,30 +22,6 @@ import {
   useWarehouse,
   useWarehouseRead,
 } from "./WarehouseShared";
-
-export function reach(entry: CoverageEntry | undefined, from?: string, to?: string) {
-  if (!entry?.available || !entry.min_date || !entry.max_date) return "absent";
-  if (entry.observedDays) {
-    const start = from || entry.min_date;
-    const end = to || entry.max_date;
-    const recorded = entry.observedDays.filter((day) => day >= start && day <= end).length;
-    if (!recorded) return "outside";
-    if (recorded < dayjs(end).diff(dayjs(start), "day") + 1) return "partial";
-    return "covered";
-  }
-  if ((from && from > entry.max_date) || (to && to < entry.min_date)) return "outside";
-  if ((from && from < entry.min_date) || (to && to > entry.max_date)) return "partial";
-  return "covered";
-}
-export function sourceCoverage(coverage: Coverage | undefined, center?: string) {
-  const sources = coverage?.sources;
-  const warehouses = coverage?.outbound_warehouses;
-  if (!warehouses) return sources;
-  const observedDays = [...new Set(
-    warehouses.filter((row) => !center || row.center === center).flatMap((row) => row.days),
-  )];
-  return sources?.map((entry) => entry.source === "outbound" ? { ...entry, observedDays } : entry);
-}
 
 export function metricOptions(unit?: string, withPns = true): Partial<Record<Metric, string>> {
   return {

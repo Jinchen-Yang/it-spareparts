@@ -8,7 +8,7 @@ import {
   type Drill,
   type Metric,
 } from "../../api/warehouseAnalytics";
-import { exact, hasKey, operatorRole, roles } from "./warehouseState";
+import { exact, hasKey, operatorRole, reach, roles } from "./warehouseState";
 import {
   DrillLink,
   Panel,
@@ -18,7 +18,7 @@ import {
   useWarehouse,
   useWarehouseRead,
 } from "./WarehouseShared";
-import { metricOptions, calendarBuckets, reach } from "./Trend";
+import { metricOptions, calendarBuckets } from "./Trend";
 
 const lineDimensions: ReadonlySet<Dimension> = new Set([
   "pn",

@@ -9,7 +9,7 @@ import {
   type Drill,
   type WarehouseQuery,
 } from "../../api/warehouseAnalytics";
-import { pageNumber, pageSize } from "./warehouseState";
+import { pageNumber, pageSize, reach, sourceCoverage } from "./warehouseState";
 import {
   DataTable,
   DrillLink,
@@ -23,7 +23,6 @@ import {
   useWarehouse,
   useWarehouseRead,
 } from "./WarehouseShared";
-import { reach, sourceCoverage } from "./Trend";
 
 export function EquipmentBoard() {
   const { filters, params, patch } = useWarehouse(),
