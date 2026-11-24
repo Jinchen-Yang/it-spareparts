@@ -92,6 +92,10 @@ class ReturnReceiptConflict(ReturnReceiptError):
     """版本冲突或状态不允许该操作。"""
 
 
+class ReturnReceiptDataBusy(ReturnReceiptConflict):
+    """另一个事务正在独占更新维保数据。"""
+
+
 class ReturnReceiptValidation(ReturnReceiptError):
     """入参不合法。"""
 
@@ -231,17 +235,19 @@ def _receipt_dict(row: MaintenanceRkdReturnLine, order_no: str | None = None) ->
     }
 
 
-def lock_receipt_context(db: Session) -> None:
+def lock_receipt_context(db: Session, *, blocking: bool = True) -> None:
     """Order/identity writers take this lock exclusively, before any fact lock.
 
     Receipt commands share it, so independent receipts still run concurrently.
     Hold it through authorization, validation and commit to prevent reassign,
     tombstone or project merge from changing the facts being authorized.
+    Interactive writes can fail promptly when an exclusive writer holds it.
     """
-    db.execute(
-        text("SELECT pg_advisory_xact_lock_shared(:key)"),
-        {"key": DATA_CHANGE_ADVISORY_LOCK_KEY},
-    )
+    params = {"key": DATA_CHANGE_ADVISORY_LOCK_KEY}
+    if blocking:
+        db.execute(text("SELECT pg_advisory_xact_lock_shared(:key)"), params)
+    elif not db.scalar(text("SELECT pg_try_advisory_xact_lock_shared(:key)"), params):
+        raise ReturnReceiptDataBusy("维保数据正在更新，请稍后重试")
 
 
 def lock_receipt_projects(db: Session, project_ids: set[str]) -> None:
