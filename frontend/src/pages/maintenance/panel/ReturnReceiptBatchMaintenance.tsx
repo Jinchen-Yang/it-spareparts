@@ -47,7 +47,7 @@ interface EditRow {
   serialsTouched: boolean;
 }
 
-type RowStatus = "pending" | "ok" | "conflict" | "unknown" | "failed";
+type RowStatus = "pending" | "ok" | "conflict" | "unknown" | "failed" | "data_busy";
 
 interface ResultRow {
   receiptId: string;
@@ -163,8 +163,8 @@ const errorStatus = (error: unknown): RowStatus => {
   const status = (error as { response?: { status?: number } })?.response?.status;
   const detail = (error as { response?: { data?: { detail?: { code?: string } } } })?.response?.data?.detail;
   if (status === 409) {
-    if (detail?.code === "return_capacity_exceeded" || detail?.code === "return_capacity_unknown"
-      || detail?.code === "return_receipt_data_busy") return "failed";
+    if (detail?.code === "return_receipt_data_busy") return "data_busy";
+    if (detail?.code === "return_capacity_exceeded" || detail?.code === "return_capacity_unknown") return "failed";
     return "conflict";
   }
   // 401/403/422 等 4xx 是确定拒绝，说明那次请求未落库；无响应/5xx 仍未知
@@ -174,7 +174,7 @@ const errorStatus = (error: unknown): RowStatus => {
 
 const UNKNOWN_RETRY_HINT = "网络异常或服务错误，结果未知。可原样重试（沿用原版本号，若首次已成功将返回版本冲突），或刷新核对";
 const CONFLICT_HINT = "版本冲突：可能此前一次提交已成功，或他人已修改。请刷新核对，系统不会自动用新版本覆盖";
-/** 重试请求收到 4xx（非 409）：只能证明这次重试被拒，不能证明首次未落库 → 保持「结果未知」。 */
+/** 非版本冲突的 4xx 只说明本次重试被拒。 */
 const RETRY_4XX_HINT = "本次重试被拒绝：不改变原提交「结果未知」判定，请刷新核对实际状态";
 
 const STATUS_TAG: Record<RowStatus, { color: string; label: string }> = {
@@ -183,6 +183,7 @@ const STATUS_TAG: Record<RowStatus, { color: string; label: string }> = {
   conflict: { color: "red", label: "版本冲突" },
   unknown: { color: "orange", label: "结果未知" },
   failed: { color: "default", label: "未提交" },
+  data_busy: { color: "default", label: "未提交" },
 };
 
 /**
@@ -190,6 +191,7 @@ const STATUS_TAG: Record<RowStatus, { color: string; label: string }> = {
  * 逐行独立编辑、独立版本 CAS、共同原因留痕；只提交有实际变更的行。
  * 部分成功语义：行间不构成事务；成功行锁定不重发；409 不自动升级 version；
  * 网络失败/5xx 视为结果未知，只允许沿用原 version 原样重试（首次已成功时会得到 409）。
+ * 数据忙时本次写入确认未提交，也可以原样重试。
  */
 export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }: {
   mode: "update" | "void";
@@ -260,17 +262,18 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
   const summarize = (finalRows: ResultRow[]) => {
     const counts = finalRows.reduce<Record<RowStatus, number>>(
       (acc, row) => ({ ...acc, [row.status]: acc[row.status] + 1 }),
-      { pending: 0, ok: 0, conflict: 0, unknown: 0, failed: 0 },
+      { pending: 0, ok: 0, conflict: 0, unknown: 0, failed: 0, data_busy: 0 },
     );
     const label = isVoid ? "批量作废" : "批量修改";
     if (counts.ok === finalRows.length && finalRows.length > 0) {
       message.success(`${label}完成：${counts.ok} 条`);
     } else {
+      const unsubmittedCount = counts.failed + counts.data_busy;
       const parts = [
         counts.ok ? `成功 ${counts.ok}` : null,
         counts.conflict ? `冲突 ${counts.conflict}` : null,
         counts.unknown ? `结果未知 ${counts.unknown}` : null,
-        counts.failed ? `未提交 ${counts.failed}` : null,
+        unsubmittedCount ? `未提交 ${unsubmittedCount}` : null,
       ].filter(Boolean);
       message.warning(`${label}结束：${parts.join("，")}；请按行核对结果`);
     }
@@ -332,7 +335,7 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
     summarize(finalRows);
   };
 
-  const retryRow = async (receiptId: string) => {
+  const retryRow = async ({ receiptId, status: previousStatus }: ResultRow) => {
     // 同步锁（与 submitAll 同一 lockRef）：双击重试在 state 刷新前就被挡下
     if (lockRef.current) return;
     const item = frozenRef.current.find((row) => row.receiptId === receiptId);
@@ -340,7 +343,9 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
     lockRef.current = true;
     const mySeq = seqRef.current;
     setRetryingId(receiptId);
-    markResult(receiptId, { detail: "正在原样重试（沿用原版本号，若首次已成功将返回版本冲突）…" });
+    markResult(receiptId, { detail: previousStatus === "unknown"
+      ? "正在原样重试（沿用原版本号，若首次已成功将返回版本冲突）…"
+      : "正在原样重试（沿用原版本号）…" });
     try {
       await sendRow(item);
       if (seqRef.current !== mySeq) return;
@@ -348,14 +353,13 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
     } catch (error) {
       if (seqRef.current !== mySeq) return;
       const status = errorStatus(error);
-      if (status === "conflict" || status === "unknown") {
-        markResult(receiptId, { status, detail: describeError(error, status) });
-      } else {
-        // 401/403/422 等 4xx：只证明这次重试被拒，不证明首次未落库 → 维持「结果未知」
+      if (previousStatus === "unknown" && (status === "data_busy" || status === "failed")) {
         markResult(receiptId, {
           status: "unknown",
           detail: `${RETRY_4XX_HINT}（${readError(error, "重试被拒绝")}）`,
         });
+      } else {
+        markResult(receiptId, { status, detail: describeError(error, status) });
       }
     } finally {
       lockRef.current = false;
@@ -392,7 +396,7 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
     if (busy) return;
     setOpen(false);
     // ok/conflict/unknown 都意味着服务端状态可能已变（conflict 可能是首次重试已成功）→ 刷新父列表
-    if (results.some((row) => row.status !== "failed")) void onDone();
+    if (results.some((row) => row.status === "ok" || row.status === "conflict" || row.status === "unknown")) void onDone();
   };
 
   const counts = results.reduce<{ ok: number; conflict: number; unknown: number }>(
@@ -522,12 +526,12 @@ export default function ReturnReceiptBatchMaintenance({ mode, receipts, onDone }
       render: (detail: string, row) => (
         <Space direction="vertical" size={4} style={{ width: "100%" }}>
           <Text type={row.status === "ok" ? undefined : row.status === "failed" ? "secondary" : "danger"} style={{ fontSize: 12 }}>{detail}</Text>
-          {row.status === "unknown" ? (
+          {row.status === "unknown" || row.status === "data_busy" ? (
             <Button
               size="small"
               loading={retryingId === row.receiptId}
               disabled={busy}
-              onClick={() => { void retryRow(row.receiptId); }}
+              onClick={() => { void retryRow(row); }}
             >
               原样重试（原版本号）
             </Button>

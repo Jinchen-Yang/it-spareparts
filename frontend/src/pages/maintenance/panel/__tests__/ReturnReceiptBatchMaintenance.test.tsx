@@ -47,11 +47,11 @@ function deferred<T>() {
 }
 
 /** 透传业务错误为 4xx（前端 axios 语义），网络错误无 response。 */
-const httpError = (status: number, detail: string) => {
-  const error = new Error(detail) as Error & { response?: { status: number; data?: { detail: string } } };
-  error.response = { status, data: { detail } };
-  return error;
-};
+const httpError = (status: number, detail: string | { code: string; message: string }) =>
+  ({ response: { status, data: { detail } } });
+const busyMessage = "维保数据正在更新，请稍后重试";
+const busyError = httpError(409, { code: "return_receipt_data_busy", message: busyMessage });
+const capacityError = httpError(409, { code: "return_capacity_exceeded", message: "需求单容量不足" });
 
 const r1 = mkReceipt({ receipt_id: "r1", pn: "PN-A", qty: "2.000", note: "旧备注", evidence_ref: "旧凭据", version: 3 });
 const r2 = mkReceipt({ receipt_id: "r2", pn: "PN-B", qty: "5.000", note: null, evidence_ref: null, version: 7 });
@@ -216,7 +216,7 @@ describe("ReturnReceiptBatchMaintenance 批量修改", () => {
     await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(2));
     expect(await within(dialog).findByText("版本冲突")).toBeInTheDocument();
     expect(within(dialog).getAllByText(/请刷新核对/).length).toBeGreaterThan(0);
-    // 409 行没有重试按钮（只有 unknown 行才有），也不会自动用新 version 重写
+    // 版本冲突没有原样重试，也不会自动用新 version 重写
     expect(screen.queryByRole("button", { name: "原样重试（原版本号）" })).not.toBeInTheDocument();
     expect(mocks.update).toHaveBeenCalledTimes(2);
   });
@@ -246,7 +246,10 @@ describe("ReturnReceiptBatchMaintenance 批量修改", () => {
     await waitFor(() => expect(within(dialog).getAllByText("版本冲突").length).toBeGreaterThan(0));
   });
 
-  it("重试收到 401/403 等 4xx：不证明首次失败，保持「结果未知」并提示核对", async () => {
+  it.each([
+    ["未授权", httpError(401, "未授权")],
+    ["数据忙", busyError],
+  ])("结果未知后重试收到%s，仍保留未知和原样重试", async (_reason, retryError) => {
     const hang = deferred<never>();
     mocks.update.mockImplementation(() => hang.promise);
     const dialog = await openUpdate([r1]);
@@ -256,14 +259,14 @@ describe("ReturnReceiptBatchMaintenance 批量修改", () => {
     await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(1));
     await hang.reject(new Error("timeout"));
     expect(await within(dialog).findByText("结果未知")).toBeInTheDocument();
-    // 重试这次收到 401（如会话过期）：4xx 只证明本次重试被拒
-    mocks.update.mockImplementationOnce(() => Promise.reject(httpError(401, "未授权")));
+    mocks.update.mockRejectedValueOnce(retryError);
     fireEvent.click(screen.getByRole("button", { name: "原样重试（原版本号）" }));
     await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(2));
     expect(mocks.update.mock.calls[1]).toEqual(["r1", { version: 3, reason: "批量修正", note: "新备注A" }]);
     expect(await within(dialog).findByText(/不改变原提交「结果未知」判定/)).toBeInTheDocument();
     // 状态仍是「结果未知」，绝不能降级成「未提交」
     expect(within(dialog).queryAllByText("未提交").length).toBe(0);
+    expect(within(dialog).getByRole("button", { name: "原样重试（原版本号）" })).toBeEnabled();
   });
 
   it("汇总提示用本次真实结果：部分失败报部分失败，不误报「完成 0 条」", async () => {
@@ -364,6 +367,58 @@ describe("ReturnReceiptBatchMaintenance 批量作废", () => {
   });
 });
 
+describe("批量维护遇到数据忙", () => {
+  it.each(["修改", "作废"])("批量%s仅原样重试数据忙的行", async (action) => {
+    const isUpdate = action === "修改";
+    const command = isUpdate ? mocks.update : mocks.voidReceipt;
+    command.mockReset();
+    command.mockResolvedValueOnce({ data: r1 })
+      .mockRejectedValueOnce(busyError)
+      .mockRejectedValueOnce(busyError)
+      .mockResolvedValueOnce({ data: r2 });
+    const dialog = await (isUpdate ? openUpdate() : openVoid());
+    if (isUpdate) {
+      setText(noteArea(dialog, 0), "新备注A");
+      setText(noteArea(dialog, 1), "新备注B");
+    }
+    const reason = isUpdate ? reasonArea(dialog) : within(dialog).getByPlaceholderText("如：批量重复登记 / 录入错误");
+    setText(reason, "清点");
+    fireEvent.click(within(dialog).getByRole("button", { name: `${action} 2 条` }));
+    const busyRow = (await within(dialog).findByText(busyMessage)).closest("tr")!;
+    const savedRow = within(dialog).getByText("PN-A").closest("tr")!;
+    const retryName = "原样重试（原版本号）";
+    expect(within(busyRow).getByText("未提交")).toBeInTheDocument();
+    expect(within(savedRow).queryByRole("button", { name: retryName })).not.toBeInTheDocument();
+    fireEvent.click(within(busyRow).getByRole("button", { name: retryName }));
+    await waitFor(() => expect(command).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(within(busyRow).getByRole("button", { name: retryName })).toBeEnabled());
+    expect(within(busyRow).getByText("未提交")).toBeInTheDocument();
+    fireEvent.click(within(busyRow).getByRole("button", { name: retryName }));
+    expect(await within(dialog).findByText("全部 2 条已提交")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: retryName })).not.toBeInTheDocument();
+    const frozen = ["r2", { version: 7, reason: "清点", ...(isUpdate ? { note: "新备注B" } : {}) }];
+    expect(command.mock.calls.slice(1)).toEqual([frozen, frozen, frozen]);
+  });
+
+  it.each([
+    ["容量拒绝", capacityError, "未提交", /需求单容量不足/],
+    ["版本冲突", httpError(409, "版本已变更"), "版本冲突", /版本已变更/],
+  ])("数据忙后遇到%s，不再允许原样重试", async (_reason, error, status, detail) => {
+    mocks.update.mockReset();
+    mocks.update.mockRejectedValueOnce(busyError).mockRejectedValueOnce(error);
+    const dialog = await openUpdate([r1]);
+    setText(noteArea(dialog), "新备注");
+    setText(reasonArea(dialog), "清点");
+    fireEvent.click(within(dialog).getByRole("button", { name: "修改 1 条" }));
+    const retryName = "原样重试（原版本号）";
+    fireEvent.click(await within(dialog).findByRole("button", { name: retryName }));
+    expect(await within(dialog).findByText(detail)).toBeInTheDocument();
+    expect(within(dialog).getByText(status)).toBeInTheDocument();
+    expect(within(dialog).queryByText("结果未知")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: retryName })).not.toBeInTheDocument();
+  });
+});
+
 
 describe("D-31 批量维护容量", () => {
   it("当前满额关联展示剩余，数量增加被预检拒绝，备注仍可提交", async () => {
@@ -385,7 +440,7 @@ describe("D-31 批量维护容量", () => {
 
   it.each([
     ["return_capacity_exceeded", "需求单 WBDD-1 下单量 10，已收 9，本次最多还能录入 1，当前提交 3"],
-    ["return_receipt_data_busy", "维保数据正在更新，请稍后重试"],
+    ["return_capacity_unknown", "需求单容量待核对"],
   ])("%s 的 409 显示原文和未提交状态", async (code, message) => {
     mocks.update.mockReset();
     mocks.update.mockRejectedValue({ response: { status: 409, data: { detail: { code, message } } } });
@@ -396,5 +451,6 @@ describe("D-31 批量维护容量", () => {
     expect(await within(dialog).findByText(message)).toBeInTheDocument();
     expect(within(dialog).getByText("未提交")).toBeInTheDocument();
     expect(within(dialog).queryByText("版本冲突")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "原样重试（原版本号）" })).not.toBeInTheDocument();
   });
 });

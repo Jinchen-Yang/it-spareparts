@@ -630,11 +630,13 @@ describe("D-31 批量录入容量", () => {
     expect(screen.getByRole("button", { name: "登记 2 条" })).toBeDisabled();
     expect(mocks.createReturnReceipt).not.toHaveBeenCalled();
   });
-  it("关联随幂等 payload 冻结，容量 409 展示中文并保留所选单据", async () => {
+  it.each([
+    ["return_capacity_exceeded", "需求单 WBDD-OPEN 下单量 10，已收 10，本次最多还能录入 0，当前提交 1"],
+    ["return_receipt_data_busy", "维保数据正在更新，请稍后重试"],
+  ])("%s 后批量登记原样重试，保留幂等键和需求单", async (code, message) => {
     mocks.createReturnReceipt.mockReset();
-    const message = "需求单 WBDD-OPEN 下单量 10，已收 10，本次最多还能录入 0，当前提交 1";
     mocks.demands.mockResolvedValue({ data: { rows: [{ source_order_id: "d1", order_no: "WBDD-OPEN", order_date: null, demand_qty: "10.000", received_qty: "9.000", remaining_qty: "1.000", max_qty: "1.000", basis_state: "complete", is_current: false }], total: 1 } });
-    mocks.createReturnReceipt.mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: "return_capacity_exceeded", message } } } })
+    mocks.createReturnReceipt.mockRejectedValueOnce({ response: { status: 409, data: { detail: { code, message } } } })
       .mockResolvedValueOnce({ data: { replayed: false, receipt_id: "r1" } });
     render(<ReturnReceiptBatchEntry projectId="p-1" onDone={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: /批\s*量\s*录\s*入/ }));
