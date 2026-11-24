@@ -162,8 +162,11 @@ export function buildEditDiff(row: EditRow): Partial<ReturnReceiptUpdateInput> {
 const errorStatus = (error: unknown): RowStatus => {
   const status = (error as { response?: { status?: number } })?.response?.status;
   const detail = (error as { response?: { data?: { detail?: { code?: string } } } })?.response?.data?.detail;
-  if (status === 409 && (detail?.code === "return_capacity_exceeded" || detail?.code === "return_capacity_unknown")) return "failed";
-  if (status === 409) return "conflict";
+  if (status === 409) {
+    if (detail?.code === "return_capacity_exceeded" || detail?.code === "return_capacity_unknown"
+      || detail?.code === "return_receipt_data_busy") return "failed";
+    return "conflict";
+  }
   // 401/403/422 等 4xx 是确定拒绝，说明那次请求未落库；无响应/5xx 仍未知
   if (status != null && status >= 400 && status < 500) return "failed";
   return "unknown";

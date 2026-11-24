@@ -143,6 +143,10 @@ class ReceiptVoid(BaseModel):
 
 
 def _raise_service_error(exc: Exception) -> None:
+    if isinstance(exc, receipts.ReturnReceiptDataBusy):
+        raise HTTPException(status.HTTP_409_CONFLICT, {
+            "code": "return_receipt_data_busy", "message": str(exc),
+        }) from exc
     if isinstance(exc, receipts.ReturnReceiptCapacityConflict):
         raise HTTPException(status.HTTP_409_CONFLICT, {
             "code": exc.code, "message": str(exc), "details": exc.details,
@@ -168,6 +172,14 @@ def _raise_service_error(exc: Exception) -> None:
             "该项目正在被其他操作处理，请稍后重试",
         ) from exc
     raise exc
+
+
+def _lock_receipt_write_context(db: Session) -> None:
+    try:
+        receipts.lock_receipt_context(db, blocking=False)
+    except receipts.ReturnReceiptDataBusy as exc:
+        db.rollback()
+        _raise_service_error(exc)
 
 
 def _receipt_project(
@@ -306,7 +318,7 @@ def create_receipt(
     _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    receipts.lock_receipt_context(db)
+    _lock_receipt_write_context(db)
     receipts.lock_receipt_projects(db, {project_id})
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     operator = _real_operator(db, ident)
@@ -362,7 +374,7 @@ def update_receipt(
 ) -> dict:
     # 先锁型号，再锁项目与返还行，最后才做范围授权。这样撤销可见范围会挡住
     # 已经开始的改单，而提交结果也不会在持有行锁时等待型号锁。
-    receipts.lock_receipt_context(db)
+    _lock_receipt_write_context(db)
     peeked = db.get(receipts.MaintenanceRkdReturnLine, receipt_id)
     if peeked is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "返还记录不存在")
@@ -424,7 +436,7 @@ def void_receipt(
     _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    receipts.lock_receipt_context(db)
+    _lock_receipt_write_context(db)
     peeked = db.get(receipts.MaintenanceRkdReturnLine, receipt_id)
     if peeked is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "返还记录不存在")
