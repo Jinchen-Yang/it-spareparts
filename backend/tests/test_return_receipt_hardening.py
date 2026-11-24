@@ -241,10 +241,16 @@ def test_api_registration_retries_after_source_import_and_rechecks_capacity(db, 
         demand = importing.scalar(select(FMaintenanceLine).where(FMaintenanceLine.order_id == order.id))
         demand.qty = 2
         importing.flush()
-        started = monotonic()
+        # The blocking form must hit PostgreSQL's timeout while the writer owns
+        # the lock. No wall-clock bound is needed on the HTTP request.
+        with SessionLocal() as blocked:
+            blocked.execute(text("SET LOCAL statement_timeout = '100ms'"))
+            with pytest.raises(DBAPIError) as timeout:
+                blocked.execute(text("SELECT pg_advisory_xact_lock_shared(:key)"),
+                                {"key": config.DATA_CHANGE_ADVISORY_LOCK_KEY})
+            assert timeout.value.orig.sqlstate == "57014"
         response = client.post(url, json=payload)
         assert response.status_code == 409, response.text
-        assert monotonic() - started < 2
         assert response.json()["detail"] == {
             "code": "return_receipt_data_busy",
             "message": "维保数据正在更新，请稍后重试",
