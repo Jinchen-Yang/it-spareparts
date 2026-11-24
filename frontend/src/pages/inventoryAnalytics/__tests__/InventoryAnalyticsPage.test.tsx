@@ -5,8 +5,7 @@ import { businessToday } from "../../../utils/date";
 import type { Cube, WarehouseResults } from "../../../api/warehouseAnalytics";
 import { warehouseParams } from "../../../api/warehouseAnalytics";
 import Page from "../InventoryAnalyticsPage";
-import { boards, operatorRole, parseDrill, parseFilters } from "../warehouseState";
-import { reach } from "../Trend";
+import { boards, operatorRole, parseDrill, parseFilters, reach } from "../warehouseState";
 
 const request = vi.hoisted(() => vi.fn());
 vi.mock("../../../api/warehouseAnalytics", async (original) => ({
@@ -490,6 +489,51 @@ describe("库存管理分析", () => {
     mount("view=" + view + "&source=outbound");
     await screen.findByText("该来源尚无已导入单据，当前无法计算业务量。");
     expect(request.mock.calls.map((c) => c[0])).toEqual(["coverage"]);
+  });
+
+  it("展示出库拣货、按仓观测日期和单头及明细仓库", async () => {
+    const normalRead = request.getMockImplementation()!;
+    request.mockImplementation(async (endpoint, params) => {
+      if (endpoint === "coverage") return {
+        ...coverage,
+        sources: coverage.sources.map((entry) => entry.source === "outbound" ? {
+          ...entry, available: true, min_date: "2026-11-03", max_date: "2026-11-05",
+          documents: 1, lines: 1,
+        } : entry),
+        outbound_warehouses: [{ center: "示例仓", warehouse: "单头出库仓", days: ["2026-11-03", "2026-11-05"] }],
+      };
+      if (endpoint === "documents") return {
+        total: 1, items: [{
+          ...record, source: "outbound", number: "CKD-TEST", outbound_warehouse: "单头出库仓",
+          whole_pn: "整机-TEST", whole_qty: 1, whole_unit: "台",
+        }],
+      };
+      if (endpoint === "lines") return {
+        total: 1, items: [{ ...sample, warehouse: "备件所在仓", bin_name: "A-1" }],
+      };
+      return normalRead(endpoint, params);
+    });
+    mount("source=outbound&" + period);
+    await screen.findByRole("heading", { name: "出库拣货人员前五" });
+    await waitFor(() => expect(reads("rankings")).toContainEqual(expect.objectContaining({
+      source: "outbound", operator_role: "outbound",
+    })));
+    const gap = await screen.findByTitle(/2026-11-04.*CKD/);
+    expect(gap).toHaveClass("wa-chart-gap");
+    fireEvent.click(screen.getByText("各出库仓的已导入业务日"));
+    fireEvent.click(await screen.findByRole("button", { name: "单头出库仓 · 匹配单据" }));
+    const document = await screen.findByRole("button", { name: "CKD-TEST" });
+    expect(reads("documents")[0]).toMatchObject({
+      scope: '{"center":"示例仓","outbound_warehouse":"单头出库仓","source":"outbound"}',
+    });
+    expect(screen.getByText("出库仓 · 单头出库仓")).toBeInTheDocument();
+    expect(screen.getByText(/整机-TEST.*1 台/)).toBeInTheDocument();
+    fireEvent.click(document);
+    expect(await screen.findByText("备件所在仓")).toBeInTheDocument();
+    expect(screen.getByText("A-1")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "返回上一级" }));
+    fireEvent.click(await screen.findByRole("button", { name: "测试与覆盖" }));
+    expect(await screen.findByRole("row", { name: /实际出库.*部分日期覆盖/ })).toBeInTheDocument();
   });
 
   it("分享的单内货品可逐层返回所在看板及列表页", async () => {

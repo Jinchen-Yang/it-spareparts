@@ -35,8 +35,8 @@ def test_receipt_waits_for_scope_revocation_then_denies_all_write_paths(db, monk
     started = Event()
     original_lock = receipts.lock_receipt_context
 
-    def capture_context(session):
-        original_lock(session)
+    def capture_context(session, **kwargs):
+        original_lock(session, **kwargs)
         worker["pid"] = session.scalar(text("SELECT pg_backend_pid()"))
         started.set()
 

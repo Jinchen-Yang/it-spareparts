@@ -1,10 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "../../../../test/antdRender";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ summary: vi.fn(), search: vi.fn(), demands: vi.fn(), projects: vi.fn(), create: vi.fn(), update: vi.fn(), audit: vi.fn(), categories: vi.fn() }));
+const mocks = vi.hoisted(() => ({ summary: vi.fn(), search: vi.fn(), demands: vi.fn(), projects: vi.fn(), create: vi.fn(), update: vi.fn(), voidReceipt: vi.fn(), audit: vi.fn(), categories: vi.fn() }));
 vi.mock("../../../../api/maintenanceOperations", async () => ({
   ...await vi.importActual<typeof import("../../../../api/maintenanceOperations")>("../../../../api/maintenanceOperations"),
   getReturnReceiptDemands: mocks.demands, getReturnReceiptSummary: mocks.summary, searchReturnReceipts: mocks.search, createReturnReceipt: mocks.create,
-  updateReturnReceipt: mocks.update, getReturnReceiptAudit: mocks.audit,
+  updateReturnReceipt: mocks.update, voidReturnReceipt: mocks.voidReceipt, getReturnReceiptAudit: mocks.audit,
   listMaintenancePartCategories: mocks.categories,
 }));
 vi.mock("../../../../api/maintenanceProjects", () => ({ listMaintenanceProjects: mocks.projects }));
@@ -17,6 +17,8 @@ const receipt = { receipt_id: "r1", project_id: "p1", source: "manual", source_o
   head_no: "MANUAL-1", part_id: 12, pn: "PN-1", description: "旧描述", qty: "2.000", condition: "坏品", note: "旧备注", evidence_ref: "旧凭据",
   occurred_at: null, line_status: "active", version: 3, created_by: "实名用户", created_at: null, updated_by: null, updated_at: null, voided_by: null, voided_at: null, void_reason: null };
 const summary = { project_id: "p1", project_total_qty: "2", unassigned_qty: "0", by_demand: [{ source_order_id: "d1", order_no: "WBDD-1", qty: "2" }] };
+const busyMessage = "维保数据正在更新，请稍后重试";
+const busyError = { response: { status: 409, data: { detail: { code: "return_receipt_data_busy", message: busyMessage } } } };
 function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promise<T>((r) => { resolve = r; }); return { promise, resolve }; }
 beforeEach(() => {
   vi.clearAllMocks(); localStorage.clear(); localStorage.setItem("permissions", JSON.stringify({ action_maintenance_bad_return_manage: true }));
@@ -28,7 +30,7 @@ beforeEach(() => {
       ? Promise.resolve({ data: { rows: [], total: 0, page: 1, page_size: 50 } })
       : Promise.resolve({ data: { rows: [{ order_no: "WBDD-1", demand_qty: "20.000", received_qty: "2.000", remaining_qty: "18.000", max_qty: "18.000", basis_state: "complete", is_current: false }], total: 1, page: 1, page_size: 100 } }));
   mocks.projects.mockResolvedValue({ data: { rows: [{ project_id: "p1", display_name: "原项目", project_code: "P1" }, { project_id: "p2", display_name: "目标项目", project_code: "P2" }], total: 2 } });
-  mocks.create.mockResolvedValue({ data: { ...receipt, replayed: false } }); mocks.update.mockResolvedValue({ data: receipt }); mocks.audit.mockResolvedValue({ data: { items: [] } });
+  mocks.create.mockResolvedValue({ data: { ...receipt, replayed: false } }); mocks.update.mockResolvedValue({ data: receipt }); mocks.voidReceipt.mockResolvedValue({ data: receipt }); mocks.audit.mockResolvedValue({ data: { items: [] } });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
@@ -90,18 +92,57 @@ describe("返还台账的登记、更正和加载恢复", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
-  it("提交响应丢失后同一表单重试保持幂等键", async () => {
-    mocks.create.mockRejectedValueOnce(new Error("network"));
+  it.each([
+    ["响应丢失", new Error("network"), /登记失败，可原样重试/],
+    ["数据忙", busyError, busyMessage],
+  ])("%s后同一登记表单重试保持输入和幂等键", async (_failure, error, message) => {
+    mocks.create.mockRejectedValueOnce(error);
     render(<ReturnReceiptsSection projectId="p1" />);
     fireEvent.click(await screen.findByRole("button", { name: "登记返还" }));
     fireEvent.click(screen.getByText("选择测试返件")); fireEvent.change(screen.getByRole("spinbutton"), { target: { value: "3" } });
     fireEvent.click(screen.getByRole("button", { name: /^登\s*记$/ }));
-    await waitFor(() => expect(mocks.create).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(screen.getByRole("button", { name: /^登\s*记$/ })).not.toHaveClass("ant-btn-loading"));
+    expect(await screen.findByText(message)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /^登\s*记$/ }));
     await waitFor(() => expect(mocks.create).toHaveBeenCalledTimes(2));
-    expect(mocks.create.mock.calls[1][1].idempotency_key).toBe(mocks.create.mock.calls[0][1].idempotency_key);
+    expect(mocks.create.mock.calls[1]).toEqual(mocks.create.mock.calls[0]);
+    expect(mocks.create.mock.calls[1][1].idempotency_key).toEqual(expect.any(String));
     expect(mocks.create.mock.calls[1][1]).toMatchObject({ qty: 3, pn: "RETURN-PN", condition: null, wbdd_no: null });
+  });
+  it("单条修改遇到数据忙，保留原因、修改内容和版本供重试", async () => {
+    mocks.update.mockRejectedValueOnce(busyError);
+    render(<ReturnReceiptsSection projectId="p1" />);
+    fireEvent.click(await screen.findByRole("button", { name: "修改" }));
+    const dialog = await screen.findByRole("dialog");
+    const note = within(dialog).getByLabelText("备注（可选）");
+    const reason = within(dialog).getByLabelText("修改原因（必填，留痕审计）");
+    fireEvent.change(note, { target: { value: "新备注" } });
+    fireEvent.change(reason, { target: { value: "核对后更正" } });
+    const save = within(dialog).getByRole("button", { name: "保存修改" });
+    fireEvent.click(save);
+    expect(await within(dialog).findByText(busyMessage)).toBeInTheDocument();
+    expect(note).toHaveValue("新备注");
+    expect(reason).toHaveValue("核对后更正");
+    fireEvent.click(save);
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledTimes(2));
+    const original = ["r1", expect.objectContaining({ version: 3, note: "新备注", reason: "核对后更正" })];
+    expect(mocks.update.mock.calls[0]).toEqual(original);
+    expect(mocks.update.mock.calls[1]).toEqual(mocks.update.mock.calls[0]);
+  });
+  it("单条作废遇到数据忙，保留原因和版本供重试", async () => {
+    mocks.voidReceipt.mockRejectedValueOnce(busyError);
+    render(<ReturnReceiptsSection projectId="p1" />);
+    fireEvent.click(await screen.findByRole("button", { name: /^作\s*废$/ }));
+    const dialog = await screen.findByRole("dialog");
+    const reason = within(dialog).getByPlaceholderText(/作废原因/);
+    fireEvent.change(reason, { target: { value: "重复登记" } });
+    const confirm = within(dialog).getByRole("button", { name: "确认作废" });
+    fireEvent.click(confirm);
+    expect(await screen.findByText(busyMessage)).toBeInTheDocument();
+    expect(reason).toHaveValue("重复登记");
+    fireEvent.click(confirm);
+    await waitFor(() => expect(mocks.voidReceipt).toHaveBeenCalledTimes(2));
+    const frozen = ["r1", { version: 3, reason: "重复登记" }];
+    expect(mocks.voidReceipt.mock.calls).toEqual([frozen, frozen]);
   });
   it("清空可选字段发送显式 null，修改型号同时提交描述", async () => {
     render(<ReturnReceiptsSection projectId="p1" />); fireEvent.click(await screen.findByRole("button", { name: "修改" }));

@@ -56,7 +56,19 @@ SHEETS = {
          "quantity": "退货明细.退货数量", "unit": "退货明细.单位", "category": "退货明细.产品大类",
          "brand": "退货明细.品牌"},
     ),
+    "出库_发货单": (
+        "outbound",
+        {**_HEADER, "number": "出库单号(必填)", "business_date": "出库日期(必填)",
+         "kind": "出库类别(必填)", "center": "仓储中心", "operator": "拣货人员(必填)",
+         "outbound_warehouse": "出库仓库(必填)", "whole_pn": "整机PN", "whole_qty": "整机出库数",
+         "whole_description": "整机描述", "whole_unit": "整机单位"},
+        {**_PART, "description": "备件明细.备件描述", "quantity": "备件明细.出库数量(必填)",
+         "category": "备件明细.产品大类", "brand": "备件明细.品牌",
+         "warehouse": "备件明细.所在仓库", "bin_name": "备件明细.所在库位",
+         "test_result": "备件明细.备件测试合格(必填)"},
+    ),
 }
+_SHEET_ALIASES = {"入库单号": "入库单", "发货单号": "出库_发货单"}
 
 
 @dataclass
@@ -127,8 +139,7 @@ def _read_fields(values, columns, labels):
     return record
 
 
-def _parse_sheet(sheet):
-    source, head_fields, line_fields = SHEETS[sheet.title]
+def _parse_sheet(sheet, source, head_fields, line_fields):
     if (sheet.max_column or 0) > config.IMPORT_XLSX_MAX_COLUMNS:
         raise WarehouseImportError("工作表列数超限")
     # 流式读取真实的 XML 行，Excel 保存的 dimension 可能过小。
@@ -145,7 +156,7 @@ def _parse_sheet(sheet):
                    and technical[heads["source_id"]] == "ObjectId"
                    and technical[heads["source_modified_at"]] == "ModifiedTime"
                    and str(technical[lines["source_id"]]).endswith(".ObjectId"))
-        if not matched:
+        if not matched or (source == "outbound" and technical[heads["status"]] != "Status"):
             raise WarehouseImportError("技术表头与中文字段身份不一致")
     prefix = line_fields["source_id"].split(".")[0] + "."
     detail_columns = {i for i, label in enumerate(labels) if str(label).startswith(prefix)}
@@ -169,6 +180,8 @@ def _parse_sheet(sheet):
                 for key in ("number", "source_id", "business_date", "source_modified_at", "status"):
                     if head[key] is None:
                         raise WarehouseImportError(f"单头缺少「{head_fields[key]}」")
+                if source == "outbound" and not head["number"].startswith("CKD-"):
+                    raise WarehouseImportError("出库单号必须是 CKD 单号")
                 if head["source_id"] in documents or head["number"] in numbers:
                     raise WarehouseImportError("重复单头源 ID 或单号")
                 numbers.add(head["number"])
@@ -190,7 +203,9 @@ def _parse_sheet(sheet):
     return list(documents.values())
 
 
-def parse_warehouse_workbook(path: Path) -> dict[str, list[WarehouseRecord]]:
+def parse_warehouse_workbook(
+    path: Path, *, sheet_titles: dict[str, str] | None = None,
+) -> dict[str, list[WarehouseRecord]]:
     """解析和校验全部已确认来源，独立于数据库；只有明确的辅助页可跳过。"""
     limit = config.MAX_UPLOAD_MB * 1024 * 1024
     with Path(path).open("rb") as file:
@@ -201,18 +216,26 @@ def parse_warehouse_workbook(path: Path) -> dict[str, list[WarehouseRecord]]:
     except (BadZipFile, KeyError, ParseError, ValueError, OSError) as exc:
         raise WarehouseImportError("无法读取 .xlsx 工作簿结构") from exc
     parsed = {}
+    titles = {}
     try:
         for sheet in book:
             if sheet.title == "重点保留" or (sheet.sheet_state != "visible" and sheet.title.startswith("Hidden_Options_")):
                 continue
-            if sheet.title not in SHEETS:
+            spec = SHEETS.get(_SHEET_ALIASES.get(sheet.title, sheet.title))
+            if spec is None:
                 raise WarehouseImportError(f"尚未支持的工作表「{sheet.title}」")
+            source, head_fields, line_fields = spec
+            if source in parsed:
+                raise WarehouseImportError(f"重复来源页签「{titles[source]}」与「{sheet.title}」")
             try:
-                parsed[SHEETS[sheet.title][0]] = _parse_sheet(sheet)
+                parsed[source] = _parse_sheet(sheet, source, head_fields, line_fields)
+                titles[source] = sheet.title
             except WarehouseImportError as exc:
                 raise WarehouseImportError(f"{sheet.title}：{exc}") from None
         if not parsed:
             raise WarehouseImportError("工作簿未含支持的仓单")
+        if sheet_titles is not None:
+            sheet_titles.update(titles)
         return parsed
     finally:
         book.close()

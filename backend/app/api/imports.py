@@ -639,13 +639,13 @@ def _process_warehouse_job(job_id: int, path: Path, filename: str, uploaded_by: 
     file_hash = None
     try:
         file_hash = pipeline.sha256_file(str(path))
-        parsed = warehouse_analytics_import.parse_warehouse_workbook(path)
+        sheet_titles: dict[str, str] = {}
+        parsed = warehouse_analytics_import.parse_warehouse_workbook(path, sheet_titles=sheet_titles)
         if not any(parsed.values()):
             raise warehouse_analytics_import.WarehouseImportError("工作簿没有可导入的仓单")
         sheets = {
             title: {"documents": len(parsed[source]), "lines": sum(len(row.lines) for row in parsed[source])}
-            for title, (source, _, _) in warehouse_analytics_import.SHEETS.items()
-            if source in parsed
+            for source, title in sheet_titles.items()
         }
         with SessionLocal.begin() as db:
             counts = warehouse_analytics_import.apply_warehouse_workbook(db, parsed)

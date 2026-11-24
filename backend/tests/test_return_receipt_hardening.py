@@ -13,9 +13,11 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from app import config
+from app import db as database
 from app.api import maintenance_return_receipts as api
 from app.db import SessionLocal, engine
 from app.models.dimensions import DimPart
+from app.models.maintenance import FMaintenanceLine
 from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
 from app.models.maintenance_project import MaintenanceProjectUserAssignment
 from app.models.maintenance_project_operations import MaintenanceProjectOperationAudit
@@ -223,6 +225,79 @@ def test_order_change_lock_blocks_receipt_until_committed_then_revalidates(db):
             future.result(timeout=10)
             assert blocked, "receipt must wait on the source-writer advisory lock"
     assert db.scalar(select(func.count()).select_from(MaintenanceRkdReturnLine)) == 0
+
+
+def test_api_registration_retries_after_source_import_and_rechecks_capacity(db, monkeypatch):
+    project = _project(db, project_id=str(uuid4()))
+    order = _wbdd(db, project=project, demand_qty=5)
+    client = _client(db, username="receipt-during-source-import")
+    url = f"/api/maintenance/projects/stable/{project.project_id}/return-receipts"
+    payload = {"pn": "TEST", "qty": 2, "wbdd_no": order.order_no, "idempotency_key": "retry"}
+    # Delimit a regression to the old statement-timeout path without a 30 s test.
+    monkeypatch.setattr(database, "REQUEST_STATEMENT_TIMEOUT_MS", 3000)
+    with SessionLocal() as importing:
+        importing.execute(text("SELECT pg_advisory_xact_lock(:key)"),
+                          {"key": config.DATA_CHANGE_ADVISORY_LOCK_KEY})
+        demand = importing.scalar(select(FMaintenanceLine).where(FMaintenanceLine.order_id == order.id))
+        demand.qty = 2
+        importing.flush()
+        # The blocking form must hit PostgreSQL's timeout while the writer owns
+        # the lock. No wall-clock bound is needed on the HTTP request.
+        with SessionLocal() as blocked:
+            blocked.execute(text("SET LOCAL statement_timeout = '100ms'"))
+            with pytest.raises(DBAPIError) as timeout:
+                blocked.execute(text("SELECT pg_advisory_xact_lock_shared(:key)"),
+                                {"key": config.DATA_CHANGE_ADVISORY_LOCK_KEY})
+            assert timeout.value.orig.sqlstate == "57014"
+        response = client.post(url, json=payload)
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"] == {
+            "code": "return_receipt_data_busy",
+            "message": "维保数据正在更新，请稍后重试",
+        }
+        assert _failed(db)[0].after_json["status_code"] == 409
+        assert db.scalar(select(func.count()).select_from(MaintenanceRkdReturnLine)) == 0
+        assert db.scalar(select(func.count()).select_from(MaintenanceProjectOperationAudit)) == 0
+        importing.commit()
+
+    saved = client.post(url, json=payload)
+    assert saved.status_code == 201, saved.text
+    assert saved.json()["qty"] == "2.000"
+    capacity_rejected = client.post(url, json={**payload, "qty": 1, "idempotency_key": "extra"})
+    assert capacity_rejected.status_code == 409, capacity_rejected.text
+    assert capacity_rejected.json()["detail"]["code"] == "return_capacity_exceeded"
+    replay = client.post(url, json=payload)
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["receipt_id"] == saved.json()["receipt_id"]
+    assert replay.json()["replayed"] is True
+    assert db.scalar(select(func.count()).select_from(MaintenanceRkdReturnLine)) == 1
+
+
+@pytest.mark.parametrize("action", ["update", "void"])
+def test_api_existing_receipt_write_can_retry_after_source_import(db, monkeypatch, action):
+    project = _project(db, project_id=str(uuid4()))
+    created = _create(db, project)
+    client = _client(db, username="receipt-edit-during-source-import")
+    url = f"/api/maintenance/return-receipts/{created['receipt_id']}"
+    body = {"version": created["version"], "reason": "correct receipt"}
+    if action == "update":
+        request = ("PATCH", url)
+        body["qty"] = 2
+    else:
+        request = ("POST", f"{url}/void")
+    monkeypatch.setattr(database, "REQUEST_STATEMENT_TIMEOUT_MS", 500)
+
+    with SessionLocal() as importing:
+        importing.execute(text("SELECT pg_advisory_xact_lock(:key)"),
+                          {"key": config.DATA_CHANGE_ADVISORY_LOCK_KEY})
+        response = client.request(*request, json=body)
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "return_receipt_data_busy"
+        importing.commit()
+
+    saved = client.request(*request, json=body)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["version"] == created["version"] + 1
 
 
 def test_failed_attempts_include_dependency_validation_conflict_and_durable_identity(db, monkeypatch):

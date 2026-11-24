@@ -5,13 +5,13 @@ import dayjs from "dayjs";
 import {
   warehouseSources,
   metrics,
-  type CoverageEntry,
   type Drill,
   type Metric,
   type Source,
 } from "../../api/warehouseAnalytics";
-import { exact, hasKey } from "./warehouseState";
+import { exact, hasKey, reach, sourceCoverage } from "./warehouseState";
 import {
+  DataTable,
   DrillLink,
   Panel,
   Pick,
@@ -23,12 +23,6 @@ import {
   useWarehouseRead,
 } from "./WarehouseShared";
 
-export function reach(entry: CoverageEntry | undefined, from?: string, to?: string) {
-  if (!entry?.available || !entry.min_date || !entry.max_date) return "absent";
-  if ((from && from > entry.max_date) || (to && to < entry.min_date)) return "outside";
-  if ((from && from < entry.min_date) || (to && to > entry.max_date)) return "partial";
-  return "covered";
-}
 export function metricOptions(unit?: string, withPns = true): Partial<Record<Metric, string>> {
   return {
     documents: metrics.documents,
@@ -168,7 +162,7 @@ export function Trend({
           ? s === "inbound" || s === "return"
           : s === (base.operator_role === "direct" ? "direct" : "outbound"))),
   );
-  const c = coverage?.sources.filter((s) => sources.includes(s.source));
+  const c = sourceCoverage(coverage, filters.center)?.filter((s) => sources.includes(s.source));
   const from = filters.date_from || c?.flatMap((s) => (s.min_date ? [s.min_date] : [])).sort()[0];
   const to =
     filters.date_to ||
@@ -332,8 +326,50 @@ export function Trend({
     </Panel>
   );
 }
+function OutboundCoverage() {
+  const { coverage, filters } = useWarehouse();
+  const rows = coverage?.outbound_warehouses?.filter(
+    (row) => !filters.center || row.center === filters.center,
+  );
+  if ((filters.source && filters.source !== "outbound") || !rows?.length) return null;
+  return (
+    <details className="wa-panel wa-outbound-coverage">
+      <summary>各出库仓的已导入业务日</summary>
+      <div className="wa-panel-body">
+        <p>记录日按 CKD 出库日期计算，含草稿。单据及数量只统计已生效记录。</p>
+        <DataTable labels={["仓储中心", "单头出库仓", "首个记录日", "最近记录日", "当前区间记录日"]}>
+          {rows.map(({ center, warehouse, days }) => {
+            const matched = days.filter((day) =>
+              (!filters.date_from || day >= filters.date_from) && (!filters.date_to || day <= filters.date_to),
+            ).length;
+            return (
+              <tr key={JSON.stringify([center, warehouse])}>
+                <td>{center || "未登记"}</td>
+                <th scope="row">
+                  {matched ? (
+                    <DrillLink
+                      to={{ scope: { source: "outbound", center, outbound_warehouse: warehouse } }}
+                      label={(warehouse || "仓库未登记") + " · 匹配单据"}
+                    >
+                      {warehouse || "仓库未登记"}
+                    </DrillLink>
+                  ) : warehouse || "仓库未登记"}
+                </th>
+                <td>{days[0]}</td>
+                <td>{days[days.length - 1]}</td>
+                <td>{matched ? format(matched) : "无导入记录"}</td>
+              </tr>
+            );
+          })}
+        </DataTable>
+      </div>
+    </details>
+  );
+}
+
 export function Overview() {
   const { filters, coverage } = useWarehouse();
+  const sources = sourceCoverage(coverage, filters.center);
   const counts = useWarehouseRead("cube", {
     ...filters,
     row: "source",
@@ -346,7 +382,7 @@ export function Overview() {
         {(cube) => (
           <div className="wa-tiles">
             {(Object.keys(warehouseSources) as Source[]).map((src) => {
-              const entry = coverage?.sources.find((c) => c.source === src),
+              const entry = sources?.find((c) => c.source === src),
                 span = reach(entry, filters.date_from, filters.date_to);
               const n = cube.rows.find((row) => row.key === src)?.value ?? 0;
               const available =
@@ -391,6 +427,7 @@ export function Overview() {
         )}
       </Result>
       <Trend />
+      <OutboundCoverage />
       <OverviewLeaders />
     </>
   );

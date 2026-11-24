@@ -14,6 +14,8 @@
 
 同一幂等键不同载荷、旧版本修改、修改已作废行返回冲突。权限拒绝、请求校验失败和服务失败写入独立事务的 `sys_audit_log`；不存请求正文、令牌和异常原文。成功的前后值审计与事实变更在同一事务提交。
 
+维保源导入等操作持有数据变更独占锁时，页面登记、修改和作废立即返回 HTTP 409，`detail.code` 为 `return_receipt_data_busy`。本次请求未写入收货事实，稍后重试登记时沿用同一载荷和幂等键，服务按最新需求单容量校验。
+
 卡墙 `receipt_return_rate` 返回 `returned_qty`、`demand_qty`、`rate_pct`、`state`。数量采用十进制定点字符串；`basis_incomplete` 时 `rate_pct=null`。未关联需求单的收货同样计入项目分子。“未归属需求”汇总行不是项目，其 `receipt_return_rate=null`，仍保留与项目行相同的顶层字段。
 
 领用搜索增加现场 `remark`、`demand_order_no`、当前主数据 `description/brand/category_major/category_minor/unit` 及 `return_requirement`；描述标注 `description_source=current_master_data`。`return_requirement` 包含 `requirement_status`、应返/免返/待判定数量及规则依据。
