@@ -23,6 +23,7 @@ DIMENSIONS = LINE_DIMENSIONS | {
     "operator",
     "operator_role",
     "tester",
+    "outbound_warehouse",
     "whole_pn",
     "whole_unit",
 }
@@ -94,6 +95,7 @@ def _scope_columns():
         "source": Document.source,
         "kind": Document.kind,
         "center": Document.center,
+        "outbound_warehouse": Document.outbound_warehouse,
         "operator": Document.operator,
         "operator_role": _role(),
         "tester": Document.tester,
@@ -190,7 +192,7 @@ def _label(dim, key):
     if dim == "source":
         return SOURCE_NAMES[key]
     if dim == "operator_role":
-        return {"pick": "拣货", "direct": "直退经办", "outbound": "实际出库"}[key]
+        return {"pick": "拣货", "direct": "直退经办", "outbound": "出库拣货"}[key]
     return key
 
 
@@ -292,7 +294,20 @@ def coverage(db: Session):
     for field, name in (("center", "centers"), ("unit", "units")):
         col = f.c[field]
         options[name] = list(db.scalars(select(col).where(col.is_not(None)).distinct().order_by(col)))
-    return {"sources": sources, "options": options}
+    outbound_days = db.execute(
+        select(Document.center, Document.outbound_warehouse, Document.business_date)
+        .where(Document.source == "outbound")
+        .distinct()
+        .order_by(Document.center, Document.outbound_warehouse, Document.business_date)
+    )
+    by_warehouse = {}
+    for center, warehouse, day in outbound_days:
+        by_warehouse.setdefault((center, warehouse), []).append(day)
+    outbound_warehouses = [
+        {"center": center, "warehouse": warehouse, "days": days}
+        for (center, warehouse), days in by_warehouse.items()
+    ]
+    return {"sources": sources, "options": options, "outbound_warehouses": outbound_warehouses}
 
 
 def rankings(db, filters, by, metric, page, page_size):
@@ -415,6 +430,7 @@ def documents(db, filters, page, page_size):
                 "date": h.business_date,
                 "kind": h.kind,
                 "center": h.center,
+                "outbound_warehouse": h.outbound_warehouse,
                 "operator": h.operator,
                 "whole_pn": h.whole_pn,
                 "whole_description": h.whole_description,

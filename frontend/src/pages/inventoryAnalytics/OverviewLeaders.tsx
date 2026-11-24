@@ -3,7 +3,7 @@ import { exact } from "./warehouseState";
 import { DrillLink, Panel, Result, format, useWarehouse, useWarehouseRead } from "./WarehouseShared";
 
 const salesReturns: Drill = { scope: { source: "return", kind: "销售退货" } };
-const warehousePick: Drill = { operator_role: "pick" };
+
 
 function Leaders({
   rows,
@@ -36,7 +36,9 @@ function Leaders({
 }
 export default function OverviewLeaders() {
   const { filters } = useWarehouse();
-  const pickingScope = !filters.source || filters.source === "inbound" || filters.source === "return";
+  const outbound = filters.source === "outbound";
+  const warehousePick: Drill = { operator_role: outbound ? "outbound" : "pick" };
+  const pickingScope = filters.source !== "direct";
   const returnScope = !filters.source || filters.source === "return";
   const centers = useWarehouseRead("cube", {
     ...filters,
@@ -61,7 +63,10 @@ export default function OverviewLeaders() {
           {(c) => <Leaders rows={c.rows} dimension="center" selection={{}} />}
         </Result>
       </Panel>
-      <Panel title="拣货人员前五" why="按已署名人员的入库和返库单据数排序。">
+      <Panel
+        title={outbound ? "出库拣货人员前五" : "拣货人员前五"}
+        why={outbound ? "按 CKD 已署名拣货人员的出库单据数排序。" : "按已署名人员的入库和返库单据数排序。"}
+      >
         {pickingScope ? (
           <Result read={people}>
             {(c) => (

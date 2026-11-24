@@ -20,6 +20,7 @@ class WarehouseAnalyticsDocument(Base):
     status: Mapped[str] = mapped_column(Text)
     kind: Mapped[str | None] = mapped_column(Text)
     center: Mapped[str | None] = mapped_column(Text)
+    outbound_warehouse: Mapped[str | None] = mapped_column(Text)
     operator: Mapped[str | None] = mapped_column(Text)
     tester: Mapped[str | None] = mapped_column(Text)
     needs_test: Mapped[bool | None]

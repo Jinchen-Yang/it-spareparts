@@ -240,3 +240,52 @@ def test_unselected_source_columns_still_detect_incomplete_identities(tmp_path):
     path = direct_book(tmp_path / "broken-parent.xlsx", [doc(), follow() + [None, "新建人"]], headers)
     with pytest.raises(ValueError, match="单头缺少"):
         parse_warehouse_workbook(path)
+
+
+CKD_HEADERS = [
+    "备件明细.数据ID(不可修改)", "备件明细.备件PN(必填)", "备件明细.备件描述", "备件明细.单位",
+    "备件明细.已出数量", "备件明细.出库数量(必填)", "备件明细.所在仓库", "备件明细.所在库位",
+    "备件明细.产品大类", "备件明细.品牌", "备件明细.备件测试合格(必填)",
+    "数据ID(不可修改)", "修改时间(必填)", "出库单号(必填)", "出库日期(必填)", "发货日期", "流程结束",
+    "数据状态", "出库类别(必填)", "仓储中心", "拣货人员(必填)", "出库仓库(必填)", "整机PN",
+    "整机描述", "整机出库数", "整机单位",
+]
+CKD_CODES = [
+    "Child.ObjectId", "Child.F0000031", "Child.F0000039", "Child.F0000010",
+    "Child.F0000038", "Child.F0000011", "Child.F0000113", "Child.F0000114",
+    "Child.F0000127", "Child.F0000130", "Child.F0000143",
+    "ObjectId", "ModifiedTime", "SeqNo", "F0000001", "F0000161", "F0000190",
+    "Status", "F0000032", "F0000178", "F0000003", "F0000177", "F0000067",
+    "F0000066", "F0000078", "F0000072",
+]
+
+
+def ckd_row(quantity=2):
+    return [
+        "ckd-line-1", "CKD-TEST-PN", "合成备件", "件", 99, quantity, "备件所在仓", "A-1", "合成大类", "合成品牌", "是",
+        "ckd-head-1", datetime(2026, 11, 1, 13), "CKD-20261101-0001", date(2026, 11, 1), date(2026, 11, 2),
+        "否", "已生效", "销售出库", "合成中心", "出库拣货甲", "单头出库仓", "整机-TEST", "合成整机", 1, "台",
+    ]
+
+
+def test_ckd_export_and_mixed_workbook_aliases_point_to_one_source(tmp_path):
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "发货单号"
+    sheet.append(CKD_CODES)
+    sheet.append(CKD_HEADERS)
+    sheet.append(ckd_row())
+    path = tmp_path / "ckd.xlsx"
+    book.save(path)
+    record, = parse_warehouse_workbook(path)["outbound"]
+    assert record.head["business_date"] == date(2026, 11, 1)
+    assert record.head["status"] == "已生效"
+    assert record.head["outbound_warehouse"] == "单头出库仓"
+    assert record.lines["ckd-line-1"]["warehouse"] == "备件所在仓"
+    assert record.lines["ckd-line-1"]["quantity"] == 2
+
+    duplicate = book.copy_worksheet(sheet)
+    duplicate.title = "出库_发货单"
+    book.save(path)
+    with pytest.raises(ValueError, match="重复来源"):
+        parse_warehouse_workbook(path)

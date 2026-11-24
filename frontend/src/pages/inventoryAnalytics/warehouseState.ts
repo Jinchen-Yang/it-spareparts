@@ -23,7 +23,7 @@ export type Board = keyof typeof boards;
 export const roles: Record<OperatorRole, string> = {
   pick: "仓库拣货",
   direct: "直退经办",
-  outbound: "实际出库",
+  outbound: "出库拣货",
 };
 export function operatorRole(source: Source | undefined, chosen: string | null): OperatorRole {
   if (source === "direct" || source === "outbound") return source;
@@ -87,7 +87,7 @@ export function parseDrill(raw: string | null): Drill | null {
     const scope: Scope = {};
     for (const [key, value] of Object.entries(data.scope)) {
       if (
-        (!hasKey(dimensions, key) && !["whole_pn", "whole_unit", "tester"].includes(key)) ||
+        (!hasKey(dimensions, key) && !["outbound_warehouse", "whole_pn", "whole_unit", "tester"].includes(key)) ||
         (value !== null && (typeof value !== "string" || value.length > 256))
       )
         return null;

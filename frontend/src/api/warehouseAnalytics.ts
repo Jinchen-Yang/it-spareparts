@@ -31,7 +31,7 @@ export const dimensions = {
   week: "自然周",
 } as const;
 export type Dimension = keyof typeof dimensions;
-export type Scope = Partial<Record<Dimension | "whole_pn" | "whole_unit" | "tester", string | null>>;
+export type Scope = Partial<Record<Dimension | "outbound_warehouse" | "whole_pn" | "whole_unit" | "tester", string | null>>;
 export type OperatorRole = "pick" | "direct" | "outbound";
 export type TestingStatus = "required" | "completed" | "pending" | "unknown" | "attributed";
 export interface Drill {
@@ -65,9 +65,11 @@ export interface CoverageEntry {
   max_date: string | null;
   documents: number | null;
   lines: number | null;
+  observedDays?: string[];
 }
 export interface Coverage {
   sources: CoverageEntry[];
+  outbound_warehouses?: { center: string | null; warehouse: string | null; days: string[] }[];
   options: { sources: Source[]; centers: string[]; units: string[] };
 }
 export interface Axis {
@@ -120,6 +122,10 @@ export interface WarehouseDocument {
   date: string;
   kind: string | null;
   center: string | null;
+  outbound_warehouse?: string | null;
+  whole_pn?: string | null;
+  whole_qty?: number | null;
+  whole_unit?: string | null;
   operator: string | null;
   matched_lines: number;
   total_lines: number;
