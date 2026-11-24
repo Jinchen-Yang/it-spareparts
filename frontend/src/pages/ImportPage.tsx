@@ -680,7 +680,7 @@ export default function ImportPage() {
         >
           <p className="ant-upload-drag-icon"><InboxOutlined /></p>
           <p className="ant-upload-text">点击或拖拽一个 .xlsx 仓单工作簿</p>
-          <p className="ant-upload-hint">支持入库单、返库单、直采直退。请保留每张单据的全部子表明细行。系统会校验整本工作簿，发现错误即停止导入。</p>
+          <p className="ant-upload-hint">支持入库单（入库单号）、返库单、直采直退和实际出库（发货单号、出库_发货单）。请保留每张单据的全部子表明细行。系统会校验整本工作簿，发现错误即停止导入。</p>
         </Upload.Dragger>
         <p style={{ marginTop: 12 }}>提交需要实名账号及「数据导入」权限。</p>
         {warehouseStaged && <p style={{ overflowWrap: "anywhere", marginTop: 12 }}>{warehouseStaged.name}</p>}

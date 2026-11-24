@@ -19,10 +19,11 @@ import {
   Result,
   Tile,
   format,
+  quantity,
   useWarehouse,
   useWarehouseRead,
 } from "./WarehouseShared";
-import { reach } from "./Trend";
+import { reach, sourceCoverage } from "./Trend";
 
 export function EquipmentBoard() {
   const { filters, params, patch } = useWarehouse(),
@@ -77,6 +78,7 @@ export function TestingBoard() {
   const { filters, coverage, params, patch } = useWarehouse();
   const by = params.get("testBy") === "tester" ? "tester" : "center";
   const read = useWarehouseRead("testing", { ...filters, by });
+  const sources = sourceCoverage(coverage, filters.center);
   return (
     <>
       <Panel
@@ -144,9 +146,9 @@ export function TestingBoard() {
       >
         <DataTable
           labels={["业务来源", "首个业务日", "最近业务日", "全期单数", "全期行数", "当前区间"]}
-          empty={!coverage?.sources.length}
+          empty={!sources?.length}
         >
-          {coverage?.sources.map((c) => {
+          {sources?.map((c) => {
             const span = reach(c, filters.date_from, filters.date_to);
             return (
               <tr key={c.source}>
@@ -272,11 +274,20 @@ function DocumentRows({ items, query }: { items: WarehouseDocument[]; query: War
                     doc.number
                   )}
                   <small>{warehouseSources[doc.source]}</small>
+                  {doc.source === "outbound" && doc.whole_pn && (
+                    <small>整机 {doc.whole_pn} · {quantity(doc.whole_qty ?? null, doc.whole_unit ?? null)}</small>
+                  )}
                 </th>
                 <td>{doc.date}</td>
                 <td>{doc.kind || "未填"}</td>
-                <td>{doc.center || "未登记"}</td>
-                <td>{doc.operator || "未登记"}</td>
+                <td>
+                  {doc.center || "未登记"}
+                  {doc.source === "outbound" && <small className="wa-outbound-detail">出库仓 · {doc.outbound_warehouse || "未登记"}</small>}
+                </td>
+                <td>
+                  {doc.operator || "未登记"}
+                  {doc.source === "outbound" && <small className="wa-outbound-detail">出库拣货</small>}
+                </td>
                 <td>
                   {format(doc.matched_lines)} / {format(doc.total_lines)}
                 </td>

@@ -130,6 +130,21 @@
   padding: 12px 15px;
   min-width: 0;
 }
+.wa-outbound-coverage > summary {
+  cursor: pointer;
+  padding: 13px 15px;
+  font-weight: 600;
+}
+.wa-outbound-coverage[open] > summary {
+  border-bottom: 1px solid var(--wa-line);
+}
+.wa-outbound-coverage p {
+  margin: 0 0 10px;
+  color: var(--wa-muted);
+}
+.wa-panel .wa-outbound-detail {
+  display: block;
+}
 .wa-tiles {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
