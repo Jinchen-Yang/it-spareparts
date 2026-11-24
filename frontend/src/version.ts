@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.48.1";
+export const APP_VERSION = "1.49.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.49.0",
+    date: "2026-11-25",
+    items: [
+      "仓单工作簿支持 CKD 发货单，可与入库、返库和直采直退页签一起导入。库存分析可按已导入的业务日查看实际出库并下钻仓库明细。",
+      "维保数据正在导入时，返还收货会立即提示稍后重试。批量维护可保留已填写的内容，逐行重试。",
+    ],
+  },
   {
     version: "1.48.1",
     date: "2026-11-23",
