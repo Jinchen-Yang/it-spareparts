@@ -63,6 +63,7 @@ from app.api import (
     maintenance_project_batch_transfer,
     maintenance_wbdd_import,
     maintenance_source_cancel_cascade,
+    model_parts,
     part_gallery,
     parts,
     pn_master_integration,
@@ -193,6 +194,8 @@ app.include_router(cycle_sell_inbound.router, prefix=settings.api_prefix)
 app.include_router(maintenance_receipt_workbook.router, prefix=settings.api_prefix)
 app.include_router(resale_export.router, prefix=settings.api_prefix)
 app.include_router(resale_catalog_export.router, prefix=settings.api_prefix)
+app.include_router(model_parts.router, prefix=settings.api_prefix)
+app.include_router(model_parts.integration, prefix=settings.api_prefix)
 app.include_router(pn_master_integration.router, prefix=settings.api_prefix)
 app.include_router(maintenance_return_receipt_import.router, prefix=settings.api_prefix)
 app.include_router(

@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     # Dedicated, default-off server-to-server export for the independent resale app.
     resale_export_token_sha256: SecretStr = SecretStr("")
     resale_catalog_token_sha256: SecretStr = SecretStr("")
+    # 机型备件池。目录只读凭据与 Shop 库存凭据独立。
+    model_parts_catalog_token_sha256: SecretStr = SecretStr("")
+    model_parts_shop_stock_url: str = ""
+    model_parts_shop_stock_token: SecretStr = SecretStr("")
     # shop → itsp PN 主数据写接口的服务密钥（只存 SHA-256）；为空时整组接口 503。
     pn_master_integration_token_sha256: SecretStr = SecretStr("")
     # itsp → shop 图库服务（图库归 shop 所有）。服务密钥只留在后端，绝不下发浏览器；
@@ -185,6 +189,7 @@ class Settings(BaseSettings):
         "resale_export_token_sha256",
         "resale_catalog_token_sha256",
         "pn_master_integration_token_sha256",
+        "model_parts_catalog_token_sha256",
         "cycle_sell_callback_token_sha256",
     )
     @classmethod
@@ -199,6 +204,26 @@ class Settings(BaseSettings):
                 f"{info.field_name.upper()} 必须是 64 位小写十六进制 SHA256 摘要"
             )
         return SecretStr(digest)
+
+    @model_validator(mode="after")
+    def separate_model_parts_credentials(self):
+        digest = self.model_parts_catalog_token_sha256.get_secret_value()
+        token = self.model_parts_shop_stock_token.get_secret_value()
+        stock_digest = hashlib.sha256(token.encode()).hexdigest() if token else ""
+        existing = {
+            secret.get_secret_value() for secret in (
+                self.resale_export_token_sha256, self.resale_catalog_token_sha256,
+                self.pn_master_integration_token_sha256, self.cycle_sell_callback_token_sha256,
+            ) if secret.get_secret_value()
+        }
+        existing.update(
+            hashlib.sha256(secret.get_secret_value().encode()).hexdigest() for secret in (
+                self.shop_gallery_token, self.shop_catalog_sync_token, self.shop_cycle_sell_token,
+            ) if secret.get_secret_value()
+        )
+        if (digest and digest in existing) or (stock_digest and stock_digest in existing | {digest}):
+            raise ValueError("机型目录与商城库存须各自使用独立凭据")
+        return self
 
     @field_validator("shop_gallery_base_url")
     @classmethod

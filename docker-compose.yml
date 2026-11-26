@@ -80,6 +80,9 @@ services:
       # itsp → shop 图库代理（图库归 shop）：两个都非空才启用，密钥只在后端。
       SHOP_GALLERY_BASE_URL: ${SHOP_GALLERY_BASE_URL:-}
       SHOP_GALLERY_TOKEN: ${SHOP_GALLERY_TOKEN:-}
+      MODEL_PARTS_CATALOG_TOKEN_SHA256: ${MODEL_PARTS_CATALOG_TOKEN_SHA256:-}
+      MODEL_PARTS_SHOP_STOCK_URL: ${MODEL_PARTS_SHOP_STOCK_URL:-}
+      MODEL_PARTS_SHOP_STOCK_TOKEN: ${MODEL_PARTS_SHOP_STOCK_TOKEN:-}
       # 三期 视觉识别(图片/扫描件)：不配则图片走降级，文字类文件照常
       VISION_API_KEY: ${VISION_API_KEY:-}
       VISION_BASE_URL: ${VISION_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}

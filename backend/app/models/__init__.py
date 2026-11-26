@@ -13,6 +13,9 @@ from app.models.fields_audience import (
     FieldDef,
     FieldValue,
 )
+from app.models.model_parts import (
+    MachineModel, MachineModelCommand, MachineModelMember, MachineModelName, MachineModelPending,
+)
 from app.models.inventory import Inventory, PartSubstitute
 from app.models.warehouse_analytics import WarehouseAnalyticsDocument, WarehouseAnalyticsLine
 from app.models.maintenance import (
@@ -174,6 +177,8 @@ from app.models.replenishment import (
 
 __all__ = [
     "CatalogDelivery",
+    "MachineModel", "MachineModelName", "MachineModelMember", "MachineModelPending",
+    "MachineModelCommand",
     "WorkbookOperation",
     "AudienceGroup", "AudienceGroupMember", "AudienceRule", "AudienceRuleMember",
     "FieldDef", "FieldValue", "FieldAnchorUsage",
