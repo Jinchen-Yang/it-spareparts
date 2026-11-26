@@ -125,6 +125,8 @@ except BaseException:
 _app_engine = engine
 
 _TABLES = [
+    "machine_model_command", "machine_model_pending", "machine_model_member",
+    "machine_model_name", "machine_model",
     "warehouse_analytics_line", "warehouse_analytics_document",
     "workbook_operation",
     "subject_event", "work_item",

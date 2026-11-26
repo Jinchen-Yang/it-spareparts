@@ -103,6 +103,7 @@ const loadBossBoard = () => import("./pages/BossBoardPage");
 const loadPools = () => import("./pages/PoolsPage");
 const loadPoolAnalysis = () => import("./pages/PoolAnalysisPage");
 const loadPartSearch = () => import("./pages/PartSearchPage");
+const loadModelParts = () => import("./pages/ModelPartsPage");
 const loadProfit = () => import("./pages/ProfitPage");
 const loadReplenishmentBeta = () => import("./pages/ReplenishmentBetaPage");
 const loadSalesAnalytics = () => import("./pages/sales/analytics/SalesAnalyticsPage");
@@ -144,6 +145,7 @@ const BossBoardPage = lazy(loadBossBoard);
 const PoolsPage = lazy(loadPools);
 const PoolAnalysisPage = lazy(loadPoolAnalysis);
 const PartSearchPage = lazy(loadPartSearch);
+const ModelPartsPage = lazy(loadModelParts);
 const ProfitPage = lazy(loadProfit);
 const ReplenishmentBetaPage = lazy(loadReplenishmentBeta);
 const SalesAnalyticsPage = lazy(loadSalesAnalytics);
@@ -224,6 +226,7 @@ export const NAV_GROUPS: NavGroup[] = [
       // 菜单按角色过滤（§10.8）；数据面遮蔽（金额/对账/客户）由后端按 data_* 键处理
       { key: "sales-analytics", path: "/sales/analytics", label: "销售分析", icon: <BarChartOutlined />, perm: "page_sales_analysis", visibleWhen: analyticsRoleGate("page_sales_analysis"), page: SalesAnalyticsPage, load: loadSalesAnalytics },
       { key: "parts", path: "/parts", label: "型号查询", icon: <SearchOutlined />, perm: "page_parts", page: PartSearchPage, load: loadPartSearch },
+      { key: "model-parts", path: "/model-parts", label: "机型备件池", icon: <DeploymentUnitOutlined />, perm: "page_parts", page: ModelPartsPage, load: loadModelParts },
       { key: "profit", path: "/profit", label: "利润分析", icon: <LineChartOutlined />, perm: "page_profit", page: ProfitPage, load: loadProfit },
     ],
   },
